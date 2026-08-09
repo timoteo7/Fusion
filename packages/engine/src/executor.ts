@@ -17,7 +17,7 @@ import { getUnmetSchedulingDependencies } from "./scheduler.js";
 import type { ImplementationExit, ImplementationExitReporter } from "./executor/implementation-exit.js";
 import { emitWorkflowLifecycleEvent } from "@fusion/core";
 // FNXC:Authorization 2026-08-09-03:04: discriminant for the graph-failure message carve-out below.
-import { PERMISSION_DENIED_ERROR_CODE } from "@fusion/core";
+import { PERMISSION_DENIED_ERROR_CODE, actorContextForAgent } from "@fusion/core";
 import { resolveTaskLifecycleColumns, resolveProjectColumnsForRoles, resolveWipTargetForTask, resolveTerminalColumns, RetryStormError, serializeRetryStormError, evaluateCompletedPromotionFailureProvenance, evaluateSkipBypassTaint, resolveWorkflowIrForTask, columnsWithFlag, evaluateForeachMergeProof, resolveCompleteColumn, resolveMergeOrchestrationColumn, resolveReboundTarget, resolveLifecycleColumns, resolveColumnAgentBinding, resolveEffectiveAgent, instanceNodeId, getWorkflowExtensionRegistry, getBuiltinWorkflow, parseNoOpCompletionMarker, allowsAutoMergeProcessing, hasUserAutoMergeHold, resolveEffectiveAutoMerge, isLiveSharedBranchGroupMemberIntegration, resolveMaxAutoMergeRetries, resolveMaxConsecutiveToolFailureRetries, resolveConsecutiveToolFailureRetryBackoffMs, resolveConsecutiveToolFailureThreshold, resolveExecutorEscalationTarget, resolveOptionalStepRevisionBudget, resolveOptionalReviewRevisionBudget, DEFAULT_MAX_POST_REVIEW_FIXES, COMPLETION_SUMMARY_NODE_ID, PLAN_REVIEW_GROUP_ID, upsertWorkflowStepResult, normalizeWorkflowReviewFindings, AWAITING_APPROVAL_PAUSE_REASON, THINKING_LEVELS, ACTIVE_WORKFLOW_WORK_ITEM_STATES, AgentStore, classifyWorkflowAgentNode, isWorkflowAgentRole, resolveExecutorFallbackModel, resolveValidatorFallbackModel, parseExplicitDuplicateMarker, nonExecutableDuplicateRedirectReason } from "@fusion/core";
 import {
   BLOCKED_THRASH_LIMIT,
@@ -247,7 +247,7 @@ import {
 import { buildPromptLayers, collapsePromptLayers } from "./execution/prompt-layers.js";
 import { resolveAndEmitGoalContext } from "./goals/goal-injection-diagnostics.js";
 import type { AgentReflectionService } from "./agents/agent-reflection.js";
-import { createRunAuditor, generateSyntheticRunId, type EngineRunContext, type RunAuditor } from "./util/run-audit.js";
+import { createRunAuditor, generateSyntheticRunId, toRunMutationContext, type EngineRunContext, type RunAuditor } from "./util/run-audit.js";
 import { AutoRecoveryDispatcher } from "./healing/auto-recovery.js";
 import {
   classifyMissingWorktreeSessionStartFailure,
@@ -13422,6 +13422,8 @@ export class TaskExecutor {
     this.currentRunContexts.set(task.id, {
       runId: syntheticRunId,
       agentId: task.assignedAgentId ?? "executor",
+      // FNXC:Identity 2026-08-09-03:04: an execution run acts as the assigned agent (or the generic executor lane); autonomous work leaves `actingFor` unset (R28).
+      actor: actorContextForAgent(task.assignedAgentId ?? "executor"),
     });
 
     // Build engine run context for audit instrumentation (FN-1404)
@@ -14860,10 +14862,8 @@ export class TaskExecutor {
         }),
         ...createIdeationTools(this.store),
         ...createGoalRetrievalTools(this.store, {
-          runContext: {
-            runId: engineRunContext.runId,
-            agentId: engineRunContext.agentId,
-          },
+          // FNXC:Identity 2026-08-09-03:04: one boundary conversion instead of a hand-built partial context.
+          runContext: toRunMutationContext(engineRunContext),
           taskId: task.id,
         }),
         createWebFetchTool(),
@@ -14908,7 +14908,7 @@ export class TaskExecutor {
           settings,
           logger: executorLog,
           secretsStore: this.options.secretsStore,
-          runContext: engineRunContext,
+          runContext: toRunMutationContext(engineRunContext),
           audit,
           // FNXC:Workspace 2026-06-21-22:30: F2 — register each freshly-acquired sub-repo worktree path in this task's activeWorktrees Set (KTD2) so owner/liveness checks see live per-repo worktrees, not just the browse-only root.
           onAcquired: (worktreePath: string) => this.addActiveWorktree(task.id, worktreePath),
