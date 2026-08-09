@@ -231,6 +231,12 @@ export { parseStepHeadings } from "./tasks/step-parsers.js";
 export {
   TaskHasDependentsError,
   TaskSelfDeleteError,
+  // FNXC:Authorization 2026-08-09-03:04: exported through the store facade so
+  // @fusion/engine and @fusion/dashboard can discriminate a permission denial
+  // without importing a deep path or matching on error strings.
+  PermissionDeniedError,
+  isPermissionDeniedError,
+  PERMISSION_DENIED_ERROR_CODE,
   TaskDeletedError,
   TaskNotFoundError,
   isTaskNotFoundError,

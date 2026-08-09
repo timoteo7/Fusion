@@ -16,6 +16,8 @@ import { DEFAULT_PROVIDER_INSTANCE_ID, type ProviderInstanceRef, type TaskStore,
 import { getUnmetSchedulingDependencies } from "./scheduler.js";
 import type { ImplementationExit, ImplementationExitReporter } from "./executor/implementation-exit.js";
 import { emitWorkflowLifecycleEvent } from "@fusion/core";
+// FNXC:Authorization 2026-08-09-03:04: discriminant for the graph-failure message carve-out below.
+import { PERMISSION_DENIED_ERROR_CODE } from "@fusion/core";
 import { resolveTaskLifecycleColumns, resolveProjectColumnsForRoles, resolveWipTargetForTask, resolveTerminalColumns, RetryStormError, serializeRetryStormError, evaluateCompletedPromotionFailureProvenance, evaluateSkipBypassTaint, resolveWorkflowIrForTask, columnsWithFlag, evaluateForeachMergeProof, resolveCompleteColumn, resolveMergeOrchestrationColumn, resolveReboundTarget, resolveLifecycleColumns, resolveColumnAgentBinding, resolveEffectiveAgent, instanceNodeId, getWorkflowExtensionRegistry, getBuiltinWorkflow, parseNoOpCompletionMarker, allowsAutoMergeProcessing, hasUserAutoMergeHold, resolveEffectiveAutoMerge, isLiveSharedBranchGroupMemberIntegration, resolveMaxAutoMergeRetries, resolveMaxConsecutiveToolFailureRetries, resolveConsecutiveToolFailureRetryBackoffMs, resolveConsecutiveToolFailureThreshold, resolveExecutorEscalationTarget, resolveOptionalStepRevisionBudget, resolveOptionalReviewRevisionBudget, DEFAULT_MAX_POST_REVIEW_FIXES, COMPLETION_SUMMARY_NODE_ID, PLAN_REVIEW_GROUP_ID, upsertWorkflowStepResult, normalizeWorkflowReviewFindings, AWAITING_APPROVAL_PAUSE_REASON, THINKING_LEVELS, ACTIVE_WORKFLOW_WORK_ITEM_STATES, AgentStore, classifyWorkflowAgentNode, isWorkflowAgentRole, resolveExecutorFallbackModel, resolveValidatorFallbackModel, parseExplicitDuplicateMarker, nonExecutableDuplicateRedirectReason } from "@fusion/core";
 import {
   BLOCKED_THRASH_LIMIT,
@@ -1959,6 +1961,64 @@ resolved. Checking two of six was a proxy for that; this checks the thing.
 function declaresAnyLifecycleRole(lifecycle: ReturnType<typeof resolveLifecycleColumns>): boolean {
   if (!lifecycle) return false;
   return Object.values(lifecycle).some((columnId) => columnId !== undefined);
+}
+
+/*
+FNXC:Authorization 2026-08-09-03:04:
+`handleGraphFailure` replaces a terminal node failure with a generic
+"Workflow graph terminated with failure at node '<n>'" string, which ERASES the reason the node
+actually failed. For most failures that is acceptable — the node's own diagnostics are logged
+separately and the generic text names the node an operator should inspect. For a permission
+denial it is not: the whole point of the denial is the sentence "actor X is not permitted to Y",
+and an operator staring at "terminated with failure at node 'execute'" has no way to learn that
+the run failed because of authorization rather than a broken worktree, a model error, or a bug.
+
+Recover it from the graph context rather than from the thrown error, because there is no thrown
+error left by the time we get here: `executeNodeWithRetries` flattens every node exception to
+`error.message` under `node:<id>:error` and, since 2026-08-09, carries the typed `code` under
+`node:<id>:errorCode`. The code is what we key on — never the message text.
+
+Deliberately narrow. Any failure WITHOUT the permission-denied code keeps the existing generic
+message byte-for-byte, so this is a carve-out for one typed error and not a change to how graph
+failures are reported in general.
+*/
+const PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX = ":errorCode";
+
+function resolveGraphPermissionDenialMessage(
+  context: Record<string, unknown> | undefined,
+  failedNode: string | undefined,
+): string | undefined {
+  if (!context) return undefined;
+
+  const readDenial = (nodeId: string): string | undefined => {
+    if (context[`node:${nodeId}${PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX}`] !== PERMISSION_DENIED_ERROR_CODE) {
+      return undefined;
+    }
+    const message = context[`node:${nodeId}:error`];
+    return typeof message === "string" && message.trim() ? message : undefined;
+  };
+
+  // Prefer the node the graph actually terminated on.
+  if (failedNode) {
+    const exact = readDenial(failedNode);
+    if (exact) return exact;
+  }
+
+  /*
+  FNXC:Authorization 2026-08-09-03:04:
+  `visitedNodeIds` records the graph node id while a materialized template/foreach instance
+  patches context under its own instance id, so the exact key can legitimately miss. Fall back to
+  any denial-coded key rather than dropping the message — the same exact-then-scan shape the
+  node diagnostic resolver already uses for `:error`.
+  */
+  for (const [key, value] of Object.entries(context)) {
+    if (!key.endsWith(PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX)) continue;
+    if (value !== PERMISSION_DENIED_ERROR_CODE) continue;
+    const message = context[`${key.slice(0, -PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX.length)}:error`];
+    if (typeof message === "string" && message.trim()) return message;
+  }
+
+  return undefined;
 }
 
 export class TaskExecutor {
@@ -12667,7 +12727,10 @@ export class TaskExecutor {
           return;
         }
       }
-      const message = `Workflow graph terminated with failure at node '${failedNode ?? "unknown"}'`;
+      // FNXC:Authorization 2026-08-09-03:04: a typed permission denial keeps its own sentence;
+      // every other failure keeps the generic node-named message unchanged.
+      const message = resolveGraphPermissionDenialMessage(result.context, failedNode)
+        ?? `Workflow graph terminated with failure at node '${failedNode ?? "unknown"}'`;
       const settings = await this.store.getSettings();
       const maxToolFailureRetries = resolveMaxConsecutiveToolFailureRetries(settings);
       if (maxToolFailureRetries > 0 && isExecuteFamilyNode && !live.paused && !live.userPaused && !live.deletedAt && live.column === wipColumn) {
