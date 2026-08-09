@@ -89,6 +89,7 @@ import {
   QUEUED_EPISODE_SIGNATURE_VERSION,
   MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
   WORKFLOW_PRINCIPAL_FENCE_VERSION,
+  IDENTITY_ACTORS_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
 import type { PluginSchemaInitHook } from "../../postgres/plugin-schema-hook.js";
@@ -111,7 +112,9 @@ describe("schema-applier: immutable migration identities", () => {
     expect(QUEUED_EPISODE_SIGNATURE_VERSION).toBe("0044");
     expect(MULTI_ROLE_WORKFLOW_AGENTS_VERSION).toBe("0045");
     expect(WORKFLOW_PRINCIPAL_FENCE_VERSION).toBe("0046");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0046");
+    // FNXC:Identity 2026-08-09-03:04: per-migration identities are immutable; only the ceiling moves as 0047 adds the identity schema.
+    expect(IDENTITY_ACTORS_VERSION).toBe("0047");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0047");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -726,7 +729,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 105 project tables, 17 central tables, 1 archive table", async () => {
+  it("creates all 107 project tables, 21 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -745,16 +748,25 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     FNXC:PgSchemaApplier 2026-08-03-02:16:
     Project table count = historical core baseline plus later migrations. 0040 adds 2 lifecycle
     outbox tables; 0041 adds 4 lifecycle consumer tables; 0043 adds the durable unplanned-dispatch
-    refusal marker (100 → 105). Plugin tables are added separately by the schema-init hook and are excluded here.
+    refusal marker (100 → 105). Plugin tables are added separately by the schema-init hook and are
+    excluded here.
+
+    FNXC:Identity 2026-08-09-03:04:
+    107, not 105: 0046 added project.workflow_agent_capacity_leases without updating this count
+    (pre-existing drift, observed red before this change), and 0047 adds project.actor_role_grants.
     */
-    expect(bySchema.project).toBe(105);
+    expect(bySchema.project).toBe(107);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
     database still CREATEs it from the historical 0000 baseline and then drops it,
     so fresh and upgraded databases converge on the same shape.
+
+    FNXC:Identity 2026-08-09-03:04:
+    21, not 17: migration 0047 adds central.actors, actor_credentials, actor_sessions, and
+    actor_provider_links (KTD7 — identity is central because one daemon serves N projects).
     */
-    expect(bySchema.central).toBe(17);
+    expect(bySchema.central).toBe(21);
     expect(bySchema.archive).toBe(1);
   });
 
@@ -1770,6 +1782,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
   });
@@ -1842,6 +1855,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 
@@ -2047,6 +2061,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 
@@ -2133,6 +2148,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 
@@ -2219,6 +2235,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 });
