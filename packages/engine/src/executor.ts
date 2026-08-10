@@ -17,7 +17,9 @@ import { getUnmetSchedulingDependencies } from "./scheduler.js";
 import type { ImplementationExit, ImplementationExitReporter } from "./executor/implementation-exit.js";
 import { emitWorkflowLifecycleEvent } from "@fusion/core";
 // FNXC:Authorization 2026-08-09-03:04: discriminant for the graph-failure message carve-out below.
-import { PERMISSION_DENIED_ERROR_CODE, UNATTRIBUTED_MUTATION_CONTEXT, actorContextForAgent } from "@fusion/core";
+import { PERMISSION_DENIED_ERROR_CODE, actorContextForAgent } from "@fusion/core";
+/* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): the executor lane's mutation-context constructor. */
+import { mutationContextForAgent } from "@fusion/core";
 import { resolveTaskLifecycleColumns, resolveProjectColumnsForRoles, resolveWipTargetForTask, resolveTerminalColumns, RetryStormError, serializeRetryStormError, evaluateCompletedPromotionFailureProvenance, evaluateSkipBypassTaint, resolveWorkflowIrForTask, columnsWithFlag, evaluateForeachMergeProof, resolveCompleteColumn, resolveMergeOrchestrationColumn, resolveReboundTarget, resolveLifecycleColumns, resolveColumnAgentBinding, resolveEffectiveAgent, instanceNodeId, getWorkflowExtensionRegistry, getBuiltinWorkflow, parseNoOpCompletionMarker, allowsAutoMergeProcessing, hasUserAutoMergeHold, resolveEffectiveAutoMerge, isLiveSharedBranchGroupMemberIntegration, resolveMaxAutoMergeRetries, resolveMaxConsecutiveToolFailureRetries, resolveConsecutiveToolFailureRetryBackoffMs, resolveConsecutiveToolFailureThreshold, resolveExecutorEscalationTarget, resolveOptionalStepRevisionBudget, resolveOptionalReviewRevisionBudget, DEFAULT_MAX_POST_REVIEW_FIXES, COMPLETION_SUMMARY_NODE_ID, PLAN_REVIEW_GROUP_ID, upsertWorkflowStepResult, normalizeWorkflowReviewFindings, AWAITING_APPROVAL_PAUSE_REASON, THINKING_LEVELS, ACTIVE_WORKFLOW_WORK_ITEM_STATES, AgentStore, classifyWorkflowAgentNode, isWorkflowAgentRole, resolveExecutorFallbackModel, resolveValidatorFallbackModel, parseExplicitDuplicateMarker, nonExecutableDuplicateRedirectReason } from "@fusion/core";
 import {
   BLOCKED_THRASH_LIMIT,
@@ -412,6 +414,14 @@ function isWorkflowStepSkillDiscoverable(
 }
 
 const yieldEventLoop = (): Promise<void> => new Promise((resolve) => setImmediateCb(resolve));
+
+/**
+ * FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C):
+ * The executor lane's own agent id. Pre-existing value, not a new one — `execute()` already stamps
+ * `task.assignedAgentId ?? "executor"` on its run context and its run-audit rows. Named here so the
+ * lane label used for attribution and the lane label used for auditing cannot drift apart.
+ */
+const EXECUTOR_LANE_AGENT_ID = "executor";
 
 function getPromptSection(prompt: string, heading: string): string {
   const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -2213,7 +2223,7 @@ export class TaskExecutor {
   */
   private safeLogEntry(taskId: string, message: string): void {
     try {
-      const result = this.store.logEntry(taskId, message, undefined, this.getRunContextFor(taskId));
+      const result = this.store.logEntry(taskId, message, undefined, this.runContextFor(taskId));
       void Promise.resolve(result).catch((error) => {
         executorLog.warn(`${taskId}: failed to write task-log breadcrumb: ${error instanceof Error ? error.message : String(error)}`);
       });
@@ -2531,7 +2541,7 @@ export class TaskExecutor {
           leaseEpoch,
           renewedAt,
         },
-        this.getRunContextFor(taskId),
+        this.runContextFor(taskId),
       );
       return;
     }
@@ -2561,7 +2571,7 @@ export class TaskExecutor {
       reviewColumns: new Set([resumeReviewLane ?? "in-review"]),
     });
     if (blocker) {
-      await this.store.logEntry(taskId, "Task already in-review; merge deferred", blocker, this.getRunContextFor(taskId));
+      await this.store.logEntry(taskId, "Task already in-review; merge deferred", blocker, this.runContextFor(taskId));
       return "blocked";
     }
 
@@ -2569,7 +2579,7 @@ export class TaskExecutor {
       taskId,
       "Task already in-review after completion — finalizing merge",
       undefined,
-      this.getRunContextFor(taskId),
+      this.runContextFor(taskId),
     );
     await this.store.mergeTask(taskId);
     return "merged";
@@ -2597,7 +2607,7 @@ export class TaskExecutor {
       taskId,
       `Completion handoff deferred — global pause active (${context})`,
       undefined,
-      this.getRunContextFor(taskId),
+      this.runContextFor(taskId),
     ).catch(() => undefined);
     return true;
   }
@@ -2620,7 +2630,7 @@ export class TaskExecutor {
         taskId,
         `Completion handoff deferred — task paused (${context})`,
         undefined,
-        this.getRunContextFor(taskId),
+        this.runContextFor(taskId),
       ).catch(() => undefined);
       return true;
     }
@@ -2636,7 +2646,7 @@ export class TaskExecutor {
         taskId,
         `Completion handoff deferred — task no longer active (${context})`,
         undefined,
-        this.getRunContextFor(taskId),
+        this.runContextFor(taskId),
       ).catch(() => undefined);
       return true;
     }
@@ -2659,6 +2669,38 @@ export class TaskExecutor {
     return this.currentRunContexts.get(taskId);
   }
 
+  /*
+  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C — the executor's run carrier):
+  `executor.ts` holds ~480 mutating store call sites but the acting agent is almost never a value in
+  scope at the call site, so U18 could not be satisfied here by appending an argument 480 times. The
+  carrier already existed: `currentRunContexts` is written once per execution run (`execute()` sets
+  it with the run's synthetic id and the assigned agent, and clears it in the outer `finally`) and is
+  reachable from every frame in the class. What was missing is that `getRunContextFor` is PARTIAL —
+  it returns `undefined` off a live run, which type-checks only against U18's deprecated overload and
+  therefore attributes nothing.
+
+  `runContextFor` is the TOTAL form and is what every store call in this file now passes. The two
+  forms are kept separate deliberately: `getRunContextFor` still answers "is there a live run?" for
+  the ~20 places that read `?.runId` / `?.agentId` as a liveness probe, and collapsing them would
+  turn those probes into unconditional truths.
+
+  The fallback is DERIVED, not a marker. `"executor"` is not invented here: it is the exact `agentId`
+  the same code path already stamps on its own run context and run-audit rows (`task.assignedAgentId
+  ?? "executor"` in `execute()`), so a write made by this lane outside a live run is genuinely the
+  executor lane's — the same reasoning that let Stage B use `"merger"`, `"triage"` and
+  `"planner-overseer"` as real actors. Substituting the unattributed marker would have been LESS
+  honest, not more: it would claim no actor is knowable for a write the executor demonstrably made.
+
+  `fallbackAgentId` exists for the frames that hold a task whose `assignedAgentId` is more specific
+  than the lane label; pass it wherever it is free, never guess. Never pass an agent id that names
+  the SUBJECT of the write (an assignee, a checkout target) — that inverts the attribution.
+  */
+  private runContextFor(taskId: string, fallbackAgentId?: string | null): RunMutationContext {
+    const live = this.currentRunContexts.get(taskId);
+    if (live) return live;
+    return mutationContextForAgent(fallbackAgentId ?? EXECUTOR_LANE_AGENT_ID);
+  }
+
   /**
    * Stable handoff reasons used on task:handoff audit events.
    * Keep values greppable for executor/self-healing forensics: review-handoff-requested,
@@ -2679,7 +2721,7 @@ export class TaskExecutor {
       await ensureWorkflowCompletionSummary(this.store, task as TaskDetail, {
         reason,
         runId,
-      }, this.getRunContextFor(task.id) ?? UNATTRIBUTED_MUTATION_CONTEXT).catch((error: unknown) => {
+      }, this.runContextFor(task.id)).catch((error: unknown) => {
         executorLog.warn(`${task.id}: failed to record workflow completion summary: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
@@ -2876,7 +2918,7 @@ export class TaskExecutor {
           */
           this.approvalSuspended.add(taskId);
           try {
-            await this.store.pauseTask(taskId, true, this.getRunContextFor(taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
+            await this.store.pauseTask(taskId, true, this.runContextFor(taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
           } catch (error) {
             this.approvalSuspended.delete(taskId);
             throw error;
@@ -2885,7 +2927,7 @@ export class TaskExecutor {
             taskId,
             `Approval required for ${decision.toolName}. Request ${approvalRequestId} created; task and agent paused awaiting decision.`,
             undefined,
-            this.getRunContextFor(taskId),
+            this.runContextFor(taskId),
           );
           /*
           FNXC:AgentGating 2026-07-05-00:10:
@@ -2993,10 +3035,10 @@ export class TaskExecutor {
         if (!taskId) return;
         this.approvalSuspended.add(taskId);
         try {
-          await this.store.pauseTask(taskId, true, this.getRunContextFor(taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
+          await this.store.pauseTask(taskId, true, this.runContextFor(taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
           await this.store.logEntry(
             taskId,
-            `Approval required for ${toolName}. Request ${approvalRequestId} created; task paused awaiting decision.`,
+            `Approval required for ${toolName}. Request ${approvalRequestId} created; task paused awaiting decision.`, undefined, this.runContextFor(taskId),
           );
         } catch (error) {
           this.approvalSuspended.delete(taskId);
@@ -3583,7 +3625,7 @@ export class TaskExecutor {
       taskId,
       `Execution suspended for approval — ${surface} disposed; task remains in progress for decision resume`,
       undefined,
-      this.getRunContextFor(taskId),
+      this.runContextFor(taskId),
     );
     executorLog.log(`${taskId}: approval suspension parked after ${surface} disposal`);
     return true;
@@ -3660,8 +3702,8 @@ export class TaskExecutor {
           resumeLimboCount: 0,
           resumeLimboTipSha: null,
           resumeLimboStepSignature: null,
-        });
-        await this.store.logEntry(task.id, "Resuming execution after unpause", undefined, this.getRunContextFor(task.id));
+        }, this.runContextFor(task.id));
+        await this.store.logEntry(task.id, "Resuming execution after unpause", undefined, this.runContextFor(task.id));
         await this.recoverApprovedStepsOnResume(task.id);
       } catch (clearErr) {
         executorLog.warn(`${task.id} clearResumeFailureState failed during unpause: ${clearErr instanceof Error ? clearErr.message : String(clearErr)}`);
@@ -4117,7 +4159,7 @@ export class TaskExecutor {
               task.id,
               "Column-agent binding released — session reverts to its own model/agent resolution",
               undefined,
-              this.getRunContextFor(task.id),
+              this.runContextFor(task.id),
             ).catch((err: unknown) => executorLog.warn(`${task.id}: failed to log column-agent release: ${err instanceof Error ? err.message : String(err)}`));
             const settings = await this.store.getSettings();
             const assignedRuntimeConfig = await this.getAssignedAgentRuntimeConfig(task.assignedAgentId);
@@ -4159,7 +4201,7 @@ export class TaskExecutor {
                     task.id,
                     `Column agent '${effective.agentId}' deleted mid-session — falling back to current model, no restart (R8)`,
                     undefined,
-                    this.getRunContextFor(task.id),
+                    this.runContextFor(task.id),
                   ).catch((err: unknown) => executorLog.warn(`${task.id}: failed to log column-agent deletion fallback: ${err instanceof Error ? err.message : String(err)}`));
                   activeEntry.lastEffectiveColumnAgentId = null;
                   // Release the reverse heartbeat guard for the deleted agent
@@ -4196,7 +4238,7 @@ export class TaskExecutor {
                       if (model) {
                         await activeEntry.session.setModel(model);
                         executorLog.log(`${task.id}: column-agent hot-swap → agent '${newAgent.id}' model ${newProvider}/${newModelId}`);
-                        await this.store.logEntry(task.id, `Column agent changed — model now ${newProvider}/${newModelId} (agent ${newAgent.id})`, undefined, this.getRunContextFor(task.id));
+                        await this.store.logEntry(task.id, `Column agent changed — model now ${newProvider}/${newModelId} (agent ${newAgent.id})`, undefined, this.runContextFor(task.id));
                       } else {
                         executorLog.log(`${task.id}: column-agent model ${newProvider}/${newModelId} not found in registry for hot-swap`);
                       }
@@ -4205,7 +4247,7 @@ export class TaskExecutor {
                       executorLog.error(`${task.id}: failed to column-agent hot-swap: ${errorMessage}`);
                       // Fire-and-forget audit (see ~3582): a logEntry failure here must
                       // not abort the tick and skip later model-change detection.
-                      this.store.logEntry(task.id, `Column-agent change failed: ${errorMessage}`, undefined, this.getRunContextFor(task.id))
+                      this.store.logEntry(task.id, `Column-agent change failed: ${errorMessage}`, undefined, this.runContextFor(task.id))
                         .catch((logErr: unknown) => executorLog.warn(`${task.id}: failed to log column-agent change failure: ${logErr instanceof Error ? logErr.message : String(logErr)}`));
                     }
                   }
@@ -4267,14 +4309,14 @@ export class TaskExecutor {
                 if (model) {
                   await activeEntry.session.setModel(model);
                   executorLog.log(`${task.id}: executor model hot-swapped to ${newProvider}/${newModelId}`);
-                  await this.store.logEntry(task.id, `Model changed to ${newProvider}/${newModelId}`, undefined, this.getRunContextFor(task.id));
+                  await this.store.logEntry(task.id, `Model changed to ${newProvider}/${newModelId}`, undefined, this.runContextFor(task.id));
                 } else {
                   executorLog.log(`${task.id}: model ${newProvider}/${newModelId} not found in registry for hot-swap`);
                 }
               } catch (err: unknown) {
                 const errorMessage = err instanceof Error ? err.message : String(err);
                 executorLog.error(`${task.id}: failed to hot-swap model: ${errorMessage}`);
-                await this.store.logEntry(task.id, `Model change failed: ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, `Model change failed: ${errorMessage}`, undefined, this.runContextFor(task.id));
               }
             }
           }
@@ -4379,7 +4421,7 @@ export class TaskExecutor {
                   await this.store.logEntry(
                     task.id,
                     `Comment received mid-execution: ${summary}`,
-                    `by ${comment.author}`
+                    `by ${comment.author}`, this.runContextFor(task.id)
                   );
                   loggedCommentIds.add(comment.id);
                 }
@@ -4576,7 +4618,7 @@ export class TaskExecutor {
       error: null,
       verificationFailureCount: options?.preserveVerificationFailureCount ? task.verificationFailureCount ?? 0 : 0,
       workflowStepResults: preservedWorkflowStepResults,
-    });
+    }, this.runContextFor(task.id));
 
     const refreshedTask = await this.store.getTask(task.id);
     const steps = refreshedTask.steps ?? [];
@@ -4605,12 +4647,12 @@ export class TaskExecutor {
             }
           }
           const earliestIndex = Math.min(...Array.from(resetIndexes));
-          await this.store.updateTask(task.id, { currentStep: earliestIndex });
+          await this.store.updateTask(task.id, { currentStep: earliestIndex }, this.runContextFor(task.id));
         }
       }
     }
 
-    await this.store.logEntry(task.id, logMessage, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, logMessage, undefined, this.runContextFor(task.id));
     return this.store.getTask(task.id);
   }
 
@@ -4639,7 +4681,7 @@ export class TaskExecutor {
       updates.blockedBy = null;
     }
     if (Object.keys(updates).length > 0) {
-      await this.store.updateTask(task.id, updates);
+      await this.store.updateTask(task.id, updates, this.runContextFor(task.id));
     }
   }
 
@@ -4744,14 +4786,14 @@ export class TaskExecutor {
         );
         await this.store.logEntry(
           taskId,
-          `Watchdog: task remained in-progress ${COMPLETED_TASK_WATCHDOG_MS / 1000}s after ${trigger} — attempting direct recovery to in-review`,
+          `Watchdog: task remained in-progress ${COMPLETED_TASK_WATCHDOG_MS / 1000}s after ${trigger} — attempting direct recovery to in-review`, undefined, this.runContextFor(taskId),
         ).catch(() => undefined);
 
         const recovered = await this.recoverCompletedTask(currentTask);
         if (!recovered) {
           await this.store.logEntry(
             taskId,
-            "Watchdog recovery attempt could not finalize completed task — leaving for follow-up recovery",
+            "Watchdog recovery attempt could not finalize completed task — leaving for follow-up recovery", undefined, this.runContextFor(taskId),
           ).catch(() => undefined);
         }
       } finally {
@@ -4781,7 +4823,7 @@ export class TaskExecutor {
     if (!live) return;
     const cleared = clearTerminalWorkflowStepFailures(live.workflowStepResults);
     if (cleared !== live.workflowStepResults) {
-      await this.store.updateTask(taskId, { workflowStepResults: cleared }, this.getRunContextFor(taskId));
+      await this.store.updateTask(taskId, { workflowStepResults: cleared }, this.runContextFor(taskId));
     }
   }
 
@@ -4851,9 +4893,9 @@ export class TaskExecutor {
           await this.store.moveTask(taskId, await resolveReboundColumnFor(this.store, taskId), {
             preserveResumeState: true,
             preserveWorktree: true,
-          });
+          }, this.runContextFor(taskId));
         } else {
-          await this.store.moveTask(taskId, await resolveReboundColumnFor(this.store, taskId), { preserveWorktree: true });
+          await this.store.moveTask(taskId, await resolveReboundColumnFor(this.store, taskId), { preserveWorktree: true }, this.runContextFor(taskId));
         }
         // Restore worktree + executionStartedAt unconditionally to match
         // the original bounce contract: even with preserveWorktree the
@@ -4864,7 +4906,7 @@ export class TaskExecutor {
         await this.store.updateTask(taskId, {
           worktree: worktreePath,
           executionStartedAt: originalExecutionStartedAt ?? null,
-        });
+        }, this.runContextFor(taskId));
         const pauseLabelAfterTodo = await this.getExecutionPauseLabel();
         if (pauseLabelAfterTodo) {
           executorLog.log(`${taskId}: workflow rerun parked in todo — ${pauseLabelAfterTodo} became active during bounce`);
@@ -4873,12 +4915,12 @@ export class TaskExecutor {
         // Now in `todo` (non-mergeable) — safe to clear prior gate failures.
         await this.clearTerminalStepFailuresForRetry(taskId);
         /* FNXC:WorkflowResolvedColumns 2026-07-30-21:40: census-invisible moveTask DESTINATION — a call argument, not a comparison. The SOURCE guard four lines up already resolves via resolveReboundColumnFor; leaving the destination literal is a split brain inside one function. */
-        await this.store.moveTask(taskId, await resolveWipTargetForTask(this.store, taskId));
+        await this.store.moveTask(taskId, await resolveWipTargetForTask(this.store, taskId), undefined, this.runContextFor(taskId));
         return "bounced";
       }
 
       if (latestTask.column === await resolveReboundColumnFor(this.store, taskId)) {
-        await this.store.updateTask(taskId, { worktree: worktreePath });
+        await this.store.updateTask(taskId, { worktree: worktreePath }, this.runContextFor(taskId));
         const pauseLabelBeforeResume = await this.getExecutionPauseLabel();
         if (pauseLabelBeforeResume) {
           executorLog.log(`${taskId}: workflow rerun parked in todo — ${pauseLabelBeforeResume} became active before resume`);
@@ -4887,7 +4929,7 @@ export class TaskExecutor {
         // Already in `todo` (non-mergeable) — safe to clear prior gate failures.
         await this.clearTerminalStepFailuresForRetry(taskId);
         /* FNXC:WorkflowResolvedColumns 2026-07-30-21:40: census-invisible moveTask DESTINATION — a call argument, not a comparison. The SOURCE guard four lines up already resolves via resolveReboundColumnFor; leaving the destination literal is a split brain inside one function. */
-        await this.store.moveTask(taskId, await resolveWipTargetForTask(this.store, taskId));
+        await this.store.moveTask(taskId, await resolveWipTargetForTask(this.store, taskId), undefined, this.runContextFor(taskId));
         return "bounced";
       }
 
@@ -4955,7 +4997,7 @@ export class TaskExecutor {
       await this.store.logEntry(
         taskId,
         `Watchdog: workflow rerun handoff stalled for ${WORKFLOW_RERUN_WATCHDOG_MS / 1000}s ` +
-        `(still ${currentTask.column}) — retrying once`,
+        `(still ${currentTask.column}) — retrying once`, undefined, this.runContextFor(taskId),
       ).catch(() => undefined);
 
       try {
@@ -4971,7 +5013,7 @@ export class TaskExecutor {
           );
           await this.store.logEntry(
             taskId,
-            `Workflow rerun watchdog retry skipped — original bounce still in flight after ${WORKFLOW_RERUN_WATCHDOG_MS / 1000}s; task may be stuck`,
+            `Workflow rerun watchdog retry skipped — original bounce still in flight after ${WORKFLOW_RERUN_WATCHDOG_MS / 1000}s; task may be stuck`, undefined, this.runContextFor(taskId),
           ).catch(() => undefined);
         } else {
           executorLog.log(`${taskId}: workflow rerun watchdog retry deferred while pause is active`);
@@ -5036,7 +5078,7 @@ export class TaskExecutor {
         preserveWorktree: true,
         moveSource: "engine",
         recoveryRehome: true,
-      });
+      }, this.runContextFor(task.id));
     }
     await this.store.updateTask(task.id, {
       paused: true,
@@ -5045,9 +5087,9 @@ export class TaskExecutor {
       error: null,
       executeRequeueLoopCount: null,
       executeRequeueLoopSignature: null,
-    }, this.getRunContextFor(task.id));
+    }, this.runContextFor(task.id));
     executorLog.log(`${task.id}: ${message}`);
-    await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
     await this.store.recordRunAuditEvent?.({
       taskId: task.id,
       agentId: "executor",
@@ -5122,10 +5164,10 @@ export class TaskExecutor {
 
     const diagnosticMessage = "Post-done session continuation suppressed — session not continuable (last role assistant); task work already complete, leaving clean in-review";
     executorLog.warn(`${task.id} ${diagnosticMessage}`);
-    await this.store.logEntry(task.id, diagnosticMessage, errorMessage, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, diagnosticMessage, errorMessage, this.runContextFor(task.id));
 
     if (liveTask.status === "failed" || liveTask.error) {
-      await this.store.updateTask(task.id, { status: null, error: null });
+      await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
     }
 
     await this.persistTokenUsage(task.id);
@@ -5174,23 +5216,23 @@ export class TaskExecutor {
       const attempt = decision.nextState.recoveryRetryCount;
       const delay = formatDelay(decision.delayMs);
       executorLog.warn(`⚡ ${task.id} non-continuable session — fresh-session retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}`);
-      await this.store.logEntry(task.id, `Non-continuable session — fresh-session retry (${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, `Non-continuable session — fresh-session retry (${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.runContextFor(task.id));
       await this.store.updateTask(task.id, {
         recoveryRetryCount: decision.nextState.recoveryRetryCount,
         nextRecoveryAt: decision.nextState.nextRecoveryAt,
         sessionFile: null,
-      });
+      }, this.runContextFor(task.id));
       this.markGraphExecuteSelfRequeued(task.id);
-      await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true });
+      await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true }, this.runContextFor(task.id));
       return true;
     }
 
     executorLog.error(`✗ ${task.id} non-continuable session fresh-session retries exhausted (${MAX_RECOVERY_RETRIES} attempts): ${errorMessage}`);
-    await this.store.logEntry(task.id, `Non-continuable session fresh-session retries exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, `Non-continuable session fresh-session retries exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, undefined, this.runContextFor(task.id));
     await this.store.updateTask(task.id, {
       recoveryRetryCount: null,
       nextRecoveryAt: null,
-    });
+    }, this.runContextFor(task.id));
     return false;
   }
 
@@ -5300,7 +5342,7 @@ export class TaskExecutor {
    * writes use this seam to retain the required persist-time budget enforcement.
    */
   private async persistTaskTokenUsage(taskId: string, tokenUsage: TaskTokenUsage): Promise<void> {
-    const runContext = this.getRunContextFor(taskId);
+    const runContext = this.runContextFor(taskId);
     await this.store.updateTask(taskId, { tokenUsage }, runContext);
     await enforceTaskTokenBudgetForPersist(this.store, taskId, runContext);
   }
@@ -5388,7 +5430,7 @@ export class TaskExecutor {
         task.id,
         "Review handoff requested by agent — moving to in-review for user review",
         undefined,
-        this.getRunContextFor(task.id)
+        this.runContextFor(task.id)
       );
 
       // Update task with awaiting-user-review status and assignee
@@ -5399,7 +5441,7 @@ export class TaskExecutor {
           status: "awaiting-user-review",
           assigneeUserId: "requesting-user",
         },
-        this.getRunContextFor(task.id)
+        this.runContextFor(task.id)
       );
 
       // Move the task to in-review column (this will also emit task:moved event)
@@ -5489,7 +5531,7 @@ export class TaskExecutor {
           task.id,
           "Auto-promotion withheld: steps were skipped after a bulk-step-completion refusal with no accepted fn_task_done — requires reviewer or operator sign-off",
           undefined,
-          this.getRunContextFor(task.id),
+          this.runContextFor(task.id),
         ).catch(() => undefined);
         return false;
       }
@@ -5525,7 +5567,7 @@ export class TaskExecutor {
       if (task.worktree && existsSync(task.worktree)) {
         const modifiedFiles = await this.captureModifiedFiles(task.worktree, task.baseCommitSha, task.id, undefined, "recovery");
         if (modifiedFiles.length > 0) {
-          await this.store.updateTask(task.id, { modifiedFiles });
+          await this.store.updateTask(task.id, { modifiedFiles }, this.runContextFor(task.id));
           executorLog.log(`${task.id}: recovered ${modifiedFiles.length} modified files`);
         }
 
@@ -5584,7 +5626,7 @@ export class TaskExecutor {
             this.clearCompletedTaskWatchdog(task.id);
             await this.store.logEntry(
               task.id,
-              `Auto-recovered: stranded completed task re-dispatched through the workflow graph — the graph re-ran pending workflow steps (recording results) and owns the in-review / back-for-fix transition`,
+              `Auto-recovered: stranded completed task re-dispatched through the workflow graph — the graph re-ran pending workflow steps (recording results) and owns the in-review / back-for-fix transition`, undefined, this.runContextFor(task.id),
             ).catch(() => undefined);
             executorLog.log(`✓ ${task.id} auto-recovered completed task via workflow-graph re-entry`);
             return true;
@@ -5643,7 +5685,7 @@ export class TaskExecutor {
       if (promotedFromPlannerColumn && plannerLanes.wip === undefined) {
         const message = `Auto-recovery withheld: completed work is in '${originColumn}' but this workflow declares no WIP column to promote it to`;
         executorLog.warn(`${task.id}: ${message}`);
-        await this.store.logEntry(task.id, message).catch(() => undefined);
+        await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id)).catch(() => undefined);
         return false;
       }
       let completionTask = task;
@@ -5672,17 +5714,17 @@ export class TaskExecutor {
             preserveProgress: true,
             preserveWorktree: true,
             preserveResumeState: true,
-          });
+          }, this.runContextFor(task.id));
         }
         // Non-undefined: the guard above returned early when this workflow declares no WIP lane.
-        completionTask = await this.store.moveTask(task.id, plannerLanes.wip as string);
+        completionTask = await this.store.moveTask(task.id, plannerLanes.wip as string, undefined, this.runContextFor(task.id));
       }
       await this.handoffTaskToReview(completionTask, "completed-task-recovered");
       if (promotedFromPlannerColumn) {
         this.recoveringCompleted.delete(task.id);
       }
       this.clearCompletedTaskWatchdog(task.id);
-      await this.store.logEntry(task.id, `Auto-recovered: task work was complete but stranded in ${originColumn} — moved to in-review`);
+      await this.store.logEntry(task.id, `Auto-recovered: task work was complete but stranded in ${originColumn} — moved to in-review`, undefined, this.runContextFor(task.id));
       executorLog.log(`✓ ${task.id} auto-recovered completed task → in-review`);
       this.signalTaskComplete(task);
       return true;
@@ -5725,7 +5767,7 @@ export class TaskExecutor {
       taskId,
       "Plan Review replan cap reached — escalating to manual approval",
       `The Plan Review gate requested a planning revision ${currentCount} times without converging (cap ${capLabel}). To avoid an endless plan → Plan Review REVISE → replan loop, the task is routed to awaiting-approval for a human decision instead of replanning again. Latest Plan Review feedback:\n${feedback}`,
-      this.getRunContextFor(taskId),
+      this.runContextFor(taskId),
     );
     // awaitingApprovalReason is written through a Record<string, unknown> (matching
     // the manual plan-approval hold + the deleted triage cap-park) so the distinct
@@ -5737,7 +5779,7 @@ export class TaskExecutor {
       recoveryRetryCount: null,
       nextRecoveryAt: null,
     };
-    await this.store.updateTask(taskId, escalationUpdates as Partial<Task>, this.getRunContextFor(taskId));
+    await this.store.updateTask(taskId, escalationUpdates as Partial<Task>, this.runContextFor(taskId));
     executorLog.warn(
       `${taskId}: Plan Review replan cap (${capLabel}) reached after ${currentCount} attempts — escalating to awaiting-approval`,
     );
@@ -5802,7 +5844,7 @@ export class TaskExecutor {
           taskId,
           "Plan Review provider failure — task kept in place",
           `Plan Review failed without a REVISE verdict due to a provider, model, transport, or abort condition. The task remains in ${liveTask.column}; no automatic replan was scheduled.\n\nDiagnostic:\n${info.feedback}`,
-          this.getRunContextFor(taskId),
+          this.runContextFor(taskId),
         );
         return false;
       }
@@ -5878,13 +5920,13 @@ export class TaskExecutor {
       }
       const totalFixCount = (liveTask.postReviewFixCount ?? 0) + 1;
       const budgetLabel = budget.unbounded ? "unbounded" : String(budget.max);
-      await this.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, this.getRunContextFor(taskId));
+      await this.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, this.runContextFor(taskId));
       this.clearPausedAborted(taskId);
       await this.store.logEntry(
         taskId,
         "AI spec revision requested",
         formatPlanReviewRevisionFeedback(revisionKey, info.status, feedback),
-        this.getRunContextFor(taskId),
+        this.runContextFor(taskId),
       );
       /*
       FNXC:PlanReviewReplan 2026-07-12-23:20:
@@ -5897,7 +5939,7 @@ export class TaskExecutor {
         taskId,
         `Plan Review failed — moved to ${replanColumn} for automatic replan (attempt ${nextCount}/${budgetLabel})`,
         optionalStepRevisionLogOutcome(feedback, revisionKey),
-        this.getRunContextFor(taskId),
+        this.runContextFor(taskId),
       );
       this.workflowLifecycleMovesInFlight.add(taskId);
       try {
@@ -5911,7 +5953,7 @@ export class TaskExecutor {
         recoveryRetryCount: null,
         nextRecoveryAt: null,
         graphResumeRetryCount: 0,
-      }, this.getRunContextFor(taskId));
+      }, this.runContextFor(taskId));
       return true;
     }
 
@@ -5952,12 +5994,12 @@ export class TaskExecutor {
     const nextCount = currentCount + 1;
     const totalFixCount = (liveTask.postReviewFixCount ?? 0) + 1;
     const budgetLabel = budget.unbounded ? "unbounded" : String(budget.max);
-    await this.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, this.getRunContextFor(taskId));
+    await this.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, this.runContextFor(taskId));
     await this.store.logEntry(
       taskId,
       `Pre-merge optional workflow step requested executor fixes (attempt ${nextCount}/${budgetLabel})`,
       optionalStepRevisionLogOutcome(`Step: ${info.stepName}\nStatus: ${info.status}\nFeedback:\n${info.feedback}`, revisionKey),
-      this.getRunContextFor(taskId),
+      this.runContextFor(taskId),
     );
     await this.sendTaskBackForFix(
       liveTask,
@@ -5985,7 +6027,7 @@ export class TaskExecutor {
       nextRecoveryAt: task.nextRecoveryAt,
     });
     const attempt = decision.nextState.recoveryRetryCount ?? MAX_RECOVERY_RETRIES;
-    const context = this.getRunContextFor(task.id);
+    const context = this.runContextFor(task.id);
     const action = decision.shouldRetry ? "replan" : "park-failed";
 
     await this.store.recordRunAuditEvent?.({
@@ -6443,7 +6485,7 @@ export class TaskExecutor {
       executorLog.log(`Resuming ${task.id}: ${task.title || task.description.slice(0, 60)}`);
       try {
         await this.clearResumeFailureState(task);
-        await this.store.logEntry(task.id, "Resumed after engine restart");
+        await this.store.logEntry(task.id, "Resumed after engine restart", undefined, this.runContextFor(task.id));
         await this.recoverApprovedStepsOnResume(task.id);
       } catch (err) {
         executorLog.error(`Failed to write resume log for ${task.id}:`, err);
@@ -6693,7 +6735,7 @@ export class TaskExecutor {
           : 0;
         this.graphToolFailureRunCursors.set(task.id, cursor);
         if (typeof this.store.updateTask === "function") {
-          await this.store.updateTask(task.id, { toolFailureDetectorLogCursor: cursor }, this.getRunContextFor(task.id));
+          await this.store.updateTask(task.id, { toolFailureDetectorLogCursor: cursor }, this.runContextFor(task.id));
         }
       }
       let selection: { workflowId: string; stepIds: string[] } | undefined;
@@ -7137,7 +7179,7 @@ export class TaskExecutor {
         // the re-running agent can read. Best-effort; logging failures swallowed.
         logTaskEntry: (summary: string, detail?: string) => {
           void this.store
-            .logEntry(task.id, summary, detail, this.getRunContextFor(task.id))
+            .logEntry(task.id, summary, detail, this.runContextFor(task.id))
             .catch(() => {});
         },
         /*
@@ -7180,7 +7222,7 @@ export class TaskExecutor {
               resultToPersist,
               isPlanReviewResult ? { maxPriorAttempts: PLAN_REVIEW_FEEDBACK_HISTORY_LIMIT } : undefined,
             );
-            await this.store.updateTask(taskId, { workflowStepResults: existing }, this.getRunContextFor(taskId));
+            await this.store.updateTask(taskId, { workflowStepResults: existing }, this.runContextFor(taskId));
           } catch {
             // Result recording is additive visibility — never affect the run.
           }
@@ -7325,7 +7367,7 @@ export class TaskExecutor {
         }
         await this.advanceNoMergeWorkflowToCompleteColumn(live as TaskDetail);
         if ((live.graphResumeRetryCount ?? 0) !== 0 || (live.consecutiveToolFailureRetryCount ?? 0) !== 0) {
-          await this.store.updateTask(task.id, { graphResumeRetryCount: 0, consecutiveToolFailureRetryCount: 0, executorEscalationAttempted: false, toolFailureDetectorLogCursor: null, toolFailureRetryExhaustedAuditEmitted: false }, this.getRunContextFor(task.id));
+          await this.store.updateTask(task.id, { graphResumeRetryCount: 0, consecutiveToolFailureRetryCount: 0, executorEscalationAttempted: false, toolFailureDetectorLogCursor: null, toolFailureRetryExhaustedAuditEmitted: false }, this.runContextFor(task.id));
         }
       }
       return;
@@ -7522,7 +7564,7 @@ export class TaskExecutor {
         bypassGuards: true,
         preserveProgress: true,
         workflowMoveMetadata: { fromColumn: task.column, reason: "no-merge-workflow-completed" },
-      });
+      }, this.runContextFor(task.id));
     } catch (err) {
       executorLog.warn(
         `[workflow-graph] ${task.id} completed a no-merge workflow but could not advance to '${completeColumn}': ${err instanceof Error ? err.message : String(err)}`,
@@ -7553,10 +7595,10 @@ export class TaskExecutor {
       store: this.store,
       task,
       workflowRunId,
-      /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2): derived where the executor genuinely holds the
-         run for this task; the marker fallback is real, not defensive — `currentRunContexts` is
-         populated per active run, and a boundary built outside one has no actor to name. */
-      runContext: this.getRunContextFor(task.id) ?? UNATTRIBUTED_MUTATION_CONTEXT,
+      /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): the live per-task run when this boundary
+         is built inside one, and the executor lane otherwise — a boundary built outside a run is
+         still a write this lane made, so it is attributed rather than marked. */
+      runContext: this.runContextFor(task.id),
       markMoveInFlight: (taskId) => this.workflowLifecycleMovesInFlight.add(taskId),
       clearMoveInFlight: (taskId) => this.workflowLifecycleMovesInFlight.delete(taskId),
       onWarn: (message, detail) => {
@@ -7643,7 +7685,7 @@ export class TaskExecutor {
     return {
       readArtifact: (task, key): Promise<string | undefined> => this.readTaskArtifact(task.id, key),
       writeSteps: async (task, steps: TaskStep[]): Promise<void> => {
-        await this.store.updateTask(task.id, { steps });
+        await this.store.updateTask(task.id, { steps }, this.runContextFor(task.id));
       },
       hasExpandedForeach: async (task): Promise<boolean> => {
         const store = this.store as unknown as {
@@ -8030,6 +8072,8 @@ export class TaskExecutor {
         {
           store: this.store,
           worktreePath,
+          // FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): the RETHINK rewind is attributed to the run that requested it.
+          runContext: this.runContextFor(taskId),
           // No single session ref for graph-owned step-sessions — rewind is skipped
           // when checkpointId resolves but no session is current (KTD-2 partial path).
           sessionRef: { current: null },
@@ -8356,7 +8400,7 @@ export class TaskExecutor {
     const logAudit = async (taskId: string | undefined, input: AuditPrimitiveInput): Promise<void> => {
       if (!taskId) return;
       try {
-        await this.store.logEntry(taskId, input.message, input.metadata ? JSON.stringify(input.metadata) : undefined);
+        await this.store.logEntry(taskId, input.message, input.metadata ? JSON.stringify(input.metadata) : undefined, this.runContextFor(taskId));
       } catch {
         // Audit is diagnostic-only and must not affect workflow execution.
       }
@@ -8509,6 +8553,8 @@ export class TaskExecutor {
           {
             store: this.store,
             worktreePath,
+            // FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): the RETHINK rewind is attributed to the run that requested it.
+            runContext: this.runContextFor(task.id),
             sessionRef: { current: null },
             reviewType: "code",
             blastRadiusGuard: branchScoped
@@ -8570,7 +8616,7 @@ export class TaskExecutor {
       // results into `task.workflowStepResults` directly (U2). No `runWorkflowStep`
       // primitive remains in `WorkflowRuntimePrimitives`.
       updateSteps: async (_ctx, task, steps) => {
-        await this.store.updateTask(task.id, { steps });
+        await this.store.updateTask(task.id, { steps }, this.runContextFor(task.id));
         return { outcome: "success", value: "steps-updated", data: { count: steps.length } };
       },
       transitionTask: async (_ctx, task, input) => {
@@ -8615,14 +8661,14 @@ export class TaskExecutor {
             moveTask?: typeof taskStore.moveTask;
           };
           if (typeof storeWithMove.moveTask === "function") {
-            await storeWithMove.moveTask(task.id, targetColumn, moveOptions);
+            await storeWithMove.moveTask(task.id, targetColumn, moveOptions, this.runContextFor(task.id));
           } else {
             patch.column = targetColumn;
           }
         }
         if (input.status !== undefined && input.status !== null) patch.status = input.status;
         if (Object.keys(patch).length > 0) {
-          await taskStore.updateTask(task.id, patch);
+          await taskStore.updateTask(task.id, patch, this.runContextFor(task.id));
         }
         return { outcome: "success", value: input.reason };
       },
@@ -8656,7 +8702,7 @@ export class TaskExecutor {
             mergeTask.id,
             `Workflow merge blocked before requester: ${missingImplementationProof}`,
             undefined,
-            this.getRunContextFor(mergeTask.id),
+            this.runContextFor(mergeTask.id),
           );
           return {
             outcome: "failure",
@@ -8669,7 +8715,7 @@ export class TaskExecutor {
             mergeTask.id,
             "Workflow merge blocked before requester: implementation steps are incomplete",
             undefined,
-            this.getRunContextFor(mergeTask.id),
+            this.runContextFor(mergeTask.id),
           );
           return {
             outcome: "failure",
@@ -8765,7 +8811,7 @@ export class TaskExecutor {
         await this.store.updateTask(task.id, {
           paused: true,
           pausedReason: input.reason,
-        } as Partial<TaskDetail>);
+        } as Partial<TaskDetail>, this.runContextFor(task.id));
         return { outcome: "success", value: "aborted" };
       },
       audit: async (ctx: WorkflowPrimitiveContext, input) => {
@@ -8843,7 +8889,7 @@ export class TaskExecutor {
         : !mergeProof.allResultsTerminal
           ? `non-terminal pre-merge node result ${mergeProof.nonTerminalResult?.workflowStepId ?? "unknown"} (${mergeProof.nonTerminalResult?.status ?? "unknown"})`
           : `foreach step instances incomplete at merge boundary: missing ${mergeProof.missingInstanceIds.join(", ")}`;
-      await this.store.logEntry(live.id, `Workflow merge boundary blocked: ${reason}`, undefined, this.getRunContextFor(live.id));
+      await this.store.logEntry(live.id, `Workflow merge boundary blocked: ${reason}`, undefined, this.runContextFor(live.id));
       return live;
     }
 
@@ -8859,14 +8905,14 @@ export class TaskExecutor {
           steps: completedSteps,
           currentStep: Math.max(0, completedSteps.length - 1),
         } as Partial<TaskDetail>,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       live = (updated as TaskDetail | undefined) ?? { ...live, steps: completedSteps, currentStep: Math.max(0, completedSteps.length - 1) };
       await this.store.logEntry(
         live.id,
         "Workflow merge boundary completed graph-native task checklist before requesting merge",
         undefined,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
     }
     if (alreadyAtMergeColumn) return live;
@@ -8888,12 +8934,12 @@ export class TaskExecutor {
       moveTask?: (id: string, column: string, options: unknown | undefined, runContext: RunMutationContext) => Promise<TaskDetail | undefined>;
     };
     if (typeof storeWithMove.moveTask === "function") {
-      const moved = await storeWithMove.moveTask(live.id, targetColumn, moveOptions, this.getRunContextFor(live.id) ?? UNATTRIBUTED_MUTATION_CONTEXT);
-      await this.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, this.getRunContextFor(live.id));
+      const moved = await storeWithMove.moveTask(live.id, targetColumn, moveOptions, this.runContextFor(live.id));
+      await this.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, this.runContextFor(live.id));
       return moved ?? { ...live, column: targetColumn };
     }
-    await this.store.updateTask(live.id, { column: targetColumn } as Partial<TaskDetail>, this.getRunContextFor(live.id));
-    await this.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, this.getRunContextFor(live.id));
+    await this.store.updateTask(live.id, { column: targetColumn } as Partial<TaskDetail>, this.runContextFor(live.id));
+    await this.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, this.runContextFor(live.id));
     return { ...live, column: targetColumn };
   }
 
@@ -9121,7 +9167,7 @@ export class TaskExecutor {
             mergeTask.id,
             `Workflow merge blocked before requester: ${missingImplementationProof}`,
             undefined,
-            this.getRunContextFor(mergeTask.id),
+            this.runContextFor(mergeTask.id),
           );
           return { outcome: "failure", value: "implementation-incomplete" };
         }
@@ -9350,7 +9396,7 @@ export class TaskExecutor {
         await this.store.logEntry(
           seamTask.id,
           `${config.type} step-review Step ${stepIndex}: ${review.verdict}${config.advisory ? " (advisory)" : ""}`,
-          review.summary,
+          review.summary, this.runContextFor(seamTask.id),
         );
         const narration = config.type === "plan" && review.verdict === "APPROVE"
           ? buildPlanVerifiedMessage()
@@ -9375,7 +9421,7 @@ export class TaskExecutor {
               await this.updateStepGraph(seamTask.id, stepIndex, "done");
               await this.store.logEntry(
                 seamTask.id,
-                `Step ${stepIndex} (${stepName}) marked done by step-review APPROVE (graph)`,
+                `Step ${stepIndex} (${stepName}) marked done by step-review APPROVE (graph)`, undefined, this.runContextFor(seamTask.id),
               );
             }
           } catch (err) {
@@ -9470,18 +9516,18 @@ export class TaskExecutor {
         // visit re-asks instead of silently consuming a stale comment.
         const latest = replies[replies.length - 1] as { text?: string; comment?: string };
         const answer = (latest?.text ?? latest?.comment ?? "").toString();
-        await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.getRunContextFor(live.id));
-        await this.store.logEntry(live.id, `Workflow input received for node '${node.id}'`, undefined, this.getRunContextFor(live.id));
+        await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.runContextFor(live.id));
+        await this.store.logEntry(live.id, `Workflow input received for node '${node.id}'`, undefined, this.runContextFor(live.id));
         return { outcome: "success", value: "input-received", contextPatch: { [`input:${node.id}`]: answer } };
       }
       // Unpaused but no post-pause reply yet — re-park below and keep waiting.
     }
 
-    await this.store.logEntry(live.id, `Workflow paused for user input: ${question}`, undefined, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, `Workflow paused for user input: ${question}`, undefined, this.runContextFor(live.id));
     await this.store.updateTask(
       live.id,
       { status: "awaiting-user-input", paused: true, pausedReason: `${marker}@${Date.now()}: ${question}` },
-      this.getRunContextFor(live.id),
+      this.runContextFor(live.id),
     );
     // Failure outcome ends the walk; handleGraphFailure leaves paused tasks
     // untouched, so the task sits awaiting input until the user responds.
@@ -9493,11 +9539,11 @@ export class TaskExecutor {
    *  next run isWorkflowCliCommandApproved returns true and the node executes. */
   private async pauseForCliApproval(node: WorkflowIrNode, live: TaskDetail, command: string): Promise<WorkflowNodeResult> {
     const marker = `workflow-cli-approval:${node.id}`;
-    await this.store.logEntry(live.id, `Workflow paused for CLI command approval: ${command}`, undefined, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, `Workflow paused for CLI command approval: ${command}`, undefined, this.runContextFor(live.id));
     await this.store.updateTask(
       live.id,
       { status: "awaiting-cli-approval", paused: true, pausedReason: `${marker}: ${command}` },
-      this.getRunContextFor(live.id),
+      this.runContextFor(live.id),
     );
     return { outcome: "failure", value: "awaiting-cli-approval" };
   }
@@ -9511,7 +9557,7 @@ export class TaskExecutor {
     extraEnv?: NodeJS.ProcessEnv,
   ): Promise<{ success: boolean; output?: string; error?: string }> {
     executorLog.log(`${task.id}: workflow node '${label}' executing approved CLI command: ${command}`);
-    await this.store.logEntry(task.id, `Workflow node '${label}' executing CLI command: ${command}`, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, `Workflow node '${label}' executing CLI command: ${command}`, undefined, this.runContextFor(task.id));
     const abort = new AbortController();
     this.registerConfiguredCommandController(task.id, abort);
     try {
@@ -9592,7 +9638,7 @@ export class TaskExecutor {
           live.id,
           `Workflow node '${node.id}': column agent '${columnAgentId}' not found — falling back to node/default resolution`,
           undefined,
-          this.getRunContextFor(live.id),
+          this.runContextFor(live.id),
         );
         return undefined;
       }
@@ -9601,7 +9647,7 @@ export class TaskExecutor {
         live.id,
         `Workflow node '${node.id}': running as column agent '${columnAgentId}' (${mode})`,
         undefined,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       return {
         modelProvider: rc.executorProvider,
@@ -9617,7 +9663,7 @@ export class TaskExecutor {
           live.id,
           `Workflow node '${node.id}': column agent '${columnAgentId}' lookup failed — falling back to node/default resolution`,
           undefined,
-          this.getRunContextFor(live.id),
+          this.runContextFor(live.id),
         );
       } catch (logErr: unknown) {
         executorLog.warn(`${live.id}: failed to log column-agent lookup failure: ${logErr instanceof Error ? logErr.message : String(logErr)}`);
@@ -9679,7 +9725,7 @@ export class TaskExecutor {
           task.id,
           `Workflow seam node '${governingNodeId}': column agent '${effective.agentId}' not found — falling back to assigned-agent resolution`,
           undefined,
-          this.getRunContextFor(task.id),
+          this.runContextFor(task.id),
         );
       } catch (logErr: unknown) {
         executorLog.warn(`${task.id}: failed to log column-agent fallback: ${logErr instanceof Error ? logErr.message : String(logErr)}`);
@@ -9691,7 +9737,7 @@ export class TaskExecutor {
         task.id,
         `Workflow seam node '${governingNodeId}': running as column agent '${effective.agentId}' (${binding.mode})`,
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
     } catch (logErr: unknown) {
       executorLog.warn(`${task.id}: failed to log column-agent adoption: ${logErr instanceof Error ? logErr.message : String(logErr)}`);
@@ -9811,7 +9857,7 @@ export class TaskExecutor {
         task.id,
         `Workflow node '${nodeId}' requires a task worktree — acquiring worktree before node execution`,
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
       const acquisition = await acquireTaskWorktree({
         task,
@@ -9821,7 +9867,7 @@ export class TaskExecutor {
         pool: this.options.pool,
         logger: executorLog,
         audit,
-        runContext: this.getRunContextFor(task.id),
+        runContext: this.runContextFor(task.id),
         runInitCommand: true,
         createWorktree: this.createWorktree.bind(this),
         runConfiguredCommand: (command, cwd, timeoutMs, env) =>
@@ -9860,7 +9906,7 @@ export class TaskExecutor {
         task.id,
         `Workflow node '${nodeId}' failed to acquire task worktree: ${message}`,
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
       throw error;
     } finally {
@@ -9913,8 +9959,8 @@ export class TaskExecutor {
         });
       }
       this.activeWorktrees.get(taskId)?.delete(live.worktree);
-      await this.store.updateTask(taskId, { worktree: null, branch: null, baseCommitSha: null, sessionFile: null }, this.getRunContextFor(taskId));
-      await this.store.logEntry(taskId, `Released the pre-execution worktree (${reason}) — it will be re-acquired when planning or execution resumes`, undefined, this.getRunContextFor(taskId)).catch(() => undefined);
+      await this.store.updateTask(taskId, { worktree: null, branch: null, baseCommitSha: null, sessionFile: null }, this.runContextFor(taskId));
+      await this.store.logEntry(taskId, `Released the pre-execution worktree (${reason}) — it will be re-acquired when planning or execution resumes`, undefined, this.runContextFor(taskId)).catch(() => undefined);
       executorLog.log(`${taskId}: released pre-execution worktree ${live.worktree} (${reason})`);
       return true;
     } catch (error) {
@@ -9986,7 +10032,7 @@ export class TaskExecutor {
         live.id,
         `Workflow node '${node.id}' assigned worktree is missing — reacquiring before node execution`,
         live.worktree,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
     }
     /*
@@ -10013,7 +10059,7 @@ export class TaskExecutor {
       taskId,
       `Workflow graph observed confirmed merge while task was '${live.column}' — finalizing to done (${reason})`,
       undefined,
-      this.getRunContextFor(taskId),
+      this.runContextFor(taskId),
     );
     const finalization = await finalizeProvenAutoMergeTask({
       store: this.store,
@@ -10046,7 +10092,7 @@ export class TaskExecutor {
         taskId,
         `Workflow graph merge-confirmed finalization blocked — ${finalization.reason ?? "unknown"}`,
         undefined,
-        this.getRunContextFor(taskId),
+        this.runContextFor(taskId),
       );
       if (finalization.reason === "task has incomplete steps" && live.mergeDetails?.noOpMerge === true && !live.mergeDetails?.commitSha) {
         /*
@@ -10120,11 +10166,11 @@ export class TaskExecutor {
           });
       if (replies.length === 0) {
         // Unpaused without a post-watermark reply — re-park and keep waiting.
-        await this.store.updateTask(live.id, { status: "awaiting-user-input", paused: true }, this.getRunContextFor(live.id));
+        await this.store.updateTask(live.id, { status: "awaiting-user-input", paused: true }, this.runContextFor(live.id));
         return { outcome: "failure", value: "awaiting-user-input" };
       }
-      await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.getRunContextFor(live.id));
-      await this.store.logEntry(live.id, `Workflow input received for step '${node.id}' — resuming`, undefined, this.getRunContextFor(live.id));
+      await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.runContextFor(live.id));
+      await this.store.logEntry(live.id, `Workflow input received for step '${node.id}' — resuming`, undefined, this.runContextFor(live.id));
     }
 
     const executorKind = typeof cfg.executor === "string" ? cfg.executor : "model";
@@ -10165,7 +10211,7 @@ export class TaskExecutor {
         live.id,
         `Fast mode — custom graph node '${node.id}' skipped`,
         undefined,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       return { outcome: "success", value: "workflow-step-skipped" };
     }
@@ -10229,7 +10275,7 @@ export class TaskExecutor {
             live.id,
             `Plan Review worktree ${executionTarget.worktree} is missing on disk — re-acquiring a task worktree instead of running in the shared checkout`,
             undefined,
-            this.getRunContextFor(live.id),
+            this.runContextFor(live.id),
           );
         }
         const acquisitionTask = recordedWorktreeMissing
@@ -10278,7 +10324,7 @@ export class TaskExecutor {
           live.id,
           `Workflow node '${node.id}': column agent '${columnAgentId}' (${columnAgentMode}) not applied — raw CLI execution runs no session`,
           undefined,
-          this.getRunContextFor(live.id),
+          this.runContextFor(live.id),
         );
       } else {
         const adopted = await this.adoptColumnAgentForNode(node, live, columnAgentId, columnAgentMode);
@@ -10314,7 +10360,7 @@ export class TaskExecutor {
           const persona = this.buildAgentPersona(agent);
           if (persona) prompt = `${persona}\n\n${prompt}`;
         } else {
-          await this.store.logEntry(live.id, `Workflow node '${node.id}': agent '${cfg.agentId}' not found — using default model`, undefined, this.getRunContextFor(live.id));
+          await this.store.logEntry(live.id, `Workflow node '${node.id}': agent '${cfg.agentId}' not found — using default model`, undefined, this.runContextFor(live.id));
         }
       } catch {
         // Agent lookup is best-effort; fall back to the default model.
@@ -10359,7 +10405,7 @@ export class TaskExecutor {
         // status reset in runAwaitInputNode).
         const approvalMarker = `workflow-cli-approval:${node.id}`;
         if ((live.pausedReason ?? "").startsWith(approvalMarker)) {
-          await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.getRunContextFor(live.id));
+          await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.runContextFor(live.id));
         }
         const env = prompt ? { ...process.env, FUSION_NODE_PROMPT: prompt } : undefined;
         const out = await this.runRawCliCommand(
@@ -10480,12 +10526,12 @@ export class TaskExecutor {
         live.id,
         `Workflow step '${node.id}' is waiting for your input: ${awaitQuestion}`,
         undefined,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       await this.store.updateTask(
         live.id,
         { status: "awaiting-user-input", paused: true, pausedReason: `${skillAwaitMarker}@${Date.now()}: ${awaitQuestion}` },
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       return { outcome: "failure", value: "awaiting-user-input" };
     }
@@ -10593,7 +10639,7 @@ export class TaskExecutor {
         live.id,
         `Workflow node '${node.id}' uses the cli-agent executor but no CLI agent runtime is wired`,
         undefined,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       return { outcome: "failure", value: "cli-agent-runtime-unavailable" };
     }
@@ -10602,7 +10648,7 @@ export class TaskExecutor {
         live.id,
         `Workflow node '${node.id}' (cli-agent) is write-capable but no task worktree exists yet — place it after the execute seam`,
         undefined,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       return { outcome: "failure", value: "no-worktree-for-write-node" };
     }
@@ -10612,7 +10658,7 @@ export class TaskExecutor {
         live.id,
         `Workflow node '${node.id}' (cli-agent) is missing 'cliAdapterId'`,
         undefined,
-        this.getRunContextFor(live.id),
+        this.runContextFor(live.id),
       );
       return { outcome: "failure", value: "cli-agent-adapter-missing" };
     }
@@ -10644,7 +10690,7 @@ export class TaskExecutor {
           live.id,
           `cli-agent session for node '${node.id}' rejected at PTY pool ceiling (${err.active}/${err.ceiling}) — queued`,
           undefined,
-          this.getRunContextFor(live.id),
+          this.runContextFor(live.id),
         );
         // A typed, surfaced state — NOT a silent stall. The graph failure handler
         // parks the task; a later sweep / capacity opening re-runs it.
@@ -10777,9 +10823,9 @@ export class TaskExecutor {
       this.clearSessionContentionHold(task.id);
       const message = `Still waiting on another task to release a shared session path after ${MAX_SESSION_CONTENTION_HOLD_RETRIES} attempts — leaving the task queued for normal re-dispatch (not a failure)${detail ? `: ${detail}` : ""}`;
       executorLog.warn(`${task.id}: ${message}`);
-      await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
       if (live.status != null || live.error != null) {
-        await this.store.updateTask(task.id, { status: null, error: null }, this.getRunContextFor(task.id));
+        await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
       }
       return;
     }
@@ -10787,11 +10833,11 @@ export class TaskExecutor {
     this.sessionContentionHoldAttempts.set(task.id, attempt);
     const message = `Waiting on another task to release a shared session path — retrying in place (${attempt}/${MAX_SESSION_CONTENTION_HOLD_RETRIES})${detail ? `: ${detail}` : ""}`;
     executorLog.warn(`${task.id}: ${message}`);
-    await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
     // A contention hold is not a failure state: clear any stale park so the row never shows as failed
     // while it is simply waiting its turn.
     if (live.status != null || live.error != null) {
-      await this.store.updateTask(task.id, { status: null, error: null }, this.getRunContextFor(task.id));
+      await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
     }
 
     const delayMs = SESSION_CONTENTION_HOLD_BACKOFF_MS === 0
@@ -11161,12 +11207,12 @@ export class TaskExecutor {
 
     const nextCount = budget.attempts + 1;
     const totalFixCount = (live.postReviewFixCount ?? 0) + 1;
-    await this.store.updateTask(live.id, { postReviewFixCount: totalFixCount }, this.getRunContextFor(live.id));
+    await this.store.updateTask(live.id, { postReviewFixCount: totalFixCount }, this.runContextFor(live.id));
     await this.store.logEntry(
       live.id,
       `Auto-recovered retryable remediation node '${failedNode ?? "unknown"}' for failed pre-merge workflow step (attempt ${nextCount}/${budget.label})`,
       optionalStepRevisionLogOutcome(`Step: ${budget.stepName ?? budget.key}${failureValue ? `\nGraph value: ${failureValue}` : ""}`, budget.key),
-      this.getRunContextFor(live.id),
+      this.runContextFor(live.id),
     );
     const sentBack = await this.recoverFailedPreMergeWorkflowStep(live);
     if (!sentBack) return false;
@@ -11380,10 +11426,10 @@ export class TaskExecutor {
     this.activeWorktrees.delete(live.id);
     const message = "Workflow graph plan node pause/resume replay surfaced after task was already in-review — stale replay ignored, in-review state preserved";
     executorLog.log(`${live.id}: ${message}`);
-    await this.store.logEntry(live.id, message, undefined, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, message, undefined, this.runContextFor(live.id));
     if (staleParkedFailure) {
-      await this.store.updateTask(live.id, { status: null, error: null }, this.getRunContextFor(live.id));
-      await this.store.logEntry(live.id, "Auto-recovered: cleared stale in-review plan pause/resume replay failure — failure notification suppressed", undefined, this.getRunContextFor(live.id));
+      await this.store.updateTask(live.id, { status: null, error: null }, this.runContextFor(live.id));
+      await this.store.logEntry(live.id, "Auto-recovered: cleared stale in-review plan pause/resume replay failure — failure notification suppressed", undefined, this.runContextFor(live.id));
     }
     try {
       await this.store.recordRunAuditEvent?.({
@@ -11464,9 +11510,9 @@ export class TaskExecutor {
     this.activeWorktrees.delete(live.id);
     const message = `Workflow graph parse node pause/resume replay surfaced after task was already in-review — auto-retrying workflow graph (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
     executorLog.log(`${live.id}: ${message}`);
-    await this.store.logEntry(live.id, message, undefined, this.getRunContextFor(live.id));
-    await this.store.logEntry(live.id, "Auto-recovered: retrying stale in-review parse pause/resume replay — failure notification suppressed", undefined, this.getRunContextFor(live.id));
-    await this.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, message, undefined, this.runContextFor(live.id));
+    await this.store.logEntry(live.id, "Auto-recovered: retrying stale in-review parse pause/resume replay — failure notification suppressed", undefined, this.runContextFor(live.id));
+    await this.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, this.runContextFor(live.id));
     try {
       await this.store.recordRunAuditEvent?.({
         taskId: live.id,
@@ -11686,9 +11732,9 @@ export class TaskExecutor {
     this.activeWorktrees.delete(live.id);
     const message = `Workflow graph node '${nodeId}' was interrupted by engine pause/resume — re-entering workflow graph (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
     executorLog.log(`${live.id}: ${message}`);
-    await this.store.logEntry(live.id, message, undefined, this.getRunContextFor(live.id));
-    await this.store.logEntry(live.id, `Auto-recovered: re-entering paused-aborted workflow graph node '${nodeId}' — failure notification suppressed`, undefined, this.getRunContextFor(live.id));
-    await this.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, message, undefined, this.runContextFor(live.id));
+    await this.store.logEntry(live.id, `Auto-recovered: re-entering paused-aborted workflow graph node '${nodeId}' — failure notification suppressed`, undefined, this.runContextFor(live.id));
+    await this.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, this.runContextFor(live.id));
     try {
       await this.store.recordRunAuditEvent?.({
         taskId: live.id,
@@ -11766,7 +11812,7 @@ export class TaskExecutor {
     const failedNode = result.visitedNodeIds[result.visitedNodeIds.length - 1] ?? "unknown";
     const message = `Workflow graph merge failure at node '${failedNode}' routed to bounded auto-merge retry${abortProvenance === "merge-seam" ? " after merge-seam abort" : isGenericAbortProvenance(abortProvenance) || abortProvenance === undefined ? " after benign pause/resume abort" : ""}`;
     executorLog.warn(`${live.id}: ${message}`);
-    await this.store.logEntry(live.id, message, undefined, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, message, undefined, this.runContextFor(live.id));
     try {
       const mergeTask = await this.ensureWorkflowMergeBoundaryTask(live, {
         reason: "workflow-merge-retry-boundary",
@@ -11798,7 +11844,7 @@ export class TaskExecutor {
       await this.store.updateTask(live.id, {
         paused: false,
         pausedReason: null,
-      }, this.getRunContextFor(live.id));
+      }, this.runContextFor(live.id));
       resumeLive = { ...live, paused: false, pausedReason: undefined };
     }
     if (hasNonTerminalWorkflowSteps(resumeLive) && await this.routeGraphFailureToExecutionResume(resumeLive, failedNode, "implementation-incomplete")) {
@@ -11808,9 +11854,9 @@ export class TaskExecutor {
     this.activeWorktrees.delete(live.id);
     const message = `Workflow graph merge blocked at node '${failedNode}': implementation incomplete with no executable proof to resume — failing instead of retrying merge`;
     executorLog.warn(`${live.id}: ${message}`);
-    await this.store.logEntry(live.id, message, undefined, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, message, undefined, this.runContextFor(live.id));
     if (!(await resolveTerminalColumnsFor(this.store, live.id)).includes(live.column) && live.error == null) {
-      await this.store.updateTask(live.id, { error: message, status: "failed" }, this.getRunContextFor(live.id));
+      await this.store.updateTask(live.id, { error: message, status: "failed" }, this.runContextFor(live.id));
     }
     await this.persistTokenUsage(live.id);
     return true;
@@ -11894,7 +11940,7 @@ export class TaskExecutor {
         this.activeWorktrees.delete(task.id);
         const blockedParkHonored = `Workflow graph run ended after an honest blocked park (${live.error}) — honoring park, not requeueing, retrying, or clearing state`;
         executorLog.log(`${task.id}: ${blockedParkHonored}`);
-        await this.store.logEntry(task.id, blockedParkHonored, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, blockedParkHonored, undefined, this.runContextFor(task.id));
         await this.persistTokenUsage(task.id);
         return;
       }
@@ -11916,7 +11962,7 @@ export class TaskExecutor {
         this.activeWorktrees.delete(task.id);
         const mergerParkHonored = `Workflow graph run ended after merger parked task with blocker (${live.error}) — honoring park, not retrying or resuming merge`;
         executorLog.log(`${task.id}: ${mergerParkHonored}`);
-        await this.store.logEntry(task.id, mergerParkHonored, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, mergerParkHonored, undefined, this.runContextFor(task.id));
         await this.persistTokenUsage(task.id);
         return;
       }
@@ -11936,9 +11982,9 @@ export class TaskExecutor {
       if (result.context?.[WORKFLOW_DRIFT_PARK_CONTEXT_KEY] === true) {
         const driftMessage = "Workflow drift park: the workflow definition changed under this run (pinned node/column no longer in the current IR). Stale IR pin cleared — requeue the task to re-resolve the current workflow and continue.";
         executorLog.warn(`${task.id}: ${driftMessage}`);
-        await this.store.logEntry(task.id, driftMessage, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, driftMessage, undefined, this.runContextFor(task.id));
         if (live.status == null && live.error == null) {
-          await this.store.updateTask(task.id, { error: driftMessage, status: "failed" }, this.getRunContextFor(task.id));
+          await this.store.updateTask(task.id, { error: driftMessage, status: "failed" }, this.runContextFor(task.id));
         }
         await this.persistTokenUsage(task.id);
         return;
@@ -11968,8 +12014,8 @@ export class TaskExecutor {
         if (priorRetries < MAX_TRANSIENT_GRAPH_RESUME_RETRIES) {
           const nextRetries = priorRetries + 1;
           const message = `Worktree base refresh blocked execution (${refreshKind}) — retrying in place (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
-          await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
-          await this.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
+          await this.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, this.runContextFor(task.id));
           const scheduleRetry = () => {
             this.execute(live).catch((err) =>
               executorLog.error(`Failed worktree base refresh retry for ${task.id}:`, err),
@@ -11982,7 +12028,7 @@ export class TaskExecutor {
             task.id,
             `Worktree base refresh remains blocked (${refreshKind}) — retry budget exhausted; task remains held`,
             undefined,
-            this.getRunContextFor(task.id),
+            this.runContextFor(task.id),
           );
         }
         await this.persistTokenUsage(task.id);
@@ -12010,8 +12056,8 @@ export class TaskExecutor {
         if (priorRetries < MAX_TRANSIENT_GRAPH_RESUME_RETRIES) {
           const nextRetries = priorRetries + 1;
           const message = `Required workflow artifact could not be read — retrying in place (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
-          await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
-          await this.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
+          await this.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, this.runContextFor(task.id));
           const scheduleRetry = () => {
             void (async () => {
               try {
@@ -12030,7 +12076,7 @@ export class TaskExecutor {
             task.id,
             "Required workflow artifact read retry budget exhausted — task remains held in its current state",
             undefined,
-            this.getRunContextFor(task.id),
+            this.runContextFor(task.id),
           );
         }
         await this.persistTokenUsage(task.id);
@@ -12048,10 +12094,10 @@ export class TaskExecutor {
           const nextRetries = priorRetries + 1;
           const message = `Plan Review provider failure — retrying in place (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
           executorLog.warn(`${task.id}: ${message}`);
-          await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
           await this.store.updateTask(task.id, {
             graphResumeRetryCount: nextRetries,
-          }, this.getRunContextFor(task.id));
+          }, this.runContextFor(task.id));
           const scheduleRetry = () => {
             this.execute(live).catch((err) =>
               executorLog.error(`Failed Plan Review provider retry for ${task.id}:`, err),
@@ -12062,7 +12108,7 @@ export class TaskExecutor {
         } else {
           const message = "Plan Review provider retry budget exhausted — task remains held in its current state";
           executorLog.warn(`${task.id}: ${message}`);
-          await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
         }
         await this.persistTokenUsage(task.id);
         return;
@@ -12193,10 +12239,10 @@ export class TaskExecutor {
         this.activeWorktrees.delete(task.id);
         const manualHoldBenign = "Workflow graph run ended at manual merge hold with auto-merge off — benign, in-review manual-hold state preserved for Merge & Close";
         executorLog.log(`${task.id}: ${manualHoldBenign}`);
-        await this.store.logEntry(task.id, manualHoldBenign, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, manualHoldBenign, undefined, this.runContextFor(task.id));
         if (live.status != null || live.error != null) {
-          await this.store.logEntry(task.id, "Auto-recovered: cleared stale auto-merge-off manual merge hold pause-abort failure — failure notification suppressed", undefined, this.getRunContextFor(task.id));
-          await this.store.updateTask(task.id, { status: null, error: null }, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, "Auto-recovered: cleared stale auto-merge-off manual merge hold pause-abort failure — failure notification suppressed", undefined, this.runContextFor(task.id));
+          await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
         }
         await this.persistTokenUsage(task.id);
         return;
@@ -12206,7 +12252,7 @@ export class TaskExecutor {
         this.activeWorktrees.delete(task.id);
         const inReviewBenign = "Workflow graph run ended during engine pause/resume while already in-review — benign, in-review state preserved";
         executorLog.log(`${task.id}: ${inReviewBenign}`);
-        await this.store.logEntry(task.id, inReviewBenign, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, inReviewBenign, undefined, this.runContextFor(task.id));
         await this.persistTokenUsage(task.id);
         return;
       }
@@ -12302,15 +12348,15 @@ export class TaskExecutor {
                 const nextRetries = priorRetries + 1;
                 const retryMessage = `Workflow graph run ended during ${pauseProvenance} — auto-continuing the agent session (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES}) instead of re-queueing to todo`;
                 executorLog.log(`${task.id}: ${retryMessage}`);
-                await this.store.logEntry(task.id, retryMessage, undefined, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, retryMessage, undefined, this.runContextFor(task.id));
                 // Emit the Auto-recovered marker BEFORE clearing status so the
                 // status-clearing updateTask's task:updated event already carries
                 // the recovery log — NotificationService.maybeSuppressTransientFailedNotification
                 // (recoveredStatus path) then proactively cancels any pending
                 // failure timer rather than relying on the race-contingent
                 // fire-time re-check.
-                await this.store.logEntry(task.id, "Auto-recovered: engine-internal pause/resume abort — retrying agent session, failure notification suppressed", undefined, this.getRunContextFor(task.id));
-                await this.store.updateTask(task.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, "Auto-recovered: engine-internal pause/resume abort — retrying agent session, failure notification suppressed", undefined, this.runContextFor(task.id));
+                await this.store.updateTask(task.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, this.runContextFor(task.id));
                 await this.persistTokenUsage(task.id);
                 const scheduleRetry = () => {
                   // Re-fetch at fire time: the snapshot is up to
@@ -12368,7 +12414,7 @@ export class TaskExecutor {
               ? `Workflow graph run ended during ${pauseProvenance} with task parked in todo — benign, paused awaiting explicit unpause`
               : `Workflow graph run ended during ${pauseProvenance} with task re-queued to todo — benign, cleared for normal scheduling`;
             executorLog.log(`${task.id}: ${todoBenign}`);
-            await this.store.logEntry(task.id, todoBenign, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, todoBenign, undefined, this.runContextFor(task.id));
             // FNXC:WorkflowLifecycle 2026-06-20-19:58: reconcile a stale
             // persisted failure with the benign reclassification. A pause-abort
             // parked `status:"failed"` on an earlier non-todo observation stays
@@ -12389,8 +12435,8 @@ export class TaskExecutor {
             // project-engine.ts). Scoped to the actual-clear path so the common
             // no-failure benign re-queue is not mislabeled as a recovery.
             if (live.status != null || live.error != null) {
-              await this.store.updateTask(task.id, { status: null, error: null }, this.getRunContextFor(task.id));
-              await this.store.logEntry(task.id, "Auto-recovered: cleared stale pause-abort failure on todo re-queue — failure notification suppressed", undefined, this.getRunContextFor(task.id));
+              await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
+              await this.store.logEntry(task.id, "Auto-recovered: cleared stale pause-abort failure on todo re-queue — failure notification suppressed", undefined, this.runContextFor(task.id));
             }
             await this.persistTokenUsage(task.id);
             return;
@@ -12418,7 +12464,7 @@ export class TaskExecutor {
             this.activeWorktrees.delete(task.id);
             const doneBenign = `Workflow graph run ended during ${pauseProvenance} after the task already completed ('${live.column}') — benign, no action needed`;
             executorLog.log(`${task.id}: ${doneBenign}`);
-            await this.store.logEntry(task.id, doneBenign, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, doneBenign, undefined, this.runContextFor(task.id));
             await this.persistTokenUsage(task.id);
             return;
           }
@@ -12428,16 +12474,16 @@ export class TaskExecutor {
           // predicate cannot drift out of sync with this text (PR #1687 review).
           const message = `${PAUSE_ABORT_PARK_ERROR_MARKER} ${pauseProvenance} in '${live.column}' at node '${failedNode}' — ${PAUSE_ABORT_PARK_OPERATOR_MARKER}; retry or explicitly unpause/resume after inspecting the task`;
           executorLog.warn(`${task.id}: ${message}`);
-          await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
           if (live.status == null && live.error == null) {
-            await this.store.updateTask(task.id, { error: message, status: "failed" }, this.getRunContextFor(task.id));
+            await this.store.updateTask(task.id, { error: message, status: "failed" }, this.runContextFor(task.id));
           }
           await this.persistTokenUsage(task.id);
           return;
         }
         const benignMessage = "Workflow graph run ended while task is paused — pause state preserved";
         executorLog.log(`${task.id}: ${benignMessage} (${pauseProvenance})`);
-        await this.store.logEntry(task.id, benignMessage, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, benignMessage, undefined, this.runContextFor(task.id));
         return;
       }
       const failedNode = result.visitedNodeIds[result.visitedNodeIds.length - 1];
@@ -12471,7 +12517,7 @@ export class TaskExecutor {
             await this.store.updateTask(live.id, {
               status: "needs-replan",
               error: null,
-            }, this.getRunContextFor(live.id));
+            }, this.runContextFor(live.id));
             const feedback = marker
               ? `Execution parse rejected non-executable PROMPT.md (DUPLICATE: ${marker.canonicalId}). Write a full plan body; do not re-emit only DUPLICATE: ${marker.canonicalId}.`
               : `Execution parse rejected non-executable PROMPT.md (${redirectReason}). Write a full plan body.`;
@@ -12479,13 +12525,13 @@ export class TaskExecutor {
               live.id,
               "AI spec revision requested",
               feedback,
-              this.getRunContextFor(live.id),
+              this.runContextFor(live.id),
             );
             await this.store.logEntry(
               live.id,
               `Parse node failed on duplicate redirect — rebounded to ${replanColumn} for re-specification`,
               redirectReason,
-              this.getRunContextFor(live.id),
+              this.runContextFor(live.id),
             );
             executorLog.warn(`${live.id}: ${redirectReason} — replan instead of failed park`);
             this.activeWorktrees.delete(live.id);
@@ -12563,7 +12609,7 @@ export class TaskExecutor {
       if (this.graphRunReportedPendingReview(result, failureValue)) {
         const compatMessage = "Implementation stopped on a pending review — parking in review (this workflow does not route the review-pending outcome)";
         executorLog.log(`${task.id}: ${compatMessage}`);
-        await this.store.logEntry(task.id, compatMessage, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, compatMessage, undefined, this.runContextFor(task.id));
         await this.handoffTaskToReview(live, "executor-exit-while-review-pending");
         await this.persistTokenUsage(task.id);
         return;
@@ -12596,12 +12642,12 @@ export class TaskExecutor {
           await this.store.updateTask(task.id, {
             executeRequeueLoopCount: nextCount,
             executeRequeueLoopSignature: signature,
-          }, this.getRunContextFor(task.id));
+          }, this.runContextFor(task.id));
         }
         if (nextCount === EXECUTE_REQUEUE_LOOP_VISIBLE_THRESHOLD) {
           const warningMessage = `Execution dispatch loop building: ${nextCount}/${MAX_EXECUTE_REQUEUE_LOOP_CYCLES} no-progress execute re-queues`;
           executorLog.warn(`${task.id}: ${warningMessage}`);
-          await this.store.logEntry(task.id, warningMessage, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, warningMessage, undefined, this.runContextFor(task.id));
         }
         const canTerminalizeExecuteLoop = live.userPaused !== true
           && live.paused !== true
@@ -12613,7 +12659,7 @@ export class TaskExecutor {
             error: terminalError,
             executeRequeueLoopCount: nextCount,
             executeRequeueLoopSignature: signature,
-          }, this.getRunContextFor(task.id));
+          }, this.runContextFor(task.id));
           await this.store.recordRunAuditEvent?.({
             taskId: task.id,
             agentId: "executor",
@@ -12630,13 +12676,13 @@ export class TaskExecutor {
             },
           });
           executorLog.warn(`${task.id}: ${terminalError}`);
-          await this.store.logEntry(task.id, terminalError, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, terminalError, undefined, this.runContextFor(task.id));
           await this.persistTokenUsage(task.id);
           return;
         }
         const benignMessage = `Workflow graph execute node ended after executor re-queued task to todo (${failureValue ?? "no-value"}) — executor recovery preserved`;
         executorLog.log(`${task.id}: ${benignMessage}`);
-        await this.store.logEntry(task.id, benignMessage, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, benignMessage, undefined, this.runContextFor(task.id));
         await this.persistTokenUsage(task.id);
         return;
       }
@@ -12651,9 +12697,9 @@ export class TaskExecutor {
       if (mergeGraphFailure && this.isTerminalMergeGraphFailureValue(failureValue) && !(await resolveTerminalColumnsFor(this.store, live.id)).includes(live.column)) {
         const message = `Workflow graph terminal merge failure at node '${failedNode ?? "unknown"}' (${failureValue}) — operator action required`;
         executorLog.warn(`${task.id}: ${message}`);
-        await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
         if (live.status == null && live.error == null) {
-          await this.store.updateTask(task.id, { error: message, status: "failed" }, this.getRunContextFor(task.id));
+          await this.store.updateTask(task.id, { error: message, status: "failed" }, this.runContextFor(task.id));
         }
         await this.persistTokenUsage(task.id);
         return;
@@ -12677,7 +12723,7 @@ export class TaskExecutor {
       if (wipColumn !== undefined && live.column !== wipColumn) {
         const benignMessage = `Workflow graph run ended after task already advanced to '${live.column}' — no further action needed`;
         executorLog.log(`${task.id}: ${benignMessage}`);
-        await this.store.logEntry(task.id, benignMessage, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, benignMessage, undefined, this.runContextFor(task.id));
         return;
       }
       if (this.isAwaitingGraphFailureValue(failureValue)) {
@@ -12687,9 +12733,9 @@ export class TaskExecutor {
         */
         const benignMessage = `Workflow graph run ended awaiting ${failureValue === "awaiting-cli-approval" ? "CLI approval" : "user input"} at node '${failedNode ?? "unknown"}' — awaiting state preserved`;
         executorLog.log(`${task.id}: ${benignMessage}`);
-        await this.store.logEntry(task.id, benignMessage, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, benignMessage, undefined, this.runContextFor(task.id));
         if (live.status !== failureValue || !live.paused) {
-          await this.store.updateTask(task.id, { status: failureValue, paused: true }, this.getRunContextFor(task.id));
+          await this.store.updateTask(task.id, { status: failureValue, paused: true }, this.runContextFor(task.id));
         }
         return;
       }
@@ -12699,12 +12745,12 @@ export class TaskExecutor {
           const nextRetries = priorRetries + 1;
           const benignMessage = `Transient resume-after-restart graph failure — auto-retrying (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES}) instead of parking`;
           executorLog.warn(`${task.id}: ${benignMessage}`);
-          await this.store.logEntry(task.id, benignMessage, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, benignMessage, undefined, this.runContextFor(task.id));
           await this.store.updateTask(task.id, {
             graphResumeRetryCount: nextRetries,
             status: null,
             error: null,
-          }, this.getRunContextFor(task.id));
+          }, this.runContextFor(task.id));
           const scheduleRetry = () => {
             this.execute(live).catch((err) =>
               executorLog.error(`Failed transient graph resume retry for ${task.id}:`, err),
@@ -12736,7 +12782,7 @@ export class TaskExecutor {
           const kind = isRemediation ? "remediation" : "execute";
           const benignMessage = `Workflow graph ended at ${kind} node '${failedNode ?? "unknown"}' while a live agent session is still executing — not flagging as failed; live session preserved`;
           executorLog.warn(`${task.id}: ${benignMessage}`);
-          await this.store.logEntry(task.id, benignMessage, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, benignMessage, undefined, this.runContextFor(task.id));
           await this.persistTokenUsage(task.id);
           return;
         }
@@ -12754,8 +12800,8 @@ export class TaskExecutor {
         if (await this.hasTrailingConsecutiveToolFailures(task.id, cursor, threshold)) {
           const claim = await this.store.claimNextToolFailureRetry(task.id, cursor!, maxToolFailureRetries);
           if (claim.outcome === "claimed") {
-            await this.store.updateTask(task.id, { status: null, error: null }, this.getRunContextFor(task.id));
-            await this.store.logEntry(task.id, `Consecutive tool-call failures — auto-retrying same model (${claim.attempt}/${maxToolFailureRetries}) instead of parking`, undefined, this.getRunContextFor(task.id));
+            await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
+            await this.store.logEntry(task.id, `Consecutive tool-call failures — auto-retrying same model (${claim.attempt}/${maxToolFailureRetries}) instead of parking`, undefined, this.runContextFor(task.id));
             await this.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("tool-failure-retry", task.id), domain: "database", mutationType: "task:execution-tool-failure-retry", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", attempt: claim.attempt, maxAttempts: maxToolFailureRetries, consecutiveToolFailures: threshold, mode: "same-model" } });
             const schedule = () => { void (async () => { const resume = await this.store.getTask(task.id); if (resume && !resume.deletedAt && !resume.paused && !resume.userPaused && resume.column === wipColumn) await this.execute(resume); })().catch((error) => executorLog.error(`${task.id}: tool-failure retry failed`, error)); };
             const delay = resolveConsecutiveToolFailureRetryBackoffMs(settings);
@@ -12782,7 +12828,7 @@ export class TaskExecutor {
           const nodeTargetRequeueColumn = escalationTarget.nodeId !== undefined ? holdColumn : undefined;
           const hasNodeTarget = escalationTarget.nodeId !== undefined && nodeTargetRequeueColumn !== undefined;
           if (escalationTarget.nodeId !== undefined && nodeTargetRequeueColumn === undefined) {
-            await this.store.logEntry(task.id, "Node escalation downgraded to an in-place retry — this task's workflow declares no column to requeue into", undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, "Node escalation downgraded to an in-place retry — this task's workflow declares no column to requeue into", undefined, this.runContextFor(task.id));
           }
           let claimedEscalation = false;
           let priorEscalationRetryCount = 0;
@@ -12810,9 +12856,9 @@ export class TaskExecutor {
               status: null,
               error: null,
             };
-          }, this.getRunContextFor(task.id));
+          }, this.runContextFor(task.id));
           if (claimedEscalation) {
-            await this.store.logEntry(task.id, "Same-model retries exhausted — escalating to alternate model/node (one attempt) instead of parking", undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, "Same-model retries exhausted — escalating to alternate model/node (one attempt) instead of parking", undefined, this.runContextFor(task.id));
             await this.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("escalation-retry", task.id), domain: "database", mutationType: "task:execution-escalation-retry", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", hasModelTarget, hasNodeTarget, priorConsecutiveToolFailureRetryCount: priorEscalationRetryCount } });
             if (!hasNodeTarget) {
               const scheduleEscalation = () => { void (async () => { const resumeTask = await this.store.getTask(task.id); if (resumeTask && !resumeTask.deletedAt && !resumeTask.paused && !resumeTask.userPaused && resumeTask.column === wipColumn) await this.execute(resumeTask); })().catch((error) => executorLog.error(`${task.id}: escalation retry failed`, error)); };
@@ -12850,7 +12896,7 @@ export class TaskExecutor {
             escalationHadModelTarget = current.modelProvider != null && current.modelId != null;
             escalationHadNodeTarget = current.nodeId != null;
             return { error: message, status: "failed" };
-          }, this.getRunContextFor(task.id));
+          }, this.runContextFor(task.id));
           if (!cursorOwnedTerminalPark) return;
           if (await this.store.markToolFailureRetryExhaustedAudit(task.id)) {
             await this.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("tool-failure-retry-exhausted", task.id), domain: "database", mutationType: "task:execution-tool-failure-retry-exhausted", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", attempts: maxToolFailureRetries, limit: maxToolFailureRetries, outcome: "terminal-park" } });
@@ -12859,7 +12905,7 @@ export class TaskExecutor {
             await this.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("escalation-exhausted", task.id), domain: "database", mutationType: "task:execution-escalation-exhausted", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", hadModelTarget: escalationHadModelTarget, hadNodeTarget: escalationHadNodeTarget } });
           }
           executorLog.warn(`${task.id}: ${message}`);
-          await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
           await this.persistTokenUsage(task.id);
           return;
         }
@@ -12889,17 +12935,17 @@ export class TaskExecutor {
           escalationHadModelTarget = current.modelProvider != null && current.modelId != null;
           escalationHadNodeTarget = current.nodeId != null;
           return { error: message, status: "failed" };
-        }, this.getRunContextFor(task.id));
+        }, this.runContextFor(task.id));
         if (!escalationTerminalParked) return;
         await this.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("escalation-exhausted", task.id), domain: "database", mutationType: "task:execution-escalation-exhausted", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", hadModelTarget: escalationHadModelTarget, hadNodeTarget: escalationHadNodeTarget } });
       } else {
         // status "failed" doubles as the self-healing exemption: review-task
         // revival sweeps skip tasks carrying a non-null status, preventing the
         // FN-5704-style loop of re-running the graph from scratch.
-        await this.store.updateTask(task.id, { error: message, status: "failed" }, this.getRunContextFor(task.id));
+        await this.store.updateTask(task.id, { error: message, status: "failed" }, this.runContextFor(task.id));
       }
       executorLog.warn(`${task.id}: ${message}`);
-      await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
       await this.persistTokenUsage(task.id);
     } catch (err) {
       executorLog.error(
@@ -12987,18 +13033,18 @@ export class TaskExecutor {
       ? `Workflow graph failed at node '${failedNode}'${failureValue ? ` (${failureValue})` : ""} with incomplete steps — moved back to todo for execution resume`
       : `Workflow graph failed at node '${failedNode}'${failureValue ? ` (${failureValue})` : ""} before a clean review handoff — moved back to todo for workflow retry`;
     executorLog.warn(`${live.id}: ${message}`);
-    await this.store.logEntry(live.id, message, undefined, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, message, undefined, this.runContextFor(live.id));
     await this.store.updateTask(live.id, {
       status: null,
       error: null,
-    }, this.getRunContextFor(live.id));
+    }, this.runContextFor(live.id));
     const reboundColumn = await resolveReboundColumnFor(this.store, live.id);
     if (live.column !== reboundColumn) {
       await this.store.moveTask(live.id, reboundColumn, {
         preserveProgress: true,
         moveSource: "engine",
         recoveryRehome: true,
-      });
+      }, this.runContextFor(live.id));
     }
     // FNXC:ReviewLeniency 2026-07-02-02:10: clear prior terminal failure results
     // (incl. optional gate nodes like code-review) AFTER the task is in `todo`
@@ -13040,14 +13086,14 @@ export class TaskExecutor {
       status: null,
       error: null,
       graphResumeRetryCount: 0,
-    }, this.getRunContextFor(live.id));
+    }, this.runContextFor(live.id));
     const reboundColumn = await resolveReboundColumnFor(this.store, live.id);
     if (live.column !== reboundColumn) {
-      await this.store.moveTask(live.id, reboundColumn, { preserveProgress: false });
+      await this.store.moveTask(live.id, reboundColumn, { preserveProgress: false }, this.runContextFor(live.id));
     }
     const message = "Auto-recovered: cleared stale workflow parse pins after reset/retry — task requeued before execution";
     executorLog.warn(`${live.id}: ${message}`);
-    await this.store.logEntry(live.id, message, undefined, this.getRunContextFor(live.id));
+    await this.store.logEntry(live.id, message, undefined, this.runContextFor(live.id));
     await this.persistTokenUsage(live.id);
     return true;
   }
@@ -13086,29 +13132,29 @@ export class TaskExecutor {
         const message = error instanceof Error ? error.message : String(error);
         executorLog.warn(`${task.id}: workflow work-engine ${extensionId} failed: ${message}`);
         if (extension.fallback === "degradeToDefault") continue;
-        await this.store.logEntry(task.id, `Workflow work engine ${extensionId} failed`, message);
+        await this.store.logEntry(task.id, `Workflow work engine ${extensionId} failed`, message, this.runContextFor(task.id));
         await this.store.updateTask(task.id, {
           status: extension.fallback === "parkNeedsAttention" ? "queued" : "failed",
           error: message,
-        });
+        }, this.runContextFor(task.id));
         return true;
       }
 
       if (result.kind === "not-claimed") continue;
       if (result.kind === "degraded-to-default") {
         executorLog.warn(`${task.id}: workflow work-engine ${extensionId} degraded to default: ${result.reason}`);
-        await this.store.logEntry(task.id, `Workflow work engine ${extensionId} degraded to default`, result.reason);
+        await this.store.logEntry(task.id, `Workflow work engine ${extensionId} degraded to default`, result.reason, this.runContextFor(task.id));
         continue;
       }
       if (result.kind === "parked") {
-        await this.store.logEntry(task.id, result.message, result.reason);
-        await this.store.updateTask(task.id, { status: "queued", error: result.reason });
+        await this.store.logEntry(task.id, result.message, result.reason, this.runContextFor(task.id));
+        await this.store.updateTask(task.id, { status: "queued", error: result.reason }, this.runContextFor(task.id));
         return true;
       }
 
       await this.store.logEntry(
         task.id,
-        result.message ?? `Workflow work engine ${extensionId} claimed execution`,
+        result.message ?? `Workflow work engine ${extensionId} claimed execution`, undefined, this.runContextFor(task.id),
       );
       try {
         await this.store.recordRunAuditEvent?.({
@@ -13207,7 +13253,7 @@ export class TaskExecutor {
         preserveResumeState: true,
         moveSource: "engine",
         recoveryRehome: true,
-      });
+      }, this.runContextFor(liveTask.id));
     }
     const normalizedUnmetDeps = [...new Set(unmetDeps)].sort();
     await this.store.transitionQueuedEpisode(liveTask.id, {
@@ -13216,7 +13262,7 @@ export class TaskExecutor {
       overlapBlockedBy: liveTask.overlapBlockedBy ?? null,
       action: `queued — unmet dependencies: ${unmetDeps.join(", ")}`,
       outcome: "Executor pre-dispatch dependency gate blocked workflow/authoritative execution.",
-      runContext: this.getRunContextFor(liveTask.id),
+      runContext: this.runContextFor(liveTask.id),
     });
     executorLog.log(`${liveTask.id}: executor dispatch blocked by unmet dependencies: ${unmetDeps.join(", ")}`);
     return true;
@@ -13435,9 +13481,11 @@ export class TaskExecutor {
     const syntheticRunId = generateSyntheticRunId("exec", task.id);
     this.currentRunContexts.set(task.id, {
       runId: syntheticRunId,
-      agentId: task.assignedAgentId ?? "executor",
+      agentId: task.assignedAgentId ?? EXECUTOR_LANE_AGENT_ID,
       // FNXC:Identity 2026-08-09-03:04: an execution run acts as the assigned agent (or the generic executor lane); autonomous work leaves `actingFor` unset (R28).
-      actor: actorContextForAgent(task.assignedAgentId ?? "executor"),
+      // Stage C: this is the carrier `runContextFor` hands to every store call in this file, and the
+      // shared const is what keeps its lane label identical to the one the fallback uses.
+      actor: actorContextForAgent(task.assignedAgentId ?? EXECUTOR_LANE_AGENT_ID),
     });
 
     // Build engine run context for audit instrumentation (FN-1404)
@@ -13516,8 +13564,8 @@ export class TaskExecutor {
         // Move to the workflow-aware replan column first, then set status so the task
         // enters it with needs-replan (workflows without "triage" replan in place in todo).
         await moveTaskToReplanColumn(this.store, task);
-        await this.store.updateTask(task.id, { status: "needs-replan" });
-        await this.store.logEntry(task.id, staleness.reason, undefined, this.getRunContextFor(task.id));
+        await this.store.updateTask(task.id, { status: "needs-replan" }, this.runContextFor(task.id));
+        await this.store.logEntry(task.id, staleness.reason, undefined, this.runContextFor(task.id));
         // FNXC:GlobalConcurrencyControls 2026-07-15-02:55: replan handoff never starts agent work — free any re-registered pre-held slot before leaving execute().
         if (dropPreHeldExecutorSlot(task.id)) this.options.semaphore?.release();
         return;
@@ -13567,7 +13615,7 @@ export class TaskExecutor {
         task.id,
         "Drift detected: in-progress with no worktree — creating fresh worktree to recover",
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
     }
 
@@ -13645,7 +13693,7 @@ export class TaskExecutor {
         if (gitDetection.status === "not-repo") {
           await this.store.logEntry(
             task.id,
-            "Cannot execute task: project directory is not a Git repository. Fusion requires a Git repository for worktree-based task execution.",
+            "Cannot execute task: project directory is not a Git repository. Fusion requires a Git repository for worktree-based task execution.", undefined, this.runContextFor(task.id),
           );
           throw new Error(
             "Project directory is not a Git repository. Fusion requires a Git repository for worktree creation. Initialize with 'git init' or run from a Git project directory.",
@@ -13657,7 +13705,7 @@ export class TaskExecutor {
           FN-7799 requires environmental Git probe failures in valid repos to surface the real cause instead of telling operators to run `git init`. Dubious ownership and similar persistent failures otherwise block every task across restarts with a false non-repo diagnosis.
           */
           const message = formatGitRepositoryDetectionError(this.rootDir, gitDetection);
-          await this.store.logEntry(task.id, message);
+          await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
           throw new Error(message);
         }
       }
@@ -13687,7 +13735,7 @@ export class TaskExecutor {
             pool: this.options.pool,
             logger: executorLog,
             audit,
-            runContext: this.getRunContextFor(task.id),
+            runContext: this.runContextFor(task.id),
             runInitCommand: true,
             createWorktree: this.createWorktree.bind(this),
             runConfiguredCommand: (command, cwd, timeoutMs, env) =>
@@ -13750,7 +13798,7 @@ export class TaskExecutor {
             if (setupResult.spawnError || setupResult.timedOut || setupResult.exitCode !== 0) {
               throw new Error(configuredCommandErrorMessage(setupResult));
             }
-            await this.store.logEntry(task.id, `[timing] Setup script '${settings.setupScript}' completed in ${Date.now() - setupStartedAt}ms`, scriptCommand, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, `[timing] Setup script '${settings.setupScript}' completed in ${Date.now() - setupStartedAt}ms`, scriptCommand, this.runContextFor(task.id));
           } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") {
               throw err;
@@ -13759,12 +13807,12 @@ export class TaskExecutor {
             const message = "stderr" in execError && typeof (execError as Record<string, unknown>).stderr === "string"
               ? String((execError as Record<string, unknown>).stderr)
               : execError.message;
-            await this.store.logEntry(task.id, `Setup script '${settings.setupScript}' failed: ${message}`, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, `Setup script '${settings.setupScript}' failed: ${message}`, undefined, this.runContextFor(task.id));
           } finally {
             this.unregisterConfiguredCommandController(task.id, setupAbortController);
           }
         } else {
-          await this.store.logEntry(task.id, `Setup script '${settings.setupScript}' not found in scripts map — skipping`, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, `Setup script '${settings.setupScript}' not found in scripts map — skipping`, undefined, this.runContextFor(task.id));
         }
       }
 
@@ -13828,8 +13876,8 @@ export class TaskExecutor {
         if (!classification.ok) {
           const reanchor = await detectNestedWorktreeRoot(this.rootDir, worktreePath, settings);
           if (reanchor.reanchored) {
-            await this.store.updateTask(task.id, { worktree: reanchor.root });
-            await this.store.logEntry(task.id, `Re-anchored nested task.worktree from ${worktreePath} to ${reanchor.root}`, undefined, this.getRunContextFor(task.id));
+            await this.store.updateTask(task.id, { worktree: reanchor.root }, this.runContextFor(task.id));
+            await this.store.logEntry(task.id, `Re-anchored nested task.worktree from ${worktreePath} to ${reanchor.root}`, undefined, this.runContextFor(task.id));
             await this.emitWorktreeReanchoredAudit(task.id, worktreePath, reanchor.root, "executor-liveness-gate");
             worktreePath = reanchor.root;
             observedWorktreeRealpath = canonicalizePath(reanchor.root);
@@ -13859,7 +13907,7 @@ export class TaskExecutor {
         const reasonSection = livenessFailureReason ? ` (${livenessFailureReason})` : "";
         const failureMessage = `worktree liveness assertion failed: ${livenessFailure}${reasonSection} — observed=${observed}, expected=${expected}${registeredSection}`;
         executorLog.error(`${task.id}: ${failureMessage}`);
-        await this.store.logEntry(task.id, failureMessage, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, failureMessage, undefined, this.runContextFor(task.id));
 
         const priorRequeues = task.taskDoneRetryCount ?? 0;
         const nextRequeueCount = priorRequeues + 1;
@@ -13906,15 +13954,15 @@ export class TaskExecutor {
             taskDoneRetryCount: nextRequeueCount,
             paused: false,
             pausedByAgentId: null,
-          });
+          }, this.runContextFor(task.id));
           await this.store.logEntry(
             task.id,
             `${failureMessage} — requeued to todo immediately (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`,
             undefined,
-            this.getRunContextFor(task.id),
+            this.runContextFor(task.id),
           );
           this.markGraphExecuteSelfRequeued(task.id);
-          await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true });
+          await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true }, this.runContextFor(task.id));
           executorLog.log(`✗ ${task.id} worktree liveness failed — requeued to todo (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`);
         } else {
           await this.store.updateTask(task.id, {
@@ -13925,8 +13973,8 @@ export class TaskExecutor {
             sessionFile: null,
             paused: false,
             pausedByAgentId: null,
-          });
-          await this.store.logEntry(task.id, `${failureMessage} — execution failed after worktree liveness retry budget was exhausted`, undefined, this.getRunContextFor(task.id));
+          }, this.runContextFor(task.id));
+          await this.store.logEntry(task.id, `${failureMessage} — execution failed after worktree liveness retry budget was exhausted`, undefined, this.runContextFor(task.id));
           await this.persistTokenUsage(task.id);
           executorLog.log(`✗ ${task.id} worktree liveness failed`);
         }
@@ -14006,7 +14054,7 @@ export class TaskExecutor {
       ) {
         await this.store.logEntry(
           task.id,
-          `[skill-load] Foreach step-execute requests skill '${graphSeamSkillName}' but it cannot be discovered from configured plugin body directories or FUSION_CE_SKILLS_DIR; the step runs with role-fallback skills only.`,
+          `[skill-load] Foreach step-execute requests skill '${graphSeamSkillName}' but it cannot be discovered from configured plugin body directories or FUSION_CE_SKILLS_DIR; the step runs with role-fallback skills only.`, undefined, this.runContextFor(task.id),
         );
       }
 
@@ -14224,14 +14272,14 @@ export class TaskExecutor {
               this.clearPausedAborted(task.id);
               this.stuckAborted.delete(task.id);
               this.userCanceledTaskIds.delete(task.id);
-              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo");
+              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo", undefined, this.runContextFor(task.id));
               return;
             }
             if (await this.parkApprovalSuspension(task.id, "step sessions")) return;
             this.clearPausedAborted(task.id);
-            await this.store.logEntry(task.id, "Execution paused — step sessions terminated, moved to todo", undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, "Execution paused — step sessions terminated, moved to todo", undefined, this.runContextFor(task.id));
             this.markGraphExecuteSelfRequeued(task.id);
-            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true });
+            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true }, this.runContextFor(task.id));
             return;
           }
           if (this.stuckAborted.has(task.id)) {
@@ -14273,7 +14321,7 @@ export class TaskExecutor {
                     if (hasAnomaly) {
                       const summary = `branch-attribution anomalies on ${repoRel}@${repo.branch}: foreign=${attribution.foreign.length}, unattributed=${attribution.unattributed.length}, ownUntrailed=${attribution.ownUntrailed.length}, ownTrailed=${attribution.ownTrailed}`;
                       executorLog.warn(`${task.id}: ${summary}`);
-                      await this.store.logEntry(task.id, `[branch-attribution] ${summary}`, undefined, this.getRunContextFor(task.id));
+                      await this.store.logEntry(task.id, `[branch-attribution] ${summary}`, undefined, this.runContextFor(task.id));
                       await audit.git({
                         type: "branch:attribution-anomaly",
                         target: repo.branch,
@@ -14294,14 +14342,14 @@ export class TaskExecutor {
                 }
               }
               if (aggregated.length > 0) {
-                await this.store.updateTask(task.id, { modifiedFiles: aggregated });
+                await this.store.updateTask(task.id, { modifiedFiles: aggregated }, this.runContextFor(task.id));
                 executorLog.log(`${task.id}: captured ${aggregated.length} modified files across ${Object.keys(workspaceWorktrees).length} sub-repo(s)`);
                 await audit.filesystem({ type: "file:capture-modified", target: task.id, metadata: { files: aggregated } });
               }
             } else {
             const modifiedFiles = await this.captureModifiedFiles(worktreePath, updatedTask.baseCommitSha, task.id, audit, "post-session");
             if (modifiedFiles.length > 0) {
-              await this.store.updateTask(task.id, { modifiedFiles });
+              await this.store.updateTask(task.id, { modifiedFiles }, this.runContextFor(task.id));
               executorLog.log(`${task.id}: captured ${modifiedFiles.length} modified files`);
               // Audit trail: record filesystem mutation (FN-1404)
               await audit.filesystem({ type: "file:capture-modified", target: task.id, metadata: { files: modifiedFiles } });
@@ -14322,7 +14370,7 @@ export class TaskExecutor {
                 if (hasAnomaly) {
                   const summary = `branch-attribution anomalies on ${updatedTask.branch}: foreign=${attribution.foreign.length}, unattributed=${attribution.unattributed.length}, ownUntrailed=${attribution.ownUntrailed.length}, ownTrailed=${attribution.ownTrailed}`;
                   executorLog.warn(`${task.id}: ${summary}`);
-                  await this.store.logEntry(task.id, `[branch-attribution] ${summary}`, undefined, this.getRunContextFor(task.id));
+                  await this.store.logEntry(task.id, `[branch-attribution] ${summary}`, undefined, this.runContextFor(task.id));
                   await audit.git({
                     type: "branch:attribution-anomaly",
                     target: updatedTask.branch,
@@ -14367,7 +14415,7 @@ export class TaskExecutor {
                     task.id,
                     `[verification] ${failedType} command failed (exit ${failedResult.exitCode}). Attempting fix agent...`,
                     summary,
-                    this.getRunContextFor(task.id),
+                    this.runContextFor(task.id),
                   );
 
                   const maxFixRetries = Math.min(settings.verificationFixRetries ?? 3, 3);
@@ -14407,7 +14455,7 @@ export class TaskExecutor {
                         task.id,
                         `[verification] Fix agent succeeded on attempt ${attempt}/${maxFixRetries}. Verification now passing.`,
                         undefined,
-                        this.getRunContextFor(task.id),
+                        this.runContextFor(task.id),
                       );
                       break;
                     }
@@ -14416,7 +14464,7 @@ export class TaskExecutor {
                       task.id,
                       `[verification] Fix agent attempt ${attempt}/${maxFixRetries} failed`,
                       undefined,
-                      this.getRunContextFor(task.id),
+                      this.runContextFor(task.id),
                     );
                   }
 
@@ -14455,10 +14503,10 @@ export class TaskExecutor {
           } else {
             const failedSteps = results.filter(r => !r.success);
             const errorSummary = failedSteps.map(r => `Step ${r.stepIndex}: ${r.error || "unknown error"}`).join("; ");
-            await this.store.updateTask(task.id, { status: null, error: null });
-            await this.store.logEntry(task.id, `Step-session failed — requeued for execution resume: ${errorSummary}`, undefined, this.getRunContextFor(task.id));
+            await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
+            await this.store.logEntry(task.id, `Step-session failed — requeued for execution resume: ${errorSummary}`, undefined, this.runContextFor(task.id));
             this.markGraphExecuteSelfRequeued(task.id);
-            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true, moveSource: "engine", recoveryRehome: true });
+            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true, moveSource: "engine", recoveryRehome: true }, this.runContextFor(task.id));
             executorLog.log(`✗ ${task.id} step-session failed → todo resume: ${errorSummary}`);
             this.options.onError?.(task, new Error(errorSummary));
           }
@@ -14473,7 +14521,7 @@ export class TaskExecutor {
           onRetry: (attempt, delayMs, error) => {
             const delaySec = Math.round(delayMs / 1000);
             executorLog.warn(`⏳ ${task.id} rate limited — retry ${attempt} in ${delaySec}s: ${error.message}`);
-            this.store.logEntry(task.id, `Rate limited — retry ${attempt} in ${delaySec}s`, undefined, this.getRunContextFor(task.id)).catch((err: unknown) => {
+            this.store.logEntry(task.id, `Rate limited — retry ${attempt} in ${delaySec}s`, undefined, this.runContextFor(task.id)).catch((err: unknown) => {
               const msg = err instanceof Error ? err.message : String(err);
               executorLog.warn(`${task.id} failed to log rate-limit retry: ${msg}`);
             });
@@ -14493,14 +14541,14 @@ export class TaskExecutor {
               this.clearPausedAborted(task.id);
               this.stuckAborted.delete(task.id);
               this.userCanceledTaskIds.delete(task.id);
-              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo");
+              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo", undefined, this.runContextFor(task.id));
               return;
             }
             if (await this.parkApprovalSuspension(task.id, "step session")) return;
             this.clearPausedAborted(task.id);
-            await this.store.logEntry(task.id, "Execution paused during step-session", undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, "Execution paused during step-session", undefined, this.runContextFor(task.id));
             this.markGraphExecuteSelfRequeued(task.id);
-            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true });
+            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true }, this.runContextFor(task.id));
           } else if (this.stuckAborted.has(task.id)) {
             stuckRequeue = this.stuckAborted.get(task.id) ?? true;
             this.stuckAborted.delete(task.id);
@@ -14517,7 +14565,7 @@ export class TaskExecutor {
               const delay = formatDelay(decision.delayMs);
               if (!isSilentTransientError(errorMessage)) {
                 executorLog.warn(`⚡ ${task.id} transient error — retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}: ${errorMessage}`);
-                await this.store.logEntry(task.id, `Transient error (retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, `Transient error (retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.runContextFor(task.id));
               }
               if (worktreePath && existsSync(worktreePath)) {
                 try {
@@ -14542,23 +14590,23 @@ export class TaskExecutor {
                 nextRecoveryAt: decision.nextState.nextRecoveryAt,
                 worktree: null,
                 branch: null,
-              });
+              }, this.runContextFor(task.id));
               this.markGraphExecuteSelfRequeued(task.id);
-              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true });
+              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true }, this.runContextFor(task.id));
               stuckRequeue = null; // Prevent outer finally from re-processing
               return;
             }
 
             executorLog.error(`✗ ${task.id} transient error retries exhausted: ${errorDetail}`);
             if (errorStack) {
-              await this.store.logEntry(task.id, `Transient error retries exhausted: ${errorMessage}`, errorStack, this.getRunContextFor(task.id));
+              await this.store.logEntry(task.id, `Transient error retries exhausted: ${errorMessage}`, errorStack, this.runContextFor(task.id));
             }
             await this.store.updateTask(task.id, {
               status: "failed",
               error: errorMessage,
               recoveryRetryCount: null,
               nextRecoveryAt: null,
-            });
+            }, this.runContextFor(task.id));
             if (accumulatedStepTokenUsage) {
               await this.persistTaskTokenUsage(task.id, accumulatedStepTokenUsage);
             }
@@ -14572,10 +14620,10 @@ export class TaskExecutor {
               return;
             }
             executorLog.error(`✗ ${task.id} step-session execution failed:`, errorDetail);
-            await this.store.logEntry(task.id, `Step-session execution failed: ${errorMessage}`, errorStack ?? errorDetail, this.getRunContextFor(task.id));
-            await this.store.updateTask(task.id, { status: null, error: null });
+            await this.store.logEntry(task.id, `Step-session execution failed: ${errorMessage}`, errorStack ?? errorDetail, this.runContextFor(task.id));
+            await this.store.updateTask(task.id, { status: null, error: null }, this.runContextFor(task.id));
             this.markGraphExecuteSelfRequeued(task.id);
-            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true, moveSource: "engine", recoveryRehome: true });
+            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true, moveSource: "engine", recoveryRehome: true }, this.runContextFor(task.id));
             executorLog.log(`✗ ${task.id} step-session execution failed → todo resume`);
             this.options.onError?.(task, err instanceof Error ? err : new Error(errorMessage));
           }
@@ -14642,11 +14690,11 @@ export class TaskExecutor {
                   error: null,
                   worktree: null,
                   branch: null,
-                });
+                }, this.runContextFor(task.id));
                 const reboundColumn = await resolveReboundColumnFor(this.store, task.id);
                 if (latestTask.column !== reboundColumn) {
                   this.markGraphExecuteSelfRequeued(task.id);
-                  await this.store.moveTask(task.id, reboundColumn, preserveProgress ? { preserveProgress: true } : undefined);
+                  await this.store.moveTask(task.id, reboundColumn, preserveProgress ? { preserveProgress: true } : undefined, this.runContextFor(task.id));
                   executorLog.log(`${task.id} moved to ${reboundColumn} for retry after stuck kill${preserveProgress ? " (progress preserved)" : ""}`);
                 }
               }
@@ -14896,7 +14944,9 @@ export class TaskExecutor {
           ...(delegateWithheld
             ? []
             : [createDelegateTaskTool(this.options.agentStore, this.store, { rootDir: this.rootDir, sourceTaskId: task.id, sourceAgentId: assignedAgentId, callerIsEphemeral: executionCallerIsEphemeral })]),
-          createTaskAssignTool(this.options.agentStore, this.store),
+          /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): the assignment's actor is the session
+             making it, never `params.agent_id` (which names the assignee). */
+          createTaskAssignTool(this.options.agentStore, this.store, this.runContextFor(task.id, assignedAgentId)),
           ...(assignedAgentId ? [
             createGetAgentConfigTool(this.options.agentStore, assignedAgentId),
             createUpdateAgentConfigTool(this.options.agentStore, assignedAgentId),
@@ -15046,9 +15096,9 @@ export class TaskExecutor {
               task.id,
               `Detected stale persisted session metadata (worktree mismatch: ${persistedWorktreePath} vs ${worktreePath}) — discarded resume state and started fresh session`,
               undefined,
-              this.getRunContextFor(task.id),
+              this.runContextFor(task.id),
             );
-            await this.store.updateTask(task.id, { sessionFile: null });
+            await this.store.updateTask(task.id, { sessionFile: null }, this.runContextFor(task.id));
             isResuming = false;
           }
         }
@@ -15145,7 +15195,7 @@ export class TaskExecutor {
               taskId: task.id,
               taskTitle: detail.title,
               // FNXC:Identity 2026-08-09-03:04 (U18/KTD2): derived from the live executor run.
-              runContext: this.getRunContextFor(task.id) ?? UNATTRIBUTED_MUTATION_CONTEXT,
+              runContext: this.runContextFor(task.id),
             }),
           });
           session = createdSession.session;
@@ -15162,13 +15212,13 @@ export class TaskExecutor {
         const executorModelMarker = `Executor using model: ${executorModelDetails}`;
         if (isResuming) {
           executorLog.debug(`${task.id}: resumed session from ${task.sessionFile}`);
-          await this.store.logEntry(task.id, `Resumed agent session after unpause (model: ${executorModelDesc})`, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, `Resumed agent session after unpause (model: ${executorModelDesc})`, undefined, this.runContextFor(task.id));
         } else {
           executorLog.debug(`${task.id}: using model ${executorModelDesc}`);
-          await this.store.logEntry(task.id, executorModelMarker, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, executorModelMarker, undefined, this.runContextFor(task.id));
           // Persist session file path so pause/resume can reopen it
           if (sessionFile) {
-            await this.store.updateTask(task.id, { sessionFile });
+            await this.store.updateTask(task.id, { sessionFile }, this.runContextFor(task.id));
           }
         }
         await this.store.appendAgentLog(task.id, executorModelMarker, "status", undefined, "executor");
@@ -15278,7 +15328,7 @@ export class TaskExecutor {
                     task.id,
                     `Context compacted at ${compactResult.tokensBefore} tokens (token cap: ${settings.tokenCap})`,
                     undefined,
-                    this.getRunContextFor(task.id),
+                    this.runContextFor(task.id),
                   );
                 }
                 return compactResult;
@@ -15299,7 +15349,7 @@ export class TaskExecutor {
           if (loopState?.pending) {
             loopState.pending = false;
             executorLog.log(`${task.id} consuming loop recovery — resuming with fresh context`);
-            await this.store.logEntry(task.id, "Resuming execution after context compaction — taking a different approach", undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, "Resuming execution after context compaction — taking a different approach", undefined, this.runContextFor(task.id));
 
             // Reset activity tracking so the detector doesn't immediately re-trigger
             stuckDetector?.recordProgress(task.id);
@@ -15338,7 +15388,7 @@ export class TaskExecutor {
               this.clearPausedAborted(task.id);
               this.stuckAborted.delete(task.id);
               this.userCanceledTaskIds.delete(task.id);
-              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo");
+              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo", undefined, this.runContextFor(task.id));
               return;
             }
             if (await this.parkApprovalSuspension(task.id, "agent session")) {
@@ -15353,7 +15403,7 @@ export class TaskExecutor {
                 return;
               }
               executorLog.log(`${task.id} paused after completion (graceful session exit) — finalizing to in-review`);
-              await this.store.logEntry(task.id, "Execution paused after completion — finalizing to in-review");
+              await this.store.logEntry(task.id, "Execution paused after completion — finalizing to in-review", undefined, this.runContextFor(task.id));
               await this.persistTokenUsage(task.id);
               /*
               FNXC:WorkflowLifecycle 2026-06-17-23:33:
@@ -15372,9 +15422,9 @@ export class TaskExecutor {
               return;
             } else {
               executorLog.log(`${task.id} paused (graceful session exit) — moving to todo`);
-              await this.store.logEntry(task.id, "Execution paused — session preserved for resume, moved to todo");
+              await this.store.logEntry(task.id, "Execution paused — session preserved for resume, moved to todo", undefined, this.runContextFor(task.id));
               this.markGraphExecuteSelfRequeued(task.id);
-              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true });
+              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true }, this.runContextFor(task.id));
             }
             return;
           }
@@ -15388,7 +15438,7 @@ export class TaskExecutor {
               this.clearPausedAborted(task.id);
               this.stuckAborted.delete(task.id);
               this.userCanceledTaskIds.delete(task.id);
-              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo");
+              await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo", undefined, this.runContextFor(task.id));
               return;
             }
             stuckRequeue = this.stuckAborted.get(task.id) ?? true;
@@ -15412,7 +15462,7 @@ export class TaskExecutor {
               }
               taskDone = true;
               executorLog.log(`${task.id} all steps done — treating as implicit fn_task_done`);
-              await this.store.logEntry(task.id, "All steps complete — implicit fn_task_done (agent did not call tool explicitly)", undefined, this.getRunContextFor(task.id));
+              await this.store.logEntry(task.id, "All steps complete — implicit fn_task_done (agent did not call tool explicitly)", undefined, this.runContextFor(task.id));
               this.scheduleCompletedTaskWatchdog(task.id, "implicit fn_task_done");
             }
           }
@@ -15422,7 +15472,7 @@ export class TaskExecutor {
             const updatedTask = await this.store.getTask(task.id);
             const modifiedFiles = await this.captureModifiedFiles(worktreePath, updatedTask.baseCommitSha, task.id, audit, "workflow-fanout");
             if (modifiedFiles.length > 0) {
-              await this.store.updateTask(task.id, { modifiedFiles });
+              await this.store.updateTask(task.id, { modifiedFiles }, this.runContextFor(task.id));
               executorLog.log(`${task.id}: captured ${modifiedFiles.length} modified files`);
             }
 
@@ -15452,7 +15502,7 @@ export class TaskExecutor {
               if (liveTask.status === "failed") {
                 const parkMessage = `${task.id}: task parked failed during no-fn_task_done retry — honoring park, not retrying`;
                 executorLog.log(parkMessage);
-                await this.store.logEntry(task.id, parkMessage, undefined, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, parkMessage, undefined, this.runContextFor(task.id));
                 this.deleteActiveSession(task.id);
                 this.tokenUsageBaselines.delete(task.id);
                 session.dispose();
@@ -15470,7 +15520,7 @@ export class TaskExecutor {
               if (!worktreeContractIntact) {
                 const reclaimMessage = `${task.id}: worktree/branch reclaimed during no-fn_task_done retry — aborting retry and requeueing`;
                 executorLog.log(reclaimMessage);
-                await this.store.logEntry(task.id, reclaimMessage, undefined, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, reclaimMessage, undefined, this.runContextFor(task.id));
                 this.deleteActiveSession(task.id);
                 this.tokenUsageBaselines.delete(task.id);
                 session.dispose();
@@ -15487,7 +15537,7 @@ export class TaskExecutor {
                   task.id,
                   `Agent finished without calling fn_task_done but Step ${pendingReviewBlock.stepIndex} is blocked on pending review (${pendingReviewBlock.reason}) — skipping retry session`,
                   undefined,
-                  this.getRunContextFor(task.id),
+                  this.runContextFor(task.id),
                 );
                 this.deleteActiveSession(task.id);
                 this.tokenUsageBaselines.delete(task.id);
@@ -15520,7 +15570,7 @@ export class TaskExecutor {
                 task.id,
                 `Agent finished without calling fn_task_done — retrying with new session (${taskDoneSessionRetries}/${MAX_TASK_DONE_SESSION_RETRIES})`,
                 undefined,
-                this.getRunContextFor(task.id),
+                this.runContextFor(task.id),
               );
 
               // Capture and analyse the previous session's text before resetting.
@@ -15533,7 +15583,7 @@ export class TaskExecutor {
                   task.id,
                   `Pseudo-pause detected (kind=${pseudoPause.kind}, matched='${shortMatch}')`,
                   undefined,
-                  this.getRunContextFor(task.id),
+                  this.runContextFor(task.id),
                 );
                 executorLog.log(`${task.id} pseudo-pause detected (kind=${pseudoPause.kind}): ${shortMatch}`);
               }
@@ -15589,7 +15639,7 @@ export class TaskExecutor {
                 await this.captureExecutorTokenUsageBaseline(task.id, retrySession);
                 captureSessionTokenBaseline(retrySession);
                 if (createdRetrySession.sessionFile) {
-                  this.store.updateTask(task.id, { sessionFile: createdRetrySession.sessionFile }).catch((err: unknown) => {
+                  this.store.updateTask(task.id, { sessionFile: createdRetrySession.sessionFile }, this.runContextFor(task.id)).catch((err: unknown) => {
                     const msg = err instanceof Error ? err.message : String(err);
                     executorLog.warn(`${task.id} failed to persist retry sessionFile: ${msg}`);
                   });
@@ -15697,7 +15747,7 @@ export class TaskExecutor {
                   }
                   taskDone = true;
                   executorLog.log(`${task.id} all steps done — treating as implicit fn_task_done`);
-                  await this.store.logEntry(task.id, "All steps complete — implicit fn_task_done (agent did not call tool explicitly)", undefined, this.getRunContextFor(task.id));
+                  await this.store.logEntry(task.id, "All steps complete — implicit fn_task_done (agent did not call tool explicitly)", undefined, this.runContextFor(task.id));
                   this.scheduleCompletedTaskWatchdog(task.id, "implicit fn_task_done");
                 }
               }
@@ -15707,7 +15757,7 @@ export class TaskExecutor {
               const updatedTask = await this.store.getTask(task.id);
               const modifiedFiles = await this.captureModifiedFiles(worktreePath, updatedTask.baseCommitSha, task.id, audit, "no-task-done-retry");
               if (modifiedFiles.length > 0) {
-                await this.store.updateTask(task.id, { modifiedFiles });
+                await this.store.updateTask(task.id, { modifiedFiles }, this.runContextFor(task.id));
                 executorLog.log(`${task.id}: captured ${modifiedFiles.length} modified files`);
               }
 
@@ -15746,15 +15796,15 @@ export class TaskExecutor {
                 task.id,
                 "Worktree/branch reclaimed mid-retry — requeued to todo (engine self-heal, no failure)",
                 undefined,
-                this.getRunContextFor(task.id),
+                this.runContextFor(task.id),
               );
               // Clear any stale binding so the next pickup creates a fresh worktree.
               // baseCommitSha is also cleared because it pinned to the now-reclaimed worktree;
               // the next pickup will re-anchor it on the fresh checkout.
-              await this.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null });
+              await this.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null }, this.runContextFor(task.id));
               await this.persistTokenUsage(task.id);
               this.markGraphExecuteSelfRequeued(task.id);
-              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true });
+              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true }, this.runContextFor(task.id));
               executorLog.log(silentMessage);
             } else if (refusalHandled) {
               return;
@@ -15774,19 +15824,19 @@ export class TaskExecutor {
                   status: "queued",
                   error: null,
                   taskDoneRetryCount: nextRequeueCount,
-                });
+                }, this.runContextFor(task.id));
                 await this.store.logEntry(
                   task.id,
                   `${errorMessage} — requeued to todo immediately (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`,
                   undefined,
-                  this.getRunContextFor(task.id),
+                  this.runContextFor(task.id),
                 );
                 this.markGraphExecuteSelfRequeued(task.id);
-                await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true });
+                await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true }, this.runContextFor(task.id));
                 executorLog.log(`✗ ${task.id} failed after ${MAX_TASK_DONE_SESSION_RETRIES} retries — requeued to todo (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`);
               } else {
-                await this.store.updateTask(task.id, { status: "failed", error: errorMessage });
-                await this.store.logEntry(task.id, `${errorMessage} — execution failed after task-done retry budget was exhausted`, undefined, this.getRunContextFor(task.id));
+                await this.store.updateTask(task.id, { status: "failed", error: errorMessage }, this.runContextFor(task.id));
+                await this.store.logEntry(task.id, `${errorMessage} — execution failed after task-done retry budget was exhausted`, undefined, this.runContextFor(task.id));
                 await this.persistTokenUsage(task.id);
                 executorLog.log(`✗ ${task.id} failed after ${MAX_TASK_DONE_SESSION_RETRIES} retries — no fn_task_done`);
               }
@@ -15815,7 +15865,7 @@ export class TaskExecutor {
           // Check both the local flag (graceful exit) and the instance set
           // (error path where dispose caused prompt to throw).
           if (!wasPaused && !this.pausedAborted.has(task.id)) {
-            this.store.updateTask(task.id, { sessionFile: null }).catch((err: unknown) => {
+            this.store.updateTask(task.id, { sessionFile: null }, this.runContextFor(task.id)).catch((err: unknown) => {
               const msg = err instanceof Error ? err.message : String(err);
               executorLog.warn(`${task.id} failed to clear sessionFile: ${msg}`);
             });
@@ -15874,7 +15924,7 @@ export class TaskExecutor {
         onRetry: (attempt, delayMs, error) => {
           const delaySec = Math.round(delayMs / 1000);
           executorLog.warn(`⏳ ${task.id} rate limited — retry ${attempt} in ${delaySec}s: ${error.message}`);
-          this.store.logEntry(task.id, `Rate limited — retry ${attempt} in ${delaySec}s`, undefined, this.getRunContextFor(task.id)).catch((err: unknown) => {
+          this.store.logEntry(task.id, `Rate limited — retry ${attempt} in ${delaySec}s`, undefined, this.runContextFor(task.id)).catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
             executorLog.warn(`${task.id} failed to log rate-limit retry: ${msg}`);
           });
@@ -15915,14 +15965,14 @@ export class TaskExecutor {
             task.id,
             `Stale assistant-continuation fresh-session retries exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`,
             errorStack ?? errorDetail,
-            this.getRunContextFor(task.id),
+            this.runContextFor(task.id),
           );
           await this.store.updateTask(task.id, {
             status: "failed",
             error: errorMessage,
             recoveryRetryCount: null,
             nextRecoveryAt: null,
-          });
+          }, this.runContextFor(task.id));
           await this.persistTokenUsage(task.id);
           this.options.onError?.(task, err instanceof Error ? err : new Error(errorMessage));
           return;
@@ -15936,13 +15986,13 @@ export class TaskExecutor {
           task.id,
           `Detected stale assistant-continuation session — fresh-session retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay} with progress preserved: ${errorMessage}`,
           undefined,
-          this.getRunContextFor(task.id),
+          this.runContextFor(task.id),
         );
         await this.store.updateTask(task.id, {
           sessionFile: null,
           recoveryRetryCount: decision.nextState.recoveryRetryCount,
           nextRecoveryAt: decision.nextState.nextRecoveryAt,
-        });
+        }, this.runContextFor(task.id));
         return;
       } else if (errorMessage.includes("Invalid transition")) {
         // Task was moved by user/process while executor was running — already in desired state
@@ -15952,7 +16002,7 @@ export class TaskExecutor {
         const toColumn = transitionMatch?.[2] ?? "unknown";
         const logMessage = `Task already moved from '${fromColumn}' — skipping transition to '${toColumn}'`;
         executorLog.log(`${task.id} ${logMessage}`);
-        await this.store.logEntry(task.id, logMessage, errorMessage, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, logMessage, errorMessage, this.runContextFor(task.id));
         /*
         FNXC:WorkflowResolvedColumns 2026-07-31-09:25 (fleet: executor lifecycle roles):
         `fromColumn`/`toColumn` are parsed out of the store's rejection message, so they carry
@@ -15980,7 +16030,7 @@ export class TaskExecutor {
           this.clearPausedAborted(task.id);
           this.stuckAborted.delete(task.id);
           this.userCanceledTaskIds.delete(task.id);
-          await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo");
+          await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo", undefined, this.runContextFor(task.id));
           return;
         }
         if (await this.parkApprovalSuspension(task.id, "executor session")) return;
@@ -15999,7 +16049,7 @@ export class TaskExecutor {
             task.id,
             "Execution abort cleanup skipped — incomplete stuck-loop task is already parked with progress preserved",
             undefined,
-            this.getRunContextFor(task.id),
+            this.runContextFor(task.id),
           );
           return;
         }
@@ -16009,7 +16059,7 @@ export class TaskExecutor {
             return;
           }
           executorLog.log(`${task.id} paused after completion — finalizing to in-review`);
-          await this.store.logEntry(task.id, "Execution paused after completion — finalizing to in-review", undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, "Execution paused after completion — finalizing to in-review", undefined, this.runContextFor(task.id));
           await this.persistTokenUsage(task.id);
           /*
           FNXC:WorkflowLifecycle 2026-06-17-23:33:
@@ -16083,7 +16133,7 @@ export class TaskExecutor {
           const pauseStillInForce = latestTask?.paused === true;
           await this.store.updateTask(
             task.id,
-            hasResumableProgress ? { worktree: undefined } : { worktree: undefined, branch: undefined },
+            hasResumableProgress ? { worktree: undefined } : { worktree: undefined, branch: undefined }, this.runContextFor(task.id),
           );
           await this.store.logEntry(
             task.id,
@@ -16091,13 +16141,13 @@ export class TaskExecutor {
               ? "Execution paused — agent terminated, parked in todo (pause preserved, awaiting explicit unpause)"
               : "Execution paused — agent terminated, moved to todo",
             undefined,
-            this.getRunContextFor(task.id),
+            this.runContextFor(task.id),
           );
           this.markGraphExecuteSelfRequeued(task.id);
           await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), {
             ...(hasResumableProgress ? { preserveResumeState: true } : {}),
             ...(pauseStillInForce ? { preservePause: true } : {}),
-          });
+          }, this.runContextFor(task.id));
         }
       } else if (this.stuckAborted.has(task.id)) {
         // Task was killed by stuck task detector — defer requeue to finally block
@@ -16106,7 +16156,7 @@ export class TaskExecutor {
           this.clearPausedAborted(task.id);
           this.stuckAborted.delete(task.id);
           this.userCanceledTaskIds.delete(task.id);
-          await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo");
+          await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo", undefined, this.runContextFor(task.id));
           return;
         }
         stuckRequeue = this.stuckAborted.get(task.id) ?? true;
@@ -16131,7 +16181,7 @@ export class TaskExecutor {
           const activeEntry = this.activeSessions.get(task.id);
           if (activeEntry) {
             executorLog.log(`${task.id} context limit error after auto-compaction — attempting reduced-prompt retry (${loopAttempts + 1}/${MAX_REDUCED_PROMPT_ATTEMPTS})`);
-            await this.store.logEntry(task.id, `Context limit error after auto-compaction — attempting reduced-prompt retry (${loopAttempts + 1}/${MAX_REDUCED_PROMPT_ATTEMPTS}): ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, `Context limit error after auto-compaction — attempting reduced-prompt retry (${loopAttempts + 1}/${MAX_REDUCED_PROMPT_ATTEMPTS}): ${errorMessage}`, undefined, this.runContextFor(task.id));
 
             this.loopRecoveryState.set(task.id, { attempts: loopAttempts + 1, pending: false });
 
@@ -16155,19 +16205,19 @@ export class TaskExecutor {
               // Reduced-prompt retry succeeded — return to let the finally block clean up
               // without marking the task as failed.
               executorLog.log(`${task.id} reduced-prompt recovery succeeded — continuing`);
-              await this.store.logEntry(task.id, "Reduced-prompt recovery succeeded — continuing execution", undefined, this.getRunContextFor(task.id));
+              await this.store.logEntry(task.id, "Reduced-prompt recovery succeeded — continuing execution", undefined, this.runContextFor(task.id));
               return;
             } catch (reducedErr: unknown) {
               const reducedErrorMessage = reducedErr instanceof Error ? reducedErr.message : String(reducedErr);
               if (!isContextLimitError(reducedErrorMessage)) {
                 executorLog.error(`${task.id} reduced-prompt recovery also failed: ${reducedErrorMessage}`);
-                await this.store.logEntry(task.id, `Reduced-prompt recovery failed: ${reducedErrorMessage}`, undefined, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, `Reduced-prompt recovery failed: ${reducedErrorMessage}`, undefined, this.runContextFor(task.id));
                 // Non-context failure — fall through to mark task as failed
               } else {
                 // Still a context error — the session is saturated beyond recovery.
                 // Fall through to the fresh-session requeue path below.
                 executorLog.warn(`${task.id} session still saturated after reduced-prompt retry — will attempt fresh-session requeue`);
-                await this.store.logEntry(task.id, `Reduced-prompt retry still over context — will attempt fresh-session requeue`, undefined, this.getRunContextFor(task.id));
+                await this.store.logEntry(task.id, `Reduced-prompt retry still over context — will attempt fresh-session requeue`, undefined, this.runContextFor(task.id));
               }
             }
           }
@@ -16186,7 +16236,7 @@ export class TaskExecutor {
             const attempt = decision.nextState.recoveryRetryCount;
             const delay = formatDelay(decision.delayMs);
             executorLog.warn(`⚡ ${task.id} context-overflow fresh-session requeue ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}`);
-            await this.store.logEntry(task.id, `Context-overflow fresh-session requeue (${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, `Context-overflow fresh-session requeue (${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.runContextFor(task.id));
             // Retain the worktree and accumulated step progress so the fresh
             // session resumes where the saturated one left off, but clear
             // sessionFile synchronously here so the next dispatch is forced
@@ -16200,19 +16250,19 @@ export class TaskExecutor {
               recoveryRetryCount: decision.nextState.recoveryRetryCount,
               nextRecoveryAt: decision.nextState.nextRecoveryAt,
               sessionFile: null,
-            });
+            }, this.runContextFor(task.id));
             this.markGraphExecuteSelfRequeued(task.id);
-            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true });
+            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true }, this.runContextFor(task.id));
             return;
           }
 
           executorLog.error(`✗ ${task.id} context-overflow requeue budget exhausted (${MAX_RECOVERY_RETRIES} attempts): ${errorMessage}`);
-          await this.store.logEntry(task.id, `Context-overflow requeues exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, `Context-overflow requeues exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, undefined, this.runContextFor(task.id));
           // Reset so downstream failure path can persist cleanly
           await this.store.updateTask(task.id, {
             recoveryRetryCount: null,
             nextRecoveryAt: null,
-          });
+          }, this.runContextFor(task.id));
           // Fall through to terminal failure marking
         // Contamination recovery lives in executor because branch cross-contamination
         // is surfaced here from task execution preflight; merger empty-cherry-pick
@@ -16221,7 +16271,7 @@ export class TaskExecutor {
           const details = err.foreignCommits
             .map((commit) => `${commit.sha.slice(0, 12)}:${commit.foreignTaskId}`)
             .join(", ");
-          await this.store.logEntry(task.id, `[recovery] branch cross-contamination detected on ${err.branchName} since ${err.baseSha}: ${details}`, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, `[recovery] branch cross-contamination detected on ${err.branchName} since ${err.baseSha}: ${details}`, undefined, this.runContextFor(task.id));
 
           try {
             const recoveredBootstrapMisbinding = await this.tryBootstrapMisbindingRecovery(task, err, audit);
@@ -16299,7 +16349,7 @@ export class TaskExecutor {
                   task.id,
                   `[recovery] rehomed orphan-our-advance commit ${commit.sha.slice(0, 12)} (source ${orphanClass.sourceTaskId}) onto ${integrationBranchForOrphan} via fast-forward; dropping from branch`,
                   undefined,
-                  this.getRunContextFor(task.id),
+                  this.runContextFor(task.id),
                 );
               } else {
                 const hint = "cherryPickHint" in rehome && rehome.cherryPickHint
@@ -16309,7 +16359,7 @@ export class TaskExecutor {
                   task.id,
                   `[recovery] orphan-our-advance commit ${commit.sha.slice(0, 12)} (source ${orphanClass.sourceTaskId}) refused auto-rehome: ${rehome.reason}${hint}`,
                   undefined,
-                  this.getRunContextFor(task.id),
+                  this.runContextFor(task.id),
                 );
                 genuinelyUnique.push(commit);
               }
@@ -16323,7 +16373,7 @@ export class TaskExecutor {
               task.id,
               `[recovery] contamination classification: already-upstream=[${alreadyShas}] misrouted=[${misroutedShas}] rehomed-orphan=[${rehomedShas}] unique=[${uniqueShas}]`,
               undefined,
-              this.getRunContextFor(task.id),
+              this.runContextFor(task.id),
             );
 
             const alreadyAttemptedRecovery = (task.recoveryRetryCount ?? 0) > 0;
@@ -16352,7 +16402,7 @@ export class TaskExecutor {
                 task.id,
                 `[recovery] auto-recovered branch-cross-contamination: dropped ${recovery.droppedShas.length} commits (already-upstream + misrouted, SHAs: ${recovery.droppedShas.map((sha) => sha.slice(0, 12)).join(", ")}); new tip ${recovery.newTipSha.slice(0, 12)}`,
                 undefined,
-                this.getRunContextFor(task.id),
+                this.runContextFor(task.id),
               );
 
               for (const dropped of misrouted) {
@@ -16373,7 +16423,7 @@ export class TaskExecutor {
                 paused: false,
                 pausedReason: null,
                 error: null,
-              });
+              }, this.runContextFor(task.id));
               // FN-4939: preserve the worktree across requeue. The recovery operated
               // inside the worktree (re-anchored the branch and re-checked it out), so
               // the worktree directory remains internally consistent and usable. Nulling
@@ -16385,7 +16435,7 @@ export class TaskExecutor {
               // recovery paths in auto-recovery-handlers/contamination.ts,
               // tryBootstrapMisbindingRecovery, and self-healing reclaim.
               this.markGraphExecuteSelfRequeued(task.id);
-              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true, preserveWorktree: true });
+              await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: true, preserveWorktree: true }, this.runContextFor(task.id));
               return;
             }
 
@@ -16394,19 +16444,19 @@ export class TaskExecutor {
                 task.id,
                 "[recovery] auto-recovery already attempted; escalating to human adjudication",
                 undefined,
-                this.getRunContextFor(task.id),
+                this.runContextFor(task.id),
               );
             } else if (genuinelyUnique.length > 0) {
               await this.store.logEntry(
                 task.id,
                 `[recovery] unique foreign commits require human adjudication: ${genuinelyUnique.map((commit) => commit.sha.slice(0, 12)).join(", ")}`,
                 undefined,
-                this.getRunContextFor(task.id),
+                this.runContextFor(task.id),
               );
             }
           } catch (recoveryError: unknown) {
             const recoveryMessage = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-            await this.store.logEntry(task.id, `[recovery] contamination auto-recovery failed: ${recoveryMessage}`, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, `[recovery] contamination auto-recovery failed: ${recoveryMessage}`, undefined, this.runContextFor(task.id));
           }
 
           const autoRecoveryDispatcher = this.getAutoRecoveryDispatcher(audit);
@@ -16442,7 +16492,7 @@ export class TaskExecutor {
               error: err.message,
               paused: true,
               pausedReason: "branch-cross-contamination",
-            });
+            }, this.runContextFor(task.id));
           }
           return;
         } else if (isBranchConflictError(err)) {
@@ -16457,7 +16507,7 @@ export class TaskExecutor {
               `startPoint=${err.startPoint}`,
             ].join(" ");
             const tripwireMessage = `Branch conflict tripwire fired after ${conflictCount} events (threshold ${this.BRANCH_CONFLICT_TRIPWIRE_THRESHOLD}). ${details}`;
-            await this.store.logEntry(task.id, `[recovery] ${tripwireMessage}`, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, `[recovery] ${tripwireMessage}`, undefined, this.runContextFor(task.id));
             const autoRecoveryDispatcher = this.getAutoRecoveryDispatcher(audit);
             const decision = await autoRecoveryDispatcher.dispatch({
               class: "branch-conflict-tripwire",
@@ -16480,7 +16530,7 @@ export class TaskExecutor {
                 error: tripwireMessage,
                 paused: true,
                 pausedReason: "branch-conflict-tripwire",
-              });
+              }, this.runContextFor(task.id));
             }
             return;
           }
@@ -16489,7 +16539,7 @@ export class TaskExecutor {
           for (let attempt = 1; attempt <= this.MAX_AUTO_RECOVERY_ATTEMPTS; attempt += 1) {
             outcome = await this.handleBranchConflict(task, err);
             if (outcome !== "retry") break;
-            await this.store.logEntry(task.id, `[recovery] ${task.id} branch-conflict auto-retry requested (${attempt}/${this.MAX_AUTO_RECOVERY_ATTEMPTS})`, undefined, this.getRunContextFor(task.id));
+            await this.store.logEntry(task.id, `[recovery] ${task.id} branch-conflict auto-retry requested (${attempt}/${this.MAX_AUTO_RECOVERY_ATTEMPTS})`, undefined, this.runContextFor(task.id));
             const taskForRetry = await this.store.getTask(task.id);
             await recordRetry({
               store: this.store,
@@ -16524,7 +16574,7 @@ export class TaskExecutor {
                 error: err.message,
                 paused: true,
                 pausedReason: "branch-conflict-recovery-exhausted",
-              });
+              }, this.runContextFor(task.id));
             }
             return;
           }
@@ -16548,7 +16598,7 @@ export class TaskExecutor {
             // Silent transient errors (e.g., "request was aborted") are noisy — skip logging
             if (!isSilentTransientError(errorMessage)) {
               executorLog.warn(`⚡ ${task.id} transient error — retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}: ${errorMessage}`);
-              await this.store.logEntry(task.id, `Transient error (retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.getRunContextFor(task.id));
+              await this.store.logEntry(task.id, `Transient error (retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, this.runContextFor(task.id));
             }
             // Clean up the old worktree so the retry gets a fresh one
             if (worktreePath && existsSync(worktreePath)) {
@@ -16575,21 +16625,21 @@ export class TaskExecutor {
               nextRecoveryAt: decision.nextState.nextRecoveryAt,
               worktree: null,
               branch: null,
-            });
+            }, this.runContextFor(task.id));
             this.markGraphExecuteSelfRequeued(task.id);
-            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true });
+            await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true }, this.runContextFor(task.id));
             return;
           }
 
           // Recovery budget exhausted — escalate to real failure
           executorLog.error(`✗ ${task.id} transient error retries exhausted (${MAX_RECOVERY_RETRIES} attempts): ${errorDetail}`);
-          await this.store.logEntry(task.id, `Transient error retries exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, errorStack ?? errorDetail, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, `Transient error retries exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, errorStack ?? errorDetail, this.runContextFor(task.id));
           await this.store.updateTask(task.id, {
             status: "failed",
             error: errorMessage,
             recoveryRetryCount: null,
             nextRecoveryAt: null,
-          });
+          }, this.runContextFor(task.id));
           await this.persistTokenUsage(task.id);
           executorLog.log(`✗ ${task.id} transient retries exhausted — failed in execution`);
           this.options.onError?.(task, err instanceof Error ? err : new Error(errorMessage));
@@ -16599,8 +16649,8 @@ export class TaskExecutor {
           ? JSON.stringify(serializeRetryStormError(err))
           : errorMessage;
         executorLog.error(`✗ ${task.id} execution failed:`, errorDetail);
-        await this.store.logEntry(task.id, `Execution failed: ${terminalError}`, errorStack ?? errorDetail, this.getRunContextFor(task.id));
-        await this.store.updateTask(task.id, { status: "failed", error: terminalError });
+        await this.store.logEntry(task.id, `Execution failed: ${terminalError}`, errorStack ?? errorDetail, this.runContextFor(task.id));
+        await this.store.updateTask(task.id, { status: "failed", error: terminalError }, this.runContextFor(task.id));
         await this.persistTokenUsage(task.id);
         executorLog.log(`✗ ${task.id} execution failed`);
         this.options.onError?.(task, err instanceof Error ? err : new Error(errorMessage));
@@ -16683,14 +16733,14 @@ export class TaskExecutor {
                 sessionFile: null,
                 status: null,
                 error: null,
-              });
+              }, this.runContextFor(task.id));
               const continuationReboundColumn = await resolveReboundColumnFor(this.store, task.id);
               if (latestTask.column !== continuationReboundColumn) {
                 this.markGraphExecuteSelfRequeued(task.id);
                 this.activeWorktrees.delete(task.id);
                 executingTaskLock.release(task.id);
                 cleanupLockHeld = false;
-                await this.store.moveTask(task.id, continuationReboundColumn, { preserveResumeState: true });
+                await this.store.moveTask(task.id, continuationReboundColumn, { preserveResumeState: true }, this.runContextFor(task.id));
               } else {
                 this.activeWorktrees.delete(task.id);
               }
@@ -16719,7 +16769,7 @@ export class TaskExecutor {
           this.clearPausedAborted(task.id);
           this.stuckAborted.delete(task.id);
           this.userCanceledTaskIds.delete(task.id);
-          await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo");
+          await this.store.logEntry(task.id, "Execution canceled by user — leaving task in todo", undefined, this.runContextFor(task.id));
         } else {
           try {
           // Re-read latest task state. While this execute() invocation was
@@ -16769,7 +16819,7 @@ export class TaskExecutor {
               error: null,
               worktree: null,
               branch: null,
-            });
+            }, this.runContextFor(task.id));
             // Only move to todo if not already there. Use the freshly-read
             // latestTask.column rather than the stale captured task.column —
             // the captured snapshot can be hours old and would race against
@@ -16777,7 +16827,7 @@ export class TaskExecutor {
             const stuckReboundColumn = await resolveReboundColumnFor(this.store, task.id);
             if (latestTask.column !== stuckReboundColumn) {
               this.markGraphExecuteSelfRequeued(task.id);
-              await this.store.moveTask(task.id, stuckReboundColumn, preserveProgress ? { preserveProgress: true } : undefined);
+              await this.store.moveTask(task.id, stuckReboundColumn, preserveProgress ? { preserveProgress: true } : undefined, this.runContextFor(task.id));
               /*
               Audit trail: record task move (FN-1404).
               FNXC:WorkflowLifecycleColumns 2026-07-30-15:15: `to` records the column the card was
@@ -16928,7 +16978,7 @@ export class TaskExecutor {
                 details: {},
               };
             }
-            await store.updateTask(taskId, { dependencies });
+            await store.updateTask(taskId, { dependencies }, this.runContextFor(taskId));
             return {
               content: [{ type: "text" as const, text: `Dependencies updated.` }],
               details: {},
@@ -17021,7 +17071,7 @@ export class TaskExecutor {
           }
 
           // Update dependencies
-          await store.updateTask(taskId, { dependencies });
+          await store.updateTask(taskId, { dependencies }, this.runContextFor(taskId));
         }
 
         const task = await store.updateStep(taskId, stepIndex, status as StepStatus);
@@ -17083,7 +17133,7 @@ export class TaskExecutor {
   }
 
   private createTaskLogTool(taskId: string): ToolDefinition {
-    return sharedCreateTaskLogTool(this.store, taskId);
+    return sharedCreateTaskLogTool(this.store, taskId, this.runContextFor(taskId));
   }
 
   private createTaskLogsReadTool(taskId: string): ToolDefinition {
@@ -17107,11 +17157,11 @@ export class TaskExecutor {
   }
 
   private createTaskPromptWriteTool(taskId: string): ToolDefinition {
-    return sharedCreateTaskPromptWriteTool(this.store, taskId, this.getRunContextFor(taskId));
+    return sharedCreateTaskPromptWriteTool(this.store, taskId, this.runContextFor(taskId));
   }
 
   private createTaskFileScopeAddTool(taskId: string): ToolDefinition {
-    return sharedCreateTaskFileScopeAddTool(this.store, taskId, this.getRunContextFor(taskId));
+    return sharedCreateTaskFileScopeAddTool(this.store, taskId, this.runContextFor(taskId));
   }
 
   /*
@@ -17241,8 +17291,8 @@ export class TaskExecutor {
         }
 
         // Add the dependency
-        await store.updateTask(taskId, { dependencies: [...existing, targetId] });
-        await store.logEntry(taskId, `Added dependency on ${targetId} — stopping execution for re-planning`);
+        await store.updateTask(taskId, { dependencies: [...existing, targetId] }, this.runContextFor(taskId));
+        await store.logEntry(taskId, `Added dependency on ${targetId} — stopping execution for re-planning`, undefined, this.runContextFor(taskId));
 
         // Trigger abort flow (same pattern as pausedAborted)
         this.depAborted.add(taskId);
@@ -17307,7 +17357,7 @@ export class TaskExecutor {
         ...reviewState,
         addressing,
       },
-    });
+    }, this.runContextFor(taskId));
   }
 
   private async verifyWorktreeInvariants(
@@ -17521,9 +17571,9 @@ export class TaskExecutor {
           if (allowReanchor && observedTopLevel !== expectedRoot && isInsideWorktreesDir(this.rootDir, observedTopLevel, settings)) {
             const reanchor = await detectNestedWorktreeRoot(this.rootDir, worktreePath, settings);
             if (reanchor.reanchored) {
-              await this.store.updateTask(task.id, { worktree: reanchor.root });
+              await this.store.updateTask(task.id, { worktree: reanchor.root }, this.runContextFor(task.id));
               executorLog.log(`${task.id}: re-anchored nested task.worktree ${worktreePath} -> ${reanchor.root}`);
-              await this.store.logEntry(task.id, `Re-anchored nested task.worktree from ${worktreePath} to ${reanchor.root}`, undefined, this.getRunContextFor(task.id));
+              await this.store.logEntry(task.id, `Re-anchored nested task.worktree from ${worktreePath} to ${reanchor.root}`, undefined, this.runContextFor(task.id));
               await this.emitWorktreeReanchoredAudit(task.id, worktreePath, reanchor.root, "verify-worktree-invariants");
               return this.verifyWorktreeInvariants(task, reanchor.root, false, options);
             }
@@ -17563,7 +17613,7 @@ export class TaskExecutor {
             rootDir: this.rootDir,
           });
           if (autocorrectResult.status !== "failed") {
-            const auditor = createRunAuditor(this.store, this.getRunContextFor(task.id));
+            const auditor = createRunAuditor(this.store, this.runContextFor(task.id));
             await auditor.git({
               type: "branch:auto-canonicalize-case",
               target: worktreePath,
@@ -17615,7 +17665,7 @@ export class TaskExecutor {
           task.id,
           `fn_task_done no_commits guard skipped (${noCommitEligibilityReason})`,
           undefined,
-          this.getRunContextFor(task.id),
+          this.runContextFor(task.id),
         );
       } catch (error) {
         executorLog.warn(
@@ -17672,7 +17722,7 @@ export class TaskExecutor {
   ): Promise<{ blocked: false } | { blocked: true; message: string }> {
     if (task.scopeOverride === true) {
       executorLog.debug(`${task.id}: scope-leak guard bypassed (scopeOverride=true)`);
-      await this.store.logEntry(task.id, "[scope-leak] scope guard bypassed via task.scopeOverride", undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, "[scope-leak] scope guard bypassed via task.scopeOverride", undefined, this.runContextFor(task.id));
       return { blocked: false };
     }
 
@@ -17729,7 +17779,7 @@ export class TaskExecutor {
       if (repoKeys.length === 0) {
         const message = "workspace task declares File Scope but acquired no sub-repo worktrees — cannot verify scope";
         executorLog.warn(`${task.id}: [scope-leak] ${message}`);
-        await this.store.logEntry(task.id, `[scope-leak] ${message}`, undefined, this.getRunContextFor(task.id));
+        await this.store.logEntry(task.id, `[scope-leak] ${message}`, undefined, this.runContextFor(task.id));
         return { blocked: true, message };
       }
       const aggregatedOffScope: string[] = [];
@@ -17762,7 +17812,7 @@ export class TaskExecutor {
           const errMessage = repoErr instanceof Error ? repoErr.message : String(repoErr);
           const message = `workspace scope-leak guard failed to evaluate (${repoRel}/${errMessage}) — refusing fn_task_done as a precaution`;
           executorLog.warn(`${task.id}: [scope-leak] ${message}`);
-          await this.store.logEntry(task.id, `[scope-leak] ${message}`, undefined, this.getRunContextFor(task.id));
+          await this.store.logEntry(task.id, `[scope-leak] ${message}`, undefined, this.runContextFor(task.id));
           return { blocked: true, message };
         }
       }
@@ -17810,7 +17860,7 @@ export class TaskExecutor {
     const repoTag = offendingRepo ? ` repo=${offendingRepo}` : "";
     const message = `[scope-leak] reviewLevel=${reviewLevel} enforcement=${enforcementMode}${repoTag} off-scope touched files [${offScopePreview}]; declared scope [${declaredScopePreview}]; total off-scope=${offScopeFiles.length} total scope=${declaredScope.length}`;
     executorLog.warn(`${task.id}: ${message}`);
-    await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
 
     if (enforcementMode === "block") {
       return {
@@ -17859,7 +17909,7 @@ export class TaskExecutor {
     refusal: Extract<ReturnType<typeof evaluateTaskDoneRefusal>, { ok: false }>,
   ): Promise<void> {
 
-    await this.store.logEntry(task.id, refusal.message, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, refusal.message, undefined, this.runContextFor(task.id));
     executorLog.error(`${task.id}: fn_task_done refused (${refusal.refusalClass}) — ${refusal.reason} (implicit completion)`);
 
     const taintUpdate = this.skipBypassTaintUpdateForRefusal(refusal);
@@ -17876,15 +17926,15 @@ export class TaskExecutor {
         worktree: null,
         branch: null,
         sessionFile: null,
-      });
+      }, this.runContextFor(task.id));
       await this.store.logEntry(
         task.id,
         `${refusal.message} — requeued to todo immediately (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`,
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
       this.markGraphExecuteSelfRequeued(task.id);
-      await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true });
+      await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveProgress: true }, this.runContextFor(task.id));
     } else {
       await this.store.updateTask(task.id, {
         status: "failed",
@@ -17895,8 +17945,8 @@ export class TaskExecutor {
         worktree: null,
         branch: null,
         sessionFile: null,
-      });
-      await this.store.logEntry(task.id, `${refusal.message} — execution failed because implicit fn_task_done was refused`, undefined, this.getRunContextFor(task.id));
+      }, this.runContextFor(task.id));
+      await this.store.logEntry(task.id, `${refusal.message} — execution failed because implicit fn_task_done was refused`, undefined, this.runContextFor(task.id));
       await this.persistTokenUsage(task.id);
     }
 
@@ -18007,7 +18057,7 @@ export class TaskExecutor {
               taskId,
               `${parkError} — no blocking dependencies recorded; parking for automatic replan in ${replanColumn} (steps preserved)`,
               undefined,
-              this.getRunContextFor(taskId),
+              this.runContextFor(taskId),
             );
             this.workflowLifecycleMovesInFlight.add(taskId);
             try {
@@ -18020,7 +18070,7 @@ export class TaskExecutor {
               error: null,
               paused: false,
               pausedByAgentId: null,
-            }, this.getRunContextFor(taskId));
+            }, this.runContextFor(taskId));
           } else {
             await store.updateTask(taskId, {
               status: "failed",
@@ -18029,7 +18079,7 @@ export class TaskExecutor {
               pausedByAgentId: null,
               ...(mergedDependencies ? { dependencies: mergedDependencies } : {}),
               ...(metaPatch ? { sourceMetadataPatch: metaPatch } : {}),
-            }, this.getRunContextFor(taskId));
+            }, this.runContextFor(taskId));
 
             await store.logEntry(
               taskId,
@@ -18037,7 +18087,7 @@ export class TaskExecutor {
                 ? `${parkError} — durable external block thrash-exhausted (signature=${classification.thrashSignature}); parked failed, no auto-requeue`
                 : `${parkError} — recorded dependencies: ${blockedByIds.join(", ")} — parked failed (honest blocked exit; steps preserved)`,
               undefined,
-              this.getRunContextFor(taskId),
+              this.runContextFor(taskId),
             );
           }
           await this.store.recordRunAuditEvent?.({
@@ -18098,7 +18148,7 @@ export class TaskExecutor {
           source: "fn_task_done",
         });
         if (!providerVerdict.ok) {
-          await store.logEntry(taskId, providerVerdict.message, undefined, this.getRunContextFor(task.id));
+          await store.logEntry(taskId, providerVerdict.message, undefined, this.runContextFor(task.id));
           executorLog.error(`${taskId}: ${providerVerdict.message}`);
           return {
             content: [{ type: "text" as const, text: providerVerdict.message }],
@@ -18117,7 +18167,7 @@ export class TaskExecutor {
         });
         if (!invariantCheck.ok) {
           const refusalMessage = `fn_task_done refused: ${invariantCheck.reason} — observed=${invariantCheck.observed}, expected=${invariantCheck.expected}`;
-          await store.logEntry(taskId, refusalMessage, undefined, this.getRunContextFor(task.id));
+          await store.logEntry(taskId, refusalMessage, undefined, this.runContextFor(task.id));
           executorLog.error(`${taskId}: fn_task_done refused (${invariantCheck.reason}) — observed=${invariantCheck.observed}, expected=${invariantCheck.expected}`);
 
           const priorRequeues = task.taskDoneRetryCount ?? 0;
@@ -18132,14 +18182,14 @@ export class TaskExecutor {
               worktree: null,
               branch: null,
               sessionFile: null,
-            });
+            }, this.runContextFor(taskId));
             await store.logEntry(
               taskId,
               `${refusalMessage} — requeued to todo immediately (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`,
               undefined,
-              this.getRunContextFor(task.id),
+              this.runContextFor(task.id),
             );
-            await store.moveTask(taskId, await resolveReboundColumnFor(store, taskId), { preserveProgress: true });
+            await store.moveTask(taskId, await resolveReboundColumnFor(store, taskId), { preserveProgress: true }, this.runContextFor(taskId));
             executorLog.log(`✗ ${taskId} failed invariant check — requeued to todo (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`);
           } else {
             await store.updateTask(taskId, {
@@ -18150,8 +18200,8 @@ export class TaskExecutor {
               worktree: null,
               branch: null,
               sessionFile: null,
-            });
-            await store.logEntry(taskId, `${refusalMessage} — invariant-check retry budget exhausted`, undefined, this.getRunContextFor(task.id));
+            }, this.runContextFor(taskId));
+            await store.logEntry(taskId, `${refusalMessage} — invariant-check retry budget exhausted`, undefined, this.runContextFor(task.id));
             await this.persistTokenUsage(taskId);
             executorLog.log(`✗ ${taskId} failed invariant check`);
           }
@@ -18167,7 +18217,7 @@ export class TaskExecutor {
         const taskDoneRefusal = evaluateTaskDoneRefusal(task, params, codeReviewVerdicts);
         if (!taskDoneRefusal.ok) {
           const refusalMessage = taskDoneRefusal.message;
-          await store.logEntry(taskId, refusalMessage, undefined, this.getRunContextFor(task.id));
+          await store.logEntry(taskId, refusalMessage, undefined, this.runContextFor(task.id));
           executorLog.error(`${taskId}: fn_task_done refused (${taskDoneRefusal.refusalClass}) — ${taskDoneRefusal.reason}`);
 
           // FNXC:Lifecycle 2026-07-16-21:40: FN-8141 — stamp the skip-bypass taint marker so a
@@ -18186,14 +18236,14 @@ export class TaskExecutor {
               worktree: null,
               branch: null,
               sessionFile: null,
-            });
+            }, this.runContextFor(taskId));
             await store.logEntry(
               taskId,
               `${refusalMessage} — requeued to todo immediately (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`,
               undefined,
-              this.getRunContextFor(task.id),
+              this.runContextFor(task.id),
             );
-            await store.moveTask(taskId, await resolveReboundColumnFor(store, taskId), { preserveProgress: true });
+            await store.moveTask(taskId, await resolveReboundColumnFor(store, taskId), { preserveProgress: true }, this.runContextFor(taskId));
             executorLog.log(`✗ ${taskId} fn_task_done refusal (${taskDoneRefusal.refusalClass}) — requeued to todo (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`);
           } else {
             await store.updateTask(taskId, {
@@ -18205,8 +18255,8 @@ export class TaskExecutor {
               worktree: null,
               branch: null,
               sessionFile: null,
-            });
-            await store.logEntry(taskId, `${refusalMessage} — fn_task_done refusal retry budget exhausted`, undefined, this.getRunContextFor(task.id));
+            }, this.runContextFor(taskId));
+            await store.logEntry(taskId, `${refusalMessage} — fn_task_done refusal retry budget exhausted`, undefined, this.runContextFor(task.id));
             await this.persistTokenUsage(taskId);
             executorLog.log(`✗ ${taskId} fn_task_done refusal (${taskDoneRefusal.refusalClass})`);
           }
@@ -18231,7 +18281,7 @@ export class TaskExecutor {
             return { blocked: false } as const;
           });
         if (scopeLeakCheck.blocked) {
-          await store.logEntry(taskId, `[scope-leak] blocked fn_task_done: ${scopeLeakCheck.message}`, undefined, this.getRunContextFor(task.id));
+          await store.logEntry(taskId, `[scope-leak] blocked fn_task_done: ${scopeLeakCheck.message}`, undefined, this.runContextFor(task.id));
           return {
             content: [{ type: "text" as const, text: scopeLeakCheck.message }],
             details: {
@@ -18241,8 +18291,8 @@ export class TaskExecutor {
         }
 
         if (noOpMarker) {
-          const runContext = this.getRunContextFor(taskId);
-          await store.updateTask(taskId, { noCommitsExpected: true });
+          const runContext = this.runContextFor(taskId);
+          await store.updateTask(taskId, { noCommitsExpected: true }, this.runContextFor(taskId));
           await store.logEntry(
             taskId,
             `Verified ${noOpMarker.kind} completion sentinel accepted; no commits expected for terminal handoff`,
@@ -18305,10 +18355,10 @@ export class TaskExecutor {
           if (existingSummary && hasRunWorkflowSteps && !existingSummary.endsWith(rerunSuffix)) {
             await store.updateTask(taskId, {
               summary: `${currentTask.summary}\n\n${rerunSuffix}`,
-            });
-            await store.logEntry(taskId, "fn_task_done summary appended to existing summary (workflow-step rerun)", undefined, this.getRunContextFor(taskId));
+            }, this.runContextFor(taskId));
+            await store.logEntry(taskId, "fn_task_done summary appended to existing summary (workflow-step rerun)", undefined, this.runContextFor(taskId));
           } else if (!existingSummary || !hasRunWorkflowSteps) {
-            await store.updateTask(taskId, { summary: params.summary });
+            await store.updateTask(taskId, { summary: params.summary }, this.runContextFor(taskId));
           }
         }
         const hardPauseActive = Boolean(settings.globalPause);
@@ -18323,8 +18373,8 @@ export class TaskExecutor {
           // honest completion signal (covers the PREMISE STALE skip-then-done flow); clear any
           // skip-bypass taint so a subsequent auto-promotion path is not blocked.
           bulkCompletionRefusalAt: null,
-        });
-        await store.logEntry(taskId, "Task marked done by agent", undefined, this.getRunContextFor(taskId));
+        }, this.runContextFor(taskId));
+        await store.logEntry(taskId, "Task marked done by agent", undefined, this.runContextFor(taskId));
 
         const latestTask = await store.getTask(taskId);
         let latestColumn = latestTask.column;
@@ -18335,11 +18385,11 @@ export class TaskExecutor {
               ? "fn_task_done called while task was in todo during pause — promoting to in-progress for deferred completion handoff"
               : "fn_task_done called while task was in todo — promoting to in-progress before completion handoff",
             undefined,
-            this.getRunContextFor(taskId),
+            this.runContextFor(taskId),
           );
           /* FNXC:WorkflowResolvedColumns 2026-07-30-21:40: census-invisible moveTask DESTINATION, and `latestColumn` must be set from the SAME resolved value or the check below it compares against a lane the card is not in. */
           const wipTarget = await resolveWipTargetForTask(store, taskId);
-          await store.moveTask(taskId, wipTarget);
+          await store.moveTask(taskId, wipTarget, undefined, this.runContextFor(taskId));
           latestColumn = wipTarget;
         }
 
@@ -18409,7 +18459,7 @@ export class TaskExecutor {
     this.activeWorktrees.delete(taskId);
 
     // Update task: clear worktree and status, move to triage
-    await this.store.updateTask(taskId, { worktree: null, status: null });
+    await this.store.updateTask(taskId, { worktree: null, status: null }, this.runContextFor(taskId));
     /*
     FNXC:WorkflowLifecycleColumns 2026-07-29-15:10 (P0 audit after the Planning-column merge):
     This wrote the LITERAL `triage`. The default coding lineage no longer declares that column —
@@ -18423,8 +18473,8 @@ export class TaskExecutor {
     Resolve the rebound target from the task's own workflow (hold -> intake -> first declared
     column), the same helper the other ~16 executor rebounds already use.
     */
-    await this.store.moveTask(taskId, await resolveReboundColumnFor(this.store, taskId));
-    await this.store.logEntry(taskId, "Execution stopped — work discarded, requeued for re-planning");
+    await this.store.moveTask(taskId, await resolveReboundColumnFor(this.store, taskId), undefined, this.runContextFor(taskId));
+    await this.store.logEntry(taskId, "Execution stopped — work discarded, requeued for re-planning", undefined, this.runContextFor(taskId));
   }
 
   /**
@@ -18448,7 +18498,7 @@ export class TaskExecutor {
     }
 
     if (lastNonPendingIndex === -1) {
-      await this.store.updateTask(taskId, { currentStep: 0 });
+      await this.store.updateTask(taskId, { currentStep: 0 }, this.runContextFor(taskId));
       return null;
     }
 
@@ -18483,7 +18533,7 @@ export class TaskExecutor {
       }
     }
     const currentStep = indexes[0] ?? lastNonPendingIndex;
-    await this.store.updateTask(taskId, { currentStep });
+    await this.store.updateTask(taskId, { currentStep }, this.runContextFor(taskId));
     return { index: currentStep, name: steps[currentStep].name, indexes };
   }
 
@@ -18514,7 +18564,7 @@ export class TaskExecutor {
       task.id,
       `[verification] Running deterministic verification (${parts.join(", ")})`,
       undefined,
-      this.getRunContextFor(task.id),
+      this.runContextFor(task.id),
     );
 
     const result: VerificationResult = { allPassed: true };
@@ -18554,7 +18604,7 @@ export class TaskExecutor {
       task.id,
       `[verification] Deterministic verification passed`,
       undefined,
-      this.getRunContextFor(task.id),
+      this.runContextFor(task.id),
     );
     return result;
   }
@@ -18654,7 +18704,7 @@ Do not refactor, rename broadly, or make opportunistic improvements.
         fallbackModelId: executorFallback.modelId,
         fallbackThinkingLevel: resolveExecutorFallbackThinkingLevel(task.thinkingLevel, settings),
         defaultThinkingLevel: resolveExecutorThinkingLevel(task.thinkingLevel, settings),
-        runAuditor: createRunAuditor(this.store, this.getRunContextFor(task.id)),
+        runAuditor: createRunAuditor(this.store, this.runContextFor(task.id)),
         settings,
         taskEnv: extraEnv,
         mcpServers: await this.resolveMcpServers(undefined),
@@ -18671,7 +18721,7 @@ Do not refactor, rename broadly, or make opportunistic improvements.
         task.id,
         `Executor verification fix agent started (model: ${describeModel(session)}, attempt ${retryNumber}/${maxRetries})`,
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
       await this.store.appendAgentLog(
         task.id,
@@ -18719,7 +18769,7 @@ ${failureContext.output.slice(0, VERIFICATION_LOG_MAX_CHARS)}
           task.id,
           `Re-running deterministic verification (attempt ${retryNumber}/${maxRetries})`,
           undefined,
-          this.getRunContextFor(task.id),
+          this.runContextFor(task.id),
         );
         await this.store.appendAgentLog(
           task.id,
@@ -18742,7 +18792,7 @@ ${failureContext.output.slice(0, VERIFICATION_LOG_MAX_CHARS)}
         task.id,
         `Executor verification fix agent encountered an error`,
         errorMessage,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
       await this.store.appendAgentLog(
         task.id,
@@ -18785,7 +18835,7 @@ ${failureContext.output.slice(0, VERIFICATION_LOG_MAX_CHARS)}
     // 2. Log an entry explaining the task was sent back
     await this.store.logEntry(
       taskId,
-      `${reason} — moved back to in-progress for remediation`,
+      `${reason} — moved back to in-progress for remediation`, undefined, this.runContextFor(taskId),
     );
 
     /*
@@ -18821,7 +18871,7 @@ ${failureContext.output.slice(0, VERIFICATION_LOG_MAX_CHARS)}
       error: null,
       sessionFile: null,
       workflowStepRetries: 0,
-    });
+    }, this.runContextFor(taskId));
 
     // 6. Schedule the move after the guard unwinds (per guard-unwind requirement)
     this.scheduleWorkflowRerun(
@@ -18979,7 +19029,7 @@ ${scopeGuard}
         throw new Error("could not resolve base commit SHA");
       }
 
-      await this.store.updateTask(task.id, { baseCommitSha });
+      await this.store.updateTask(task.id, { baseCommitSha }, this.runContextFor(task.id));
       /*
       FNXC:EngineDiagnostics 2026-08-03-05:54:
       Base-SHA capture is per-task setup bookkeeping (also in run-audit). Worktree created stays info.
@@ -19262,12 +19312,12 @@ ${scopeGuard}
     if (!scriptCommand) {
       const available = settings.scripts ? Object.keys(settings.scripts).join(", ") : "none";
       const msg = `Script '${scriptName}' not found in project settings. Available scripts: ${available}`;
-      await this.store.logEntry(task.id, msg);
+      await this.store.logEntry(task.id, msg, undefined, this.runContextFor(task.id));
       return { success: false, error: msg };
     }
 
     executorLog.log(`${task.id}: workflow step '${workflowStep.name}' executing script '${scriptName}': ${scriptCommand}`);
-    await this.store.logEntry(task.id, `Workflow step '${workflowStep.name}' executing script '${scriptName}': ${scriptCommand}`);
+    await this.store.logEntry(task.id, `Workflow step '${workflowStep.name}' executing script '${scriptName}': ${scriptCommand}`, undefined, this.runContextFor(task.id));
 
     const scriptAbortController = new AbortController();
     this.registerConfiguredCommandController(task.id, scriptAbortController);
@@ -19346,21 +19396,21 @@ ${scopeGuard}
     const marker = `workflow-input:${markerMatch[1]}`;
     const replies = this.workflowInputRepliesAfterWatermark(live, marker);
     if (live.paused || replies.length === 0) {
-      await this.store.updateTask(live.id, { status: "awaiting-user-input", paused: true }, this.getRunContextFor(live.id));
+      await this.store.updateTask(live.id, { status: "awaiting-user-input", paused: true }, this.runContextFor(live.id));
       return "waiting";
     }
     /*
      * FNXC:WorkflowInput 2026-06-29-10:00:
      * A workflow graph can restart at an earlier node after pause/resume recovery while the durable pausedReason still points at the later skill node that asked the question. If the user already supplied a post-watermark reply, clear that stale marker before any node executes so Compound Engineering cannot loop at Plan while Commit & open PR's answered question remains attached.
      */
-    await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.getRunContextFor(live.id));
+    await this.store.updateTask(live.id, { status: null, pausedReason: null }, this.runContextFor(live.id));
     await this.store.logEntry(
       live.id,
       marker === `workflow-input:${nodeId}`
         ? `Workflow input received for step '${nodeId}' — resuming`
         : `Workflow input marker '${markerMatch[1]}' already has a reply — clearing stale marker before step '${nodeId}'`,
       undefined,
-      this.getRunContextFor(live.id),
+      this.runContextFor(live.id),
     );
     return "clear";
   }
@@ -19423,7 +19473,7 @@ ${scopeGuard}
         workflowReviewSpecArtifact = await this.readTaskArtifact(task.id, "PROMPT.md");
       } catch (error) {
         const diagnostic = `PROMPT.md could not be read because task storage failed; ${workflowStep.name} must retry without replanning. ${error instanceof Error ? error.message : String(error)}`;
-        await this.store.logEntry(task.id, `[pre-merge] ${workflowStep.name} artifact read failed: ${diagnostic}`);
+        await this.store.logEntry(task.id, `[pre-merge] ${workflowStep.name} artifact read failed: ${diagnostic}`, undefined, this.runContextFor(task.id));
         return {
           success: false,
           error: diagnostic,
@@ -19446,7 +19496,7 @@ ${scopeGuard}
       const diagnostic = `PROMPT.md could not be loaded; ${workflowStep.name} cannot approve without the authoritative task contract.`;
       await this.store.logEntry(
         task.id,
-        `[pre-merge] ${workflowStep.name} refused to run without PROMPT.md: ${diagnostic}`,
+        `[pre-merge] ${workflowStep.name} refused to run without PROMPT.md: ${diagnostic}`, undefined, this.runContextFor(task.id),
       );
       return {
         success: false,
@@ -19471,7 +19521,7 @@ ${scopeGuard}
         const output = `REVISE: ${diagnostic}`;
         await this.store.logEntry(
           task.id,
-          `[pre-merge] Plan Review deterministic external-integration evidence check requested revision: ${diagnostic}`,
+          `[pre-merge] Plan Review deterministic external-integration evidence check requested revision: ${diagnostic}`, undefined, this.runContextFor(task.id),
         );
         return {
           success: false,
@@ -19787,11 +19837,11 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       ) {
         await this.store.logEntry(
           task.id,
-          `[skill-load] Workflow step '${workflowStep.name}' requests skill '${workflowStep.skillName}' but it cannot be discovered from configured plugin body directories or FUSION_CE_SKILLS_DIR; the step runs with role-fallback skills only.`,
+          `[skill-load] Workflow step '${workflowStep.name}' requests skill '${workflowStep.skillName}' but it cannot be discovered from configured plugin body directories or FUSION_CE_SKILLS_DIR; the step runs with role-fallback skills only.`, undefined, this.runContextFor(task.id),
         );
       }
       const logBrowserVerificationActivity = async (message: string) => {
-        await this.store.logEntry(task.id, message);
+        await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
         await this.store.appendAgentLog(task.id, message, "status", undefined, "reviewer");
       };
       if (workflowStep.requiresBrowser === true) {
@@ -19837,7 +19887,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       if (toolMode === "readonly" && readonlyCustomTools.denied.length > 0) {
         await this.store.logEntry(
           task.id,
-          `[readonly-violation] Workflow step '${workflowStep.name}' dropped denied custom tools: ${readonlyCustomTools.denied.join(", ")}`,
+          `[readonly-violation] Workflow step '${workflowStep.name}' dropped denied custom tools: ${readonlyCustomTools.denied.join(", ")}`, undefined, this.runContextFor(task.id),
         );
       }
 
@@ -19876,7 +19926,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         fallbackModelId: workflowFallback.modelId,
         fallbackThinkingLevel: workflowStepFallbackThinkingLevel,
         defaultThinkingLevel: workflowStepThinkingLevel,
-        runAuditor: createRunAuditor(this.store, this.getRunContextFor(task.id)),
+        runAuditor: createRunAuditor(this.store, this.runContextFor(task.id)),
         settings,
         taskEnv: stepEnv,
         mcpServers: await this.resolveMcpServers(undefined),
@@ -19902,7 +19952,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       executorLog.debug(`${task.id}: workflow step '${workflowStep.name}' using model ${workflowModelDetails}`);
       await this.store.logEntry(
         task.id,
-        `Workflow step '${workflowStep.name}' using model: ${workflowModelDetails}`,
+        `Workflow step '${workflowStep.name}' using model: ${workflowModelDetails}`, undefined, this.runContextFor(task.id),
       );
       this.setActiveWorkflowStepSession(task.id, session, worktreePath, this.createSeenSteeringIds(task));
       // FNXC:TaskTiming 2026-07-30-21:40: graph-owned Plan Review is the only
@@ -19912,7 +19962,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         this.activePlanningWorkflowSessions.add(task.id);
         const planningStart = startPlanningSegment(task);
         try {
-          if (planningStart.planningStartedAt) await this.store.updateTask(task.id, planningStart);
+          if (planningStart.planningStartedAt) await this.store.updateTask(task.id, planningStart, this.runContextFor(task.id));
         } catch (error) {
           this.activePlanningWorkflowSessions.delete(task.id);
           throw error;
@@ -19995,7 +20045,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           executorLog.warn(`${task.id}: workflow step '${workflowStep.name}' (${attemptLabel}) timed out after ${timeoutMs}ms — disposing session`);
           await this.store.logEntry(
             task.id,
-            `Workflow step '${workflowStep.name}' ${attemptLabel === "primary" ? "primary" : "fallback"} model timed out after ${Math.round(timeoutMs / 1000)}s — aborting session`,
+            `Workflow step '${workflowStep.name}' ${attemptLabel === "primary" ? "primary" : "fallback"} model timed out after ${Math.round(timeoutMs / 1000)}s — aborting session`, undefined, this.runContextFor(task.id),
           );
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: timed out`);
@@ -20039,7 +20089,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           // hard gate block — see runGraphCustomNode's outcome mapping.
           await this.store.logEntry(
             task.id,
-            `[pre-merge] Workflow step '${workflowStep.name}' produced malformed output (no parseable verdict) — recorded as non-blocking advisory`,
+            `[pre-merge] Workflow step '${workflowStep.name}' produced malformed output (no parseable verdict) — recorded as non-blocking advisory`, undefined, this.runContextFor(task.id),
           );
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: malformed output`);
@@ -20068,7 +20118,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           const deniedTool = violation.toolName || "unknown";
           await this.store.logEntry(
             task.id,
-            `[readonly-violation] Workflow step '${workflowStep.name}' attempted denied tool '${deniedTool}'`,
+            `[readonly-violation] Workflow step '${workflowStep.name}' attempted denied tool '${deniedTool}'`, undefined, this.runContextFor(task.id),
           );
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: readonly violation`);
@@ -20087,7 +20137,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
             const livePlanningTask = await this.store.getTask(task.id);
             if (livePlanningTask) {
               const planningEnd = finalizePlanningSegment(livePlanningTask);
-              if (planningEnd.planningStartedAt === null) await this.store.updateTask(task.id, planningEnd);
+              if (planningEnd.planningStartedAt === null) await this.store.updateTask(task.id, planningEnd, this.runContextFor(task.id));
             }
           } finally {
             // Finalize before releasing Plan Review ownership so triage can only
@@ -20124,7 +20174,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         if (!retryMalformed) return retryOutcome;
         await this.store.logEntry(
           task.id,
-          `Workflow step '${workflowStep.name}' produced malformed output on both the primary attempt and one self-retry — no fallback model configured (set ${fallbackSettingsHint})`,
+          `Workflow step '${workflowStep.name}' produced malformed output on both the primary attempt and one self-retry — no fallback model configured (set ${fallbackSettingsHint})`, undefined, this.runContextFor(task.id),
         );
         return retryOutcome;
       }
@@ -20132,7 +20182,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       executorLog.warn(`${task.id}: workflow step '${workflowStep.name}' ${reason} and no fallback model is configured`);
       await this.store.logEntry(
         task.id,
-        `Workflow step '${workflowStep.name}' ${reason} — no fallback model configured (set ${fallbackSettingsHint})`,
+        `Workflow step '${workflowStep.name}' ${reason} — no fallback model configured (set ${fallbackSettingsHint})`, undefined, this.runContextFor(task.id),
       );
       return primaryOutcome;
     }
@@ -20212,11 +20262,11 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       ? await classifyTaskWorktree(this.rootDir, worktreePath)
       : { ok: false as const };
     if (!worktreePath || !worktreeClassification.ok) {
-      await this.store.logEntry(task.id, `[recovery] bootstrap misbinding detected but worktree unavailable for re-anchor: ${worktreePath ?? "none"}`, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, `[recovery] bootstrap misbinding detected but worktree unavailable for re-anchor: ${worktreePath ?? "none"}`, undefined, this.runContextFor(task.id));
       return false;
     }
 
-    await this.store.logEntry(task.id, `[recovery] bootstrap-time branch misbinding detected on ${contamination.branchName}: 0 own commits, re-anchoring to ${contamination.baseSha}`, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, `[recovery] bootstrap-time branch misbinding detected on ${contamination.branchName}: 0 own commits, re-anchoring to ${contamination.baseSha}`, undefined, this.runContextFor(task.id));
 
     try {
       const reanchor = await reanchorBranchToBase({
@@ -20243,12 +20293,12 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         error: null,
         paused: false,
         pausedReason: null,
-      });
+      }, this.runContextFor(task.id));
       this.markGraphExecuteSelfRequeued(task.id);
-      await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: false, preserveWorktree: true });
+      await this.store.moveTask(task.id, await resolveReboundColumnFor(this.store, task.id), { preserveResumeState: false, preserveWorktree: true }, this.runContextFor(task.id));
       return true;
     } catch (error) {
-      await this.store.logEntry(task.id, `[recovery] bootstrap re-anchor failed; falling back to contamination safety path: ${formatError(error)}`, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, `[recovery] bootstrap re-anchor failed; falling back to contamination safety path: ${formatError(error)}`, undefined, this.runContextFor(task.id));
       return false;
     }
   }
@@ -20263,14 +20313,14 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
   ): Promise<void> {
     const targetPath = preservedWorktreeTargetPathForTask(task.id, livePath, settings, this.rootDir);
     const normalizedPath = await this.normalizeReclaimableWorktreePath(livePath, targetPath, task.id, settings);
-    await this.store.updateTask(task.id, { worktree: normalizedPath, branch });
+    await this.store.updateTask(task.id, { worktree: normalizedPath, branch }, this.runContextFor(task.id));
     const latestTask = await this.store.getTask(task.id);
     const baseRef = await this.resolveDiffBaseRef(normalizedPath, latestTask.baseCommitSha);
     if (baseRef) {
       await assertCleanBranchAtBase(this.rootDir, branch, baseRef, task.id);
     }
     const message = `[recovery] reclaimed existing worktree for ${task.id} at ${normalizedPath} (${count} commits preserved, tip ${tipSha.slice(0, 12)})`;
-    await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
     await this.store.appendAgentLog(task.id, "Branch conflict auto-recovery", "status", message, "executor");
   }
 
@@ -20283,7 +20333,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     if (activeOwner !== null) {
       const refusalMessage = `[FN-4811] Branch conflict on ${error.branchName} deferred: conflicting worktree ${error.conflictingWorktreePath} is actively owned by ${activeOwner}`;
       executorLog.warn(refusalMessage);
-      await this.store.logEntry(task.id, refusalMessage, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, refusalMessage, undefined, this.runContextFor(task.id));
       return "sticky";
     }
     const settings = await mergeEffectiveSettings(this.store, task, await this.store.getSettings());
@@ -20300,9 +20350,9 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     });
 
     if (inspection.kind === "stale-resolved") {
-      await this.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null });
+      await this.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null }, this.runContextFor(task.id));
       const message = `[recovery] ${task.id} stage-A: pruned stale admin entry for ${error.branchName}`;
-      await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
       await this.store.appendAgentLog(task.id, "Branch conflict auto-recovery", "status", message, "executor");
       return "retry";
     }
@@ -20329,9 +20379,9 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       } catch {
         // best-effort
       }
-      await this.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null });
+      await this.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null }, this.runContextFor(task.id));
       const message = `[recovery] ${task.id} stage-A: tip-already-merged cleanup for ${error.branchName} (${inspection.tipSha.slice(0, 12)} on ${inspection.integrationRef})`;
-      await this.store.logEntry(task.id, message, undefined, this.getRunContextFor(task.id));
+      await this.store.logEntry(task.id, message, undefined, this.runContextFor(task.id));
       await this.store.appendAgentLog(task.id, "Branch conflict auto-recovery", "status", message, "executor");
       return "retry";
     }
@@ -20368,9 +20418,9 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
 
     const conflictMessage = `Task branch conflict: ${error.branchName} is already checked out at ${error.conflictingWorktreePath}. ` +
       `Resolve the local branch/worktree conflict with git tooling (inspect/reclaim or discard) before retrying.`;
-    await this.store.logEntry(task.id, this.formatBranchConflictLifecycleLog(task.id, error), undefined, this.getRunContextFor(task.id));
+    await this.store.logEntry(task.id, this.formatBranchConflictLifecycleLog(task.id, error), undefined, this.runContextFor(task.id));
     await this.store.appendAgentLog(task.id, "Branch conflict recovery required", "tool_error", this.formatBranchConflictAgentLog(task.id, error), "executor");
-    const autoRecoveryDispatcher = this.getAutoRecoveryDispatcher(createRunAuditor(this.store, this.getRunContextFor(task.id)));
+    const autoRecoveryDispatcher = this.getAutoRecoveryDispatcher(createRunAuditor(this.store, this.runContextFor(task.id)));
     const decision = await autoRecoveryDispatcher.dispatch({
       class: "branch-conflict-unrecoverable",
       taskId: task.id,
@@ -20395,7 +20445,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         worktree: error.conflictingWorktreePath,
         paused: true,
         pausedReason: "branch-conflict-unrecoverable",
-      });
+      }, this.runContextFor(task.id));
       await this.persistTokenUsage(task.id);
       executorLog.warn(`✗ ${task.id} branch conflict sticky failure: ${error.branchName} @ ${error.conflictingWorktreePath}`);
       this.options.onError?.(task, error);
@@ -20428,7 +20478,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         // Stored baseBranch no longer exists (e.g., upstream dep merged and branch
         // deleted while this task sat queued/stuck). Clear it on the task so any
         // subsequent retry branches from the default base, and proceed from HEAD.
-        await this.store.updateTask(taskId, { executionStartBranch: null });
+        await this.store.updateTask(taskId, { executionStartBranch: null }, this.runContextFor(taskId));
       } else {
         resolvedStartPoint = resolved;
       }
@@ -20507,7 +20557,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           await this.store.logEntry(
             taskId,
             `Worktree creation failed after ${this.MAX_WORKTREE_RETRIES} attempts`,
-            errorMessage,
+            errorMessage, this.runContextFor(taskId),
           );
           if (isBranchConflict) {
             throw error;
@@ -20712,7 +20762,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
 
     await this.store.logEntry(
       taskId,
-      `Squash-imported dependency content from ${label} into worktree (single import commit instead of inheriting raw commits)`,
+      `Squash-imported dependency content from ${label} into worktree (single import commit instead of inheriting raw commits)`, undefined, this.runContextFor(taskId),
     );
   }
 
@@ -20785,7 +20835,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await execAsync(`git rebase ${this.quoteShellArg(remoteRef)}`, { cwd: worktreePath });
       await this.store.logEntry(
         taskId,
-        `Rebased new worktree branch ${branch} onto ${remoteRef}`,
+        `Rebased new worktree branch ${branch} onto ${remoteRef}`, undefined, this.runContextFor(taskId),
       );
     } catch (rebaseErr) {
       const msg = rebaseErr instanceof Error ? rebaseErr.message : String(rebaseErr);
@@ -20799,7 +20849,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       }
       await this.store.logEntry(
         taskId,
-        `Could not rebase new worktree onto ${remoteRef} — kept local base. The merge-time rebase will retry with conflict resolution.`,
+        `Could not rebase new worktree onto ${remoteRef} — kept local base. The merge-time rebase will retry with conflict resolution.`, undefined, this.runContextFor(taskId),
       );
     }
   }
@@ -20825,7 +20875,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         `Worktree base ref "${startPoint}" is missing — falling back to default base`,
-        errorMessage,
+        errorMessage, this.runContextFor(taskId),
       );
       return null;
     }
@@ -20910,14 +20960,14 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         task.id,
         `Worktree session-start auto-recovery exhausted (${recovery.retries}/${MAX_WORKTREE_SESSION_RETRIES}); task left for human inspection`,
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
     } else {
       await this.store.logEntry(
         task.id,
         `Worktree was ${classification} at session start; requeued to todo for clean retry (attempt ${recovery.retries}/${MAX_WORKTREE_SESSION_RETRIES})`,
         undefined,
-        this.getRunContextFor(task.id),
+        this.runContextFor(task.id),
       );
     }
     return recovery.outcome === "escalate-exhausted" ? "escalate-exhausted" : "requeue-todo";
@@ -20929,7 +20979,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     toPath: string,
     source: "verify-worktree-invariants" | "executor-liveness-gate",
   ): Promise<void> {
-    const runContext = this.getRunContextFor(taskId);
+    const runContext = this.runContextFor(taskId);
     if (!runContext?.runId || !runContext.agentId) return;
     const auditor = createRunAuditor(this.store, {
       runId: runContext.runId,
@@ -20962,7 +21012,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     targetPath: string,
     metadata: Record<string, unknown>,
   ): Promise<void> {
-    const runContext = this.getRunContextFor(taskId);
+    const runContext = this.runContextFor(taskId);
     if (!runContext?.runId || !runContext.agentId) return;
     const auditor = createRunAuditor(this.store, {
       runId: runContext.runId,
@@ -21010,7 +21060,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       const removed = await tryRemoveStaleLock({ lockPath: resolvePath(this.rootDir, lockPath) });
       if (removed.removed) {
         await this.emitStaleLockAudit(taskId, "worktree:stale-lock-recovered", path, { lockPath });
-        await this.store.logEntry(taskId, `Recovered stale worktree index.lock and retrying`, resolvePath(this.rootDir, lockPath), this.getRunContextFor(taskId));
+        await this.store.logEntry(taskId, `Recovered stale worktree index.lock and retrying`, resolvePath(this.rootDir, lockPath), this.runContextFor(taskId));
         return true;
       }
       await this.emitStaleLockAudit(taskId, "worktree:stale-lock-recovery-failed", path, {
@@ -21048,7 +21098,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.emitStaleLockAudit(taskId, "worktree:stale-registration-recovered", path, {
         actions: recovery.actions,
       });
-      await this.store.logEntry(taskId, "Recovered stale worktree registration and retrying", staleRegistrationPath, this.getRunContextFor(taskId));
+      await this.store.logEntry(taskId, "Recovered stale worktree registration and retrying", staleRegistrationPath, this.runContextFor(taskId));
       return true;
     }
 
@@ -21104,7 +21154,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       if (!isRegistered) {
         await this.store.logEntry(
           taskId,
-          `Removing existing directory (not a registered worktree): ${path}`,
+          `Removing existing directory (not a registered worktree): ${path}`, undefined, this.runContextFor(taskId),
         );
         try {
           await rm(path, { recursive: true, force: true });
@@ -21160,7 +21210,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await createWithBranch(branch);
       executorLog.log(`Worktree created: ${path}${startPoint ? ` (from ${startPoint})` : ""}`);
       if (attemptNumber > 0) {
-        await this.store.logEntry(taskId, `Worktree created on attempt ${attemptNumber + 1}`, path);
+        await this.store.logEntry(taskId, `Worktree created on attempt ${attemptNumber + 1}`, path, this.runContextFor(taskId));
       }
       await installGuardOrCleanup();
       return { path, branch };
@@ -21224,7 +21274,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         }
         const branchCleaned = await this.cleanupStaleBranch(branch, taskId);
         if (branchCleaned) {
-          await this.store.logEntry(taskId, `Removed stale branch reference, retrying`);
+          await this.store.logEntry(taskId, `Removed stale branch reference, retrying`, undefined, this.runContextFor(taskId));
           return this.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, recoveryDepth + 1, allowSiblingBranchRename, settings);
         }
         throw new Error(
@@ -21306,7 +21356,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           }
           const branchCleaned = await this.cleanupStaleBranch(branch, taskId);
           if (branchCleaned) {
-            await this.store.logEntry(taskId, `Cleaned up stale reference in fallback, retrying`);
+            await this.store.logEntry(taskId, `Cleaned up stale reference in fallback, retrying`, undefined, this.runContextFor(taskId));
             return this.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, recoveryDepth + 1, allowSiblingBranchRename, settings);
           }
         }
@@ -21373,7 +21423,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         `[recovery] reclaimed existing worktree for ${taskId} at ${livePath} (${inspection.taskAttributedCommitCount} commits preserved)`,
-        inspection.tipSha,
+        inspection.tipSha, this.runContextFor(taskId),
       );
       return { path: livePath, branch };
     }
@@ -21385,7 +21435,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         `[recovery] reclaimed existing worktree for ${taskId} at ${livePath} (0 commits preserved)`,
-        inspection.tipSha,
+        inspection.tipSha, this.runContextFor(taskId),
       );
       return { path: livePath, branch };
     }
@@ -21394,7 +21444,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       if (inspection.kind === "stale" || inspection.kind === "stale-resolved" || inspection.kind === "tip-already-merged") {
         const cleanupSuccess = await this.cleanupConflictingWorktree(conflictPath, branch, taskId);
         if (cleanupSuccess) {
-          await this.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path);
+          await this.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path, this.runContextFor(taskId));
           return this.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, 0, allowSiblingBranchRename, settings);
         }
         // FN-4811: When git classifies a worktree as stale but the DB liveness gate refuses
@@ -21407,7 +21457,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       if (inspection.kind === "live-foreign") {
         const cleanupSuccess = await this.cleanupConflictingWorktree(inspection.livePath, branch, taskId);
         if (cleanupSuccess) {
-          await this.store.logEntry(taskId, `Removed foreign conflicting worktree and retrying`, inspection.livePath);
+          await this.store.logEntry(taskId, `Removed foreign conflicting worktree and retrying`, inspection.livePath, this.runContextFor(taskId));
           return this.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, 0, allowSiblingBranchRename, settings);
         }
         // FN-4811: Cleanup was refused because the foreign worktree is actively bound to a
@@ -21426,7 +21476,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
 
     const cleanupSuccess = await this.cleanupConflictingWorktree(conflictPath, branch, taskId);
     if (cleanupSuccess) {
-      await this.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path);
+      await this.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path, this.runContextFor(taskId));
       return this.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, 0, allowSiblingBranchRename, settings);
     }
 
@@ -21459,7 +21509,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         await this.store.logEntry(
           taskId,
           `[recovery] deferred relocation of active preserved worktree ${sourcePath}`,
-          sourcePath,
+          sourcePath, this.runContextFor(taskId),
         );
         return placement.path;
       }
@@ -21467,7 +21517,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         await this.store.logEntry(
           taskId,
           `[recovery] relocated preserved worktree from ${sourcePath} to ${placement.path}`,
-          placement.path,
+          placement.path, this.runContextFor(taskId),
         );
       }
       return placement.path;
@@ -21476,7 +21526,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         `[recovery] failed to relocate preserved worktree from ${sourcePath} to ${targetPath}: ${detail}`,
-        sourcePath,
+        sourcePath, this.runContextFor(taskId),
       );
       throw new NonRetryableWorktreeError(
         `Could not relocate preserved ${taskId} worktree into the configured worktrees directory: ${detail}`,
@@ -21506,7 +21556,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         await this.store.logEntry(
           taskId,
           `Preserved active conflicting worktree and retrying with fresh worktree branch ${suffixedBranch}`,
-          `${conflictPath} -> ${newPath}`,
+          `${conflictPath} -> ${newPath}`, this.runContextFor(taskId),
         );
         /*
          * FNXC:ExecutorWorktree 2026-07-01-00:00:
@@ -21561,7 +21611,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         await this.store.logEntry(
           taskId,
           `Refusing to create nested worktree`,
-          `target ${target} is inside registered worktree ${wt}`,
+          `target ${target} is inside registered worktree ${wt}`, this.runContextFor(taskId),
         );
         throw new NonRetryableWorktreeError(
           `Refusing to create worktree at ${target}: path is nested inside existing worktree ${wt}. ` +
@@ -21719,7 +21769,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       executorLog.warn(
         `[FN-5346] ${taskId}: dropped stale self-owned activeSessionRegistry entry before removeWorktree at ${worktreePath}`,
       );
-      await this.store.logEntry(taskId, "Cleared stale self-owned active-session entry before remove", worktreePath);
+      await this.store.logEntry(taskId, "Cleared stale self-owned active-session entry before remove", worktreePath, this.runContextFor(taskId));
     } else if (outcome.action === "process-active-refuses") {
       executorLog.warn(
         `[FN-5256] refused stale-self-owned reconcile for ${taskId}: process-active=true at ${worktreePath}`,
@@ -21727,7 +21777,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         "Refused stale self-owned reconcile — task still actively executing",
-        worktreePath,
+        worktreePath, this.runContextFor(taskId),
       ).catch(() => undefined);
     } else if (outcome.action === "too-recent-refuses") {
       executorLog.warn(
@@ -21736,7 +21786,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         `Refused stale self-owned reconcile — registration too recent (${outcome.ageMs}ms < ${outcome.minIdleMs}ms)`,
-        worktreePath,
+        worktreePath, this.runContextFor(taskId),
       ).catch(() => undefined);
     }
   }
@@ -21795,7 +21845,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           await this.store.logEntry(
             input.taskId,
             "Reconciled stale self-owned active-session registration (post-throw)",
-            input.worktreePath,
+            input.worktreePath, this.runContextFor(input.taskId),
           );
           await removeWorktree(removeArgs);
           return;
@@ -21827,7 +21877,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     if (activeOwner !== null) {
       const refusalMessage = `[FN-4811] Refused to remove worktree ${worktreePath}: actively owned by ${activeOwner} (requested by ${taskId})`;
       executorLog.warn(refusalMessage);
-      await this.store.logEntry(taskId, `Refused to remove conflicting worktree — actively owned by another task`, `${worktreePath} (owner: ${activeOwner})`);
+      await this.store.logEntry(taskId, `Refused to remove conflicting worktree — actively owned by another task`, `${worktreePath} (owner: ${activeOwner})`, this.runContextFor(taskId));
       return false;
     }
 
@@ -21837,7 +21887,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         await execAsync(`git worktree unlock "${worktreePath}"`, {
           cwd: this.rootDir,
         });
-        await this.store.logEntry(taskId, `Unlocked worktree`, worktreePath);
+        await this.store.logEntry(taskId, `Unlocked worktree`, worktreePath, this.runContextFor(taskId));
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         executorLog.warn(`${taskId}: failed to unlock conflicting worktree ${worktreePath} before cleanup: ${msg}`);
@@ -21851,14 +21901,14 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         taskId,
         reason: RemovalReason.ExecutorDispose,
       });
-      await this.store.logEntry(taskId, `Removed conflicting worktree`, worktreePath);
+      await this.store.logEntry(taskId, `Removed conflicting worktree`, worktreePath, this.runContextFor(taskId));
 
       // Delete the branch if it exists
       try {
         await execAsync(`git branch -D "${branch}"`, {
           cwd: this.rootDir,
         });
-        await this.store.logEntry(taskId, `Deleted branch`, branch);
+        await this.store.logEntry(taskId, `Deleted branch`, branch, this.runContextFor(taskId));
         // FN-2165 regression guard: null baseBranch on any task that stored this branch
         await this.store.clearStaleExecutionStartBranchReferences([branch], taskId);
       } catch (err: unknown) {
@@ -21922,7 +21972,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           await this.store.logEntry(
             taskId,
             `Refused stale-path cleanup — path is not a safe orphan (registered=${stillRegistered}, owner=${activeOwner ?? "none"})`,
-            worktreePath,
+            worktreePath, this.runContextFor(taskId),
           );
           return false;
         }
@@ -21955,14 +22005,14 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         await this.store.logEntry(
           taskId,
           `Cleaned up stale conflicting worktree (no live worktree at path — pruned admin entry and removed orphan directory)`,
-          worktreePath,
+          worktreePath, this.runContextFor(taskId),
         );
         return true;
       }
       await this.store.logEntry(
         taskId,
         `Failed to clean up conflicting worktree`,
-        `${worktreePath}: ${errorMessage}`,
+        `${worktreePath}: ${errorMessage}`, this.runContextFor(taskId),
       );
       return false;
     }
@@ -21985,7 +22035,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     // Step 1: Prune stale worktree metadata that may hold a lock on the branch
     try {
       await execAsync("git worktree prune", { cwd: this.rootDir });
-      await this.store.logEntry(taskId, `Pruned stale worktree metadata`, branch);
+      await this.store.logEntry(taskId, `Pruned stale worktree metadata`, branch, this.runContextFor(taskId));
     } catch {
       // Prune is best-effort — continue even if it fails
     }
@@ -21995,7 +22045,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await execAsync(`git branch -D "${branch}"`, {
         cwd: this.rootDir,
       });
-      await this.store.logEntry(taskId, `Removed stale branch`, branch);
+      await this.store.logEntry(taskId, `Removed stale branch`, branch, this.runContextFor(taskId));
       // FN-2165 regression guard: null baseBranch on any task that stored this branch
       try { await this.store.clearStaleExecutionStartBranchReferences([branch], taskId); } catch { /* best-effort */ }
       return true;
@@ -22004,7 +22054,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         `git branch -D failed for stale branch, trying update-ref`,
-        `${branch}: ${branchDeleteErrorMessage}`,
+        `${branch}: ${branchDeleteErrorMessage}`, this.runContextFor(taskId),
       );
     }
 
@@ -22014,7 +22064,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await execAsync(`git update-ref -d "${refPath}"`, {
         cwd: this.rootDir,
       });
-      await this.store.logEntry(taskId, `Force-removed stale branch reference via update-ref`, refPath);
+      await this.store.logEntry(taskId, `Force-removed stale branch reference via update-ref`, refPath, this.runContextFor(taskId));
       // FN-2165 regression guard: null baseBranch on any task that stored this branch
       try { await this.store.clearStaleExecutionStartBranchReferences([branch], taskId); } catch { /* best-effort */ }
       return true;
@@ -22023,7 +22073,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       await this.store.logEntry(
         taskId,
         `Failed to remove stale branch reference`,
-        `${branch}: ${updateRefErrorMessage}`,
+        `${branch}: ${updateRefErrorMessage}`, this.runContextFor(taskId),
       );
       return false;
     }
@@ -22195,7 +22245,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         try {
           await this.store.logEntry(
             taskId,
-            `Step ${i} (${stepName}) recovered as done on resume — code review had already approved before the engine stopped`,
+            `Step ${i} (${stepName}) recovered as done on resume — code review had already approved before the engine stopped`, undefined, this.runContextFor(taskId),
           );
           await this.store.updateStep(taskId, i, "done");
           recovered++;
@@ -22314,7 +22364,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         taskId,
         `Reconciled Step ${stepIndex} as done from git history (resume)`,
         undefined,
-        this.getRunContextFor(taskId),
+        this.runContextFor(taskId),
       );
       executorLog.log(`${taskId}: reconciled Step ${stepIndex} as done from git history`);
     }
@@ -22324,7 +22374,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       const updated = await this.store.getTask(taskId);
       const lowestPending = updated.steps.findIndex((s) => s.status === "pending" || s.status === "in-progress");
       if (lowestPending >= 0 && lowestPending !== updated.currentStep) {
-        await this.store.updateTask(taskId, { currentStep: lowestPending });
+        await this.store.updateTask(taskId, { currentStep: lowestPending }, this.runContextFor(taskId));
         executorLog.log(`${taskId}: set currentStep to ${lowestPending} after step reconciliation`);
       }
     }
@@ -22392,20 +22442,20 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       const firstPendingStep = refreshedTask.steps.findIndex((s) => s.status === "pending");
       const newCurrentStep = firstPendingStep >= 0 ? firstPendingStep : 0;
       if (newCurrentStep !== prevCurrentStep) {
-        await this.store.updateTask(task.id, { currentStep: newCurrentStep });
+        await this.store.updateTask(task.id, { currentStep: newCurrentStep }, this.runContextFor(task.id));
         executorLog.log(
           `${task.id}: reset currentStep to ${newCurrentStep} after lost-work reset (was ${prevCurrentStep})`,
         );
         await this.store.logEntry(
           task.id,
-          `Reset currentStep to ${newCurrentStep} after lost-work step reset (was ${prevCurrentStep})`,
+          `Reset currentStep to ${newCurrentStep} after lost-work step reset (was ${prevCurrentStep})`, undefined, this.runContextFor(task.id),
         );
       }
     }
 
     await this.store.logEntry(
       task.id,
-      `Reset ${completedStepCount} step(s) to pending — ${reason} (uncommitted work lost with worktree)`,
+      `Reset ${completedStepCount} step(s) to pending — ${reason} (uncommitted work lost with worktree)`, undefined, this.runContextFor(task.id),
     );
   }
 
@@ -22480,12 +22530,12 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           if (this.workspaceConfig && !worktreePath) {
             await this.store.logEntry(
               taskId,
-              `workspace task ${taskId}: no singular worktree to force-requeue (per-repo teardown is Phase B)`,
+              `workspace task ${taskId}: no singular worktree to force-requeue (per-repo teardown is Phase B)`, undefined, this.runContextFor(taskId),
             );
           }
           await this.store.logEntry(
             taskId,
-            `Force-kill cleanup starting after stuck-kill unwind timeout — reaping in-flight surfaces and worktree`,
+            `Force-kill cleanup starting after stuck-kill unwind timeout — reaping in-flight surfaces and worktree`, undefined, this.runContextFor(taskId),
           );
 
           // Spawned children must be terminated before the canonical reaper clears
@@ -22524,7 +22574,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
               cleanupFailed = true;
               const cleanupErrMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
               executorLog.warn(`${taskId}: worktree removal failed during force-requeue cleanup (${worktreePath}): ${cleanupErrMessage}`);
-              await this.store.logEntry(taskId, `Force-kill cleanup failed to remove worktree ${worktreePath}: ${cleanupErrMessage}`);
+              await this.store.logEntry(taskId, `Force-kill cleanup failed to remove worktree ${worktreePath}: ${cleanupErrMessage}`, undefined, this.runContextFor(taskId));
             }
           }
 
@@ -22532,15 +22582,15 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
 
           await this.store.logEntry(
             taskId,
-            `Force-requeued after stuck-kill: executor did not unwind within ${FORCE_REQUEUE_GRACE_MS / 1000}s (hung subprocess)${preserveProgress ? " — progress preserved" : ""}`,
+            `Force-requeued after stuck-kill: executor did not unwind within ${FORCE_REQUEUE_GRACE_MS / 1000}s (hung subprocess)${preserveProgress ? " — progress preserved" : ""}`, undefined, this.runContextFor(taskId),
           );
           await this.store.updateTask(taskId, {
             status: "queued",
             error: null,
             worktree: null,
             branch: null,
-          });
-          await this.store.moveTask(taskId, await resolveReboundColumnFor(this.store, taskId), preserveProgress ? { preserveProgress: true } : undefined);
+          }, this.runContextFor(taskId));
+          await this.store.moveTask(taskId, await resolveReboundColumnFor(this.store, taskId), preserveProgress ? { preserveProgress: true } : undefined, this.runContextFor(taskId));
           // Remove from executing only after the hung surfaces and worktree have
           // been reaped, preventing a scheduler re-dispatch onto stale resources.
           this.executing.delete(taskId);
@@ -22551,13 +22601,13 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
             taskId,
             cleanupFailed
               ? "Force-kill cleanup completed with non-fatal worktree removal failure — task requeued"
-              : "Force-kill cleanup completed — in-flight surfaces reaped and task requeued",
+              : "Force-kill cleanup completed — in-flight surfaces reaped and task requeued", undefined, this.runContextFor(taskId),
           );
           executorLog.log(`${taskId} force-requeued to todo after stuck-kill cleanup`);
         } catch (err: unknown) {
           const errorMessage = err instanceof Error ? err.message : String(err);
           executorLog.error(`Failed to force-requeue stuck task ${taskId}: ${errorMessage}`);
-          await this.store.logEntry(taskId, `Force-kill cleanup failed during stuck-kill force-requeue: ${errorMessage}`).catch(() => undefined);
+          await this.store.logEntry(taskId, `Force-kill cleanup failed during stuck-kill force-requeue: ${errorMessage}`, undefined, this.runContextFor(taskId)).catch(() => undefined);
         }
       }, FORCE_REQUEUE_GRACE_MS);
     }
@@ -22599,7 +22649,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     // Attempt compaction
     const attempt = (state?.attempts ?? 0) + 1;
     executorLog.log(`${taskId} loop detected (attempt ${attempt}) — attempting compact-and-resume`);
-    await this.store.logEntry(taskId, `Loop detected (${event.activitySinceProgress} events since last progress) — attempting compact-and-resume (attempt ${attempt})`);
+    await this.store.logEntry(taskId, `Loop detected (${event.activitySinceProgress} events since last progress) — attempting compact-and-resume (attempt ${attempt})`, undefined, this.runContextFor(taskId));
 
     let compactionTimedOut = false;
     let compactionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -22631,18 +22681,18 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         ? `Context compaction timed out after ${LOOP_COMPACTION_TIMEOUT_MS / 1000}s`
         : "Context compaction failed or unavailable";
       executorLog.log(`${taskId} ${reason.toLowerCase()} — falling back to kill/requeue`);
-      await this.store.logEntry(taskId, `${reason} — falling back to kill/requeue`);
+      await this.store.logEntry(taskId, `${reason} — falling back to kill/requeue`, undefined, this.runContextFor(taskId));
       return false;
     }
 
     if (this.activeSessions.get(taskId)?.session !== activeEntry.session) {
       executorLog.log(`${taskId} compaction completed after session changed — falling back to kill/requeue`);
-      await this.store.logEntry(taskId, "Context compaction completed after session changed — falling back to kill/requeue");
+      await this.store.logEntry(taskId, "Context compaction completed after session changed — falling back to kill/requeue", undefined, this.runContextFor(taskId));
       return false;
     }
 
     executorLog.log(`${taskId} compaction succeeded (freed ${compactResult.tokensBefore} tokens) — setting recovery-pending`);
-    await this.store.logEntry(taskId, `Context compacted successfully — will resume with fresh context`);
+    await this.store.logEntry(taskId, `Context compacted successfully — will resume with fresh context`, undefined, this.runContextFor(taskId));
 
     // FN-5168: once loop recovery has fired in this execute() lifecycle,
     // ignored fn_task_update rebuffs can be promoted to no-progress churn.
@@ -23008,7 +23058,7 @@ Child agent: ${agent.id} (${name})`;
             fallbackProvider: childExecutorFallback.provider,
             fallbackModelId: childExecutorFallback.modelId,
             fallbackThinkingLevel: resolveExecutorFallbackThinkingLevel(undefined, settings),
-            runAuditor: createRunAuditor(this.store, this.getRunContextFor(taskId)),
+            runAuditor: createRunAuditor(this.store, this.runContextFor(taskId)),
             settings,
             taskEnv,
             mcpServers: await this.resolveMcpServers(agent.id),

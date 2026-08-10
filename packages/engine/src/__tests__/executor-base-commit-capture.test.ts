@@ -4,6 +4,8 @@ import { TaskExecutor } from "../executor.js";
 import { executorLog } from "../logger.js";
 import type { Task } from "@fusion/core";
 import { createMockStore, mockedExec, mockedExecSync, resetExecutorMocks } from "./executor-test-helpers.js";
+/* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): the executor threads a real mutation context to every store call, so these assertions pin it rather than dropping the argument. */
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -37,7 +39,7 @@ describe("captureBaseCommitSha", () => {
 
     await (executor as any).captureBaseCommitSha(makeTask(), "/tmp/test/.worktrees/fn-4383", audit);
 
-    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "abc1234" });
+    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "abc1234" }, ANY_MUTATION_CONTEXT);
     expect(audit.git).toHaveBeenCalledWith(expect.objectContaining({ metadata: { purpose: "base", preserved: false } }));
   });
 
@@ -79,7 +81,7 @@ describe("captureBaseCommitSha", () => {
       { isResume: false },
     );
 
-    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "freshmainSHA" });
+    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "freshmainSHA" }, ANY_MUTATION_CONTEXT);
     expect(audit.git).toHaveBeenCalledWith(
       expect.objectContaining({ metadata: { purpose: "base", preserved: false } }),
     );
@@ -101,7 +103,7 @@ describe("captureBaseCommitSha", () => {
 
     await (executor as any).captureBaseCommitSha(makeTask({ baseCommitSha: "stale999" }), "/tmp/test/.worktrees/fn-4383", audit);
 
-    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "new456" });
+    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "new456" }, ANY_MUTATION_CONTEXT);
   });
 
   it("preserves prior merge base on resume for FN-4309/FN-4383 multi-session regression", async () => {
@@ -136,7 +138,7 @@ describe("captureBaseCommitSha", () => {
 
     await (executor as any).captureBaseCommitSha(makeTask(), "/tmp/test/.worktrees/fn-4383", audit);
 
-    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "head777" });
+    expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "head777" }, ANY_MUTATION_CONTEXT);
     expect(vi.mocked(executorLog.warn)).toHaveBeenCalledWith(expect.stringContaining("falling back to HEAD"));
   });
 });

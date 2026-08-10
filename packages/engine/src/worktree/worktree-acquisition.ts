@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import {acquireWorktreePathReservation, canonicalizeWorktreePath, UNATTRIBUTED_MUTATION_CONTEXT, type RunMutationContext, type Settings, type Task, type TaskStore, type SecretsStore} from "@fusion/core";
+import {acquireWorktreePathReservation, canonicalizeWorktreePath, type RunMutationContext, type Settings, type Task, type TaskStore, type SecretsStore} from "@fusion/core";
 import { generateWorktreeName, resolveTaskWorkingBranch, slugify } from "./worktree-names.js";
 import { resolveTaskWorktreePathForBackend, resolveWorktreesDir } from "./worktree-paths.js";
 import { hydrateWorktreeDb } from "./worktree-db-hydrate.js";
@@ -61,7 +61,16 @@ export interface AcquireTaskWorktreeOptions {
   pool?: WorktreePool;
   logger?: { log: (m: string) => void; warn: (m: string) => void; debug?: (m: string) => void; error?: (m: string) => void };
   audit?: Pick<RunAuditor, "git" | "filesystem">;
-  runContext?: RunMutationContext;
+  /*
+  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C — required, not optional):
+  Stage B left this optional and resolved a single unattributed marker inside `acquireTaskWorktree`,
+  because `executor.ts` was the one caller that could not supply a context. Stage C threaded the
+  executor's run carrier, so every caller can — and the option is now REQUIRED. That is the whole
+  point of the staging: an optional context turns ~45 downstream writes in this file into writes an
+  unwired caller can silently leave unattributed, and only a required parameter makes that a compile
+  error instead.
+  */
+  runContext: RunMutationContext;
   runInitCommand?: boolean;
   secretsStore?: Pick<SecretsStore, "listEnvExportable">;
   createWorktree?: (
@@ -213,19 +222,13 @@ async function pinnedWorktreeBranchMatches(rootDir: string, worktreePath: string
 }
 
 export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Promise<AcquireTaskWorktreeResult> {
-  const { task, rootDir, store, settings, pool, logger, audit, runContext: providedRunContext, createWorktree, runConfiguredCommand, runInitCommand, taskEnv, secretsStore } = opts;
   /*
-  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage B):
+  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C):
   This file already threaded `runContext` end to end; what U18 changed is that the store now REFUSES
-  an absent one. The option stays optional because its callers differ in what they can supply — the
-  merge lane and the heartbeat always have a run context, while `executor.ts` reads its own
-  `currentRunContexts` map and legitimately misses. So the whole file resolves ONCE, here, and the
-  ~45 downstream writes take the resolved value. The single marker is deliberate and is Stage C's
-  work list: the executor is where a missing run carrier gets threaded, and no other caller can reach
-  this fallback. Inventing a lane actor here instead would attribute a human-triggered or executor
-  worktree acquisition to a fictional "worktree" agent.
+  an absent one, and what Stage C changed is that the caller can no longer omit it. The ~45
+  downstream writes take the caller's context directly — there is no local fallback left to resolve.
   */
-  const runContext = providedRunContext ?? UNATTRIBUTED_MUTATION_CONTEXT;
+  const { task, rootDir, store, settings, pool, logger, audit, runContext, createWorktree, runConfiguredCommand, runInitCommand, taskEnv, secretsStore } = opts;
   const refreshExistingWorktree = async (path: string): Promise<WorktreeBaseRefreshResult | undefined> => {
     if (!opts.refreshStaleBase) return undefined;
     const refresh = await refreshReusedWorktreeBase({ task, rootDir, worktreePath: path, store, settings, audit, logger, runContext });
@@ -962,7 +965,10 @@ export interface AcquireWorkspaceRepoWorktreeOptions {
   logger?: { log: (m: string) => void; warn: (m: string) => void; error?: (m: string) => void };
   secretsStore?: Pick<SecretsStore, "listEnvExportable">;
   audit?: Pick<RunAuditor, "git" | "filesystem">;
-  runContext?: RunMutationContext;
+  /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): required for the same reason as
+     `AcquireTaskWorktreeOptions.runContext` — the sole context-less caller was
+     `fn_acquire_repo_worktree`, built by `executor.ts`, which now carries a run context. */
+  runContext: RunMutationContext;
   /** Test seam: inject the path-keyed exclusivity registry (defaults to the process singleton). */
   registry?: ActiveSessionRegistry;
   runConfiguredCommand?: AcquireTaskWorktreeOptions["runConfiguredCommand"];
@@ -997,10 +1003,7 @@ const WORKSPACE_REPO_ACQUIRE_OWNER_KEY = "workspace-repo-acquire";
 export async function acquireWorkspaceRepoWorktree(
   opts: AcquireWorkspaceRepoWorktreeOptions,
 ): Promise<{ worktreePath: string; branch: string; baseCommitSha?: string; alreadyAcquired: boolean }> {
-  const { repoRelPath, workspaceRootDir, task, store, settings, logger, secretsStore, audit, runContext: providedRunContext, runConfiguredCommand, taskEnv } = opts;
-  /* FNXC:Identity 2026-08-09-03:04 (U18 Stage B): same single-resolution shape as `acquireTaskWorktree`; the
-     per-repo workspace path is reached from `fn_workspace_repo_acquire`, whose actor arrives with U11. */
-  const runContext = providedRunContext ?? UNATTRIBUTED_MUTATION_CONTEXT;
+  const { repoRelPath, workspaceRootDir, task, store, settings, logger, secretsStore, audit, runContext, runConfiguredCommand, taskEnv } = opts;
   const registry = opts.registry ?? activeSessionRegistry;
   const { join, isAbsolute, normalize, sep } = await import("node:path");
 
