@@ -195,6 +195,18 @@ export async function reviewStep(
   baseline?: string,
   options: ReviewOptions = {},
 ): Promise<ReviewResult> {
+  /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2, hoisted again in Stage B): one reviewer run context for
+     the WHOLE function, not just the session block. The pause-gate, skip, and failure paths write to
+     the task log before a reviewer session is ever created, and those writes have the same actor as
+     the session's own — the reviewer lane, or the explicitly routed `options.agentId`. Declaring it
+     at function scope is what lets every one of them say so instead of writing unattributed. */
+  const reviewerRunContext: EngineRunContext = {
+    runId: generateSyntheticRunId("reviewer", options.taskId ?? "review"),
+    agentId: options.agentId ?? "reviewer",
+    taskId: options.taskId,
+    phase: "review",
+    source: "reviewer",
+  };
   // Pause gate: do not spawn a reviewer subprocess while the engine is paused.
   // Re-read settings from the store so a stale `options.settings` snapshot can't
   // leak a reviewer past a pause that flipped on after the parent agent started.
@@ -222,7 +234,7 @@ export async function reviewStep(
       try {
         await options.store.logEntry(
           options.taskId,
-          `${reviewType} review skipped — ${reason} active`,
+          `${reviewType} review skipped — ${reason} active`, undefined, toRunMutationContext(reviewerRunContext),
         );
       } catch {
         // best-effort
@@ -442,7 +454,7 @@ export async function reviewStep(
     if (options.store && options.taskId) {
       await options.store.logEntry(
         options.taskId,
-        `${reviewType} review aborted before spawn — ${reason} active`,
+        `${reviewType} review aborted before spawn — ${reason} active`, undefined, toRunMutationContext(reviewerRunContext),
       ).catch(() => undefined);
     }
     return {
@@ -474,19 +486,10 @@ export async function reviewStep(
         options.onText?.(delta);
       }
     };
-    /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2): hoisted so run-audit and the fallback observer's
-       task-log write name the SAME reviewer run. Derived attribution. */
-    const reviewerRunContext: EngineRunContext = {
-      runId: generateSyntheticRunId("reviewer", options.taskId ?? "review"),
-      agentId: options.agentId ?? "reviewer",
-      taskId: options.taskId,
-      phase: "review",
-      source: "reviewer",
-    };
     const runAuditor = options.store ? createRunAuditor(options.store, reviewerRunContext) : undefined;
     const reviewCustomTools = [
       createWebFetchTool(),
-      ...(canWritePromptInline && options.store && options.taskId ? [createTaskPromptWriteTool(options.store, options.taskId)] : []),
+      ...(canWritePromptInline && options.store && options.taskId ? [createTaskPromptWriteTool(options.store, options.taskId, toRunMutationContext(reviewerRunContext))] : []),
       ...(memoryTools ?? []),
     ];
 
@@ -551,7 +554,7 @@ export async function reviewStep(
     reviewerLog.log(`${taskId}: reviewer using model ${reviewerModelDetails}`);
     if (options.store && options.taskId && reviewerModelMarker !== lastEmittedModelMarker) {
       lastEmittedModelMarker = reviewerModelMarker;
-      await options.store.logEntry(options.taskId, reviewerModelMarker);
+      await options.store.logEntry(options.taskId, reviewerModelMarker, undefined, toRunMutationContext(reviewerRunContext));
       await options.store.appendAgentLog(options.taskId, reviewerModelMarker, "status", undefined, "reviewer").catch(() => undefined);
     }
 
@@ -607,7 +610,7 @@ export async function reviewStep(
           : `${reviewType} review hit context limit — retrying with compacted request`;
         reviewerLog.warn(`${taskId}: ${retryLogMessage}`);
         if (options.store && options.taskId && retrySettings && typeof options.store.getTask === "function") {
-          await options.store.logEntry(options.taskId, retryLogMessage).catch(() => undefined);
+          await options.store.logEntry(options.taskId, retryLogMessage, undefined, toRunMutationContext(reviewerRunContext)).catch(() => undefined);
           const taskForRetry = await options.store.getTask(options.taskId);
           await recordRetry({
             store: options.store,
@@ -682,7 +685,7 @@ export async function reviewStep(
         const message = `${reviewType} review hit a transient network error — retry ${attempt}/${REVIEWER_TRANSIENT_MAX_RETRIES} in ${Math.round(delayMs / 1000)}s: ${error.message}`;
         reviewerLog.warn(`${taskId}: ${message}`);
         if (options.store && options.taskId) {
-          void options.store.logEntry(options.taskId, message).catch(() => undefined);
+          void options.store.logEntry(options.taskId, message, undefined, toRunMutationContext(reviewerRunContext)).catch(() => undefined);
         }
       },
     });
@@ -693,7 +696,7 @@ export async function reviewStep(
     const message = `${reviewType} review retry with fallback model after ${reason} (${mode})`;
     reviewerLog.warn(`${taskId}: ${message}`);
     if (options.store && options.taskId) {
-      await options.store.logEntry(options.taskId, message).catch(() => undefined);
+      await options.store.logEntry(options.taskId, message, undefined, toRunMutationContext(reviewerRunContext)).catch(() => undefined);
     }
   };
 
@@ -706,7 +709,7 @@ export async function reviewStep(
     if (!options.store || !options.taskId || typeof options.store.updateTask !== "function") {
       return;
     }
-    await options.store.updateTask(options.taskId, { reviewerFallbackRetryCount: 0 }).catch(() => undefined);
+    await options.store.updateTask(options.taskId, { reviewerFallbackRetryCount: 0 }, toRunMutationContext(reviewerRunContext)).catch(() => undefined);
   };
 
   let firstAttempt: { verdict: ReviewVerdict; summary: string; review: string };
@@ -726,7 +729,7 @@ export async function reviewStep(
       const escalationMessage = `${reviewType} review could not reach the model (${classification}) — escalating to the engine retry path: ${providerErrorMessage}`;
       reviewerLog.warn(`${taskId}: ${escalationMessage}`);
       if (options.store && options.taskId) {
-        await options.store.logEntry(options.taskId, escalationMessage).catch(() => undefined);
+        await options.store.logEntry(options.taskId, escalationMessage, undefined, toRunMutationContext(reviewerRunContext)).catch(() => undefined);
       }
       throw new ReviewerProviderError(providerErrorMessage, classification, {
         cause: err,

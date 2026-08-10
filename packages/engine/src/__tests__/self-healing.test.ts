@@ -8,6 +8,7 @@ and, because the converted sweeps resolve intake by ROLE, would have quietly
 asserted that the sweeps do nothing.
 */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 /*
 FNXC:Identity 2026-08-09-03:04 (U18/KTD2):
 These call-arg assertions now include the mutation context the converted sweep passes.
@@ -6231,9 +6232,8 @@ describe("SelfHealingManager", () => {
       expect(result).toBe(1);
       expect(store.updateTask).toHaveBeenCalledWith(
         "FN-350",
-        expect.objectContaining({ paused: false, status: null, error: null, mergeRetries: 0 }),
-      );
-      expect(store.moveTask).toHaveBeenCalledWith("FN-350", "done", expect.objectContaining({ moveSource: "engine" }));
+        expect.objectContaining({ paused: false, status: null, error: null, mergeRetries: 0 }), ANY_MUTATION_CONTEXT);
+      expect(store.moveTask).toHaveBeenCalledWith("FN-350", "done", expect.objectContaining({ moveSource: "engine" }), ANY_MUTATION_CONTEXT);
       expect(store.logEntry).toHaveBeenCalledWith(
         "FN-350",
         expect.stringContaining("Auto-finalized from in-review: content proven"), undefined, UNATTRIBUTED_MUTATION_CONTEXT,
@@ -6290,9 +6290,8 @@ describe("SelfHealingManager", () => {
       expect(result).toBe(1);
       expect(store.updateTask).toHaveBeenCalledWith(
         "FN-352",
-        expect.objectContaining({ paused: false, status: null, error: null, mergeRetries: 0 }),
-      );
-      expect(store.moveTask).toHaveBeenCalledWith("FN-352", "done", expect.objectContaining({ moveSource: "engine" }));
+        expect.objectContaining({ paused: false, status: null, error: null, mergeRetries: 0 }), ANY_MUTATION_CONTEXT);
+      expect(store.moveTask).toHaveBeenCalledWith("FN-352", "done", expect.objectContaining({ moveSource: "engine" }), ANY_MUTATION_CONTEXT);
 
       managerWithRecovery.stop();
     });
@@ -6325,7 +6324,7 @@ describe("SelfHealingManager", () => {
       expect(store.updateTask).toHaveBeenCalledWith("FN-353", {
         status: "failed",
         error: "Merge confirmed but finalization blocked: task has incomplete steps",
-      });
+      }, ANY_MUTATION_CONTEXT);
       expect(store.logEntry).toHaveBeenCalledWith(
         "FN-353",
         expect.stringContaining("finalization blocked"), undefined, UNATTRIBUTED_MUTATION_CONTEXT,
@@ -6361,9 +6360,8 @@ describe("SelfHealingManager", () => {
       expect(result).toBe(1);
       expect(store.updateTask).toHaveBeenCalledWith(
         "FN-354",
-        expect.objectContaining({ paused: false, status: null, error: null, mergeRetries: 0 }),
-      );
-      expect(store.moveTask).toHaveBeenCalledWith("FN-354", "done", expect.objectContaining({ moveSource: "engine" }));
+        expect.objectContaining({ paused: false, status: null, error: null, mergeRetries: 0 }), ANY_MUTATION_CONTEXT);
+      expect(store.moveTask).toHaveBeenCalledWith("FN-354", "done", expect.objectContaining({ moveSource: "engine" }), ANY_MUTATION_CONTEXT);
 
       managerWithRecovery.stop();
     });
@@ -6407,13 +6405,11 @@ describe("SelfHealingManager", () => {
       expect(result).toBe(1);
       expect(store.updateTask).toHaveBeenCalledWith(
         "FN-6897",
-        expect.objectContaining({ status: null, error: null, blockedBy: null, overlapBlockedBy: null, mergeRetries: 0 }),
-      );
+        expect.objectContaining({ status: null, error: null, blockedBy: null, overlapBlockedBy: null, mergeRetries: 0 }), ANY_MUTATION_CONTEXT);
       expect(store.moveTask).toHaveBeenCalledWith(
         "FN-6897",
         "done",
-        expect.objectContaining({ moveSource: "engine", recoveryRehome: true }),
-      );
+        expect.objectContaining({ moveSource: "engine", recoveryRehome: true }), ANY_MUTATION_CONTEXT);
       expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
         mutationType: "task:auto-merge-finalize-column-mismatch-reconciled",
         metadata: expect.objectContaining({ previousColumn: "todo", overlapBlockedBy: "FN-ACTIVE", commitSha: "landed123" }),
@@ -12641,7 +12637,7 @@ describe("stranded AI merge clean-room recovery", () => {
     }
 
     expect(testStore.enqueueMergeQueue).not.toHaveBeenCalled();
-    expect(testStore.moveTask).toHaveBeenCalledWith("FN-5858", "done", expect.anything());
+    expect(testStore.moveTask).toHaveBeenCalledWith("FN-5858", "done", expect.anything(), ANY_MUTATION_CONTEXT);
     expect(testStore.updateTask).toHaveBeenCalledWith("FN-5858", expect.objectContaining({
       mergeRetries: 0,
       mergeDetails: expect.objectContaining({
@@ -12649,7 +12645,7 @@ describe("stranded AI merge clean-room recovery", () => {
         mergeConfirmed: true,
         landedFiles: ["Packages/Editor/file.ts"],
       }),
-    }));
+    }), ANY_MUTATION_CONTEXT);
     expect(testStore.logEntry).toHaveBeenCalledWith(
       "FN-5858",
       expect.stringContaining("Auto-recovered stranded AI merge clean-room commit dddddddd"), undefined, UNATTRIBUTED_MUTATION_CONTEXT,

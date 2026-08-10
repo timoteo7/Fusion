@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import {acquireWorktreePathReservation, canonicalizeWorktreePath, type RunMutationContext, type Settings, type Task, type TaskStore, type SecretsStore} from "@fusion/core";
+import {acquireWorktreePathReservation, canonicalizeWorktreePath, UNATTRIBUTED_MUTATION_CONTEXT, type RunMutationContext, type Settings, type Task, type TaskStore, type SecretsStore} from "@fusion/core";
 import { generateWorktreeName, resolveTaskWorkingBranch, slugify } from "./worktree-names.js";
 import { resolveTaskWorktreePathForBackend, resolveWorktreesDir } from "./worktree-paths.js";
 import { hydrateWorktreeDb } from "./worktree-db-hydrate.js";
@@ -160,7 +160,8 @@ async function maybeWarnForeignTaskStartPoint(
     taskId: string;
     logger?: { warn: (m: string) => void };
     store: TaskStore;
-    runContext?: RunMutationContext;
+    /** FNXC:Identity 2026-08-09-03:04 (U18 Stage B): required — the only caller resolves it first. */
+    runContext: RunMutationContext;
   },
 ): Promise<void> {
   const { baseBranch, rootDir, worktreePath, taskId, logger, store, runContext } = input;
@@ -212,10 +213,22 @@ async function pinnedWorktreeBranchMatches(rootDir: string, worktreePath: string
 }
 
 export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Promise<AcquireTaskWorktreeResult> {
-  const { task, rootDir, store, settings, pool, logger, audit, runContext, createWorktree, runConfiguredCommand, runInitCommand, taskEnv, secretsStore } = opts;
+  const { task, rootDir, store, settings, pool, logger, audit, runContext: providedRunContext, createWorktree, runConfiguredCommand, runInitCommand, taskEnv, secretsStore } = opts;
+  /*
+  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage B):
+  This file already threaded `runContext` end to end; what U18 changed is that the store now REFUSES
+  an absent one. The option stays optional because its callers differ in what they can supply — the
+  merge lane and the heartbeat always have a run context, while `executor.ts` reads its own
+  `currentRunContexts` map and legitimately misses. So the whole file resolves ONCE, here, and the
+  ~45 downstream writes take the resolved value. The single marker is deliberate and is Stage C's
+  work list: the executor is where a missing run carrier gets threaded, and no other caller can reach
+  this fallback. Inventing a lane actor here instead would attribute a human-triggered or executor
+  worktree acquisition to a fictional "worktree" agent.
+  */
+  const runContext = providedRunContext ?? UNATTRIBUTED_MUTATION_CONTEXT;
   const refreshExistingWorktree = async (path: string): Promise<WorktreeBaseRefreshResult | undefined> => {
     if (!opts.refreshStaleBase) return undefined;
-    const refresh = await refreshReusedWorktreeBase({ task, rootDir, worktreePath: path, store, settings, audit, logger });
+    const refresh = await refreshReusedWorktreeBase({ task, rootDir, worktreePath: path, store, settings, audit, logger, runContext });
     if (!refresh.executionSafe) {
       await audit?.git({ type: refresh.kind === "stale-base-conflict" ? "worktree:base-refresh-conflict" : "worktree:base-refresh-blocked", target: path, metadata: { taskId: task.id, outcome: refresh.kind } });
       await store.logEntry(task.id, `Worktree base refresh blocked execution (${refresh.kind})`, refresh.detail, runContext);
@@ -318,7 +331,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
       });
       logger?.log(`${task.id}: assigned worktree is not usable; creating a fresh worktree instead: ${worktreePath}`);
       await store.logEntry(task.id, "Assigned worktree is not a registered, usable git worktree; creating a fresh worktree instead", worktreePath, runContext);
-      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null });
+      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null }, runContext);
       const fallbackName = generateWorktreeName(rootDir, settings);
       worktreePath = await resolveTaskWorktreePathForBackend(rootDir, fallbackName, settings, backend, branchName);
       isResume = false;
@@ -465,13 +478,13 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
      */
     if (isRepoRootPath(rootDir, created.path)) {
       await emitRepoRootReturnGuardAudit(created.path, source);
-      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null });
+      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null }, runContext);
       throw new RepoRootWorktreeError(task.id, rootDir, created.path, `fresh-create:${logOrigin}`);
     }
 
     worktreePath = created.path;
     branch = created.branch;
-    await store.updateTask(task.id, { worktree: created.path, branch: created.branch });
+    await store.updateTask(task.id, { worktree: created.path, branch: created.branch }, runContext);
     await audit?.git({ type: "worktree:create", target: created.path, metadata: { branch: created.branch, source: logOrigin === "return-guard" ? "acquire-return-guard" : undefined } });
     await audit?.git({ type: "branch:create", target: created.branch });
     if (created.branch !== branchName) {
@@ -542,7 +555,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
     await emitRepoRootReturnGuardAudit(guardedPath, source);
     logger?.warn(`${task.id}: acquisition ${source} returned repo root; clearing assignment and creating a fresh worktree`);
     await store.logEntry(task.id, "Acquisition attempted to return the project root as a task worktree; creating a fresh worktree instead", guardedPath, runContext);
-    await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null });
+    await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null }, runContext);
     const fallbackName = generateWorktreeName(rootDir, settings);
     const fallbackPath = await resolveTaskWorktreePathForBackend(rootDir, fallbackName, settings, backend, branchName);
     const created = await createWorktreeImpl(branchName, fallbackPath, task.id, freshStartPoint, allowSiblingBranchRename);
@@ -597,7 +610,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
         metadata: { taskId: task.id, previous: task.worktree, derived: pinnedPath, source: "acquire" },
       });
       await store.logEntry(task.id, "Re-derived task-pinned worktree path from task id", `${task.worktree} -> ${pinnedPath}`, runContext);
-      await store.updateTask(task.id, { worktree: pinnedPath });
+      await store.updateTask(task.id, { worktree: pinnedPath }, runContext);
     }
 
     worktreePath = pinnedPath;
@@ -618,7 +631,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
          * was already correct.
          */
         if (task.worktree !== pinnedPath || task.branch !== resumedBranch) {
-          await store.updateTask(task.id, { worktree: pinnedPath, branch: resumedBranch });
+          await store.updateTask(task.id, { worktree: pinnedPath, branch: resumedBranch }, runContext);
         }
         return reuseWarmWorktree(pinnedPath, resumedBranch, "existing");
       }
@@ -668,7 +681,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
         }
       }
       // The removed worktree's session cannot resume into a fresh checkout — clear it so the executor starts clean.
-      await store.updateTask(task.id, { sessionFile: null });
+      await store.updateTask(task.id, { sessionFile: null }, runContext);
     }
 
     const created = await createWorktreeImpl(branchName, pinnedPath, task.id, freshStartPoint, allowSiblingBranchRename);
@@ -780,7 +793,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
           });
           acquiredFromPool = true;
           logger?.log(`Acquired worktree from pool: ${worktreePath}`);
-          await store.updateTask(task.id, { worktree: worktreePath, branch });
+          await store.updateTask(task.id, { worktree: worktreePath, branch }, runContext);
           await audit?.git({ type: "worktree:reuse", target: worktreePath, metadata: { branch, reclaimed: prepared.reclaimed } });
           if (prepared.reclaimed) {
             await store.logEntry(task.id, `Acquired reclaimed worktree from pool: ${worktreePath} (${prepared.strandedCommitCount ?? 0} commits preserved)`, undefined, runContext);
@@ -876,7 +889,8 @@ async function verifyResumeBranchNotMisbound(input: {
   store: TaskStore;
   audit?: Pick<RunAuditor, "git" | "filesystem">;
   logger?: { log?: (msg: string) => void; warn?: (msg: string) => void };
-  runContext: RunMutationContext | undefined;
+  /** FNXC:Identity 2026-08-09-03:04 (U18 Stage B): required — both callers sit below the single resolution point above. */
+  runContext: RunMutationContext;
 }): Promise<void> {
   const { worktreePath, branchName, taskId, rootDir, store, audit, logger, runContext } = input;
 
@@ -983,7 +997,10 @@ const WORKSPACE_REPO_ACQUIRE_OWNER_KEY = "workspace-repo-acquire";
 export async function acquireWorkspaceRepoWorktree(
   opts: AcquireWorkspaceRepoWorktreeOptions,
 ): Promise<{ worktreePath: string; branch: string; baseCommitSha?: string; alreadyAcquired: boolean }> {
-  const { repoRelPath, workspaceRootDir, task, store, settings, logger, secretsStore, audit, runContext, runConfiguredCommand, taskEnv } = opts;
+  const { repoRelPath, workspaceRootDir, task, store, settings, logger, secretsStore, audit, runContext: providedRunContext, runConfiguredCommand, taskEnv } = opts;
+  /* FNXC:Identity 2026-08-09-03:04 (U18 Stage B): same single-resolution shape as `acquireTaskWorktree`; the
+     per-repo workspace path is reached from `fn_workspace_repo_acquire`, whose actor arrives with U11. */
+  const runContext = providedRunContext ?? UNATTRIBUTED_MUTATION_CONTEXT;
   const registry = opts.registry ?? activeSessionRegistry;
   const { join, isAbsolute, normalize, sep } = await import("node:path");
 
@@ -1240,7 +1257,7 @@ export async function acquireWorkspaceRepoWorktree(
     the standard chip — the blank/wrong-card state U10 prevents. Nulling them here
     keeps `task.worktree` null for the workspace task's whole lifetime.
     */
-    await store.updateTask(task.id, { workspaceWorktrees: updated, worktree: null, branch: null });
+    await store.updateTask(task.id, { workspaceWorktrees: updated, worktree: null, branch: null }, runContext);
 
     return { worktreePath: result.worktreePath, branch: result.branch, baseCommitSha, alreadyAcquired: false };
   } catch (err) {

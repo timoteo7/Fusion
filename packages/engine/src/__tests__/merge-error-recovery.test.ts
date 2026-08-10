@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 import type { Settings, Task } from "@fusion/core";
 
 const testState = vi.hoisted(() => {
@@ -343,8 +344,8 @@ describe("ProjectEngine merge error recovery", () => {
       mergeRetries: 0,
       error: null,
       mergeConflictBounceCount: 1,
-    });
-    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "in-progress");
+    }, ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "in-progress", undefined, ANY_MUTATION_CONTEXT);
     expect(store.addTaskComment).toHaveBeenCalledWith(
       TASK_ID,
       expect.stringContaining("Bouncing back to in-progress"),
@@ -353,8 +354,7 @@ describe("ProjectEngine merge error recovery", () => {
     expect(store.logEntry).toHaveBeenCalledWith(
       TASK_ID,
       expect.stringContaining("bounced to in-progress"),
-      "MergeConflictBounce",
-    );
+      "MergeConflictBounce", ANY_MUTATION_CONTEXT);
     expect(hasErrorLog(errorSpy, "failed to bounce")).toBe(false);
   });
 
@@ -395,7 +395,7 @@ describe("ProjectEngine merge error recovery", () => {
     expect(store.updateTask).toHaveBeenCalledWith(TASK_ID, {
       mergeTransientRetryCount: 1,
       status: null,
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(store.updateTask).not.toHaveBeenCalledWith(
       TASK_ID,
       expect.objectContaining({ status: "failed" }),
@@ -425,12 +425,11 @@ describe("ProjectEngine merge error recovery", () => {
       status: "failed",
       mergeRetries: 3,
       error: "socket hang up",
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(store.logEntry).toHaveBeenCalledWith(
       TASK_ID,
       expect.stringContaining("transient retries exhausted"),
-      "MergeTransientRetryExhausted",
-    );
+      "MergeTransientRetryExhausted", ANY_MUTATION_CONTEXT);
   });
 
   it("stores terminal merge metadata for non-conflict direct merge errors", async () => {
@@ -446,7 +445,7 @@ describe("ProjectEngine merge error recovery", () => {
       status: "failed",
       mergeRetries: 3,
       error: "remote branch missing",
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(store.updateTask).not.toHaveBeenCalledWith(
       TASK_ID,
       expect.objectContaining({ mergeTransientRetryCount: expect.any(Number) }),
@@ -478,11 +477,10 @@ describe("ProjectEngine merge error recovery", () => {
     expect(store.updateTask).toHaveBeenCalledWith(TASK_ID, {
       status: "failed",
       error: "Merge confirmed but finalization blocked: task has incomplete steps",
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(store.logEntry).toHaveBeenCalledWith(
       TASK_ID,
-      expect.stringContaining("finalization blocked"),
-    );
+      expect.stringContaining("finalization blocked"), undefined, ANY_MUTATION_CONTEXT);
   });
 
   it("auto-finalizes paused+failed merge-confirmed tasks by clearing soft blockers", async () => {
@@ -502,9 +500,8 @@ describe("ProjectEngine merge error recovery", () => {
 
     expect(store.updateTask).toHaveBeenCalledWith(
       TASK_ID,
-      expect.objectContaining({ paused: false, status: null, error: null }),
-    );
-    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "done", expect.objectContaining({ moveSource: "engine" }));
+      expect.objectContaining({ paused: false, status: null, error: null }), ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "done", expect.objectContaining({ moveSource: "engine" }), ANY_MUTATION_CONTEXT);
   });
 
   it("auto-finalizes merge-confirmed tasks with stale transient merging status", async () => {
@@ -523,9 +520,8 @@ describe("ProjectEngine merge error recovery", () => {
 
     expect(store.updateTask).toHaveBeenCalledWith(
       TASK_ID,
-      expect.objectContaining({ paused: false, status: null, error: null }),
-    );
-    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "done", expect.objectContaining({ moveSource: "engine" }));
+      expect.objectContaining({ paused: false, status: null, error: null }), ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "done", expect.objectContaining({ moveSource: "engine" }), ANY_MUTATION_CONTEXT);
     expect(store.updateTask).not.toHaveBeenCalledWith(
       TASK_ID,
       expect.objectContaining({
@@ -560,17 +556,14 @@ describe("ProjectEngine merge error recovery", () => {
     });
     expect(store.updateTask).toHaveBeenCalledWith(
       TASK_ID,
-      expect.objectContaining({ status: null, error: null, blockedBy: null, overlapBlockedBy: null }),
-    );
+      expect.objectContaining({ status: null, error: null, blockedBy: null, overlapBlockedBy: null }), ANY_MUTATION_CONTEXT);
     expect(store.moveTask).toHaveBeenCalledWith(
       TASK_ID,
       "done",
-      expect.objectContaining({ moveSource: "engine", recoveryRehome: true }),
-    );
+      expect.objectContaining({ moveSource: "engine", recoveryRehome: true }), ANY_MUTATION_CONTEXT);
     expect(store.logEntry).toHaveBeenCalledWith(
       TASK_ID,
-      expect.stringContaining("Auto-merge finalization repaired column mismatch"),
-    );
+      expect.stringContaining("Auto-merge finalization repaired column mismatch"), undefined, ANY_MUTATION_CONTEXT);
     expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       domain: "database",
       mutationType: "task:auto-merge-finalize-column-mismatch-reconciled",
@@ -621,7 +614,7 @@ describe("ProjectEngine merge error recovery", () => {
     expect(store.updateTask).toHaveBeenCalledWith(TASK_ID, {
       mergeTransientRetryCount: 1,
       status: null,
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(store.updateTask).not.toHaveBeenCalledWith(
       TASK_ID,
       expect.objectContaining({ status: "failed" }),
@@ -654,7 +647,7 @@ describe("ProjectEngine merge error recovery", () => {
       status: "failed",
       mergeRetries: 3,
       error: "PR API timeout",
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(hasErrorLog(errorSpy, `failed to update ${TASK_ID} after merge strategy error`)).toBe(
       true,
     );
@@ -702,8 +695,7 @@ describe("ProjectEngine merge error recovery", () => {
     expect(store.logEntry).toHaveBeenCalledWith(
       TASK_ID,
       expect.stringContaining("[verification] post-finalize verification failed for already-on-main fast-path; no action"),
-      "VerificationError",
-    );
+      "VerificationError", ANY_MUTATION_CONTEXT);
     expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       domain: "database",
       mutationType: "task:post-finalize-verification-no-op",
@@ -737,12 +729,11 @@ describe("ProjectEngine merge error recovery", () => {
       mergeRetries: 0,
       error: null,
       verificationFailureCount: 1,
-    });
-    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "in-progress");
+    }, ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "in-progress", undefined, ANY_MUTATION_CONTEXT);
     expect(store.logEntry).toHaveBeenCalledWith(
       TASK_ID,
-      "Deterministic test verification failed (1/3) — moved back to in-progress with status=merging-fix for remediation",
-    );
+      "Deterministic test verification failed (1/3) — moved back to in-progress with status=merging-fix for remediation", undefined, ANY_MUTATION_CONTEXT);
     expect(logSpy).toHaveBeenCalledWith(
       `Auto-merge: ${TASK_ID} deterministic test verification failed (1/3) — moved to in-progress with status=merging-fix`,
     );
@@ -791,8 +782,8 @@ describe("ProjectEngine merge error recovery", () => {
       mergeRetries: 0,
       error: null,
       verificationFailureCount: 2,
-    });
-    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "in-progress");
+    }, ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith(TASK_ID, "in-progress", undefined, ANY_MUTATION_CONTEXT);
   });
 
 

@@ -1,6 +1,7 @@
 // -nocheck
 /* eslint-disable -eslint/no-unused-vars */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 import "./executor-test-helpers.js";
 import { AgentSemaphore } from "../concurrency/concurrency.js";
 import { detectReviewHandoffIntent, determineRevisionResetStart } from "../executor.js";
@@ -338,7 +339,7 @@ describe("Workflow Steps Execution", () => {
       sessionFile: null,
       recoveryRetryCount: 1,
       nextRecoveryAt: expect.any(String),
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(store.updateTask).toHaveBeenCalledWith("FN-ASSISTANT-STALE", {
       sessionFile: null,
       status: null,
@@ -398,7 +399,7 @@ describe("Workflow Steps Execution", () => {
       error: "Cannot continue from message role: assistant",
       recoveryRetryCount: null,
       nextRecoveryAt: null,
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(store.moveTask).not.toHaveBeenCalledWith("FN-ASSISTANT-STALE-EXHAUSTED", "todo", expect.anything());
     expect(onError).toHaveBeenCalledOnce();
   });

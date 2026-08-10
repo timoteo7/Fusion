@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterAll } from "vitest";
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -412,9 +413,8 @@ describe("runAiMerge", () => {
       expect.objectContaining({
         status: null,
         mergeDetails: expect.objectContaining({ mergeConfirmed: true }),
-      }),
-    );
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+      }), ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
     expect(emitted.some((e) => e.event === "task:merged")).toBe(true);
   });
 
@@ -614,9 +614,8 @@ describe("runAiMerge", () => {
           noOpMerge: true,
           noOpReason: "no-net-changes",
         }),
-      }),
-    );
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+      }), ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("short-circuits a zero-commits-ahead branch before the clean-room/merge-agent churn (empty-branch wedge)", async () => {
@@ -642,7 +641,7 @@ describe("runAiMerge", () => {
     expect(result.noOp).toBe(true);
     expect(result.merged).toBe(false);
     expect(git(dir, "rev-parse main")).toBe(mainBefore);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("demotes a no-commits task with skipped-out work instead of AI empty-merge finalizing done", async () => {
@@ -673,13 +672,12 @@ describe("runAiMerge", () => {
     expect(result.error).toContain("skipped verification step");
     expect(task.column).toBe("todo");
     expect(task.error).toContain("skipped verification step");
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }), ANY_MUTATION_CONTEXT);
     expect(store.moveTask).not.toHaveBeenCalledWith("FN-1", "done");
     expect(store.logEntry).toHaveBeenCalledWith(
       "FN-1",
       expect.stringContaining("Finalize blocked (no-commits incomplete-work guard)"),
-      expect.stringContaining("ai-empty-merge"),
-    );
+      expect.stringContaining("ai-empty-merge"), ANY_MUTATION_CONTEXT);
     expect(git(dir, "rev-parse main")).toBe(mainBefore);
   });
 
@@ -713,7 +711,7 @@ describe("runAiMerge", () => {
     expect(result.noOp).toBe(false);
     expect(result.error).toContain("Testing & Verification");
     expect(task.column).toBe("todo");
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }), ANY_MUTATION_CONTEXT);
     expect(store.moveTask).not.toHaveBeenCalledWith("FN-1", "done");
     expect(git(dir, "rev-parse main")).toBe(mainBefore);
   });
@@ -738,7 +736,7 @@ describe("runAiMerge", () => {
     expect(result.noOp).toBe(true);
     expect(result.ok).toBe(true);
     expect(task.column).toBe("done");
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("finalizes a verified intentional no-op instead of bouncing it back to todo", async () => {
@@ -766,8 +764,7 @@ describe("runAiMerge", () => {
     expect(store.moveTask).toHaveBeenCalledWith(
       "FN-1",
       "done",
-      expect.objectContaining({ moveSource: "engine", preserveProgress: true }),
-    );
+      expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
     expect(store.moveTask).not.toHaveBeenCalledWith(
       "FN-1",
       "todo",
@@ -808,7 +805,7 @@ describe("runAiMerge", () => {
     expect(result.error).toContain("operator review required");
     expect(task.column).toBe("todo");
     expect(task.error).toContain("operator review required");
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }), ANY_MUTATION_CONTEXT);
     expect(store.moveTask).not.toHaveBeenCalledWith("FN-1", "done");
     expect(store.recordRunAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({ mutationType: "task:empty-merge-finalize-blocked-no-landed-proof" }),
@@ -838,7 +835,7 @@ describe("runAiMerge", () => {
     expect(store.recordRunAuditEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ mutationType: "task:empty-merge-finalize-blocked-no-landed-proof" }),
     );
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("still finalizes an empty branch as no-op when the branch tip is already an ancestor of main", async () => {
@@ -926,13 +923,12 @@ describe("runAiMerge", () => {
     expect(result.merged).toBe(false);
     expect(result.noOp).toBe(false);
     expect(task.column).toBe("todo");
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({ preserveProgress: true, moveSource: "engine" }), ANY_MUTATION_CONTEXT);
     expect(store.moveTask).not.toHaveBeenCalledWith("FN-1", "done", expect.anything());
     expect(store.logEntry).toHaveBeenCalledWith(
       "FN-1",
       expect.stringContaining("Finalize blocked (overseer failed-executor veto)"),
-      expect.stringContaining("ai-empty-merge"),
-    );
+      expect.stringContaining("ai-empty-merge"), ANY_MUTATION_CONTEXT);
     expect(auditDb.some((e: any) => e.mutationType === "overseer:no-op-finalize-vetoed-failed-executor")).toBe(true);
     expect(git(dir, "rev-parse main")).toBe(mainBefore);
   });
@@ -976,8 +972,7 @@ describe("runAiMerge", () => {
     expect(store.logEntry).toHaveBeenCalledWith(
       "FN-1",
       expect.stringContaining("Finalize blocked (overseer failed-executor veto)"),
-      expect.stringContaining("ai-empty-merge"),
-    );
+      expect.stringContaining("ai-empty-merge"), ANY_MUTATION_CONTEXT);
     expect(git(dir, "rev-parse main")).toBe(mainBefore);
   });
 
@@ -1012,7 +1007,7 @@ describe("runAiMerge", () => {
 
     expect(result.noOp).toBe(true);
     expect(task.column).toBe("done");
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("fails loudly when an executed, never-merged task has no branch (possible lost work)", async () => {
@@ -1056,9 +1051,8 @@ describe("runAiMerge", () => {
           mergeConfirmed: true,
           noOpMerge: true,
         }),
-      }),
-    );
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+      }), ANY_MUTATION_CONTEXT);
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("finalizes as a no-op when an already-merged task's branch is gone (re-process)", async () => {
@@ -1069,7 +1063,7 @@ describe("runAiMerge", () => {
       mergeAgent: vi.fn(), reviewAgent: vi.fn(),
     });
     expect(result.noOp).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("finalizes as a no-op when a never-executed task has no branch", async () => {
@@ -1080,7 +1074,7 @@ describe("runAiMerge", () => {
       mergeAgent: vi.fn(), reviewAgent: vi.fn(),
     });
     expect(result.noOp).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }));
+    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "done", expect.objectContaining({ moveSource: "engine", preserveProgress: true }), ANY_MUTATION_CONTEXT);
   });
 
   it("throws a clear error when the task's target branch has no local ref", async () => {

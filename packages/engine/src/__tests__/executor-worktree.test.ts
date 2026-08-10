@@ -1,6 +1,7 @@
 // -nocheck
 /* eslint-disable -eslint/no-unused-vars */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 import "./executor-test-helpers.js";
 import { AgentSemaphore } from "../concurrency/concurrency.js";
 import { detectReviewHandoffIntent, determineRevisionResetStart } from "../executor.js";
@@ -145,7 +146,7 @@ describe("TaskExecutor with semaphore", () => {
     // attempts" / "fails fast when rootDir not git" tests, which assert failed without any in-review
     // move). The protected invariant here is unchanged: an execution throw marks the task failed with an
     // error message and fires onError.
-    expect(store.updateTask).toHaveBeenCalledWith("FN-001", { status: "failed", error: expect.any(String) });
+    expect(store.updateTask).toHaveBeenCalledWith("FN-001", { status: "failed", error: expect.any(String) }, ANY_MUTATION_CONTEXT);
     expect(store.moveTask).not.toHaveBeenCalledWith("FN-001", "in-review");
     expect(onError).toHaveBeenCalled();
   });
@@ -389,7 +390,7 @@ describe("TaskExecutor worktree naming", () => {
     expect(store.updateTask).toHaveBeenCalledWith("FN-030", {
       worktree: "/tmp/test/.worktrees/swift-falcon",
       branch: "fusion/fn-030",
-    });
+    }, ANY_MUTATION_CONTEXT);
     expect(mockedGenerateWorktreeName).toHaveBeenCalledWith("/tmp/test", expect.any(Object));
   });
 
@@ -470,7 +471,7 @@ describe("TaskExecutor worktree naming", () => {
 
     await executor.execute(makeTask("FN-032", stalePath));
 
-    expect(store.updateTask).toHaveBeenCalledWith("FN-032", expect.objectContaining({ worktree: null, branch: null }));
+    expect(store.updateTask).toHaveBeenCalledWith("FN-032", expect.objectContaining({ worktree: null, branch: null }), ANY_MUTATION_CONTEXT);
     expect(mockedGenerateWorktreeName).toHaveBeenCalledWith("/tmp/test", expect.any(Object));
     const worktreeAddCalls = mockedExecSync.mock.calls.filter(
       (call) => typeof call[0] === "string" && call[0].includes("git worktree add"),
@@ -497,7 +498,7 @@ describe("TaskExecutor worktree naming", () => {
       expect(store.updateTask).toHaveBeenCalledWith("FN-042", {
         worktree: "/tmp/test/.worktrees/fn-042",
         branch: "fusion/fn-042",
-      });
+      }, ANY_MUTATION_CONTEXT);
       // Should NOT call generateWorktreeName when using task-id
       expect(mockedGenerateWorktreeName).not.toHaveBeenCalled();
     });
@@ -531,7 +532,7 @@ describe("TaskExecutor worktree naming", () => {
       expect(store.updateTask).toHaveBeenCalledWith("FN-043", {
         worktree: `/tmp/test/.worktrees/${expectedSlug}`,
         branch: "fusion/fn-043",
-      });
+      }, ANY_MUTATION_CONTEXT);
       expect(mockedGenerateWorktreeName).not.toHaveBeenCalled();
     });
 
@@ -565,7 +566,7 @@ describe("TaskExecutor worktree naming", () => {
       expect(store.updateTask).toHaveBeenCalledWith("FN-044", {
         worktree: `/tmp/test/.worktrees/${expectedSlug}`,
         branch: "fusion/fn-044",
-      });
+      }, ANY_MUTATION_CONTEXT);
     });
 
     it("uses generateWorktreeName when worktreeNaming is 'random'", async () => {
@@ -586,7 +587,7 @@ describe("TaskExecutor worktree naming", () => {
       expect(store.updateTask).toHaveBeenCalledWith("FN-045", {
         worktree: "/tmp/test/.worktrees/swift-falcon",
         branch: "fusion/fn-045",
-      });
+      }, ANY_MUTATION_CONTEXT);
       expect(mockedGenerateWorktreeName).toHaveBeenCalledWith("/tmp/test", expect.any(Object));
     });
 
@@ -608,7 +609,7 @@ describe("TaskExecutor worktree naming", () => {
       expect(store.updateTask).toHaveBeenCalledWith("FN-046", {
         worktree: "/tmp/test/.worktrees/swift-falcon",
         branch: "fusion/fn-046",
-      });
+      }, ANY_MUTATION_CONTEXT);
       expect(mockedGenerateWorktreeName).toHaveBeenCalledWith("/tmp/test", expect.any(Object));
     });
 
@@ -644,7 +645,7 @@ describe("TaskExecutor worktree naming", () => {
       expect(store.updateTask).toHaveBeenCalledWith("FN-047", {
         worktree: "/tmp/test/.worktrees/swift-falcon",
         branch: "fusion/fn-047",
-      });
+      }, ANY_MUTATION_CONTEXT);
       expect(mockedGenerateWorktreeName).toHaveBeenCalledWith("/tmp/test", expect.any(Object));
     });
   });
@@ -1543,8 +1544,7 @@ describe("TaskExecutor worktree recovery", () => {
     expect(activeSessionRegistry.lookupByPath(conflictPath)?.kind).toBe("workflow-step");
     expect(store.updateTask).toHaveBeenCalledWith(
       "FN-050",
-      expect.objectContaining({ worktree: freshPath, branch: "fusion/fn-050-2" }),
-    );
+      expect.objectContaining({ worktree: freshPath, branch: "fusion/fn-050-2" }), ANY_MUTATION_CONTEXT);
     const logMessages = store.logEntry.mock.calls.map((call: any[]) => String(call[1] ?? ""));
     expect(logMessages.some((message: string) => message.includes("automatic cleanup failed"))).toBe(false);
   });
@@ -1692,8 +1692,7 @@ describe("TaskExecutor worktree recovery", () => {
 
       expect(store.updateTask).toHaveBeenCalledWith(
         "FN-050",
-        expect.objectContaining({ status: "failed", error: expect.stringContaining("index.lock") }),
-      );
+        expect.objectContaining({ status: "failed", error: expect.stringContaining("index.lock") }), ANY_MUTATION_CONTEXT);
       expect(mockedTryRemoveStaleLock).not.toHaveBeenCalled();
     });
   });
@@ -2340,7 +2339,7 @@ describe("TaskExecutor dependency-based worktree creation", () => {
     expect(store.updateTask).toHaveBeenCalledWith("FN-065", {
       status: "failed",
       error: expect.stringContaining("automatic cleanup failed"),
-    });
+    }, ANY_MUTATION_CONTEXT);
   });
 
   it("passes baseBranch to pool prepareForTask when using pooled worktree", async () => {
@@ -2486,7 +2485,7 @@ describe("TaskExecutor dependency-based worktree creation", () => {
     expect(store.updateTask).toHaveBeenCalledWith("FN-066", {
       worktree: "/tmp/test/.worktrees/idle-wt",
       branch: "fusion/fn-066-2",
-    });
+    }, ANY_MUTATION_CONTEXT);
   });
 });
 
@@ -2615,7 +2614,7 @@ describe("TaskExecutor worktree pool integration", () => {
     const executor = new TaskExecutor(store, "/tmp/test", { pool });
     await executor.execute(makeTask());
 
-    expect(store.updateTask).toHaveBeenCalledWith("FN-020", { baseCommitSha: "newbase123" });
+    expect(store.updateTask).toHaveBeenCalledWith("FN-020", { baseCommitSha: "newbase123" }, ANY_MUTATION_CONTEXT);
   });
 
   it("creates fresh worktree when pool is empty", async () => {
@@ -2778,8 +2777,7 @@ describe("TaskExecutor worktree pool integration", () => {
       expect.objectContaining({
         status: "failed",
         paused: true,
-      }),
-    );
+      }), ANY_MUTATION_CONTEXT);
     expect(store.moveTask).toHaveBeenCalledWith(
       "FN-020",
       "todo",

@@ -33,6 +33,7 @@ multi-column query option plus a resolved union across live workflows — a shar
 49 call sites, which is a coordinator-level call.
 */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 import { EventEmitter } from "node:events";
 import type { Settings, Task, TaskStore } from "@fusion/core";
 import { getTaskHardMergeBlocker, resolveLifecycleColumns } from "@fusion/core";
@@ -853,7 +854,7 @@ describe("self-healing sweeps are bounded by a hardcoded column QUERY, not by th
 
     await new SelfHealingManager(store, { rootDir: "/repo" }).recoverStaleMergingStatus();
 
-    expect(updateTask).toHaveBeenCalledWith("FN-STALESTAMP", expect.objectContaining({ status: null }));
+    expect(updateTask).toHaveBeenCalledWith("FN-STALESTAMP", expect.objectContaining({ status: null }), ANY_MUTATION_CONTEXT);
   });
   it("does not clear a merge stamp on a card outside the RENAMED review lanes", async () => {
     /*
@@ -1001,7 +1002,7 @@ describe("self-healing sweeps are bounded by a hardcoded column QUERY, not by th
 
     await new SelfHealingManager(store, { rootDir: "/repo" }).recoverPostDoneNonContinuableWedge();
 
-    expect(updateTask).toHaveBeenCalledWith("FN-WEDGE", expect.objectContaining({ status: null, error: null }));
+    expect(updateTask).toHaveBeenCalledWith("FN-WEDGE", expect.objectContaining({ status: null, error: null }), ANY_MUTATION_CONTEXT);
   });
   it("does not clear a wedge for a card sitting in a lane that is NOT a review lane", async () => {
     /*
@@ -1053,7 +1054,7 @@ describe("self-healing sweeps are bounded by a hardcoded column QUERY, not by th
 
     await new SelfHealingManager(store, { rootDir: "/repo" }).clearStaleBlockedBy();
 
-    expect(updateTask).toHaveBeenCalledWith("FN-STUCK", expect.objectContaining({ blockedBy: null }));
+    expect(updateTask).toHaveBeenCalledWith("FN-STUCK", expect.objectContaining({ blockedBy: null }), ANY_MUTATION_CONTEXT);
   });
   it("leaves blockedBy alone while the blocker is still in flight on a RENAMED board", async () => {
     /*
@@ -1224,7 +1225,7 @@ describe("self-healing sweeps are bounded by a hardcoded column QUERY, not by th
 
     await new SelfHealingManager(store, { rootDir: "/repo" }).reconcileCompletedTask("FN-DONE");
 
-    expect(updateTask).toHaveBeenCalledWith("FN-WAITING", expect.objectContaining({ blockedBy: null }));
+    expect(updateTask).toHaveBeenCalledWith("FN-WAITING", expect.objectContaining({ blockedBy: null }), ANY_MUTATION_CONTEXT);
   });
   it("does not release a dependent blocked on a DIFFERENT task", async () => {
     /*
@@ -1356,7 +1357,7 @@ describe("self-healing sweeps are bounded by a hardcoded column QUERY, not by th
 
     await new SelfHealingManager(store, { rootDir: "/repo" }).reconcileStaleMergerStatus();
 
-    expect(updateTask).toHaveBeenCalledWith("FN-STALEMERGE", expect.objectContaining({ status: null }));
+    expect(updateTask).toHaveBeenCalledWith("FN-STALEMERGE", expect.objectContaining({ status: null }), ANY_MUTATION_CONTEXT);
   });
   it("leaves a card with no stale merging status alone", async () => {
     /*
@@ -1773,7 +1774,7 @@ describe("self-healing sweeps are bounded by a hardcoded column QUERY, not by th
 
     await new SelfHealingManager(store, { rootDir: "/repo" }).recoverMisclassifiedFailures();
 
-    expect(updateTask).toHaveBeenCalledWith("FN-MISCLASS", expect.objectContaining({ status: null, error: null }));
+    expect(updateTask).toHaveBeenCalledWith("FN-MISCLASS", expect.objectContaining({ status: null, error: null }), ANY_MUTATION_CONTEXT);
   });
   it("does not clear the same failure for a card in the RENAMED wip lane", async () => {
     /*

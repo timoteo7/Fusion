@@ -20,6 +20,8 @@
  */
 
 import { AsyncMissionStore, resolveTaskLifecycleColumns } from "@fusion/core";
+/* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage B): mutation-context constructors for this lane. */
+import { mutationContextForAgent } from "@fusion/core";
 import type {
   TaskStore,
   MissionStore,
@@ -340,7 +342,7 @@ export class MissionAutopilot {
       const failedTask = await this.taskStore.getTask(taskId).catch(() => null);
       if (failedTask?.error && isOperatorActionableAgentError(failedTask.error)) {
         await this.missionStore.updateFeatureStatus(feature.id, "blocked");
-        await this.taskStore.updateTask(taskId, { status: "failed", paused: true });
+        await this.taskStore.updateTask(taskId, { status: "failed", paused: true }, mutationContextForAgent("mission-autopilot"));
         await this.logMissionEventSafe(
           missionId,
           "error",
@@ -360,7 +362,7 @@ export class MissionAutopilot {
 
       if (retryCount > maxRetries) {
         await this.missionStore.updateFeatureStatus(feature.id, "blocked");
-        await this.taskStore.updateTask(taskId, { status: "failed", paused: true });
+        await this.taskStore.updateTask(taskId, { status: "failed", paused: true }, mutationContextForAgent("mission-autopilot"));
         await this.logMissionEventSafe(
           missionId,
           "error",
@@ -411,10 +413,10 @@ export class MissionAutopilot {
         return;
       }
       if (task?.column !== holdColumn) {
-        await this.taskStore.moveTask(taskId, holdColumn);
+        await this.taskStore.moveTask(taskId, holdColumn, undefined, mutationContextForAgent("mission-autopilot"));
       }
 
-      await this.taskStore.updateTask(taskId, { error: null, status: null, paused: false });
+      await this.taskStore.updateTask(taskId, { error: null, status: null, paused: false }, mutationContextForAgent("mission-autopilot"));
     } catch (err) {
       autopilotLog.error(`Error handling task failure for ${taskId}:`, err);
     }
