@@ -17,7 +17,7 @@ import { getUnmetSchedulingDependencies } from "./scheduler.js";
 import type { ImplementationExit, ImplementationExitReporter } from "./executor/implementation-exit.js";
 import { emitWorkflowLifecycleEvent } from "@fusion/core";
 // FNXC:Authorization 2026-08-09-03:04: discriminant for the graph-failure message carve-out below.
-import { PERMISSION_DENIED_ERROR_CODE, actorContextForAgent } from "@fusion/core";
+import { PERMISSION_DENIED_ERROR_CODE, UNATTRIBUTED_MUTATION_CONTEXT, actorContextForAgent } from "@fusion/core";
 import { resolveTaskLifecycleColumns, resolveProjectColumnsForRoles, resolveWipTargetForTask, resolveTerminalColumns, RetryStormError, serializeRetryStormError, evaluateCompletedPromotionFailureProvenance, evaluateSkipBypassTaint, resolveWorkflowIrForTask, columnsWithFlag, evaluateForeachMergeProof, resolveCompleteColumn, resolveMergeOrchestrationColumn, resolveReboundTarget, resolveLifecycleColumns, resolveColumnAgentBinding, resolveEffectiveAgent, instanceNodeId, getWorkflowExtensionRegistry, getBuiltinWorkflow, parseNoOpCompletionMarker, allowsAutoMergeProcessing, hasUserAutoMergeHold, resolveEffectiveAutoMerge, isLiveSharedBranchGroupMemberIntegration, resolveMaxAutoMergeRetries, resolveMaxConsecutiveToolFailureRetries, resolveConsecutiveToolFailureRetryBackoffMs, resolveConsecutiveToolFailureThreshold, resolveExecutorEscalationTarget, resolveOptionalStepRevisionBudget, resolveOptionalReviewRevisionBudget, DEFAULT_MAX_POST_REVIEW_FIXES, COMPLETION_SUMMARY_NODE_ID, PLAN_REVIEW_GROUP_ID, upsertWorkflowStepResult, normalizeWorkflowReviewFindings, AWAITING_APPROVAL_PAUSE_REASON, THINKING_LEVELS, ACTIVE_WORKFLOW_WORK_ITEM_STATES, AgentStore, classifyWorkflowAgentNode, isWorkflowAgentRole, resolveExecutorFallbackModel, resolveValidatorFallbackModel, parseExplicitDuplicateMarker, nonExecutableDuplicateRedirectReason } from "@fusion/core";
 import {
   BLOCKED_THRASH_LIMIT,
@@ -2674,10 +2674,12 @@ export class TaskExecutor {
     const agentId = this.getRunContextFor(task.id)?.agentId;
     await this.generateCompletionFeatureVideo(task);
     if (reason.startsWith("workflow-")) {
+      // FNXC:Identity 2026-08-09-03:04 (U18/KTD2): derived — the executor holds a real per-task run
+      // context here (this is the same run that produced `runId`/`agentId` two lines above).
       await ensureWorkflowCompletionSummary(this.store, task as TaskDetail, {
         reason,
         runId,
-      }).catch((error: unknown) => {
+      }, this.getRunContextFor(task.id) ?? UNATTRIBUTED_MUTATION_CONTEXT).catch((error: unknown) => {
         executorLog.warn(`${task.id}: failed to record workflow completion summary: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
@@ -7551,6 +7553,10 @@ export class TaskExecutor {
       store: this.store,
       task,
       workflowRunId,
+      /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2): derived where the executor genuinely holds the
+         run for this task; the marker fallback is real, not defensive — `currentRunContexts` is
+         populated per active run, and a boundary built outside one has no actor to name. */
+      runContext: this.getRunContextFor(task.id) ?? UNATTRIBUTED_MUTATION_CONTEXT,
       markMoveInFlight: (taskId) => this.workflowLifecycleMovesInFlight.add(taskId),
       clearMoveInFlight: (taskId) => this.workflowLifecycleMovesInFlight.delete(taskId),
       onWarn: (message, detail) => {
@@ -8870,11 +8876,19 @@ export class TaskExecutor {
       workflowMoveSource: "workflow-graph",
       workflowMoveMetadata: metadata,
     };
+    /*
+    FNXC:Identity 2026-08-09-03:04 (U18/KTD2 — the seam restates the required context):
+    This inline widening re-declares `moveTask` with `options?: unknown` and NO context parameter.
+    Because it is an intersection over `this.store`, the narrow member wins at the call below, so a
+    lifecycle move made here would stay unattributed even after every other executor call site is
+    converted — a hole invisible to the census, inside the file that owns the most call sites. The
+    shape now mirrors the CANONICAL store arity so the widening cannot weaken the requirement.
+    */
     const storeWithMove = this.store as typeof this.store & {
-      moveTask?: (id: string, column: string, options?: unknown) => Promise<TaskDetail | undefined>;
+      moveTask?: (id: string, column: string, options: unknown | undefined, runContext: RunMutationContext) => Promise<TaskDetail | undefined>;
     };
     if (typeof storeWithMove.moveTask === "function") {
-      const moved = await storeWithMove.moveTask(live.id, targetColumn, moveOptions);
+      const moved = await storeWithMove.moveTask(live.id, targetColumn, moveOptions, this.getRunContextFor(live.id) ?? UNATTRIBUTED_MUTATION_CONTEXT);
       await this.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, this.getRunContextFor(live.id));
       return moved ?? { ...live, column: targetColumn };
     }
@@ -15130,6 +15144,8 @@ export class TaskExecutor {
               store: this.store,
               taskId: task.id,
               taskTitle: detail.title,
+              // FNXC:Identity 2026-08-09-03:04 (U18/KTD2): derived from the live executor run.
+              runContext: this.getRunContextFor(task.id) ?? UNATTRIBUTED_MUTATION_CONTEXT,
             }),
           });
           session = createdSession.session;

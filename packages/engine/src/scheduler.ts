@@ -1,3 +1,13 @@
+/*
+FNXC:Identity 2026-08-09-03:04 (U18/KTD2 — why every store mutation in this file carries the MARKER):
+The scheduler dispatches and re-blocks cards on a poll loop. Its writes are unattended system
+bookkeeping with no session, no request, and no acting agent — the agent ids in scope name the task's
+ASSIGNEE, i.e. the subject of the write, never its author. Deriving from those would produce audit
+rows claiming an agent blocked or unblocked itself. The marker records the truth (no actor resolved
+yet) and is counted by `unattributed-actor-census.test.ts`, so U13 inherits an explicit work list.
+Do NOT substitute a system-actor identity here: whether these lanes get one is U13's decision.
+*/
+import { UNATTRIBUTED_MUTATION_CONTEXT } from "@fusion/core";
 import {
   getCurrentRepo,
   computeBlockerFanoutMap,
@@ -1145,7 +1155,7 @@ export class Scheduler {
             lastDispatchAt: null,
             executeRequeueLoopCount: null,
             executeRequeueLoopSignature: null,
-          }).catch((error) => {
+          }, UNATTRIBUTED_MUTATION_CONTEXT).catch((error) => {
             schedulerLog.warn(`Failed to reset dispatch oscillation state for ${task.id} on move to ${to}: ${error instanceof Error ? error.message : String(error)}`);
           });
         }
@@ -1204,17 +1214,17 @@ export class Scheduler {
                   await this.store.updateTask(dependent.id, {
                     status: "queued",
                     blockedBy: unresolvedDeps[0],
-                  });
+                  }, UNATTRIBUTED_MUTATION_CONTEXT);
                   await this.store.logEntry(
                     dependent.id,
-                    `Auto-reblocked: unresolved dependency ${unresolvedDeps[0]} remains after ${task.id} reached ${to}`,
+                    `Auto-reblocked: unresolved dependency ${unresolvedDeps[0]} remains after ${task.id} reached ${to}`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
                   );
                 } else {
-                  await this.store.updateTask(dependent.id, { blockedBy: null, status: null });
+                  await this.store.updateTask(dependent.id, { blockedBy: null, status: null }, UNATTRIBUTED_MUTATION_CONTEXT);
                   const unblockMessage = currentlyBlockedByCompletedTask
                     ? `Auto-unblocked: blocker ${task.id} reached ${to}`
                     : `Auto-unblocked: blocker ${task.id} reached ${to} — all dependencies satisfied`;
-                  await this.store.logEntry(dependent.id, unblockMessage);
+                  await this.store.logEntry(dependent.id, unblockMessage, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
                 }
               } catch (error) {
                 schedulerLog.error(
@@ -1293,7 +1303,7 @@ export class Scheduler {
             lastDispatchAt: null,
             executeRequeueLoopCount: null,
             executeRequeueLoopSignature: null,
-          }).catch((error) => {
+          }, UNATTRIBUTED_MUTATION_CONTEXT).catch((error) => {
             schedulerLog.warn(`Failed to reset dispatch oscillation state for ${task.id} on unpause: ${error instanceof Error ? error.message : String(error)}`);
           });
         }
@@ -1479,17 +1489,17 @@ export class Scheduler {
                 await this.store.updateTask(dependent.id, {
                   blockedBy: nextBlocker,
                   status: "queued",
-                });
+                }, UNATTRIBUTED_MUTATION_CONTEXT);
                 await this.store.logEntry(
                   dependent.id,
-                  `Auto-reblocked (FN-5496): unresolved dependency ${nextBlocker} remains after blocker ${task.id} was soft-deleted`,
+                  `Auto-reblocked (FN-5496): unresolved dependency ${nextBlocker} remains after blocker ${task.id} was soft-deleted`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
                 );
               } else if (dependent.column === deletedParked.hold) {
-                await this.store.updateTask(dependent.id, { blockedBy: null, status: null });
-                await this.store.logEntry(dependent.id, `Auto-unblocked (FN-5496): blocker ${task.id} was soft-deleted`);
+                await this.store.updateTask(dependent.id, { blockedBy: null, status: null }, UNATTRIBUTED_MUTATION_CONTEXT);
+                await this.store.logEntry(dependent.id, `Auto-unblocked (FN-5496): blocker ${task.id} was soft-deleted`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
               } else {
-                await this.store.updateTask(dependent.id, { blockedBy: null });
-                await this.store.logEntry(dependent.id, `Auto-unblocked (FN-5496): blocker ${task.id} was soft-deleted`);
+                await this.store.updateTask(dependent.id, { blockedBy: null }, UNATTRIBUTED_MUTATION_CONTEXT);
+                await this.store.logEntry(dependent.id, `Auto-unblocked (FN-5496): blocker ${task.id} was soft-deleted`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
               }
             } catch (error) {
               schedulerLog.error(`Failed to reconcile dependent ${dependent.id} for soft-deleted blocker ${task.id}`, error);
@@ -1631,7 +1641,7 @@ export class Scheduler {
 
     this.clearDispatchQueuedReasonMemo(taskId);
     this.wasDispatchQueuedReasonLogged.add(key);
-    await this.store.logEntry(taskId, reason);
+    await this.store.logEntry(taskId, reason, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
     return true;
   }
 
@@ -1792,7 +1802,7 @@ export class Scheduler {
 
       const message = `Overlap bottleneck: ${blockerId} is currently blocking ${fanout.overlapBlockedTodoCount} todo task(s) via blockedBy (${state}).`;
       schedulerLog.warn(message);
-      await this.store.logEntry(blockerId, message);
+      await this.store.logEntry(blockerId, message, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
       this.lastHighOverlapFanoutWarningKey.set(blockerId, dedupeKey);
     }
 
@@ -2161,7 +2171,7 @@ export class Scheduler {
         const result = await this.store.renewSymbolLocks(symbols, task.id, SYMBOL_LOCK_LEASE_MS);
         if (result.lost.length > 0) {
           schedulerLog.warn(`Symbol-lock renewal lost ownership for ${task.id}: ${result.lost.join(", ")}`);
-          await this.store.logEntry(task.id, `symbol-lock renewal lost: ${result.lost.join(", ")}`);
+          await this.store.logEntry(task.id, `symbol-lock renewal lost: ${result.lost.join(", ")}`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
         }
       } catch (error) {
         // Do not abort capacity admission for unrelated tasks; the durable expiry
@@ -2438,7 +2448,7 @@ export class Scheduler {
               const milestone = slice ? await this.options.missionStore.getMilestone(slice.milestoneId) : undefined;
               const mission = milestone ? await this.options.missionStore.getMission(milestone.missionId) : undefined;
               if (mission?.status === "blocked") {
-                await this.store.updateTask(task.id, { status: "queued" });
+                await this.store.updateTask(task.id, { status: "queued" }, UNATTRIBUTED_MUTATION_CONTEXT);
                 await this.logDispatchQueuedReason(task.id, "queued — mission is blocked");
                 return null;
               }
@@ -2476,8 +2486,8 @@ export class Scheduler {
                 error,
                 recoveryRetryCount: null,
                 nextRecoveryAt: null,
-              });
-              await this.store.logEntry(task.id, error, validation.reason);
+              }, UNATTRIBUTED_MUTATION_CONTEXT);
+              await this.store.logEntry(task.id, error, validation.reason, UNATTRIBUTED_MUTATION_CONTEXT);
               return null;
             }
             const attempt = decision.nextState.recoveryRetryCount ?? MAX_RECOVERY_RETRIES;
@@ -2486,11 +2496,11 @@ export class Scheduler {
               error: null,
               recoveryRetryCount: decision.nextState.recoveryRetryCount,
               nextRecoveryAt: decision.nextState.nextRecoveryAt,
-            });
+            }, UNATTRIBUTED_MUTATION_CONTEXT);
             await this.store.logEntry(
               task.id,
               `Task rebounded to ${replanColumn} for re-specification — filesystem validation failed (attempt ${attempt}/${MAX_RECOVERY_RETRIES} in ${formatDelay(decision.delayMs)})`,
-              validation.reason,
+              validation.reason, UNATTRIBUTED_MUTATION_CONTEXT,
             );
             return null;
           }
@@ -2506,8 +2516,8 @@ export class Scheduler {
             if (staleness.isStale) {
               schedulerLog.warn(`Task ${task.id} specification is stale — ${staleness.reason}`);
               await moveTaskToReplanColumn(this.store, task);
-              await this.store.updateTask(task.id, { status: "needs-replan" });
-              await this.store.logEntry(task.id, staleness.reason);
+              await this.store.updateTask(task.id, { status: "needs-replan" }, UNATTRIBUTED_MUTATION_CONTEXT);
+              await this.store.logEntry(task.id, staleness.reason, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
               return null;
             }
           }
@@ -2515,7 +2525,7 @@ export class Scheduler {
           const freshTask = await this.store.getTask(task.id);
           if (!freshTask || freshTask.column !== task.column || freshTask.paused || freshTask.userPaused) {
             if (freshTask?.userPaused === true && freshTask.status !== "queued") {
-              await this.store.updateTask(task.id, { status: "queued" });
+              await this.store.updateTask(task.id, { status: "queued" }, UNATTRIBUTED_MUTATION_CONTEXT);
               await this.logDispatchQueuedReason(task.id, "queued — user paused (manual move to todo)");
             }
             return null;
@@ -2529,7 +2539,7 @@ export class Scheduler {
             );
             if (!recovered) {
               await this.options.leaseManager.reconcileLeaseRow(freshTask.id);
-              await this.store.updateTask(freshTask.id, { status: "queued" });
+              await this.store.updateTask(freshTask.id, { status: "queued" }, UNATTRIBUTED_MUTATION_CONTEXT);
               await this.logDispatchQueuedReason(freshTask.id, "queued — checkout lease recovery blocked dispatch");
               return null;
             }
@@ -2554,7 +2564,7 @@ export class Scheduler {
               if (!this.wasNodeDispatchValidationBlocked.has(task.id)) {
                 this.wasNodeDispatchValidationBlocked.add(task.id);
                 schedulerLog.log(`Task ${task.id} dispatch blocked — ${nodeValidation.reason}`);
-                await this.store.logEntry(task.id, nodeValidation.reason);
+                await this.store.logEntry(task.id, nodeValidation.reason, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
               }
               return null;
             }
@@ -2590,7 +2600,7 @@ export class Scheduler {
                   }
                   const reason = `Owning-node handoff parked dispatch: ${handoffDecision.reason}`;
                   schedulerLog.log(`Task ${task.id} dispatch blocked — ${reason}`);
-                  await this.store.logEntry(task.id, reason);
+                  await this.store.logEntry(task.id, reason, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
                   try {
                     await this.store.recordRunAuditEvent?.({
                       taskId: freshTask.id,
@@ -2619,7 +2629,7 @@ export class Scheduler {
                 return null;
               }
 
-              await this.store.logEntry(task.id, `Owning-node handoff applied: ${handoffDecision.reason}`);
+              await this.store.logEntry(task.id, `Owning-node handoff applied: ${handoffDecision.reason}`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
               try {
                 await this.store.recordRunAuditEvent?.({
                   taskId: freshTask.id,
@@ -2676,14 +2686,14 @@ export class Scheduler {
                 if (!this.wasNodeBlocked.has(task.id)) {
                   this.wasNodeBlocked.add(task.id);
                   schedulerLog.log(`Task ${task.id} dispatch blocked — ${decision.reason}`);
-                  await this.store.logEntry(task.id, decision.reason);
+                  await this.store.logEntry(task.id, decision.reason, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
                 }
                 return null;
               }
               this.wasNodeBlocked.delete(task.id);
               if (decision.fallbackToLocal) {
                 schedulerLog.log(`Task ${task.id} falling back to local — ${decision.reason}`);
-                await this.store.logEntry(task.id, decision.reason);
+                await this.store.logEntry(task.id, decision.reason, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
                 effectiveNode = { nodeId: undefined, source: "local" };
               }
             }
@@ -2734,10 +2744,10 @@ export class Scheduler {
               pausedReason: "dispatch-oscillation",
               status: freshTask.status ?? "queued",
               error: oscillationError,
-            });
+            }, UNATTRIBUTED_MUTATION_CONTEXT);
             await this.store.logEntry(
               task.id,
-              `Dispatch oscillation auto-paused after ${nextDispatchStormCount} cycles within ${dispatchOscillationWindowMs}ms`,
+              `Dispatch oscillation auto-paused after ${nextDispatchStormCount} cycles within ${dispatchOscillationWindowMs}ms`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
             );
             await this.store.appendAgentLog?.(
               task.id,
@@ -2776,7 +2786,7 @@ export class Scheduler {
             { planApprovalRequired: latestSettings.planApprovalMode === "require-all" },
           );
           if (missionAdmission.kind === "lineage-blocked") {
-            await this.store.updateTask(task.id, { status: "queued", blockedBy: null, overlapBlockedBy: null });
+            await this.store.updateTask(task.id, { status: "queued", blockedBy: null, overlapBlockedBy: null }, UNATTRIBUTED_MUTATION_CONTEXT);
             await this.logDispatchQueuedReason(task.id, `queued — mission lineage blocked: ${missionAdmission.reason}`);
             return null;
           }
@@ -2801,18 +2811,18 @@ export class Scheduler {
               }
 
               if (task.overlapBlockedBy) {
-                await this.store.updateTask(task.id, { overlapBlockedBy: null });
+                await this.store.updateTask(task.id, { overlapBlockedBy: null }, UNATTRIBUTED_MUTATION_CONTEXT);
               }
 
               activeScopes.set(task.id, taskScope);
               activeScopeColumns.set(task.id, "in-progress");
               reservedScope = true;
             } else if (task.overlapBlockedBy) {
-              await this.store.updateTask(task.id, { overlapBlockedBy: null });
+              await this.store.updateTask(task.id, { overlapBlockedBy: null }, UNATTRIBUTED_MUTATION_CONTEXT);
               if (isCoordinationOnlyTask(task, taskScope)) {
                 await this.store.logEntry(
                   task.id,
-                  "coordination/no-commit task bypassed non-implementation overlap lease",
+                  "coordination/no-commit task bypassed non-implementation overlap lease", undefined, UNATTRIBUTED_MUTATION_CONTEXT,
                 );
               }
             }
@@ -2890,7 +2900,7 @@ export class Scheduler {
               available: 0,
               bindingGates: [...new Set([...concurrencyDiagnostic.bindingGates, bindingGate])],
             });
-            await this.store.updateTask(task.id, { status: "queued" });
+            await this.store.updateTask(task.id, { status: "queued" }, UNATTRIBUTED_MUTATION_CONTEXT);
             await this.logDispatchQueuedReason(task.id, reason);
             return null;
           }
@@ -2920,7 +2930,7 @@ export class Scheduler {
                   activeScopeColumns.delete(task.id);
                 }
                 const conflict = lockResult.conflicts[0];
-                await this.store.updateTask(task.id, { status: "queued", blockedBy: null, overlapBlockedBy: null });
+                await this.store.updateTask(task.id, { status: "queued", blockedBy: null, overlapBlockedBy: null }, UNATTRIBUTED_MUTATION_CONTEXT);
                 await this.logDispatchQueuedReason(
                   task.id,
                   `queued — symbol contention: symbol=${conflict?.symbolKey ?? "unknown"} holder=${conflict?.ownerTaskId ?? "unknown"}`,
@@ -2928,7 +2938,7 @@ export class Scheduler {
                 return null;
               }
               acquiredSymbols = missionAdmission.symbols;
-              await this.store.logEntry(task.id, `symbol-lock admission acquired: ${missionAdmission.symbols.join(", ")}`);
+              await this.store.logEntry(task.id, `symbol-lock admission acquired: ${missionAdmission.symbols.join(", ")}`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
             }
 
             dispatchPrepByTaskId.set(task.id, {
@@ -3010,7 +3020,7 @@ export class Scheduler {
           column: "in-progress" as const,
         };
         try {
-          await this.store.updateTask(taskId, dispatchUpdate);
+          await this.store.updateTask(taskId, dispatchUpdate, UNATTRIBUTED_MUTATION_CONTEXT);
         } catch (error) {
           schedulerLog.error(`Post-release dispatch metadata update failed for ${taskId}:`, error);
         }
@@ -3025,7 +3035,7 @@ export class Scheduler {
         this.wasPermanentAgentUnavailable.delete(taskId);
         this.clearDispatchQueuedReasonMemo(taskId);
         try {
-          await this.store.logEntry(taskId, `Node routing resolved: ${prep.effectiveNodeId ?? "local"} (source: ${prep.effectiveNodeSource})`);
+          await this.store.logEntry(taskId, `Node routing resolved: ${prep.effectiveNodeId ?? "local"} (source: ${prep.effectiveNodeSource})`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
         } catch (error) {
           schedulerLog.error(`Post-release dispatch log failed for ${taskId}:`, error);
         }
