@@ -6,7 +6,8 @@
  * behavior-preserving refactor. Each function receives the TaskStore
  * instance as its first parameter and performs byte-identical work.
  */
-import {TaskStore, storeLog} from "../store.js";
+import {TaskStore, storeLog, type DeleteTaskOptions} from "../store.js";
+import type {RunMutationContext} from "../types.js";
 import {TaskSelfDeleteError} from "./errors.js";
 import {isWorkspaceTask, type Task, type GithubIssueAction, type TaskDeleteClosureContext} from "../types.js";
 import {type TaskDeleteAuditContext} from "../task-delete-attribution.js";
@@ -187,7 +188,7 @@ function _scheduleDeleteBranchCleanup(store: TaskStore, task: Task): void {
     })();
   }
 
-export async function deleteTaskImpl(store: TaskStore, id: string, options?: { removeDependencyReferences?: boolean; removeLineageReferences?: boolean; allowResurrection?: boolean; githubIssueAction?: GithubIssueAction; closureContext?: TaskDeleteClosureContext; auditContext?: TaskDeleteAuditContext; },): Promise<Task> {
+export async function deleteTaskImpl(store: TaskStore, id: string, options?: DeleteTaskOptions & { runContext?: RunMutationContext },): Promise<Task> {
     // FNXC:RuntimeLifecycleAsync 2026-06-24-12:00:
     // Backend-mode deleteTask: delegate the core async operations (task read,
     // lineage gate, lineage clear, soft-delete, audit) to the async helpers.
