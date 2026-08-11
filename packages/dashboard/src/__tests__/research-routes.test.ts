@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { UNATTRIBUTED_CONTEXT_MATCHER } from "./mutation-context-matchers.js";
 import { describe, it, expect, vi } from "vitest";
 import express from "express";
 import { get as performGet, request as performRequest } from "../test-request.js";
@@ -202,6 +203,7 @@ describe("research-routes", () => {
           sourceMetadata: expect.objectContaining({ runId: "RR-1", findingId: "finding-1", documentKey: "research-RR-1" }),
         }),
       }),
+      undefined, UNATTRIBUTED_CONTEXT_MATCHER,
     );
     expect(store.upsertTaskDocument).toHaveBeenCalledWith(
       "FN-1",
@@ -453,6 +455,7 @@ describe("research-routes", () => {
         title: "Research: Finding One",
         description: expect.stringContaining("Important actionable result."),
       }),
+      undefined, UNATTRIBUTED_CONTEXT_MATCHER,
     );
   });
 

@@ -1,3 +1,21 @@
+/*
+FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage D — why every mutation context in this file is the MARKER):
+
+The actor for these writes is the authenticated human on the other end of the HTTP request. That actor
+does not exist yet: U9 is the unit that resolves it from the session and threads it through the route
+layer. Until then each write says so explicitly with the unattributed marker, which the U18
+census counts and ratchets DOWN.
+
+Two things this must NOT become. It is not `BOOTSTRAP_ACTOR_CONTEXT`: that means "written while
+identity was off" and is real attribution, so using it here would make an unwired route
+indistinguishable from a genuine pre-enablement write and leave U9 with no work list. And it is not a
+place to stop at one marker per file — the marker sits at the call site because U9's work is per
+handler, and one alias would hide every new unattributed route added between now and then.
+
+U9: replace these with the request's resolved actor. Nothing else about the call sites changes.
+*/
+// FNXC:Identity 2026-08-09-03:04: one-line import on purpose — the U18 census counts any non-`import`-prefixed line naming the marker, so a multi-line import block would score as debt it is not.
+import { UNATTRIBUTED_MUTATION_CONTEXT } from "@fusion/core";
 import { createLogger, resolveWorkflowIrForTask, resolveReviewColumns, resolveReboundTarget } from "@fusion/core";
 
 const severityAuditLog = createLogger("dashboard-register-git-github");
@@ -2261,7 +2279,7 @@ async function syncPrReviewsToTask(store: TaskStore, task: Task, snapshot: PrRev
       source,
       externalId,
       reviewState,
-    });
+    }, UNATTRIBUTED_MUTATION_CONTEXT);
   }
 }
 
@@ -2313,7 +2331,7 @@ export async function applyChangesRequestedTransition(
     preserveProgress: true,
     preserveWorktree: true,
     moveSource: "engine",
-  });
+  }, UNATTRIBUTED_MUTATION_CONTEXT);
 
   if ("recordRunAuditEvent" in store && typeof store.recordRunAuditEvent === "function") {
     const auditInput: RunAuditEventInput = {
@@ -4206,10 +4224,10 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
           sourceMetadata: source.sourceMetadata,
         },
         ...(importedIssueGithubTracking ? { githubTracking: importedIssueGithubTracking } : {}),
-      });
+      }, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
 
       // Log the import action
-      await scopedStore.logEntry(task.id, "Imported from GitHub", sourceUrl);
+      await scopedStore.logEntry(task.id, "Imported from GitHub", sourceUrl, UNATTRIBUTED_MUTATION_CONTEXT);
 
       /*
       FNXC:IssueImportAttachments 2026-07-15-11:20:
@@ -4242,6 +4260,7 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
             task.id,
             `Imported ${imageImport.attached} image attachment${imageImport.attached === 1 ? "" : "s"} from GitHub issue`,
             sourceUrl,
+            UNATTRIBUTED_MUTATION_CONTEXT,
           );
         } catch (error) {
           // FNXC:IssueImportAttachments 2026-07-15-14:10: Post-create audit
@@ -4515,10 +4534,10 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
               sourceMetadata: source.sourceMetadata,
             },
             ...(importedIssueGithubTracking ? { githubTracking: importedIssueGithubTracking } : {}),
-          });
+          }, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
 
           // Log the import action
-          await scopedStore.logEntry(task.id, "Imported from GitHub", sourceUrl);
+          await scopedStore.logEntry(task.id, "Imported from GitHub", sourceUrl, UNATTRIBUTED_MUTATION_CONTEXT);
 
           /*
           FNXC:IssueImportAttachments 2026-07-15-11:20:
@@ -4553,6 +4572,7 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
                 task.id,
                 `Imported ${batchImageImport.attached} image attachment${batchImageImport.attached === 1 ? "" : "s"} from GitHub issue`,
                 sourceUrl,
+                UNATTRIBUTED_MUTATION_CONTEXT,
               );
             } catch (error) {
               severityAuditLog.warn(`[fusion:github-import] Could not log image attachments for ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -4940,10 +4960,10 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
           sourceType: "github_import",
           sourceMetadata: { prUrl: sourceUrl, prNumber },
         },
-      });
+      }, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
 
       // Log the import action
-      await scopedStore.logEntry(task.id, "Imported PR from GitHub", sourceUrl);
+      await scopedStore.logEntry(task.id, "Imported PR from GitHub", sourceUrl, UNATTRIBUTED_MUTATION_CONTEXT);
 
       res.status(201).json(task);
     } catch (err: unknown) {
@@ -4985,8 +5005,8 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
           sourceType: "github_import",
           sourceMetadata: { sourceUrl, number, type, commentAuthor: author.trim(), commentCreatedAt: comment.createdAt },
         },
-      });
-      await scopedStore.logEntry(task.id, "Imported PR/issue comment from GitHub", sourceUrl);
+      }, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
+      await scopedStore.logEntry(task.id, "Imported PR/issue comment from GitHub", sourceUrl, UNATTRIBUTED_MUTATION_CONTEXT);
       res.status(201).json(task);
     } catch (err: unknown) {
       if (err instanceof ApiError) throw err;
@@ -5468,7 +5488,7 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
       } else {
         await scopedStore.updatePrInfo(task.id, prInfo);
       }
-      await scopedStore.logEntry(task.id, existingPr ? "Linked existing PR" : "Created PR", `PR #${prInfo.number}: ${prInfo.url}`);
+      await scopedStore.logEntry(task.id, existingPr ? "Linked existing PR" : "Created PR", `PR #${prInfo.number}: ${prInfo.url}`, UNATTRIBUTED_MUTATION_CONTEXT);
 
       res.status(201).json(prInfo);
     } catch (err: unknown) {
@@ -5531,7 +5551,7 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
       }
 
       await runGitCommand(["push", "-u", "origin", head], repoRoot, 60_000);
-      await scopedStore.logEntry(task.id, "Pushed PR branch", head);
+      await scopedStore.logEntry(task.id, "Pushed PR branch", head, UNATTRIBUTED_MUTATION_CONTEXT);
 
       const preflight = await computePrPreflight(task, repoRoot, baseBranch);
       res.json({
@@ -5621,9 +5641,9 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
         });
       }
 
-      await scopedStore.logEntry(task.id, "AI resolved PR conflicts", `${head} against ${baseRef} in ${repoInfo.owner}/${repoInfo.repo}`);
+      await scopedStore.logEntry(task.id, "AI resolved PR conflicts", `${head} against ${baseRef} in ${repoInfo.owner}/${repoInfo.repo}`, UNATTRIBUTED_MUTATION_CONTEXT);
       if (result.pushed) {
-        await scopedStore.logEntry(task.id, "Pushed branch after PR conflict resolution", head);
+        await scopedStore.logEntry(task.id, "Pushed branch after PR conflict resolution", head, UNATTRIBUTED_MUTATION_CONTEXT);
       }
 
       const preflight = await computePrPreflight(task, repoRoot, baseBranch);

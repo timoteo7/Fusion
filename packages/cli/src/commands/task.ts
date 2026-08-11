@@ -1,9 +1,9 @@
+import { cliOperatorMutationContext } from "../identity/cli-operator-mutation-context.js";
 import { TaskStore, COLUMNS, COLUMN_LABELS, resolveProjectColumnsForRoles, TERMINAL_ROLES, resolveReviewColumns, resolveTaskLifecycleColumns, resolveWorkflowIrForTask, CentralCore, buildAutoPauseClearPatch, buildManualRetryResetPatch, extractIntentSignature, findNearDuplicates, getTaskDuplicateLineage, isWorkspaceTask, reconcileDeterministicDuplicate, resolveTaskGithubTracking, runDeterministicDuplicateGuard, type Settings, type Column, type ColumnId, type StepStatus, type AgentLogType, type AgentLogEntry, type IntentSignature, type NearDuplicateCandidate, type NearDuplicateMatch, type TaskDependencyMutation } from "@fusion/core";
 import { isInReviewMissingWorktreeSessionStartFailure, runAiMerge, landWorkspaceTask, installBaselineArchiveWorktreeDisposer } from "@fusion/engine";
 import { createInterface } from "node:readline/promises";
 import type { PlanningQuestion, PlanningSummary } from "@fusion/core";
 // FNXC:Identity 2026-08-09-03:04: pre-credential operator writes are attributed to the reserved bootstrap actor.
-import { BOOTSTRAP_ACTOR_CONTEXT } from "@fusion/core";
 import { createSession, createTaskFromPlanSession, ensureDurablePlanningSessionStore, getSession as getPlanningSession, submitResponse, validateSession, RateLimitError, SessionNotFoundError, InvalidSessionStateError } from "@fusion/dashboard/planning";
 import { watchFile, unwatchFile, statSync, existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -521,7 +521,7 @@ export async function runTaskCreate(descriptionArg?: string, attachFiles?: strin
               sourceType: "cli",
               sourceMetadata: Object.keys(sourceMetadata).length > 0 ? sourceMetadata : undefined,
             },
-          });
+          }, undefined, cliOperatorMutationContext());
 
           const reconcileResult = await reconcileDeterministicDuplicate(store, {
             createdTask: created,
@@ -549,7 +549,7 @@ export async function runTaskCreate(descriptionArg?: string, attachFiles?: strin
     if (nodeName) {
       try {
         resolvedNode = await resolveNodeByNameOrId(nodeName);
-        await retryBoardCall(context, resolvedTask.id, "set node override", () => store.updateTask(resolvedTask.id, { nodeId: resolvedNode!.id }));
+        await retryBoardCall(context, resolvedTask.id, "set node override", () => store.updateTask(resolvedTask.id, { nodeId: resolvedNode!.id }, cliOperatorMutationContext()));
       } catch (error) {
         console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
         await closeBoardContextAndExit(context, 1);
@@ -817,7 +817,7 @@ export async function runTaskDeps(
 export async function runTaskLog(id: string, message: string, outcome?: string, projectName?: string) {
   // FNXC:CliBoardMutation 2026-07-09-00:00 (FN-7734): single board write.
   await withBoardWrite(projectName, { id, action: "log entry" }, async (context) => {
-    await context.store.logEntry(id, message, outcome);
+    await context.store.logEntry(id, message, outcome, cliOperatorMutationContext());
 
     console.log();
     console.log(`  ✓ ${id}: logged "${message}"`);
@@ -1059,7 +1059,7 @@ export async function runTaskSetNode(id: string, nodeNameOrId: string, projectNa
       return;
     }
 
-    await context.store.updateTask(id, { nodeId: resolvedNode.id });
+    await context.store.updateTask(id, { nodeId: resolvedNode.id }, cliOperatorMutationContext());
     console.log(`✓ Set node override for ${id}: ${resolvedNode.name || resolvedNode.id}`);
   });
 }
@@ -1080,7 +1080,7 @@ export async function runTaskClearNode(id: string, projectName?: string) {
       return;
     }
 
-    await context.store.updateTask(id, { nodeId: null });
+    await context.store.updateTask(id, { nodeId: null }, cliOperatorMutationContext());
     console.log(`✓ Cleared node override for ${id}`);
   });
 }
@@ -1347,7 +1347,7 @@ export async function runTaskMove(id: string, column: string, projectName?: stri
   agent session kept running (Move-Task contract violation).
   */
   await withBoardWrite(projectName, { id, action: "move task" }, async (context) => {
-    const task = await context.store.moveTask(id, column as Column, { moveSource: "user" });
+    const task = await context.store.moveTask(id, column as Column, { moveSource: "user" }, cliOperatorMutationContext());
     console.log();
     console.log(`  ✓ Moved ${task.id} → ${columnLabel(task.column)}`);
     console.log();
@@ -1528,7 +1528,7 @@ export async function runTaskRetry(id: string, projectName?: string) {
     const retryLogSuffix = clearedDeadlockAutoPause ? ", cleared deadlock auto-pause" : "";
 
     if (isMissingWorktreeSessionRetry) {
-      await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never, { preserveProgress: true }));
+      await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never, { preserveProgress: true }, cliOperatorMutationContext()));
       await retryBoardCall(context, id, "update task", () => context.store.updateTask(id, {
         status: null,
         error: null,
@@ -1537,8 +1537,8 @@ export async function runTaskRetry(id: string, projectName?: string) {
         sessionFile: null,
         ...autoPauseClearPatch,
         ...buildManualRetryResetPatch({ resetMergeRetries: true }),
-      }));
-      await retryBoardCall(context, id, "log entry", () => context.store.logEntry(id, `Retry requested from CLI (unusable worktree session-start recovery → todo, preserving progress${retryLogSuffix})`));
+      }, cliOperatorMutationContext()));
+      await retryBoardCall(context, id, "log entry", () => context.store.logEntry(id, `Retry requested from CLI (unusable worktree session-start recovery → todo, preserving progress${retryLogSuffix})`, undefined, cliOperatorMutationContext()));
 
       console.log();
       console.log(`  ✓ Retried ${id} → todo (unusable worktree session metadata cleared)`);
@@ -1550,18 +1550,20 @@ export async function runTaskRetry(id: string, projectName?: string) {
     // and merge failures (all steps done).
     if (isInReviewRetry) {
       if (isExecutionFailureInReview) {
-        await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never, { preserveProgress: true }));
+        await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never, { preserveProgress: true }, cliOperatorMutationContext()));
         await retryBoardCall(context, id, "update task", () => context.store.updateTask(id, {
           status: null,
           error: null,
           ...autoPauseClearPatch,
           ...buildManualRetryResetPatch(),
-        }));
+        }, cliOperatorMutationContext()));
         await retryBoardCall(context, id, "log entry", () => context.store.logEntry(
           id,
           isInReviewExecutionStall
             ? `Retry requested from CLI (stranded in-review execution retry → todo, preserving progress${retryLogSuffix})`
             : `Retry requested from CLI (execution failure in-review → todo, preserving progress${retryLogSuffix})`,
+          undefined,
+          cliOperatorMutationContext(),
         ));
 
         console.log();
@@ -1570,14 +1572,14 @@ export async function runTaskRetry(id: string, projectName?: string) {
         return;
       }
 
-      await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never));
+      await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never, undefined, cliOperatorMutationContext()));
       await retryBoardCall(context, id, "update task", () => context.store.updateTask(id, {
         status: null,
         error: null,
         ...autoPauseClearPatch,
         ...buildManualRetryResetPatch({ resetMergeRetries: true }),
-      }));
-      await retryBoardCall(context, id, "log entry", () => context.store.logEntry(id, `Retry requested from CLI (merge retry → todo, mergeRetries reset${retryLogSuffix})`));
+      }, cliOperatorMutationContext()));
+      await retryBoardCall(context, id, "log entry", () => context.store.logEntry(id, `Retry requested from CLI (merge retry → todo, mergeRetries reset${retryLogSuffix})`, undefined, cliOperatorMutationContext()));
 
       console.log();
       console.log(`  ✓ Retried ${id} → todo (merge retry state cleared)`);
@@ -1598,7 +1600,7 @@ export async function runTaskRetry(id: string, projectName?: string) {
     crashing. Found by review, not by me, and not by any tool: the census counts comparisons and sees
     none of these, and a same-file grep for the double-quoted form reports clean.
     */
-    await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never));
+    await retryBoardCall(context, id, "move task", () => context.store.moveTask(id, retryHoldColumn as never, undefined, cliOperatorMutationContext()));
 
     // Clear failure state and stale branch refs so retry can choose a fresh base.
     await retryBoardCall(context, id, "update task", () => context.store.updateTask(id, {
@@ -1610,13 +1612,14 @@ export async function runTaskRetry(id: string, projectName?: string) {
       baseCommitSha: null,
       ...autoPauseClearPatch,
       ...buildManualRetryResetPatch({ resetMergeRetries: true }),
-    }));
+    }, cliOperatorMutationContext()));
 
     // Log the retry action
     await retryBoardCall(context, id, "log entry", () => context.store.logEntry(
       id,
       clearedDeadlockAutoPause ? "Retry requested from CLI (cleared deadlock auto-pause)" : "Retry requested from CLI",
       "Task reset to todo for retry",
+      cliOperatorMutationContext(),
     ));
 
     console.log();
@@ -1662,6 +1665,19 @@ export async function runTaskDelete(id: string, force?: boolean, allowResurrecti
   }
 
   try {
+    /*
+    FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage D):
+    ONE resolution feeds BOTH carriers on this delete. `TaskDeleteAuditContext` is the second,
+    differently shaped carrier KTD2 folds into `RunMutationContext`; while both exist, resolving the
+    actor independently in each would let a single delete persist two different answers to "who did
+    this", and the delete row is the one row where that must not happen.
+
+    It also stops claiming the BOOTSTRAP actor. Bootstrap means "written while identity was off" and
+    is real attribution; the human at a terminal simply has no credential until U11. Marking it as
+    bootstrap would have made this call site look wired while attributing nothing, and would have
+    hidden it from U11's work list — the failure `identity/actor.ts` documents at length.
+    */
+    const deleteContext = cliOperatorMutationContext();
     await retryBoardCall(context, id, "delete task", () => context.store.deleteTask(id, {
       allowResurrection: allowResurrection === true,
       auditContext: {
@@ -1670,10 +1686,10 @@ export async function runTaskDelete(id: string, force?: boolean, allowResurrecti
         agentId: "cli",
         runId: `synthetic-cli-delete-${id}-${Date.now()}`,
         callerKind: "operator-cli",
-        // FNXC:Identity 2026-08-09-03:04: R21 — authenticated actor as its own field. The human CLI has no credential until U11, so this is honestly the bootstrap actor rather than an invented human id derived from `callerKind`.
-        actor: BOOTSTRAP_ACTOR_CONTEXT,
+        // FNXC:Identity 2026-08-09-03:04: R21 — authenticated actor as its own field, read from the single resolution above.
+        actor: deleteContext.actor,
       },
-    }));
+    }, deleteContext));
     console.log();
     console.log(`  ✓ Deleted ${id}`);
     console.log();
@@ -1834,7 +1850,7 @@ export async function runTaskImportGitHubInteractive(
           sourceMetadata: source.sourceMetadata,
         },
         ...(importedIssueGithubTracking ? { githubTracking: importedIssueGithubTracking } : {}),
-      }));
+      }, undefined, cliOperatorMutationContext()));
 
       const label = task.title || task.description.slice(0, 60) + (task.description.length > 60 ? "…" : "");
       outputResult(`  ✓ Created ${task.id}: ${label}\n`);
@@ -2010,7 +2026,7 @@ export async function runTaskImportFromGitHub(
           sourceMetadata: source.sourceMetadata,
         },
         ...(importedIssueGithubTracking ? { githubTracking: importedIssueGithubTracking } : {}),
-      }));
+      }, undefined, cliOperatorMutationContext()));
 
       const label = task.title || task.description.slice(0, 60) + (task.description.length > 60 ? "…" : "");
       outputResult(`  ✓ Created ${task.id}: ${label}\n`);
@@ -2085,8 +2101,8 @@ export async function runTaskImportFromGitLab(
         sourceIssue: provenance.sourceIssue,
         gitlabTracking: provenance.gitlabTracking,
         source: { sourceType: "gitlab_import", sourceMetadata: provenance.sourceMetadata },
-      }));
-      await retryBoardCall(context, task.id, "log entry", () => store.logEntry(task.id, resource === "merge-requests" ? "Imported merge request from GitLab" : "Imported from GitLab", item.webUrl));
+      }, undefined, cliOperatorMutationContext()));
+      await retryBoardCall(context, task.id, "log entry", () => store.logEntry(task.id, resource === "merge-requests" ? "Imported merge request from GitLab" : "Imported from GitLab", item.webUrl, cliOperatorMutationContext()));
       existingTasks.push(task);
       created += 1;
       outputResult(`  ✓ Created ${task.id}: ${task.title}\n`);

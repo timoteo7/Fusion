@@ -34,7 +34,9 @@ import {
   assertNotWorkspaceTaskMerge,
   WorkspaceTaskMergeError,
 } from "@fusion/core";
-import type { Settings, TaskDetail, PrInfo, MergeResult, BranchGroup, BranchGroupPrState, Task } from "@fusion/core";
+import type { Settings, TaskDetail, PrInfo, MergeResult, BranchGroup, BranchGroupPrState, Task, RunMutationContext } from "@fusion/core";
+// FNXC:Identity 2026-08-09-03:04: one-line import on purpose — the U18 census counts any non-`import`-prefixed line naming the marker, so a multi-line import block would score as debt it is not.
+import { UNATTRIBUTED_MUTATION_CONTEXT } from "@fusion/core";
 import { resolveWorkflowIrForTask, resolveCompleteColumn, resolveMergeOrchestrationColumn } from "@fusion/core";
 
 /*
@@ -702,19 +704,27 @@ export async function cleanupMergedTaskArtifacts(
   }
 }
 
+/*
+FNXC:Identity 2026-08-09-03:04 (U18/KTD2):
+`runContext` is REQUIRED and sits BEFORE the optional trailing parameters on purpose. Both finalize
+helpers are private to this module and reached only from `processPullRequestMergeTask`, which
+resolves the actor once; a trailing optional would let a future caller finalize a merge with no
+attribution and still compile, which is the exact seam U18 exists to close.
+*/
 async function finalizePullRequestMerge(
   store: TaskStore,
   cwd: string,
   task: TaskDetail,
   prInfo: PrInfo,
+  runContext: RunMutationContext,
   message = "Pull request merged",
   pool?: WorktreePool,
 ): Promise<void> {
   await cleanupMergedTaskArtifacts(cwd, task, { pool });
-  await store.updateTask(task.id, { status: null, mergeRetries: 0 });
-  const movedTask = await store.moveTask(task.id, await resolveCompleteTargetForTask(store, task.id));
+  await store.updateTask(task.id, { status: null, mergeRetries: 0 }, runContext);
+  const movedTask = await store.moveTask(task.id, await resolveCompleteTargetForTask(store, task.id), undefined, runContext);
   const mergedTask = movedTask ?? (await store.getTask(task.id));
-  await store.logEntry(task.id, message, `PR #${prInfo.number}: ${prInfo.url}`);
+  await store.logEntry(task.id, message, `PR #${prInfo.number}: ${prInfo.url}`, runContext);
   const settings = await store.getSettings();
   const resolvedIntegrationBranch = await resolveIntegrationBranch(cwd, settings);
   const mergeTargetBranch = resolveTaskMergeTarget(mergedTask, {
@@ -745,14 +755,15 @@ async function finalizeNoOpMergeTask(
   cwd: string,
   task: TaskDetail,
   reason: string,
+  runContext: RunMutationContext,
   pool?: WorktreePool,
 ): Promise<void> {
   const branch = task.branch ?? getTaskBranchName(task.id);
   await cleanupMergedTaskArtifacts(cwd, task, { pool });
-  await store.updateTask(task.id, { status: null, mergeRetries: 0 });
-  const movedTask = await store.moveTask(task.id, await resolveCompleteTargetForTask(store, task.id));
+  await store.updateTask(task.id, { status: null, mergeRetries: 0 }, runContext);
+  const movedTask = await store.moveTask(task.id, await resolveCompleteTargetForTask(store, task.id), undefined, runContext);
   const mergedTask = movedTask ?? (await store.getTask(task.id));
-  await store.logEntry(task.id, reason, `Branch ${branch} has no commits relative to the base branch; nothing to merge.`);
+  await store.logEntry(task.id, reason, `Branch ${branch} has no commits relative to the base branch; nothing to merge.`, runContext);
   store.emit("task:merged", {
     task: mergedTask,
     branch: mergedTask.branch ?? branch,
@@ -811,6 +822,20 @@ export async function processPullRequestMergeTask(
   getTaskMergeBlocker: TaskMergeBlockerFn,
   pool?: WorktreePool,
 ): Promise<ProcessPullRequestResult> {
+  /*
+  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 — ONE marker for this whole lane, and it is a work item):
+  This is the CLI's unattended PR-merge drain: `daemon.ts`, `serve.ts` and `dashboard.ts` all poll it
+  on a timer, so there is no request, no session and no acting agent to derive from. The only agent
+  ids in scope name the task being merged, and attributing a merge to them would produce an audit row
+  claiming a task merged itself — the same reason the engine's self-healing sweeps took the marker
+  rather than the subject id.
+
+  It is resolved ONCE here and threaded into every write below (and into both finalize helpers, whose
+  parameter is required), so the lane holds a single greppable debt rather than twenty-one. Whoever
+  gives the CLI daemon lanes a system actor — U13 for the sweep, U11 if it is reclassified as an
+  operator action — replaces this line and the whole lane becomes attributed at once.
+  */
+  const runContext = UNATTRIBUTED_MUTATION_CONTEXT;
   const task = await store.getTask(taskId);
   /*
   FNXC:WorkflowResolvedColumns 2026-07-30-23:55:
@@ -901,7 +926,7 @@ export async function processPullRequestMergeTask(
       }
     }
 
-    await store.updateTask(task.id, { status: "creating-pr" });
+    await store.updateTask(task.id, { status: "creating-pr" }, runContext);
     let groupPrInfo: PrInfo | null = null;
     if (branchGroup.prNumber) {
       groupPrInfo = {
@@ -936,14 +961,14 @@ export async function processPullRequestMergeTask(
           const message = err instanceof Error ? err.message : String(err);
           if (message.includes("No commits between")) {
             await store.updateBranchGroup(branchGroup.id, { prState: "none", prNumber: null, prUrl: null });
-            await finalizeNoOpMergeTask(store, cwd, task, "No group pull request created (no commits vs base) — finalizing as no-op", pool);
+            await finalizeNoOpMergeTask(store, cwd, task, "No group pull request created (no commits vs base) — finalizing as no-op", runContext, pool);
             return "skipped";
           }
           throw err;
         }
-        await store.logEntry(task.id, "Created group PR", `PR #${groupPrInfo.number}: ${groupPrInfo.url}`);
+        await store.logEntry(task.id, "Created group PR", `PR #${groupPrInfo.number}: ${groupPrInfo.url}`, runContext);
       } else {
-        await store.logEntry(task.id, "Linked existing group PR", `PR #${groupPrInfo.number}: ${groupPrInfo.url}`);
+        await store.logEntry(task.id, "Linked existing group PR", `PR #${groupPrInfo.number}: ${groupPrInfo.url}`, runContext);
       }
     }
 
@@ -972,29 +997,29 @@ export async function processPullRequestMergeTask(
     if (mergeStatus.prInfo.status === "merged") {
       for (const member of members) {
         const memberDetail = await store.getTask(member.id);
-        await finalizePullRequestMerge(store, cwd, memberDetail, refreshedPrInfo, "Group pull request merged", pool);
+        await finalizePullRequestMerge(store, cwd, memberDetail, refreshedPrInfo, runContext, "Group pull request merged", pool);
       }
       await store.updateBranchGroup(branchGroup.id, { status: "finalized", prState: "merged" });
       return "merged";
     }
 
     if (settings.requirePrApproval && mergeStatus.reviewDecision !== "APPROVED") {
-      await store.updateTask(task.id, { status: "awaiting-pr-checks" });
+      await store.updateTask(task.id, { status: "awaiting-pr-checks" }, runContext);
       return "waiting";
     }
 
     if (!mergeStatus.mergeReady) {
-      await store.updateTask(task.id, { status: mergeStatus.prInfo.status === "open" ? "awaiting-pr-checks" : null });
+      await store.updateTask(task.id, { status: mergeStatus.prInfo.status === "open" ? "awaiting-pr-checks" : null }, runContext);
       return "waiting";
     }
 
     const activeMerge = await store.getActiveMergingTask(task.id);
     if (activeMerge) {
-      await store.updateTask(task.id, { status: "awaiting-pr-checks" });
+      await store.updateTask(task.id, { status: "awaiting-pr-checks" }, runContext);
       return "waiting";
     }
 
-    await store.updateTask(task.id, { status: "merging-pr" });
+    await store.updateTask(task.id, { status: "merging-pr" }, runContext);
     const mergedPr = await github.mergePr({ owner: prRepo.owner, repo: prRepo.repo, number: refreshedPrInfo.number, method: "squash" });
     await store.updateBranchGroup(branchGroup.id, {
       prNumber: mergedPr.number,
@@ -1003,14 +1028,14 @@ export async function processPullRequestMergeTask(
     });
     for (const member of members) {
       const memberDetail = await store.getTask(member.id);
-      await finalizePullRequestMerge(store, cwd, memberDetail, mergedPr, "Group pull request merged", pool);
+      await finalizePullRequestMerge(store, cwd, memberDetail, mergedPr, runContext, "Group pull request merged", pool);
     }
     await store.updateBranchGroup(branchGroup.id, { status: "finalized", prState: "merged" });
     return "merged";
   }
 
   if (isSharedBranchGroupMember && !branchGroup) {
-    await store.logEntry(task.id, "Branch group missing; falling back to per-task PR path", task.branchContext?.groupId);
+    await store.logEntry(task.id, "Branch group missing; falling back to per-task PR path", task.branchContext?.groupId, runContext);
   }
 
   const mergeTarget = resolveTaskMergeTarget(task, {
@@ -1020,7 +1045,7 @@ export async function processPullRequestMergeTask(
   let prInfo: PrInfo | undefined = task.prInfo;
 
   if (!prInfo) {
-    await store.updateTask(task.id, { status: "creating-pr" });
+    await store.updateTask(task.id, { status: "creating-pr" }, runContext);
 
     const existingPr = await github.findPrForBranch({ owner: prRepo.owner, repo: prRepo.repo, head: branch, state: "all" });
     if (!existingPr) {
@@ -1043,7 +1068,7 @@ export async function processPullRequestMergeTask(
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("No commits between")) {
-        await finalizeNoOpMergeTask(store, cwd, task, "No pull request created (no commits vs base) — finalizing as no-op", pool);
+        await finalizeNoOpMergeTask(store, cwd, task, "No pull request created (no commits vs base) — finalizing as no-op", runContext, pool);
         return "skipped";
       }
       throw err;
@@ -1054,6 +1079,7 @@ export async function processPullRequestMergeTask(
       task.id,
       existingPr ? "Linked existing PR" : "Created PR",
       `PR #${prInfo.number}: ${prInfo.url}`,
+      runContext,
     );
   }
 
@@ -1070,7 +1096,7 @@ export async function processPullRequestMergeTask(
   await store.updatePrInfo(task.id, refreshedPrInfo);
 
   if (mergeStatus.prInfo.status === "merged") {
-    await finalizePullRequestMerge(store, cwd, task, prInfo, "Pull request merged", pool);
+    await finalizePullRequestMerge(store, cwd, task, prInfo, runContext, "Pull request merged", pool);
     return "merged";
   }
 
@@ -1081,7 +1107,7 @@ export async function processPullRequestMergeTask(
   // PR, wait for me to approve and merge it" by holding the merge until
   // reviewDecision === "APPROVED".
   if (settings.requirePrApproval && mergeStatus.reviewDecision !== "APPROVED") {
-    await store.updateTask(task.id, { status: "awaiting-pr-checks" });
+    await store.updateTask(task.id, { status: "awaiting-pr-checks" }, runContext);
     return "waiting";
   }
 
@@ -1103,9 +1129,9 @@ export async function processPullRequestMergeTask(
         ...(mergeStatus.prInfo.mergeable === "conflicting"
           ? { mergeRetries: (task.mergeRetries ?? 0) + 1 }
           : {}),
-      });
+      }, runContext);
     } else {
-      await store.updateTask(task.id, { status: null });
+      await store.updateTask(task.id, { status: null }, runContext);
     }
     return "waiting";
   }
@@ -1113,10 +1139,10 @@ export async function processPullRequestMergeTask(
   // Cross-process safety net: abort if another task is already mid-merge.
   const activeMerge = await store.getActiveMergingTask(task.id);
   if (activeMerge) {
-    await store.updateTask(task.id, { status: "awaiting-pr-checks" });
+    await store.updateTask(task.id, { status: "awaiting-pr-checks" }, runContext);
     return "waiting";
   }
-  await store.updateTask(task.id, { status: "merging-pr" });
+  await store.updateTask(task.id, { status: "merging-pr" }, runContext);
   let mergedPr: PrInfo;
   try {
     mergedPr = await github.mergePr({ owner: prRepo.owner, repo: prRepo.repo, number: prInfo.number, method: "squash" });
@@ -1140,6 +1166,7 @@ export async function processPullRequestMergeTask(
         cwd,
         task,
         refreshedAfterFailure,
+        runContext,
         "Pull request already merged after merge command failed; reconciled task state from GitHub",
         pool,
       );
@@ -1149,6 +1176,6 @@ export async function processPullRequestMergeTask(
     throw err;
   }
   await store.updatePrInfo(task.id, { ...mergedPr, lastCheckedAt: new Date().toISOString() });
-  await finalizePullRequestMerge(store, cwd, task, mergedPr, "Pull request merged", pool);
+  await finalizePullRequestMerge(store, cwd, task, mergedPr, runContext, "Pull request merged", pool);
   return "merged";
 }
