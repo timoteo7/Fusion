@@ -46,7 +46,7 @@ vi.mock("@fusion/core", async (importOriginal) => {
   };
 });
 
-import { CentralCore, type AsyncCentralClaimStore } from "@fusion/core";
+import { CentralCore, listRecall, type AsyncCentralClaimStore, type RecallCaptureWriterWithTestDrain } from "@fusion/core";
 import { InProcessRuntime } from "../runtimes/in-process-runtime.js";
 
 pgDescribe("InProcessRuntime PostgreSQL composition", () => {
@@ -112,12 +112,34 @@ pgDescribe("InProcessRuntime PostgreSQL composition", () => {
       */
       const secretsStore = await lifecycle.secretsStoreGetter?.mock.results[0]?.value;
       const runtimeConsumers = runtime as unknown as {
-        executor?: { options?: { secretsStore?: unknown } };
-        heartbeatMonitor?: { secretsStore?: unknown };
+        executor?: { options?: { secretsStore?: unknown; agentStore?: unknown } };
+        heartbeatMonitor?: { secretsStore?: unknown; configStore?: unknown };
+        scheduler?: { options?: { agentStore?: unknown } };
+        triageProcessor?: { options?: { agentStore?: unknown } };
+        selfHealingManager?: { options?: { agentStore?: unknown } };
       };
       expect(lifecycle.secretsStoreGetter).toHaveBeenCalled();
       expect(runtimeConsumers.executor?.options?.secretsStore).toBe(secretsStore);
       expect(runtimeConsumers.heartbeatMonitor?.secretsStore).toBe(secretsStore);
+
+      /*
+      FNXC:WorkflowAgentRouting 2026-08-07-22:39:
+      Every runtime consumer that resolves a permanent workflow principal must receive the ONE
+      long-lived engine AgentStore — asserted across all of them, not only the consumer that
+      regressed. FN-8764 gave the executor a fail-closed role-routing gate keyed on
+      `options.agentStore` but never wired that option, so a store the runtime had already built
+      was simply absent at the seam: every role-classified node (execute / step-execute / review /
+      merge) failed closed, the executor's `workflow-principal-*` branch swallowed it as a
+      recoverable hold, and the board deadlocked with no log, audit, or task error. The invariant
+      is the shared instance at every seam; an undefined here is the deadlock.
+      */
+      const runtimeAgentStore = runtime.getAgentStore();
+      expect(runtimeAgentStore).toBeDefined();
+      expect(runtimeConsumers.executor?.options?.agentStore).toBe(runtimeAgentStore);
+      expect(runtimeConsumers.scheduler?.options?.agentStore).toBe(runtimeAgentStore);
+      expect(runtimeConsumers.triageProcessor?.options?.agentStore).toBe(runtimeAgentStore);
+      expect(runtimeConsumers.selfHealingManager?.options?.agentStore).toBe(runtimeAgentStore);
+      expect(runtimeConsumers.heartbeatMonitor?.configStore).toBe(runtimeAgentStore);
 
       /*
       FNXC:SecretsEnvRuntimeWiring 2026-08-05-21:58:
@@ -178,6 +200,32 @@ pgDescribe("InProcessRuntime PostgreSQL composition", () => {
         source: "on_demand",
       });
       await assertConsumerMaterializedSecretsEnv(heartbeatTask.id);
+
+      /*
+      FNXC:MemoryRecallCapture 2026-08-11-11:53:
+      FN-8933's runtime root must supply the live recall writer to its reflection service; an
+      injected unit-test writer cannot detect a missing composition line. Drive the runtime-owned
+      service through a completed task and drain only its test seam before reading the real store.
+      */
+      const reflectionAgent = await runtime.getAgentStore()!.createAgent({
+        name: "Runtime recall composition agent",
+        role: "executor",
+      });
+      const reflectedTask = await taskStore.createTask({ description: "runtime recall composition" });
+      await taskStore.updateTask(reflectedTask.id, {
+        column: "done",
+        status: "completed",
+        assignedAgentId: reflectionAgent.id,
+      });
+      const reflectionService = (runtime as unknown as {
+        executor?: { options?: { reflectionService?: { captureTaskPerformance(agentId: string, taskId: string): Promise<unknown>; captureWriter: RecallCaptureWriterWithTestDrain } } };
+      }).executor?.options?.reflectionService;
+      expect(reflectionService).toBeDefined();
+      await reflectionService!.captureTaskPerformance(reflectionAgent.id, reflectedTask.id);
+      await reflectionService!.captureWriter.flushPendingCaptures();
+      expect(await listRecall(layer!, { limit: 10 })).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source: expect.objectContaining({ taskId: reflectedTask.id, agentId: reflectionAgent.id }) }),
+      ]));
 
       const missionStore = taskStore.getMissionStore();
       const mission = await missionStore.createMission({ title: "Runtime composition" });

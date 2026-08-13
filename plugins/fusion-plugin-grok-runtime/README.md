@@ -29,10 +29,11 @@ The previously assumed `superagent-ai/grok-cli` contract is a different product 
 `GrokRuntimeAdapter` drives xAI's native ACP server with a **vendored** ACP client
 (copied under `src/acp/`, not imported from `fusion-plugin-acp-runtime`):
 
+<!-- FNXC:GrokRuntimeDocs 2026-08-12-22:30: The optional-model line is an illustrative invocation, not a captured transcript, so it tracks the current flagship id (grok-4.6, seeded in packages/core/src/ai/grok-provider.ts). Observed grok models output elsewhere keeps its verbatim older ids. -->
 ```bash
 grok agent stdio
 # optional model:
-grok agent -m grok-4.5 stdio
+grok agent -m grok-4.6 stdio
 ```
 
 - **Realtime streaming** — ACP `session/update` notifications map to Fusion `onText` / `onThinking` / `onToolStart` / `onToolEnd` as chunks arrive (not buffered until process exit).

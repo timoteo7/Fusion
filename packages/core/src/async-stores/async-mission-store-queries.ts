@@ -175,6 +175,7 @@ interface FeatureRow {
   description: string | null;
   acceptanceCriteria: string | null;
   status: string;
+  specAlignment: string | null;
   createdAt: string;
   updatedAt: string;
   loopState: string | null;
@@ -340,6 +341,7 @@ const featureColumns = {
   description: schema.project.missionFeatures.description,
   acceptanceCriteria: schema.project.missionFeatures.acceptanceCriteria,
   status: schema.project.missionFeatures.status,
+  specAlignment: schema.project.missionFeatures.specAlignment,
   createdAt: schema.project.missionFeatures.createdAt,
   updatedAt: schema.project.missionFeatures.updatedAt,
   loopState: schema.project.missionFeatures.loopState,
@@ -510,6 +512,7 @@ function rowToFeature(row: FeatureRow): MissionFeature {
     description: row.description ?? undefined,
     acceptanceCriteria: row.acceptanceCriteria ?? undefined,
     status: row.status as FeatureStatus,
+    specAlignment: row.specAlignment as MissionFeature["specAlignment"],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     loopState: (row.loopState as FeatureLoopState) || "idle",
@@ -1037,6 +1040,30 @@ export async function listFeaturesForMilestone(handle: QueryHandle, milestoneId:
       eq(schema.project.slices.id, schema.project.missionFeatures.sliceId),
     ))
     .where(and(missionProjectScope(schema.project.missionFeatures.projectId), eq(schema.project.slices.milestoneId, milestoneId)))
+    .orderBy(asc(schema.project.missionFeatures.createdAt));
+  return rows.map((row) => rowToFeature(row as FeatureRow));
+}
+
+/**
+ * FNXC:MissionBlockedRepair 2026-08-11-05:25:
+ * Blocked-mission diagnostics are mission-scoped and may run inside the clear transaction. Resolve the requested hierarchy in one joined query so unrelated project features cannot lengthen that transaction.
+ */
+export async function listFeaturesForMission(handle: QueryHandle, missionId: string): Promise<MissionFeature[]> {
+  const rows = await handle
+    .select(featureColumns)
+    .from(schema.project.missionFeatures)
+    .innerJoin(schema.project.slices, and(
+      eq(schema.project.slices.projectId, schema.project.missionFeatures.projectId),
+      eq(schema.project.slices.id, schema.project.missionFeatures.sliceId),
+    ))
+    .innerJoin(schema.project.milestones, and(
+      eq(schema.project.milestones.projectId, schema.project.slices.projectId),
+      eq(schema.project.milestones.id, schema.project.slices.milestoneId),
+    ))
+    .where(and(
+      missionProjectScope(schema.project.missionFeatures.projectId),
+      eq(schema.project.milestones.missionId, missionId),
+    ))
     .orderBy(asc(schema.project.missionFeatures.createdAt));
   return rows.map((row) => rowToFeature(row as FeatureRow));
 }
@@ -2019,6 +2046,7 @@ export async function upsertFeature(handle: QueryHandle, feature: MissionFeature
       description: feature.description ?? null,
       acceptanceCriteria: feature.acceptanceCriteria ?? null,
       status: feature.status,
+      specAlignment: feature.specAlignment ?? null,
       createdAt: feature.createdAt,
       updatedAt: feature.updatedAt,
       loopState: feature.loopState ?? "idle",
@@ -2046,6 +2074,7 @@ export async function upsertFeature(handle: QueryHandle, feature: MissionFeature
         description: sql`excluded.description`,
         acceptanceCriteria: sql`excluded.acceptance_criteria`,
         status: sql`excluded.status`,
+        specAlignment: sql`excluded.spec_alignment`,
         updatedAt: sql`excluded.updated_at`,
         loopState: sql`excluded.loop_state`,
         implementationAttemptCount: sql`excluded.implementation_attempt_count`,

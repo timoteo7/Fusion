@@ -22,6 +22,10 @@ vi.mock("@fusion/engine", () => ({
   createFnAgent: vi.fn(),
   createAgentTask: vi.fn(),
   fetchWebContent: fetchWebContentMock,
+  // FNXC:MissionValidationRepair 2026-08-11-02:35: FN-8947 adds feature-repair target resolution to extension.ts, so isolated engine mocks must export it.
+  resolveFeatureRepairTargets: vi.fn(),
+  // FNXC:MissionAutoReconcile 2026-08-11-03:27: FN-8948 exposes the mission reconciliation authority through extension.ts.
+  reconcileMissionState: vi.fn(),
   emitGoalRetrievalAudit: vi.fn(),
   createWorkflowAuthoringTools: vi.fn(() => ({})),
   workflowListParams: {},

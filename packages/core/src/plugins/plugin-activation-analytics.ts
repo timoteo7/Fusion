@@ -1,5 +1,5 @@
 import type { Database } from "../db/db.js";
-import type { AsyncDataLayer } from "../postgres/data-layer.js";
+import { projectScopeFor, type AsyncDataLayer } from "../postgres/data-layer.js";
 import { and, gte, lte, sql } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
 
@@ -91,7 +91,15 @@ export async function aggregatePluginActivations(
   // instead of the broken `"execute" in dbOrLayer || ("transactionImmediate" in dbOrLayer)`.
   if ("ping" in dbOrLayer) {
     const layer = dbOrLayer as AsyncDataLayer;
-    const conditions = [];
+    /*
+    FNXC:ProjectSchemaOwnership 2026-08-12-14:14:
+    Ecosystem analytics may share one PostgreSQL schema across projects. Scope both
+    aggregate reads to the bound layer so another project's activation history is
+    never presented as this dashboard's metric; unbound analytics remain global.
+    */
+    const conditions = [projectScopeFor(schema.project.pluginActivations.projectId, layer.projectId)].filter(
+      (condition): condition is NonNullable<typeof condition> => condition !== undefined,
+    );
     if (query.from !== undefined) conditions.push(gte(schema.project.pluginActivations.activatedAt, query.from));
     if (query.to !== undefined) conditions.push(lte(schema.project.pluginActivations.activatedAt, query.to));
     const where = conditions.length > 0 ? and(...conditions) : undefined;

@@ -31,7 +31,7 @@ vocabulary rather than go silent, which is the failure being fixed.
 import { describe, expect, it, vi } from "vitest";
 import type { MissionFeature, Task, TaskStore, WorkflowIr } from "@fusion/core";
 
-import { reconcileMissionFeatureState } from "../missions/mission-feature-sync.js";
+import { reconcileMissionFeatureState, resolveFeatureRepairTargets } from "../missions/mission-feature-sync.js";
 
 const DEFAULT_NAMES = {
   intake: "triage", hold: "todo", wip: "in-progress",
@@ -257,5 +257,62 @@ describe("a non-lifecycle column named with a legacy id is not claimed", () => {
     );
 
     expect(d.kind === "update" && d.status).toBe("triaged");
+  });
+});
+
+/*
+FNXC:MissionValidationRepair 2026-08-10-17:20:
+Repair targets retain the exact observed task snapshot. This proves absent links remain repairable
+rather than being mistaken for a stale fence, while renamed lifecycle roles retain their meaning.
+*/
+describe("feature validation repair target resolution", () => {
+  const linkedFeature = { id: "F-1", taskId: "FN-1" } as MissionFeature;
+  const repairStore = (resolvedTask: Task | undefined, workflowIr: WorkflowIr = ir(DEFAULT_NAMES)) => ({
+    ...storeWith(workflowIr),
+    getTask: vi.fn(async () => resolvedTask),
+  }) as unknown as TaskStore;
+
+  it.each([
+    ["planner", DEFAULT_NAMES.intake, "triaged", false, "planner"],
+    ["wip", DEFAULT_NAMES.wip, "in-progress", true, "wip"],
+    ["review", DEFAULT_NAMES.review, "in-progress", true, "wip"],
+  ] as const)("derives %s targets from the linked task lane", async (_label, column, status, resumeImplementation, laneRole) => {
+    const source = task(column);
+    const result = await resolveFeatureRepairTargets(repairStore(source), linkedFeature);
+    expect(result).toMatchObject({ status, resumeImplementation, groundTruth: {
+      featureId: "F-1", taskId: "FN-1", taskLiveness: "live", taskColumn: column,
+      taskUpdatedAt: source.updatedAt, laneRole,
+    } });
+  });
+
+  it("uses renamed planner lanes from the same workflow snapshot", async () => {
+    const result = await resolveFeatureRepairTargets(repairStore(task(RENAMED.hold), ir(RENAMED)), linkedFeature);
+    expect(result).toMatchObject({ status: "triaged", resumeImplementation: false, groundTruth: { laneRole: "planner", taskColumn: RENAMED.hold } });
+  });
+
+  it("rejects a completed or custom live lane instead of falsely clearing it to defined", async () => {
+    await expect(resolveFeatureRepairTargets(repairStore(task(DEFAULT_NAMES.complete)), linkedFeature))
+      .rejects.toThrow("not a planner or active-work lifecycle lane");
+  });
+
+  it("fences unlinked, missing, and physically archived task links as absent", async () => {
+    const unlinked = await resolveFeatureRepairTargets(repairStore(undefined), { id: "F-0", taskId: undefined });
+    const missing = await resolveFeatureRepairTargets(repairStore(undefined), linkedFeature);
+    const archived = await resolveFeatureRepairTargets(repairStore({ ...task(DEFAULT_NAMES.wip), deletedAt: "2026-01-02T00:00:00.000Z" }), linkedFeature);
+    for (const [result, taskId] of [[unlinked, null], [missing, "FN-1"], [archived, "FN-1"]] as const) {
+      expect(result).toMatchObject({ status: "defined", resumeImplementation: false, groundTruth: {
+        taskId, taskLiveness: "absent", taskColumn: null, taskUpdatedAt: null, laneRole: "none",
+      } });
+    }
+  });
+
+  it("does not emit an unverifiable absent fence for archived snapshots or renamed archived lanes", async () => {
+    const retainedSnapshot = await resolveFeatureRepairTargets(
+      repairStore({ ...task(DEFAULT_NAMES.wip), archivedAt: "2026-01-02T00:00:00.000Z" }),
+      linkedFeature,
+    );
+    expect(retainedSnapshot.groundTruth.taskLiveness).toBe("live");
+    await expect(resolveFeatureRepairTargets(repairStore(task(RENAMED.archived), ir(RENAMED)), linkedFeature))
+      .rejects.toThrow("not a planner or active-work lifecycle lane");
   });
 });

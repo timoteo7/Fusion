@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { builtinModules } from "node:module";
+import { execFileSync } from "node:child_process";
 import { parse } from "yaml";
 import { applyPrepackTransform } from "../../scripts/prepare-publish-manifest.mjs";
 
@@ -53,12 +55,12 @@ function assertRuntimeDepsAreNotOptionalPeers(pkg: any, label: string): void {
     ).not.toBe(true);
   }
 
-  // FNXC:DesktopPackaging 2026-07-26-22:55: Exact matched Pi runtime pin — keep in sync with
-  // pnpm-workspace.yaml overrides and check-pi-versions-pinned.mjs (currently 0.82.1).
+  // FNXC:DesktopPackaging 2026-08-12-20:46: Exact matched Pi runtime pin — keep in sync with
+  // pnpm-workspace.yaml overrides and check-pi-versions-pinned.mjs (currently 0.84.1).
   for (const dependencyName of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"]) {
     expect(dependencies, `${label}: ${dependencyName} must remain a required runtime dependency`).toHaveProperty(
       dependencyName,
-      "0.82.1",
+      "0.84.1",
     );
     expect(dependencies[dependencyName], `${label}: ${dependencyName} must be a clean exact semver`).toMatch(
       EXACT_SEMVER,
@@ -91,6 +93,18 @@ function assertRuntimeDepsAreNotOptionalPeers(pkg: any, label: string): void {
 describe("CLI package.json publishing config", () => {
   const pkg = loadPackageJson("cli");
   const prepackScript = loadCliPrepackScript();
+
+  /*
+   * FNXC:CliRuntimeContract 2026-08-11-09:30:
+   * Node 22.4 is the supported floor because the CLI uses import attributes and
+   * `node:fs/promises` glob; declaring it prevents unsupported runtimes from
+   * silently reaching the Node 22.4+ exit-13 liveness path FN-8954 repaired.
+   */
+  it("declares the supported Node runtime in both manifests", () => {
+    const rootPkg = loadRootPackageJson();
+    expect(pkg.engines?.node).toBe(">=22.4.0");
+    expect(rootPkg.engines?.node).toBe(pkg.engines.node);
+  });
 
   it('has "bin" field with fn/fusion pointing to committed launcher', () => {
     expect(pkg.bin).toBeDefined();
@@ -338,6 +352,37 @@ describe("CLI package.json publishing config", () => {
       },
     );
 
+    /*
+    FNXC:Packaging 2026-08-11-05:52:
+    FN-8978 removed the duplicate TypeScript declaration from CLI devDependencies.
+    Prepack copies remaining devDependencies into the published manifest, so this
+    guard covers the packed output as well as the source manifest.
+    */
+    it("published manifest keeps tsup externals as runtime-only dependencies", () => {
+      const publishedPkg = applyPrepackTransform(pkg);
+      const deps = Object.keys(publishedPkg.dependencies || {});
+      const devDeps = Object.keys(publishedPkg.devDependencies || {});
+
+      for (const external of externals) {
+        if (
+          builtinModules.includes(external) ||
+          external.startsWith("node:") ||
+          external in TRANSITIVE_EXTERNALS
+        ) {
+          continue;
+        }
+
+        expect(
+          deps,
+          `published tsup external "${external}" must be in @runfusion/fusion dependencies — otherwise \`npx runfusion.ai\` fails with ERR_MODULE_NOT_FOUND on a clean install. If this is a transitive dep, add it to TRANSITIVE_EXTERNALS with a reason.`,
+        ).toContain(external);
+        expect(
+          devDeps,
+          `published tsup external "${external}" must not be only a devDependency`,
+        ).not.toContain(external);
+      }
+    });
+
     it("TRANSITIVE_EXTERNALS entries still appear in tsup external (otherwise stale)", () => {
       for (const name of Object.keys(TRANSITIVE_EXTERNALS)) {
         expect(
@@ -480,5 +525,33 @@ describe("Workflow YAML validity", () => {
     const parsed = loadWorkflowYaml("version.yml");
     expect(parsed).toBeDefined();
     expect(parsed.name).toBe("Version & Release");
+  });
+});
+
+describe("shipped agent skills", () => {
+  it("keeps computer-use in the published skill tree", () => {
+    /* FNXC:ComputerUseSkill 2026-08-11-07:19: package files globs, manifest transform, and the
+     * actual npm pack file list together prevent a source-only skill from being mistaken for shipped. */
+    const cli = loadPackageJson("cli");
+    expect(cli.pi.skills).toContain("./skill");
+    expect(cli.files).toContain("skill/**");
+    expect(applyPrepackTransform(cli).files).toContain("skill/**");
+    const packageDir = join(workspaceRoot, "packages", "cli");
+    const packFixture = mkdtempSync(join(tmpdir(), "fusion-cli-packlist-"));
+    try {
+      /* Keep npm's real packlist semantics without making this focused manifest test scan the
+       * multi-megabyte built CLI and dashboard bundles. Source presence is still proven by cpSync. */
+      writeFileSync(join(packFixture, "package.json"), JSON.stringify(cli));
+      cpSync(join(packageDir, "skill"), join(packFixture, "skill"), { recursive: true });
+      const packed = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+        cwd: packFixture,
+        encoding: "utf8",
+      })) as Array<{ files: Array<{ path: string }> }>;
+      const packedPaths = new Set(packed[0]!.files.map((file) => file.path));
+      expect(packedPaths).toContain("skill/fusion/SKILL.md");
+      expect(packedPaths).toContain("skill/computer-use/SKILL.md");
+    } finally {
+      rmSync(packFixture, { recursive: true, force: true });
+    }
   });
 });

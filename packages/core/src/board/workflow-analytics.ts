@@ -2,7 +2,7 @@ import { isReviewColumnRole, isWipColumnRole, type ColumnRoleTraitFlags } from "
 import { resolveProjectColumnsForRoles, type ProjectLaneVocabularyStore } from "../project-lane-vocabulary.js";
 import { sql } from "drizzle-orm";
 import type { Database } from "../db/db.js";
-import type { AsyncDataLayer } from "../postgres/data-layer.js";
+import { projectScopeFor, type AsyncDataLayer } from "../postgres/data-layer.js";
 import { BUILTIN_WORKFLOWS, getBuiltinWorkflow, isBuiltinWorkflowId } from "../workflows/builtin-workflows.js";
 import { costFor, type CostResult, type ModelPricingOverrides } from "../ai/model-pricing.js";
 import type { TokenTotals } from "./token-analytics.js";
@@ -592,9 +592,10 @@ async function aggregateWorkflowAnalyticsAsync(
     modifiedFiles: r.modifiedFiles == null ? null : JSON.stringify(r.modifiedFiles),
   }));
 
-  // Prefetch all custom workflow names once; builtins resolve in-memory.
+  // Prefetch custom names once; an unbound analytics layer intentionally sees all partitions.
+  const workflowScope = projectScopeFor(sql`project_id`, layer.projectId);
   const workflowNameRows = (await layer.db.execute(
-    sql`SELECT id, name FROM project.workflows`,
+    sql`SELECT id, name FROM project.workflows ${workflowScope ? sql`WHERE ${workflowScope}` : sql``}`,
   )) as Array<{ id: string; name: string | null }>;
   const names = new Map<string, string>();
   for (const row of workflowNameRows) {

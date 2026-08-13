@@ -19,7 +19,10 @@
  *   - `agent_api_keys`         — API key records (data jsonb, revokedAt)
  *   - `agent_config_revisions` — config revision history (data jsonb)
  *   - `agent_blocked_states`   — blocked-task dedup snapshots (data jsonb)
- *   - `agent_ratings`          — agent ratings (score CHECK 1..5)
+ *   - `agent_ratings`          — project-owned agent ratings (score CHECK 1..5)
+ *
+ * FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00:
+ * Rating helpers receive an optional trailing project id. Blank or undefined bindings preserve compatibility behavior: writes are trigger-stamped while reads and deletes remain unscoped.
  *
  * SQLite → PostgreSQL notes (VAL-SCHEMA-004):
  *   - The `data` and `metadata` columns on `agents` (and the `data` columns on
@@ -45,7 +48,7 @@
  */
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
-import { projectOwnershipPartition, type AsyncDataLayer, type DbTransaction } from "../postgres/data-layer.js";
+import { projectOwnershipPartition, projectScopeFor, type AsyncDataLayer, type DbTransaction } from "../postgres/data-layer.js";
 import type {
   Agent,
   AgentState,
@@ -226,17 +229,30 @@ export async function writeAgent(handle: QueryHandle, agent: Agent, projectId?: 
 /**
  * Read a single agent by id, or null if not found.
  *
+ * FNXC:MultiProjectIsolation 2026-08-11-09:08:
+ * Runfusion/Fusion#3414 requires reads and deletes to carry the same ownership
+ * predicate as writes because external PostgreSQL owner/superuser connections
+ * bypass RLS. An unbound layer deliberately passes no scope for compatibility
+ * and cross-project analytics callers.
+ *
  * FNXC:AgentStore 2026-06-24-14:15:
  * The jsonb `data` column holds the extended fields; the indexed columns hold
  * the identity/state fields. The two are merged back into an Agent. The caller
  * is responsible for applying ephemeral/permission-policy normalization
  * (parseAgent in the sync store) — this helper returns the raw merged shape.
  */
-export async function readAgent(handle: QueryHandle, agentId: string): Promise<Agent | null> {
+export async function readAgent(
+  handle: QueryHandle,
+  agentId: string,
+  projectId?: string,
+): Promise<Agent | null> {
   const rows = await handle
     .select(agentColumns)
     .from(schema.project.agents)
-    .where(eq(schema.project.agents.id, agentId));
+    .where(and(
+      eq(schema.project.agents.id, agentId),
+      projectScopeFor(schema.project.agents.projectId, projectId),
+    ));
   const row = rows[0] as AgentRow | undefined;
   if (!row) return null;
   return mergeAgentRow(row);
@@ -269,8 +285,9 @@ export function mergeAgentRow(row: AgentRow): Agent {
 export async function listAgentRows(
   handle: QueryHandle,
   filter?: { state?: AgentState; role?: AgentCapability },
+  projectId?: string,
 ): Promise<Agent[]> {
-  const conditions = [];
+  const conditions = [projectScopeFor(schema.project.agents.projectId, projectId)];
   if (filter?.state) {
     conditions.push(eq(schema.project.agents.state, filter.state));
   }
@@ -293,11 +310,15 @@ export async function listAgentRows(
 export async function findAgentRowsByName(
   handle: QueryHandle,
   name: string,
+  projectId?: string,
 ): Promise<Agent[]> {
   const rows = await handle
     .select(agentColumns)
     .from(schema.project.agents)
-    .where(eq(schema.project.agents.name, name))
+    .where(and(
+      eq(schema.project.agents.name, name),
+      projectScopeFor(schema.project.agents.projectId, projectId),
+    ))
     .orderBy(desc(schema.project.agents.createdAt), desc(schema.project.agents.id));
   return rows.map((row) => mergeAgentRow(row as AgentRow));
 }
@@ -306,10 +327,17 @@ export async function findAgentRowsByName(
  * Delete an agent by id. Cascading foreign keys remove heartbeats, runs,
  * task sessions, API keys, config revisions, and blocked states.
  */
-export async function deleteAgent(handle: QueryHandle, agentId: string): Promise<boolean> {
+export async function deleteAgent(
+  handle: QueryHandle,
+  agentId: string,
+  projectId?: string,
+): Promise<boolean> {
   const result = await handle
     .delete(schema.project.agents)
-    .where(eq(schema.project.agents.id, agentId))
+    .where(and(
+      eq(schema.project.agents.id, agentId),
+      projectScopeFor(schema.project.agents.projectId, projectId),
+    ))
     .returning({ id: schema.project.agents.id });
   return result.length > 0;
 }
@@ -324,8 +352,10 @@ export async function deleteAgent(handle: QueryHandle, agentId: string): Promise
 export async function recordHeartbeat(
   handle: QueryHandle,
   event: { agentId: string; timestamp: string; status: AgentHeartbeatEvent["status"]; runId: string },
+  projectId?: string,
 ): Promise<AgentHeartbeatEvent> {
   await handle.insert(schema.project.agentHeartbeats).values({
+    projectId: projectId?.trim() || "",
     agentId: event.agentId,
     timestamp: event.timestamp,
     status: event.status,
@@ -345,11 +375,15 @@ export async function getHeartbeatHistory(
   handle: QueryHandle,
   agentId: string,
   limit = 50,
+  projectId?: string,
 ): Promise<AgentHeartbeatEvent[]> {
   const rows = await handle
     .select(heartbeatColumns)
     .from(schema.project.agentHeartbeats)
-    .where(eq(schema.project.agentHeartbeats.agentId, agentId))
+    .where(and(
+      eq(schema.project.agentHeartbeats.agentId, agentId),
+      projectScopeFor(schema.project.agentHeartbeats.projectId, projectId),
+    ))
     .orderBy(desc(schema.project.agentHeartbeats.timestamp))
     .limit(limit);
   return (rows as AgentHeartbeatRow[]).map((row) => ({
@@ -582,6 +616,7 @@ export async function getTaskSession(
   handle: QueryHandle,
   agentId: string,
   taskId: string,
+  projectId?: string,
 ): Promise<AgentTaskSession | null> {
   const rows = await handle
     .select({ data: schema.project.agentTaskSessions.data })
@@ -590,6 +625,7 @@ export async function getTaskSession(
       and(
         eq(schema.project.agentTaskSessions.agentId, agentId),
         eq(schema.project.agentTaskSessions.taskId, taskId),
+        projectScopeFor(schema.project.agentTaskSessions.projectId, projectId),
       ),
     );
   return (rows[0]?.data as AgentTaskSession | undefined) ?? null;
@@ -602,9 +638,10 @@ export async function getTaskSession(
 export async function upsertTaskSession(
   handle: QueryHandle,
   session: AgentTaskSession,
+  projectId?: string,
 ): Promise<AgentTaskSession> {
   const now = new Date().toISOString();
-  const existing = await getTaskSession(handle, session.agentId, session.taskId);
+  const existing = await getTaskSession(handle, session.agentId, session.taskId, projectId);
   const saved: AgentTaskSession = {
     ...session,
     createdAt: existing?.createdAt ?? now,
@@ -613,6 +650,7 @@ export async function upsertTaskSession(
   await handle
     .insert(schema.project.agentTaskSessions)
     .values({
+      projectId: projectId?.trim() || "",
       agentId: session.agentId,
       taskId: session.taskId,
       data: saved,
@@ -640,6 +678,7 @@ export async function deleteTaskSession(
   handle: QueryHandle,
   agentId: string,
   taskId: string,
+  projectId?: string,
 ): Promise<void> {
   await handle
     .delete(schema.project.agentTaskSessions)
@@ -647,6 +686,7 @@ export async function deleteTaskSession(
       and(
         eq(schema.project.agentTaskSessions.agentId, agentId),
         eq(schema.project.agentTaskSessions.taskId, taskId),
+        projectScopeFor(schema.project.agentTaskSessions.projectId, projectId),
       ),
     );
 }
@@ -659,11 +699,15 @@ export async function deleteTaskSession(
 export async function readApiKeys(
   handle: QueryHandle,
   agentId: string,
+  projectId?: string,
 ): Promise<AgentApiKey[]> {
   const rows = await handle
     .select({ data: schema.project.agentApiKeys.data })
     .from(schema.project.agentApiKeys)
-    .where(eq(schema.project.agentApiKeys.agentId, agentId))
+    .where(and(
+      eq(schema.project.agentApiKeys.agentId, agentId),
+      projectScopeFor(schema.project.agentApiKeys.projectId, projectId),
+    ))
     .orderBy(asc(schema.project.agentApiKeys.createdAt));
   return rows
     .map((row) => (row.data as AgentApiKey | null) ?? null)
@@ -678,8 +722,10 @@ export async function readApiKeys(
 export async function insertApiKey(
   handle: QueryHandle,
   key: AgentApiKey,
+  projectId?: string,
 ): Promise<void> {
   await handle.insert(schema.project.agentApiKeys).values({
+    projectId: projectId?.trim() || "",
     id: key.id,
     agentId: key.agentId,
     data: key,
@@ -721,6 +767,7 @@ export async function revokeApiKeyRow(
   keyId: string,
   agentId: string,
   revoked: AgentApiKey,
+  projectId?: string,
 ): Promise<void> {
   await handle
     .update(schema.project.agentApiKeys)
@@ -729,6 +776,7 @@ export async function revokeApiKeyRow(
       and(
         eq(schema.project.agentApiKeys.id, keyId),
         eq(schema.project.agentApiKeys.agentId, agentId),
+        projectScopeFor(schema.project.agentApiKeys.projectId, projectId),
       ),
     );
 }
@@ -741,8 +789,10 @@ export async function revokeApiKeyRow(
 export async function appendConfigRevision(
   handle: QueryHandle,
   revision: AgentConfigRevision,
+  projectId?: string,
 ): Promise<void> {
   await handle.insert(schema.project.agentConfigRevisions).values({
+    projectId: projectId?.trim() || "",
     id: revision.id,
     agentId: revision.agentId,
     data: revision,
@@ -756,11 +806,15 @@ export async function appendConfigRevision(
 export async function readConfigRevisions(
   handle: QueryHandle,
   agentId: string,
+  projectId?: string,
 ): Promise<AgentConfigRevision[]> {
   const rows = await handle
     .select({ data: schema.project.agentConfigRevisions.data })
     .from(schema.project.agentConfigRevisions)
-    .where(eq(schema.project.agentConfigRevisions.agentId, agentId))
+    .where(and(
+      eq(schema.project.agentConfigRevisions.agentId, agentId),
+      projectScopeFor(schema.project.agentConfigRevisions.projectId, projectId),
+    ))
     .orderBy(asc(schema.project.agentConfigRevisions.createdAt));
   return rows
     .map((row) => (row.data as AgentConfigRevision | null) ?? null)
@@ -773,11 +827,15 @@ export async function readConfigRevisions(
 export async function findConfigRevisionById(
   handle: QueryHandle,
   revisionId: string,
+  projectId?: string,
 ): Promise<AgentConfigRevision | null> {
   const rows = await handle
     .select({ data: schema.project.agentConfigRevisions.data })
     .from(schema.project.agentConfigRevisions)
-    .where(eq(schema.project.agentConfigRevisions.id, revisionId));
+    .where(and(
+      eq(schema.project.agentConfigRevisions.id, revisionId),
+      projectScopeFor(schema.project.agentConfigRevisions.projectId, projectId),
+    ));
   return (rows[0]?.data as AgentConfigRevision | undefined) ?? null;
 }
 
@@ -787,12 +845,18 @@ export async function findConfigRevisionById(
  * FNXC:AgentStore 2026-06-24-14:55:
  * Add a rating. The `score` CHECK constraint (BETWEEN 1 AND 5) is enforced by
  * PostgreSQL (VAL-SCHEMA-005); a violation rejects the insert.
+ *
+ * FNXC:MultiProjectIsolation 2026-08-11-10:25:
+ * Ratings share project-local agent IDs, so each write and lookup receives the
+ * bound project scope even when an owner connection bypasses PostgreSQL RLS.
  */
 export async function addRating(
   handle: QueryHandle,
   rating: AgentRating,
+  projectId?: string,
 ): Promise<AgentRating> {
   await handle.insert(schema.project.agentRatings).values({
+    projectId: projectId?.trim() || "",
     id: rating.id,
     agentId: rating.agentId,
     raterType: rating.raterType,
@@ -825,13 +889,20 @@ function mapRatingRow(row: AgentRatingRow): AgentRating {
 /**
  * Get ratings for an agent (newest first), optionally filtered by category
  * and capped at `limit`.
+ *
+ * FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00:
+ * A bound project id scopes the read; an absent or blank id deliberately remains an unscoped compatibility read.
  */
 export async function getRatings(
   handle: QueryHandle,
   agentId: string,
   options?: { limit?: number; category?: string },
+  projectId?: string,
 ): Promise<AgentRating[]> {
-  const conditions = [eq(schema.project.agentRatings.agentId, agentId)];
+  const conditions = [
+    eq(schema.project.agentRatings.agentId, agentId),
+    projectScopeFor(schema.project.agentRatings.projectId, projectId),
+  ];
   if (options?.category !== undefined) {
     conditions.push(eq(schema.project.agentRatings.category, options.category));
   }
@@ -848,11 +919,21 @@ export async function getRatings(
 
 /**
  * Delete a rating by id.
+ *
+ * FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00:
+ * Bound deletion is constrained to its rating partition, while an unbound compatibility store retains the prior unscoped behavior.
  */
-export async function deleteRating(handle: QueryHandle, ratingId: string): Promise<boolean> {
+export async function deleteRating(
+  handle: QueryHandle,
+  ratingId: string,
+  projectId?: string,
+): Promise<boolean> {
   const result = await handle
     .delete(schema.project.agentRatings)
-    .where(eq(schema.project.agentRatings.id, ratingId))
+    .where(and(
+      eq(schema.project.agentRatings.id, ratingId),
+      projectScopeFor(schema.project.agentRatings.projectId, projectId),
+    ))
     .returning({ id: schema.project.agentRatings.id });
   return result.length > 0;
 }
@@ -865,11 +946,15 @@ export async function deleteRating(handle: QueryHandle, ratingId: string): Promi
 export async function getLastBlockedState(
   handle: QueryHandle,
   agentId: string,
+  projectId?: string,
 ): Promise<BlockedStateSnapshot | null> {
   const rows = await handle
     .select({ data: schema.project.agentBlockedStates.data })
     .from(schema.project.agentBlockedStates)
-    .where(eq(schema.project.agentBlockedStates.agentId, agentId));
+    .where(and(
+      eq(schema.project.agentBlockedStates.agentId, agentId),
+      projectScopeFor(schema.project.agentBlockedStates.projectId, projectId),
+    ));
   return (rows[0]?.data as BlockedStateSnapshot | undefined) ?? null;
 }
 
@@ -881,11 +966,13 @@ export async function setLastBlockedState(
   handle: QueryHandle,
   agentId: string,
   state: BlockedStateSnapshot,
+  projectId?: string,
 ): Promise<void> {
   const updatedAt = new Date().toISOString();
   await handle
     .insert(schema.project.agentBlockedStates)
     .values({
+      projectId: projectId?.trim() || "",
       agentId,
       data: state,
       updatedAt,
@@ -905,10 +992,14 @@ export async function setLastBlockedState(
 export async function clearLastBlockedState(
   handle: QueryHandle,
   agentId: string,
+  projectId?: string,
 ): Promise<void> {
   await handle
     .delete(schema.project.agentBlockedStates)
-    .where(eq(schema.project.agentBlockedStates.agentId, agentId));
+    .where(and(
+      eq(schema.project.agentBlockedStates.agentId, agentId),
+      projectScopeFor(schema.project.agentBlockedStates.projectId, projectId),
+    ));
 }
 
 /**
@@ -917,6 +1008,7 @@ export async function clearLastBlockedState(
  */
 export async function getAllBlockedStates(
   handle: QueryHandle,
+  projectId?: string,
 ): Promise<Array<{ agentId: string; state: BlockedStateSnapshot }>> {
   const rows = await handle
     .select({
@@ -925,6 +1017,7 @@ export async function getAllBlockedStates(
       updatedAt: schema.project.agentBlockedStates.updatedAt,
     })
     .from(schema.project.agentBlockedStates)
+    .where(projectScopeFor(schema.project.agentBlockedStates.projectId, projectId))
     .orderBy(asc(schema.project.agentBlockedStates.updatedAt), asc(schema.project.agentBlockedStates.agentId));
   return rows
     .map((row) => {

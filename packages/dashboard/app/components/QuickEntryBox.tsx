@@ -2402,7 +2402,19 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
             <div
               ref={modelMenuPortalRef}
               className="model-nested-menu model-nested-menu--portal"
-              onMouseDown={(e) => e.preventDefault()}
+              onMouseDown={(e) => {
+                /*
+                FNXC:QuickAddModels 2026-08-12-21:51:
+                React synthetic mouse events cross createPortal boundaries, so this composer-focus guard
+                must exempt form controls and the portaled model dropdown or preventDefault suppresses
+                focus for its filter input. Plain menu chrome still preserves the quick-entry focus.
+                */
+                const target = e.target as Element;
+                if (target.closest("input, textarea, select, [contenteditable], .model-combobox-dropdown--portal")) {
+                  return;
+                }
+                e.preventDefault();
+              }}
               data-testid="model-nested-menu"
               style={{
                 position: "fixed",
@@ -2415,7 +2427,11 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
               }}
             >
               {activeModelSubmenu === null ? (
-                // Top-level menu with Plan/Executor/Reviewer choices
+                /*
+                 * FNXC:QuickAddModelMenu 2026-08-12-22:04:
+                 * Top-level model rows use bare role names and matching icon alignment because
+                 * .model-menu-item-label has no gap. Submenu headers retain the "<Role> Model" form.
+                 */
                 <div className="model-menu-items">
                   <button
                     type="button"
@@ -2468,9 +2484,22 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                     </span>
                     <ChevronRight size={12} style={{ marginLeft: "auto", color: "var(--text-dim)" }} />
                   </button>
-                  <button type="button" className={`model-menu-item ${hasMergerOverride ? "model-menu-item--active" : ""}`} onClick={() => setActiveModelSubmenu("merger")} data-testid="model-menu-merger">
-                    <span className="model-menu-item-label"><Brain size={12} /> {t("tasks.mergerModel", "Merger Model")}</span>
-                    <span className="model-menu-item-value">{hasMergerOverride ? getModelBadgeLabel(mergerProvider, mergerModelId) : t("tasks.usingDefault", "Using default")}</span><ChevronRight size={12} style={{ marginLeft: "auto", color: "var(--text-dim)" }} />
+                  <button
+                    type="button"
+                    className={`model-menu-item ${hasMergerOverride ? "model-menu-item--active" : ""}`}
+                    onClick={() => setActiveModelSubmenu("merger")}
+                    data-testid="model-menu-merger"
+                  >
+                    <span className="model-menu-item-label">
+                      <Brain size={12} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                      {t("tasks.modelMerger", "Merger")}
+                    </span>
+                    <span className="model-menu-item-value">
+                      {hasMergerOverride
+                        ? getModelBadgeLabel(mergerProvider, mergerModelId)
+                        : t("tasks.usingDefault", "Using default")}
+                    </span>
+                    <ChevronRight size={12} style={{ marginLeft: "auto", color: "var(--text-dim)" }} />
                   </button>
                 </div>
               ) : (

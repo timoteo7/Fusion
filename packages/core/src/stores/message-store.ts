@@ -19,6 +19,7 @@ import { DASHBOARD_USER_ID, normalizeMessageParticipant, validateMessageMetadata
 import type { AsyncDataLayer } from "../postgres/data-layer.js";
 import * as asyncMessageStore from "../async-stores/async-message-store.js";
 import { sanitizeTextValue, sanitizeJsonbValue } from "../postgres/nul-sanitize.js";
+import { emitUsageEvent } from "../task-store/async/async-events.js";
 
 const messageStoreLog = createLogger("message-store");
 
@@ -32,6 +33,10 @@ export interface MessageStoreEvents {
   "message:received": [message: Message];
   /** Emitted when a message is marked as read */
   "message:read": [message: Message];
+  /** Emitted when a message is archived */
+  "message:archived": [message: Message];
+  /** Emitted when a message is restored from archive */
+  "message:unarchived": [message: Message];
   /** Emitted when a message is deleted */
   "message:deleted": [messageId: string];
   /** Emitted when proposal metadata changes without creating a new message. */
@@ -50,6 +55,7 @@ interface MessageRow {
   content: string;
   type: string;
   read: number;
+  archived: number | null;
   metadata: string | null;
   createdAt: string;
   updatedAt: string;
@@ -108,12 +114,12 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
     // Prepare frequently-run statements (SQLite path)
     const sqliteDb = this.db!;
     this.stmtInsert = sqliteDb.prepare(`
-      INSERT INTO messages (id, fromId, fromType, toId, toType, content, type, read, metadata, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, fromId, fromType, toId, toType, content, type, read, archived, metadata, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.stmtInsertOnce = sqliteDb.prepare(`
-      INSERT OR IGNORE INTO messages (id, fromId, fromType, toId, toType, content, type, read, metadata, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO messages (id, fromId, fromType, toId, toType, content, type, read, archived, metadata, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtGetById = sqliteDb.prepare(`
@@ -149,6 +155,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
       content: row.content,
       type: row.type as MessageType,
       read: row.read === 1,
+      archived: (row.archived ?? 0) === 1,
       metadata: fromJson<Message["metadata"]>(row.metadata),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -187,6 +194,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
       content: sanitizeTextValue(input.content),
       type: input.type,
       read: false,
+      archived: false,
       metadata: sanitizeJsonbValue(input.metadata),
       createdAt: now,
       updatedAt: now,
@@ -203,6 +211,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
         content: message.content,
         type: message.type,
         read: message.read,
+        archived: message.archived,
         metadata: message.metadata ?? null,
         createdAt: message.createdAt,
         updatedAt: message.updatedAt,
@@ -217,11 +226,27 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
         message.content,
         message.type,
         message.read ? 1 : 0,
+        message.archived ? 1 : 0,
         toJsonNullable(message.metadata),
         message.createdAt,
         message.updatedAt,
       );
       this.db!.bumpLastModified();
+    }
+
+    /*
+    FNXC:CommandCenterActivity 2026-08-09-10:46:
+    Human mailbox sends count as activity only after durable delivery succeeds. Usage telemetry contains
+    routing identifiers only, never message prose, and its failure cannot delay or reverse mailbox delivery.
+    */
+    if (this.asyncLayer && message.fromType === "user") {
+      try {
+        void emitUsageEvent(this.asyncLayer.db, this.asyncLayer.projectId ?? "", {
+          kind: "user_message", agentId: message.toType === "agent" ? message.toId : null,
+          taskId: typeof message.metadata?.taskId === "string" ? message.metadata.taskId : null,
+          category: "mailbox",
+        }).catch((error) => messageStoreLog.warn(`Failed to emit mailbox usage telemetry: ${error instanceof Error ? error.message : String(error)}`));
+      } catch (error) { messageStoreLog.warn(`Failed to emit mailbox usage telemetry: ${error instanceof Error ? error.message : String(error)}`); }
     }
 
     messageStoreLog.log(`MessageStore emitting message:sent id=${message.id} type=${message.type} fromId=${message.fromId} toId=${message.toId}`);
@@ -279,6 +304,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
       content: sanitizeTextValue(input.content),
       type: input.type,
       read: false,
+      archived: false,
       metadata: sanitizeJsonbValue(input.metadata),
       createdAt: now,
       updatedAt: now,
@@ -299,6 +325,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
         message.toType,
         message.content,
         message.type,
+        0,
         0,
         toJsonNullable(message.metadata),
         message.createdAt,
@@ -451,6 +478,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
       whereClauses.push("read = ?");
       params.push(filter.read ? 1 : 0);
     }
+    whereClauses.push(filter?.archived === true ? "archived = 1" : "(archived = 0 OR archived IS NULL)");
 
     const whereSql = whereClauses.join(" AND ");
     const limit = filter?.limit ?? 100;
@@ -517,17 +545,45 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
 
     // Get count of unread messages before updating
     const unreadRow = this.db!.prepare(`
-      SELECT COUNT(*) as count FROM messages WHERE ${toIdPredicate} AND toType = ? AND read = 0
+      SELECT COUNT(*) as count FROM messages WHERE ${toIdPredicate} AND toType = ? AND read = 0 AND (archived = 0 OR archived IS NULL)
     `).get(...participantIds, ownerType) as { count: number } | undefined;
     const count = unreadRow?.count ?? 0;
 
     // Mark all as read
     this.db!.prepare(`
-      UPDATE messages SET read = 1, updatedAt = ? WHERE ${toIdPredicate} AND toType = ? AND read = 0
+      UPDATE messages SET read = 1, updatedAt = ? WHERE ${toIdPredicate} AND toType = ? AND read = 0 AND (archived = 0 OR archived IS NULL)
     `).run(now, ...participantIds, ownerType);
 
     this.db!.bumpLastModified();
     return count;
+  }
+
+  /** Archive a message without destroying its correspondence history. */
+  async archiveMessage(id: string): Promise<Message> {
+    return this.setMessageArchived(id, true);
+  }
+
+  /** Restore a previously archived message to default mailbox lists. */
+  async unarchiveMessage(id: string): Promise<Message> {
+    return this.setMessageArchived(id, false);
+  }
+
+  private async setMessageArchived(id: string, archived: boolean): Promise<Message> {
+    if (this.asyncLayer) {
+      const updated = await asyncMessageStore.setMessageArchived(this.asyncLayer.db, id, archived);
+      if (!updated) throw new Error(`Message ${id} not found`);
+      this.emit(archived ? "message:archived" : "message:unarchived", updated);
+      return updated;
+    }
+    const existing = await this.getMessage(id);
+    if (!existing) throw new Error(`Message ${id} not found`);
+    if (existing.archived === archived) return existing;
+    this.db!.prepare("UPDATE messages SET archived = ?, updatedAt = ? WHERE id = ?")
+      .run(archived ? 1 : 0, new Date().toISOString(), id);
+    this.db!.bumpLastModified();
+    const updated = (await this.getMessage(id))!;
+    this.emit(archived ? "message:archived" : "message:unarchived", updated);
+    return updated;
   }
 
   /**
@@ -616,7 +672,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
   async getConversation(
     participantA: { id: string; type: ParticipantType },
     participantB: { id: string; type: ParticipantType },
-    options?: { limit?: number },
+    options?: Pick<MessageFilter, "limit" | "archived">,
   ): Promise<Message[]> {
     if (this.asyncLayer) {
       return asyncMessageStore.getConversation(this.asyncLayer.db, participantA, participantB, options);
@@ -643,7 +699,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
         (${participantAFromPredicate} AND fromType = ? AND ${participantBToPredicate} AND toType = ?)
         OR
         (${participantBFromPredicate} AND fromType = ? AND ${participantAToPredicate} AND toType = ?)
-      )
+      ) AND ${options?.archived === true ? "archived = 1" : "(archived = 0 OR archived IS NULL)"}
       ORDER BY createdAt DESC
       LIMIT ?
     `).all(
@@ -686,12 +742,12 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
       : `toId IN (${participantIds.map(() => "?").join(", ")})`;
 
     const unreadRow = this.db!.prepare(`
-      SELECT COUNT(*) as count FROM messages WHERE ${toIdPredicate} AND toType = ? AND read = 0
+      SELECT COUNT(*) as count FROM messages WHERE ${toIdPredicate} AND toType = ? AND read = 0 AND (archived = 0 OR archived IS NULL)
     `).get(...participantIds, ownerType) as { count: number } | undefined;
     const unreadCount = unreadRow?.count ?? 0;
 
     const lastRow = this.db!.prepare(`
-      SELECT * FROM messages WHERE ${toIdPredicate} AND toType = ? ORDER BY createdAt DESC, rowid DESC LIMIT 1
+      SELECT * FROM messages WHERE ${toIdPredicate} AND toType = ? AND (archived = 0 OR archived IS NULL) ORDER BY createdAt DESC, rowid DESC LIMIT 1
     `).get(...participantIds, ownerType) as unknown as MessageRow | undefined;
     const lastMessage = lastRow ? this.rowToMessage(lastRow) : undefined;
 
@@ -707,13 +763,13 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
    * Get all agent-to-agent messages across all agents.
    * @returns Array of messages (newest first)
    */
-  async getAllAgentToAgentMessages(): Promise<Message[]> {
+  async getAllAgentToAgentMessages(filter?: Pick<MessageFilter, "archived">): Promise<Message[]> {
     if (this.asyncLayer) {
-      return asyncMessageStore.getAllAgentToAgentMessages(this.asyncLayer.db);
+      return asyncMessageStore.getAllAgentToAgentMessages(this.asyncLayer.db, filter);
     }
     const rows = this.db!.prepare(`
       SELECT * FROM messages
-      WHERE type = ?
+      WHERE type = ? AND ${filter?.archived === true ? "archived = 1" : "(archived = 0 OR archived IS NULL)"}
       ORDER BY createdAt DESC, rowid DESC
     `).all("agent-to-agent");
 
@@ -729,7 +785,7 @@ export class MessageStore extends EventEmitter<MessageStoreEvents> {
     }
     const row = this.db!.prepare(`
       SELECT COUNT(*) as count FROM messages
-      WHERE type = ? AND read = 0
+      WHERE type = ? AND read = 0 AND (archived = 0 OR archived IS NULL)
     `).get("agent-to-agent") as { count: number } | undefined;
 
     return row?.count ?? 0;

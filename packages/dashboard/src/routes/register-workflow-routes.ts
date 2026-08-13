@@ -17,6 +17,7 @@ U9: replace these with the request's resolved actor. Nothing else about the call
 // FNXC:Identity 2026-08-09-03:04: one-line import on purpose — the U18 census counts any non-`import`-prefixed line naming the marker, so a multi-line import block would score as debt it is not.
 import { UNATTRIBUTED_MUTATION_CONTEXT } from "@fusion/core";
 import type { WorkflowDefinition, WorkflowDefinitionKind, WorkflowIr, WorkflowIrNode, WorkflowSettingDefinition, TaskStore } from "@fusion/core";
+import { resolveRequestActor } from "../request-actor.js";
 import { ColumnTraitValidationError, OccupiedColumnsError, InvalidRehomeTargetError, WorkflowIrError, ColumnAgentBindingError, WorkflowSettingRejectionError, SCHEMA_VERSION, assertColumnTraitsValid, layoutForIr, listTraits, listStepParsers, parseWorkflowIr, resolvePlanningSettingsModel, stripApprovalBypassFlags, resolveWorkflowIrById, resolveEffectiveSettingValues, findOrphanedSettingValues, isBuiltinWorkflowId, getBuiltinWorkflow, BUILTIN_WORKFLOW_SETTINGS, AgentStore, validateColumnAgentBindings, resolveWorkflowOptionalSteps, enumeratePromptBearingWorkflowNodes, normalizeWorkflowIcon, WorkflowSwitchRehomeFailedError } from "@fusion/core";
 import { buildSessionSkillContextSync, createFnAgent as engineCreateFnAgent, validateCodeNodeSources, validateWorkflowIrDryRun } from "@fusion/engine";
 import { ApiError, badRequest, conflict, notFound, rateLimited } from "../api-error.js";
@@ -538,6 +539,7 @@ export function registerWorkflowRoutes(ctx: ApiRoutesContext): void {
           workflowId,
           projectId,
           values as Record<string, unknown>,
+          resolveRequestActor(req),
         );
         const declarations = await resolveSettingDeclarations(store, workflowId);
         res.json({
@@ -1007,6 +1009,7 @@ export function registerWorkflowRoutes(ctx: ApiRoutesContext): void {
             workflow.id,
             workflowProjectId,
             importedSettingValues,
+            resolveRequestActor(req),
           );
         }
         if (Object.keys(importedPromptOverrides).length > 0) {

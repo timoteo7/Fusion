@@ -5,9 +5,10 @@
  * Usage: fn plugin create <name>
  */
 
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+
+import { readOwnCliVersion } from "../cli-version.js";
 
 // Valid plugin name pattern: kebab-case
 const PLUGIN_NAME_REGEX = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
@@ -50,39 +51,8 @@ function ensureTargetPathAvailable(targetDir: string, targetPath: string): void 
   }
 }
 
-function readOwnCliVersion(): string | undefined {
-  let currentDir: string;
-  try {
-    currentDir = dirname(fileURLToPath(import.meta.url));
-  } catch {
-    return undefined;
-  }
-
-  for (let i = 0; i < 8; i += 1) {
-    const pkgPath = resolve(currentDir, "package.json");
-    if (existsSync(pkgPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
-          name?: string;
-          version?: string;
-        };
-        if (parsed.name === "@runfusion/fusion" && typeof parsed.version === "string") {
-          return parsed.version;
-        }
-      } catch {
-        // Ignore malformed package.json and continue walking.
-      }
-    }
-    const parentDir = resolve(currentDir, "..");
-    if (parentDir === currentDir) break;
-    currentDir = parentDir;
-  }
-
-  return undefined;
-}
-
 function resolveFusionCaretVersion(): string {
-  const version = readOwnCliVersion() ?? DEFAULT_RUNFUSION_VERSION;
+  const version = readOwnCliVersion(import.meta.url) ?? DEFAULT_RUNFUSION_VERSION;
   return `^${version}`;
 }
 

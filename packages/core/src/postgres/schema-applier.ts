@@ -56,7 +56,18 @@ capacity-model table drop that landed while this PR was open.
 */
 /* FNXC:CrossProcessDeleteObservation 2026-08-01-11:39: advance the schema ceiling so durable consumer state exists before observers begin polling FN-8684's outbox. */
 /* FNXC:MissionValidation 2026-08-01-16:21: advance the schema ceiling before validator admission reads durable content fingerprints. */
-export const SCHEMA_BASELINE_VERSION = "0047";
+/* FNXC:PrMergeEventDrivenChecks 2026-08-09-14:35: 0048 registers project-scoped GitHub CI check state. */
+/** FNXC:AgentActivityStream 2026-08-09-21:32: 0049 follows the landed 0048 GitHub check-state migration so upgraded projects receive the durable activity outbox. */
+/* FNXC:SpecLock 2026-08-09-18:17: 0050 stores immutable plan history and 0051 widens source revisions before Date.now()-based writes. */
+/* FNXC:MemoryRecall 2026-08-10-11:03: Explicit baseline registration prevents the recall migration from being silently skipped. */
+/* FNXC:SpecLockMissionAlignment 2026-08-10-16:17: advance the schema ceiling so SQLite and PostgreSQL feature projections retain reconciled drift alignment. */
+/* FNXC:MultiProjectIsolation 2026-08-11-10:25: schema startup must register project-local agent ratings before bound stores scope their mutations. */
+/* FNXC:MessageArchive 2026-08-12-22:14: 0058 persists non-destructive mailbox archival on upgrades. */
+/* FNXC:Identity 2026-08-09-03:04: 0059 adds the actor/credential/session/provider-link registry in `central`
+   plus project-scoped role grants. Renumbered from 0047 on the main refresh: main had already landed its own
+   0047, and two migrations sharing one bookkeeping identity means whichever check runs first marks the other
+   applied — the identity tables would silently never be created on an upgraded database. */
+export const SCHEMA_BASELINE_VERSION = "0059";
 /** FNXC:SymbolLock 2026-07-20-10:00: upgrades need durable task declarations before admission resolves symbols. */
 export const TASK_DECLARED_SYMBOLS_VERSION = "0028";
 const INITIAL_SCHEMA_VERSION = "0000";
@@ -191,8 +202,32 @@ export const QUEUED_EPISODE_SIGNATURE_VERSION = "0044";
 export const MULTI_ROLE_WORKFLOW_AGENTS_VERSION = "0045";
 /** FNXC:WorkflowAgentRouting 2026-08-07-03:25: upgraded projects need durable principal fencing before graph dispatch can route permanent agents. */
 export const WORKFLOW_PRINCIPAL_FENCE_VERSION = "0046";
-/** FNXC:Identity 2026-08-09-03:04: 0047 adds the additive actor/credential/session/provider-link registry in `central` plus project-scoped role grants; explicit registration is what keeps it from silently never running on upgraded databases. */
-export const IDENTITY_ACTORS_VERSION = "0047";
+/** FNXC:TaskRecommendations 2026-08-08-05:02: explicit registration prevents recommendation JSONB upgrades being skipped. */
+export const TASK_RECOMMENDATIONS_VERSION = "0047";
+/** FNXC:PrMergeEventDrivenChecks 2026-08-09-14:35: explicit registration prevents event-driven merge state migration from being skipped. */
+export const GITHUB_CHECK_STATES_VERSION = "0048";
+/** FNXC:AgentActivityStream 2026-08-09-21:32: Migration 0049 avoids the already-landed 0048 bookkeeping identity. */
+export const AGENT_ACTIVITY_EVENTS_VERSION = "0049";
+/** FNXC:SpecLock 2026-08-09-18:17: immutable lock/report storage follows the already-landed activity migration. */
+export const SPEC_LOCK_DRIFT_REPORT_VERSION = "0050";
+/** FNXC:SpecLock 2026-08-09-18:17: widen source revisions before Date.now()-based current-plan writes overflow integer storage. */
+export const SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION = "0051";
+/** FNXC:MemoryRecall 2026-08-10-11:03: explicit migration bookkeeping for project recall rows. */
+export const MEMORY_RECALL_RECORDS_VERSION = "0052";
+/** FNXC:SpecLockMissionAlignment 2026-08-10-16:17: durable feature alignment is registered after all existing migration identities. */
+export const MISSION_FEATURE_SPEC_ALIGNMENT_VERSION = "0053";
+/** FNXC:MultiProjectIsolation 2026-08-11-10:25: keep rating identity project-local after the universal ownership migration. */
+export const AGENT_RATING_PROJECT_ISOLATION_VERSION = "0054";
+/** FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00: targeted idempotent reconciliation protects historical rating ownership drift. */
+export const AGENT_RATINGS_PROJECT_PARTITION_VERSION = "0055";
+/** FNXC:MultiProjectIsolation 2026-08-12-02:12: register FN-8997 predicate indexes explicitly; migration files are never auto-discovered. */
+export const PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION = "0056";
+/** FNXC:MultiProjectIsolation 2026-08-12-15:43: register the 0048 default reconciliation explicitly for upgrades. */
+export const PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION = "0057";
+/** FNXC:MessageArchive 2026-08-12-22:14: explicit registration prevents the archived-message migration from being skipped. */
+export const MESSAGE_ARCHIVE_SCHEMA_VERSION = "0058";
+/** FNXC:Identity 2026-08-09-03:04: explicit registration is what keeps the identity migration from silently never running on upgraded databases. */
+export const IDENTITY_ACTORS_VERSION = "0059";
 
 /** SECURITY DEFINER helper that only inserts LEGACY_ADOPTION_DRAINED_MARKER. */
 export const LEGACY_ADOPTION_DRAINED_MARKER_FUNCTION = "fusion_mark_legacy_adoption_drained";
@@ -413,7 +448,19 @@ const UNPLANNED_EXECUTION_BLOCK_DEDUPE_MIGRATION_PATH = join(MIGRATIONS_DIR, "00
 const QUEUED_EPISODE_SIGNATURE_MIGRATION_PATH = join(MIGRATIONS_DIR, "0044_fn_8785_queued_episode_signature.sql");
 const MULTI_ROLE_WORKFLOW_AGENTS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0045_fn_8764_multi_role_workflow_agents.sql");
 const WORKFLOW_PRINCIPAL_FENCE_MIGRATION_PATH = join(MIGRATIONS_DIR, "0046_fn_8764_workflow_principal_fence.sql");
-const IDENTITY_ACTORS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0047_fn_identity_actors.sql");
+const TASK_RECOMMENDATIONS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0047_fn_8829_task_recommendations.sql");
+const GITHUB_CHECK_STATES_MIGRATION_PATH = join(MIGRATIONS_DIR, "0048_fn_8903_github_check_states.sql");
+const AGENT_ACTIVITY_EVENTS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0049_fn_8864_agent_activity_events.sql");
+const SPEC_LOCK_DRIFT_REPORT_MIGRATION_PATH = join(MIGRATIONS_DIR, "0050_spec_lock_drift_report.sql");
+const SPEC_LOCK_SOURCE_REVISION_BIGINT_MIGRATION_PATH = join(MIGRATIONS_DIR, "0051_spec_lock_source_revision_bigint.sql");
+const MEMORY_RECALL_RECORDS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0052_fn_8922_memory_recall_records.sql");
+const MISSION_FEATURE_SPEC_ALIGNMENT_MIGRATION_PATH = join(MIGRATIONS_DIR, "0053_mission_feature_spec_alignment.sql");
+const AGENT_RATING_PROJECT_ISOLATION_MIGRATION_PATH = join(MIGRATIONS_DIR, "0054_fn_8957_agent_rating_project_isolation.sql");
+const AGENT_RATINGS_PROJECT_PARTITION_MIGRATION_PATH = join(MIGRATIONS_DIR, "0055_fn_8988_agent_ratings_project_partition.sql");
+const PROJECT_OWNERSHIP_DECLARATION_DRIFT_MIGRATION_PATH = join(MIGRATIONS_DIR, "0056_fn_8997_project_ownership_declaration_drift.sql");
+const PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_MIGRATION_PATH = join(MIGRATIONS_DIR, "0057_fn_9004_project_ownership_default_reconciliation.sql");
+const MESSAGE_ARCHIVE_SCHEMA_MIGRATION_PATH = join(MIGRATIONS_DIR, "0058_fn_9014_message_archive.sql");
+const IDENTITY_ACTORS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0059_fn_identity_actors.sql");
 
 /**
  * Ensure the migration bookkeeping table exists. Lives in the public schema so
@@ -530,6 +577,18 @@ export async function applySchemaBaseline(
     const queuedEpisodeSignatureAlreadyApplied = applied.includes(QUEUED_EPISODE_SIGNATURE_VERSION);
     const multiRoleWorkflowAgentsAlreadyApplied = applied.includes(MULTI_ROLE_WORKFLOW_AGENTS_VERSION);
     const workflowPrincipalFenceAlreadyApplied = applied.includes(WORKFLOW_PRINCIPAL_FENCE_VERSION);
+    const taskRecommendationsAlreadyApplied = applied.includes(TASK_RECOMMENDATIONS_VERSION);
+    const githubCheckStatesAlreadyApplied = applied.includes(GITHUB_CHECK_STATES_VERSION);
+    const agentActivityEventsAlreadyApplied = applied.includes(AGENT_ACTIVITY_EVENTS_VERSION);
+    const specLockDriftReportAlreadyApplied = applied.includes(SPEC_LOCK_DRIFT_REPORT_VERSION);
+    const specLockSourceRevisionBigintAlreadyApplied = applied.includes(SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION);
+    const memoryRecallRecordsAlreadyApplied = applied.includes(MEMORY_RECALL_RECORDS_VERSION);
+    const missionFeatureSpecAlignmentAlreadyApplied = applied.includes(MISSION_FEATURE_SPEC_ALIGNMENT_VERSION);
+    const agentRatingProjectIsolationAlreadyApplied = applied.includes(AGENT_RATING_PROJECT_ISOLATION_VERSION);
+    const agentRatingsProjectPartitionAlreadyApplied = applied.includes(AGENT_RATINGS_PROJECT_PARTITION_VERSION);
+    const projectOwnershipDeclarationDriftAlreadyApplied = applied.includes(PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION);
+    const projectOwnershipDefaultReconciliationAlreadyApplied = applied.includes(PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION);
+    const messageArchiveSchemaAlreadyApplied = applied.includes(MESSAGE_ARCHIVE_SCHEMA_VERSION);
     const identityActorsAlreadyApplied = applied.includes(IDENTITY_ACTORS_VERSION);
     assertBinaryNotOlderThanDatabase(applied);
     let schemaChanged = false;
@@ -1135,6 +1194,103 @@ export async function applySchemaBaseline(
       schemaChanged = true;
     }
     /*
+    FNXC:TaskRecommendations 2026-08-08-06:11:
+    A copied test/template database can retain migration bookkeeping from a newer binary while its
+    project.tasks relation predates this additive column. Verify the materialized column as well as
+    the marker, then replay the idempotent migration to prevent TaskStore inserts from failing after
+    an otherwise successful startup. Settings-only schemas have no tasks relation and remain no-ops.
+    */
+    const taskRecommendationColumnState = (await tx.execute(sql`
+      SELECT
+        to_regclass('project.tasks') IS NOT NULL AS tasks_exists,
+        EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'project'
+            AND table_name = 'tasks'
+            AND column_name = 'recommendations'
+        ) AS recommendations_exists
+    `)) as unknown as Array<{ tasks_exists: boolean; recommendations_exists: boolean }>;
+    const taskRecommendationColumnsMissing = taskRecommendationColumnState[0]?.tasks_exists
+      && !taskRecommendationColumnState[0]?.recommendations_exists;
+    if (!taskRecommendationsAlreadyApplied || taskRecommendationColumnsMissing) {
+      const migrationSql = await readFile(TASK_RECOMMENDATIONS_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${TASK_RECOMMENDATIONS_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+
+    /* FNXC:PrMergeEventDrivenChecks 2026-08-09-14:35: run after historical baseline for both new and upgraded databases; idempotent SQL converges interrupted upgrades. */
+    if (!githubCheckStatesAlreadyApplied) {
+      const migrationSql = await readFile(GITHUB_CHECK_STATES_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${GITHUB_CHECK_STATES_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+
+    if (!agentActivityEventsAlreadyApplied) {
+      const migrationSql = await readFile(AGENT_ACTIVITY_EVENTS_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${AGENT_ACTIVITY_EVENTS_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+
+    if (!specLockDriftReportAlreadyApplied) {
+      const migrationSql = await readFile(SPEC_LOCK_DRIFT_REPORT_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${SPEC_LOCK_DRIFT_REPORT_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+
+    if (!specLockSourceRevisionBigintAlreadyApplied) {
+      const migrationSql = await readFile(SPEC_LOCK_SOURCE_REVISION_BIGINT_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    if (!memoryRecallRecordsAlreadyApplied) {
+      const migrationSql = await readFile(MEMORY_RECALL_RECORDS_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${MEMORY_RECALL_RECORDS_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    if (!missionFeatureSpecAlignmentAlreadyApplied) {
+      const migrationSql = await readFile(MISSION_FEATURE_SPEC_ALIGNMENT_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${MISSION_FEATURE_SPEC_ALIGNMENT_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    if (!agentRatingProjectIsolationAlreadyApplied) {
+      const migrationSql = await readFile(AGENT_RATING_PROJECT_ISOLATION_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${AGENT_RATING_PROJECT_ISOLATION_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    if (!agentRatingsProjectPartitionAlreadyApplied) {
+      const migrationSql = await readFile(AGENT_RATINGS_PROJECT_PARTITION_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${AGENT_RATINGS_PROJECT_PARTITION_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    if (!projectOwnershipDeclarationDriftAlreadyApplied) {
+      const migrationSql = await readFile(PROJECT_OWNERSHIP_DECLARATION_DRIFT_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    if (!projectOwnershipDefaultReconciliationAlreadyApplied) {
+      const migrationSql = await readFile(PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    if (!messageArchiveSchemaAlreadyApplied) {
+      const migrationSql = await readFile(MESSAGE_ARCHIVE_SCHEMA_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${MESSAGE_ARCHIVE_SCHEMA_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    /*
     FNXC:Identity 2026-08-09-03:04:
     Identity storage is additive: it never touches the dead-looking project_auth_* tables, whose live
     writer is the SQLite→Postgres cutover migrator (a missing target there is a fail-closed startup
@@ -1146,7 +1302,6 @@ export async function applySchemaBaseline(
       await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${IDENTITY_ACTORS_VERSION}) ON CONFLICT (version) DO NOTHING`);
       schemaChanged = true;
     }
-
     return { applied: schemaChanged, pluginHooksRun: pluginHooks.length };
   });
 }

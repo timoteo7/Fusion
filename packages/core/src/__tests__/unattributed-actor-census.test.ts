@@ -307,10 +307,30 @@ complained) and the `updateTaskCustomFields` inline widening in
 `src/routes/register-task-workflow-routes.ts`. Both now restate the canonical arity. Do not relax
 either back to quiet a caller.
 */
+/*
+FNXC:Identity 2026-08-12-01:20 (dashboard 150 -> 153 — the baseline moved because MAIN ADDED CODE):
+
+Merging `origin/main` into this branch brought three NEW `store.logEntry` call sites into
+`dashboard/src/planning.ts`'s create path that did not exist when Stage D counted it: the GitHub
+source-issue import log, the imported-image-attachment log, and the duplicate-source-issue log
+(`Source issue already tracked by ...`). They sit inside the same planning-create handler as the
+three markers Stage D already recorded for that file and have the same answer to "who is acting":
+the authenticated human on the other end of the HTTP request, which U9 resolves. There is no run id,
+no agent id and no lane label to derive from, so they take the marker like their neighbours.
+
+This is NOT the ratchet being loosened to accommodate a regression. The number rose because the file
+grew, not because a converted site was re-marked: every pre-existing entry in the distribution is
+unchanged, and `core`, `engine` and `cli` all held their exact baselines across the merge — including
+`engine`, whose `executor.ts` was re-peeled into ~240 modules by main and re-threaded here with zero
+new markers. Leaving the three sites unconverted would have been the real regression: they would have
+compiled against U18's deprecated overload and attributed nothing, invisible to this census.
+
+U9 clears these three with the other six in this file.
+*/
 const BASELINE_BY_PACKAGE: Readonly<Record<string, number>> = {
   core: 33,
   engine: 308,
-  dashboard: 150,
+  dashboard: 153,
   cli: 2,
 };
 const BASELINE = Object.values(BASELINE_BY_PACKAGE).reduce((sum, n) => sum + n, 0);

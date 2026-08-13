@@ -57,8 +57,14 @@ import {
 import { ACTIVE_STATUSES, isTaskAgentActive } from "../utils/taskActivity";
 import { getPrBadgeModifierClass } from "../utils/prBadgeClass";
 import { getTotalAgentActiveMs, getEndToEndDurationMs, getTimedDurationMs, getWorkflowRuntimeMs, parseTimestampToMs } from "../utils/taskTiming";
-import { getTaskStatusBadgeLabel, type TaskStatusBadgeContext, hasTaskStatusBadge, isTaskPlanningActive } from "../utils/taskStatusBadgeLabel";
-import { isReviewBudgetExhaustedApproval, isTaskAwaitingPlanApproval } from "../utils/reviewBudgetApproval";
+import { getTaskStatusBadgeLabel, getTaskWipLifecycleBadgeLabel, type TaskStatusBadgeContext, hasTaskStatusBadge, isTaskPlanningActive } from "../utils/taskStatusBadgeLabel";
+import {
+  isPlanReviewGateUnsatisfied,
+  isReviewBudgetExhaustedApproval,
+  isTaskAwaitingPlanApproval,
+  isTaskBlockedOnApprovalHold,
+  resolvePromoteSuppressed,
+} from "../utils/reviewBudgetApproval";
 import { canStartPrFeedbackAddressing, getTaskPrimaryPrInfo } from "../utils/prFeedback";
 import type { ToastType } from "../hooks/useToast";
 import { useConfirm } from "../hooks/useConfirm";
@@ -1511,6 +1517,10 @@ function TaskCardComponent({
     () => isPlanReviewRunning(task),
     [task.steps, task.enabledWorkflowSteps, task.workflowStepResults],
   );
+  const planReviewGateUnsatisfied = useMemo(
+    () => isPlanReviewGateUnsatisfied(task),
+    [task.enabledWorkflowSteps, task.workflowStepResults],
+  );
   /*
   FNXC:WorkflowResolvedColumns 2026-07-30-00:40 (partial-supply seam, caught by the gate):
   `getRunningOptionalGateBadge` takes resolved flags and BOTH ListView call sites supply them; this
@@ -1549,6 +1559,7 @@ function TaskCardComponent({
   */
   const isPlanReviewReplanCapApproval = isReviewBudgetExhaustedApproval(task);
   const isAwaitingApproval = isTaskAwaitingPlanApproval(task, isIntakeColumn);
+  const isBlockedOnApprovalHold = isTaskBlockedOnApprovalHold(task);
   const isAwaitingInput = task.status === "awaiting-user-input";
   const isArchived = isArchivedColumn;
   /*
@@ -1585,6 +1596,27 @@ function TaskCardComponent({
   two independent conditions disjoint.
   */
   const awaitingPlanning = task.awaitingPlanning ?? ((task.steps?.length ?? 0) === 0);
+  /*
+  FNXC:TaskCardPromote 2026-08-09-19:00:
+  Post-U11, the hold column is also the planning lane, so Promote must not be offered while a card is unplanned, being planned, in Plan Review, or awaiting plan approval. That click is rejected as `unplanned-for-execution` and the force path would start implementation against an incomplete plan.
+
+  `awaitingPlanning` is absent from SSE payloads, so its step-count fallback deliberately matches the Ready / Queued to plan badge pair. `isAwaitingApproval` only applies on an intake-trait merged planning lane or for the `plan-review-replan-cap` reason.
+
+  FNXC:TaskCardPromote 2026-08-11-09:13:
+  FN-8950 anticipates `issueRelease`'s approval and unplanned refusal arms. An enabled-but-pending
+  default-on Plan Review in Todo and an absent enabled-step selection are both blocked; approval
+  holds are blocked on every column rather than only intake. This is deliberately conservative,
+  not exact parity: the card cannot resolve custom defaultOn values, plan-review's column/WIP
+  position, or capacity continuations, and also suppresses the planning-stage `specifying` and
+  `plan-review-unavailable` statuses. Hiding a shortcut is safer than offering a click the server
+  rejects: capacity release and explicit force promotion remain available.
+  */
+  const isStillInPlanning = awaitingPlanning
+    || ["planning", "specifying", "needs-replan", "plan-review-unavailable"].includes(task.status ?? "")
+    || planReviewGateUnsatisfied
+    || isAwaitingApproval
+    || isBlockedOnApprovalHold;
+  const showPromoteAction = Boolean(onPromote) && !resolvePromoteSuppressed(task, isStillInPlanning);
   const showIdleTodoBadge = !isPaused
     && isHoldColumn
     && !visualStatus
@@ -1697,7 +1729,9 @@ function TaskCardComponent({
   const hasBranchMetadata = Boolean(branchMetadata.branch || branchMetadata.baseBranch);
   const isAgentCreated = isAgentCreatedTask(task);
   const sourceAgentName = getSourceAgentName(task, agentsMap);
-  const agentCreatedVisibleLabel = sourceAgentName ? abbreviateBadge(sourceAgentName, 15) : t("tasks.agentLabel", "Agent");
+  const agentCreatedVisibleLabel = sourceAgentName
+    ? t("tasks.createdByAgentShort", "by {{name}}", { name: abbreviateBadge(sourceAgentName, 15) })
+    : t("tasks.agentLabel", "Agent");
   const agentCreatedTitle = sourceAgentName
     ? t("tasks.createdByAgentNamed", "Created by agent: {{name}}", { name: sourceAgentName })
     : t("tasks.createdByAgent", "Created by agent");
@@ -2161,7 +2195,7 @@ function TaskCardComponent({
     );
     return (next?.id ?? "todo") as ColumnId;
   }, [taskMoveColumns, task.column]);
-  const shouldRenderActionRow = Boolean(onPromote) || showCreatePrQuickAction || showAddressPrFeedbackAction || showStartAction;
+  const shouldRenderActionRow = showPromoteAction || showCreatePrQuickAction || showAddressPrFeedbackAction || showStartAction;
 
   const enterEditMode = useCallback((e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -3210,7 +3244,7 @@ function TaskCardComponent({
     && Boolean(githubTrackedIssue);
   const footerHasLeadingContent = Boolean(filesChangedButton)
     || (isGitHubImportedTask && !showLinkedIssueChipForImport);
-  const costBadgeBelowPromote = Boolean(onPromote && cardCostLabel);
+  const costBadgeBelowPromote = Boolean(showPromoteAction && cardCostLabel);
   const costBadgeChip = cardCostLabel ? (
     <span
       className="card-cost-indicator"
@@ -3407,8 +3441,20 @@ function TaskCardComponent({
   const showQueuedBadge = !isPaused
     && !isWipColumn
     && (queued || visualStatus === "queued");
+  const wipLifecycleBadgeLabel = !isPaused
+    && !isStuck
+    && !isPlanReviewReplanCapApproval
+    && !isAwaitingApproval
+    && !showOptionalGateBadge
+    && !showReadyBadge
+    && !showQueuedToPlanBadge
+    ? getTaskWipLifecycleBadgeLabel(visualStatus, t, {
+      isWipColumn,
+      lifecycleLabel: taskActionColumnLabel(task.column),
+    })
+    : null;
   const showStatusBadge = !isPaused
-    && (hasTaskStatusBadge(visualStatus) || isTransientPlannerActive)
+    && (hasTaskStatusBadge(visualStatus) || isTransientPlannerActive || Boolean(wipLifecycleBadgeLabel))
     && visualStatus !== "queued"
     && !(suppressPlanningStatusBadge && isPlanningStatusBadge);
   /*
@@ -3440,7 +3486,8 @@ function TaskCardComponent({
               ? t("tasks.queuedToPlan", "Queued to plan")
               : showQueuedBadge
                 ? t("tasks.statusQueued", "Queued")
-              : getTaskStatusLabel(visualStatus ?? "", t, showOptionalGateBadge ? undefined : getRunningWorkflowStepLabel(task), { idle: !isAgentActive, overlapBlockedBy: task.overlapBlockedBy ?? null });
+                : wipLifecycleBadgeLabel
+                  ?? getTaskStatusLabel(visualStatus ?? "", t, showOptionalGateBadge ? undefined : getRunningWorkflowStepLabel(task), { idle: !isAgentActive, overlapBlockedBy: task.overlapBlockedBy ?? null });
   const hasCardMetaBadges = showPriorityBadge
     || task.executionMode === "fast"
     // FNXC:PlannerOversight 2026-07-04-00:00: the oversight badge is opt-in
@@ -4267,6 +4314,7 @@ function TaskCardComponent({
             <span
               className={`card-agent-badge${isAgentNameLoading ? " card-agent-badge--loading" : ""}`}
               title={t("tasks.assignedTo", "Assigned to {{name}}", { name: assignedAgentBadgeLabel })}
+              aria-label={t("tasks.assignedTo", "Assigned to {{name}}", { name: assignedAgentBadgeLabel })}
             >
               <Bot size={11} />
               <span className="card-agent-badge-text" aria-hidden="true">
@@ -4327,7 +4375,7 @@ function TaskCardComponent({
               {isStarting ? t("tasks.starting", "Starting…") : t("tasks.start", "Start")}
             </button>
           )}
-          {onPromote && (
+          {showPromoteAction && (
             <button
               type="button"
               className="card-promote-action card-send-back-btn"
@@ -4358,13 +4406,16 @@ function TaskCardComponent({
           {/**
            * FNXC:TaskCardLayout 2026-07-10-00:00:
            * FN-7780 moves the created-by-agent chip below the task content and before the workflow identity row so the header keeps only ID/status/actions metadata and no longer wraps on narrow/mobile cards. The badge content, tooltip, and accessible name remain unchanged.
+           *
+           * FNXC:TaskCardAgentBadges 2026-08-10-03:41:
+           * FN-8930 requires current ownership and created-by provenance to never read as two assigned agents. Bot plus the filled owner pill means the current owner; Sparkles plus the outlined "by …" pill means creation provenance.
            */}
           <span
-            className="card-agent-created-badge"
+            className="card-agent-created-badge card-agent-created-badge--provenance"
             title={agentCreatedTitle}
             aria-label={agentCreatedTitle}
           >
-            <Bot size={11} aria-hidden="true" />
+            <Sparkles size={11} aria-hidden="true" />
             <span className="visually-hidden">{agentCreatedTitle}</span>
             <span aria-hidden="true">{agentCreatedVisibleLabel}</span>
           </span>

@@ -373,7 +373,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       attachments: input.attachments,
       createdAt: now,
     };
-    const created = await asyncChatStore.addChatMessage(this.asyncLayer.db, message);
+    const created = await asyncChatStore.addChatMessage(this.asyncLayer.db, message, this.asyncLayer.projectId);
     this.emit("chat:message:added", created);
     return created;
   }
@@ -382,7 +382,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
    * Append a file attachment metadata record to an existing message.
    */
   async addMessageAttachment(sessionId: string, messageId: string, attachment: ChatAttachment): Promise<ChatMessage> {
-    const updated = await asyncChatStore.addChatMessageAttachment(this.asyncLayer.db, sessionId, messageId, attachment);
+    const updated = await asyncChatStore.addChatMessageAttachment(this.asyncLayer.db, sessionId, messageId, attachment, this.asyncLayer.projectId);
     this.emit("chat:message:updated", updated);
     return updated;
   }
@@ -395,7 +395,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
    * @returns Array of messages ordered by createdAt ASC (default) or DESC
    */
   async getMessages(sessionId: string, filter?: ChatMessagesFilter): Promise<ChatMessage[]> {
-    return asyncChatStore.getChatMessages(this.asyncLayer.db, sessionId, filter);
+    return asyncChatStore.getChatMessages(this.asyncLayer.db, sessionId, filter, this.asyncLayer.projectId);
   }
 
   /**
@@ -405,7 +405,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
    * @returns The message, or undefined if not found
    */
   async getMessage(id: string): Promise<ChatMessage | undefined> {
-    return asyncChatStore.getChatMessage(this.asyncLayer.db, id);
+    return asyncChatStore.getChatMessage(this.asyncLayer.db, id, this.asyncLayer.projectId);
   }
 
   /**
@@ -416,11 +416,11 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
    * @returns Map of sessionId -> latest ChatMessage for that session
    */
   async getLastMessageForSessions(sessionIds: string[]): Promise<Map<string, ChatMessage>> {
-    return asyncChatStore.getLastMessageForSessions(this.asyncLayer.db, sessionIds);
+    return asyncChatStore.getLastMessageForSessions(this.asyncLayer.db, sessionIds, this.asyncLayer.projectId);
   }
 
   async hasMessages(sessionId: string): Promise<boolean> {
-    return (await asyncChatStore.getChatMessages(this.asyncLayer.db, sessionId, { limit: 1 })).length > 0;
+    return (await asyncChatStore.getChatMessages(this.asyncLayer.db, sessionId, { limit: 1 }, this.asyncLayer.projectId)).length > 0;
   }
 
   /**
@@ -449,7 +449,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
     if (!trimmed || !sessionIds || sessionIds.length === 0) {
       return new Map();
     }
-    return asyncChatStore.searchChatSessionsByMessageContent(this.asyncLayer.db, trimmed, sessionIds);
+    return asyncChatStore.searchChatSessionsByMessageContent(this.asyncLayer.db, trimmed, sessionIds, this.asyncLayer.projectId);
   }
 
   /**
@@ -459,9 +459,9 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
    * @returns true if deleted, false if not found
    */
   async deleteMessage(id: string): Promise<boolean> {
-    const existing = await asyncChatStore.getChatMessage(this.asyncLayer.db, id);
+    const existing = await asyncChatStore.getChatMessage(this.asyncLayer.db, id, this.asyncLayer.projectId);
     if (!existing) return false;
-    const deleted = await asyncChatStore.deleteChatMessage(this.asyncLayer.db, id);
+    const deleted = await asyncChatStore.deleteChatMessage(this.asyncLayer.db, id, this.asyncLayer.projectId);
     if (deleted) {
       this.emit("chat:message:deleted", id);
       const updatedSession = await this.getSession(existing.sessionId);
@@ -485,7 +485,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
    * @returns deletedIds (in ASC order) and retained messages (pre-edit history, ASC order)
    */
   async deleteMessagesFrom(sessionId: string, fromMessageId: string): Promise<{ deletedIds: string[]; retained: ChatMessage[] }> {
-    const result = await asyncChatStore.deleteChatMessagesFrom(this.asyncLayer.db, sessionId, fromMessageId);
+    const result = await asyncChatStore.deleteChatMessagesFrom(this.asyncLayer.db, sessionId, fromMessageId, this.asyncLayer.projectId);
     if (result.deletedIds.length > 0) {
       for (const id of result.deletedIds) {
         this.emit("chat:message:deleted", id);
@@ -504,7 +504,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
    * is what lets a later edit rewind losslessly via SessionManager.branch()/resetLeaf().
    */
   async updateMessageMetadata(messageId: string, metadata: Record<string, unknown> | null, options?: { merge?: boolean }): Promise<ChatMessage> {
-    const updated = await asyncChatStore.updateChatMessageMetadata(this.asyncLayer.db, messageId, metadata, options);
+    const updated = await asyncChatStore.updateChatMessageMetadata(this.asyncLayer.db, messageId, metadata, options, this.asyncLayer.projectId);
     this.emit("chat:message:updated", updated);
     return updated;
   }
@@ -540,15 +540,15 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
   }
 
   async getRoom(id: string): Promise<ChatRoom | undefined> {
-    return asyncChatStore.getChatRoom(this.asyncLayer.db, id);
+    return asyncChatStore.getChatRoom(this.asyncLayer.db, id, this.asyncLayer.projectId);
   }
 
   async getRoomBySlug(projectId: string | null, slug: string): Promise<ChatRoom | undefined> {
-    return asyncChatStore.getChatRoomBySlug(this.asyncLayer.db, projectId, slug);
+    return asyncChatStore.getChatRoomBySlug(this.asyncLayer.db, projectId, slug, this.asyncLayer.projectId);
   }
 
   async listRooms(options?: { projectId?: string; status?: ChatRoomStatus }): Promise<ChatRoom[]> {
-    return asyncChatStore.listChatRooms(this.asyncLayer.db, options);
+    return asyncChatStore.listChatRooms(this.asyncLayer.db, options, this.asyncLayer.projectId);
   }
 
   async updateRoom(id: string, input: ChatRoomUpdateInput): Promise<ChatRoom | undefined> {
@@ -561,7 +561,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       if (!slug) throw new Error("Room name must include letters or numbers");
       const existing = await this.getRoom(id);
       if (existing) {
-        const slugConflict = await asyncChatStore.getChatRoomBySlug(this.asyncLayer.db, existing.projectId, slug);
+        const slugConflict = await asyncChatStore.getChatRoomBySlug(this.asyncLayer.db, existing.projectId, slug, this.asyncLayer.projectId);
         if (slugConflict && slugConflict.id !== id) {
           throw new Error(`Room slug ${slug} already exists in this project`);
         }
@@ -570,19 +570,19 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
     }
     if (input.description !== undefined) updateInput.description = input.description;
     if (input.status !== undefined) updateInput.status = input.status;
-    const updated = await asyncChatStore.updateChatRoom(this.asyncLayer.db, id, updateInput);
+    const updated = await asyncChatStore.updateChatRoom(this.asyncLayer.db, id, updateInput, this.asyncLayer.projectId);
     if (updated) this.emit("chat:room:updated", updated);
     return updated;
   }
 
   async deleteRoom(id: string): Promise<boolean> {
-    const deleted = await asyncChatStore.deleteChatRoom(this.asyncLayer.db, id);
+    const deleted = await asyncChatStore.deleteChatRoom(this.asyncLayer.db, id, this.asyncLayer.projectId);
     if (deleted) this.emit("chat:room:deleted", id);
     return deleted;
   }
 
   async cleanupOldChats(maxAgeMs: number): Promise<{ sessionsDeleted: number; roomsDeleted: number }> {
-    const result = await asyncChatStore.cleanupOldChats(this.asyncLayer.db, maxAgeMs);
+    const result = await asyncChatStore.cleanupOldChats(this.asyncLayer.db, maxAgeMs, this.asyncLayer.projectId);
     for (const sessionId of result.deletedSessionIds) {
       this.emit("chat:session:deleted", sessionId);
     }
@@ -594,7 +594,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
 
   async addRoomMember(roomId: string, agentId: string, role: RoomMemberRole = "member"): Promise<ChatRoomMember> {
     const now = new Date().toISOString();
-    await asyncChatStore.addChatRoomMember(this.asyncLayer.db, roomId, agentId, role, now);
+    await asyncChatStore.addChatRoomMember(this.asyncLayer.db, roomId, agentId, role, now, this.asyncLayer.projectId);
     const members = await this.listRoomMembers(roomId);
     const member = members.find((m) => m.agentId === agentId);
     if (!member) throw new Error(`Failed to load room member ${agentId}`);
@@ -603,17 +603,17 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
   }
 
   async removeRoomMember(roomId: string, agentId: string): Promise<boolean> {
-    const removed = await asyncChatStore.removeChatRoomMember(this.asyncLayer.db, roomId, agentId);
+    const removed = await asyncChatStore.removeChatRoomMember(this.asyncLayer.db, roomId, agentId, this.asyncLayer.projectId);
     if (removed) this.emit("chat:room:member:removed", { roomId, agentId });
     return removed;
   }
 
   async listRoomMembers(roomId: string): Promise<ChatRoomMember[]> {
-    return asyncChatStore.listChatRoomMembers(this.asyncLayer.db, roomId);
+    return asyncChatStore.listChatRoomMembers(this.asyncLayer.db, roomId, this.asyncLayer.projectId);
   }
 
   async listRoomsForAgent(agentId: string, options?: { projectId?: string; status?: ChatRoomStatus }): Promise<ChatRoom[]> {
-    return asyncChatStore.listChatRoomsForAgent(this.asyncLayer.db, agentId, options);
+    return asyncChatStore.listChatRoomsForAgent(this.asyncLayer.db, agentId, options, this.asyncLayer.projectId);
   }
 
   async addRoomMessage(roomId: string, input: ChatRoomMessageCreateInput): Promise<ChatRoomMessage> {
@@ -634,13 +634,13 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       mentions: input.mentions ?? [],
       createdAt: now,
     };
-    const created = await asyncChatStore.addChatRoomMessage(this.asyncLayer.db, message);
+    const created = await asyncChatStore.addChatRoomMessage(this.asyncLayer.db, message, this.asyncLayer.projectId);
     this.emit("chat:room:message:added", created);
     return created;
   }
 
   async getRoomMessages(roomId: string, filter?: ChatRoomMessagesFilter): Promise<ChatRoomMessage[]> {
-    return asyncChatStore.getChatRoomMessages(this.asyncLayer.db, roomId, filter);
+    return asyncChatStore.getChatRoomMessages(this.asyncLayer.db, roomId, filter, this.asyncLayer.projectId);
   }
 
   async listRoomMessagesSince(
@@ -648,17 +648,17 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
     sinceIso: string,
     options?: { excludeSenderAgentId?: string; limit?: number },
   ): Promise<ChatRoomMessage[]> {
-    return asyncChatStore.listChatRoomMessagesSince(this.asyncLayer.db, roomId, sinceIso, options);
+    return asyncChatStore.listChatRoomMessagesSince(this.asyncLayer.db, roomId, sinceIso, options, this.asyncLayer.projectId);
   }
 
   async getRoomMessage(id: string): Promise<ChatRoomMessage | undefined> {
-    return asyncChatStore.getChatRoomMessage(this.asyncLayer.db, id);
+    return asyncChatStore.getChatRoomMessage(this.asyncLayer.db, id, this.asyncLayer.projectId);
   }
 
   async deleteRoomMessage(id: string): Promise<boolean> {
-    const existing = await asyncChatStore.getChatRoomMessage(this.asyncLayer.db, id);
+    const existing = await asyncChatStore.getChatRoomMessage(this.asyncLayer.db, id, this.asyncLayer.projectId);
     if (!existing) return false;
-    const deleted = await asyncChatStore.deleteChatRoomMessage(this.asyncLayer.db, id);
+    const deleted = await asyncChatStore.deleteChatRoomMessage(this.asyncLayer.db, id, this.asyncLayer.projectId);
     if (deleted) {
       this.emit("chat:room:message:deleted", id);
       const updatedRoom = await this.getRoom(existing.roomId);
@@ -668,13 +668,13 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
   }
 
   async clearRoomMessages(roomId: string): Promise<number> {
-    const deleted = await asyncChatStore.clearChatRoomMessages(this.asyncLayer.db, roomId);
+    const deleted = await asyncChatStore.clearChatRoomMessages(this.asyncLayer.db, roomId, this.asyncLayer.projectId);
     if (deleted > 0) this.emit("chat:room:messages:cleared", { roomId, deletedCount: deleted });
     return deleted;
   }
 
   async addRoomMessageAttachment(roomId: string, messageId: string, attachment: ChatAttachment): Promise<ChatRoomMessage> {
-    const updated = await asyncChatStore.addChatRoomMessageAttachment(this.asyncLayer.db, roomId, messageId, attachment);
+    const updated = await asyncChatStore.addChatRoomMessageAttachment(this.asyncLayer.db, roomId, messageId, attachment, this.asyncLayer.projectId);
     this.emit("chat:room:message:updated", updated);
     return updated;
   }

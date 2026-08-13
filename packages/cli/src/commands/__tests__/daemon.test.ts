@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { installShippedSkillsIntoProject, SHIPPED_SKILL_NAMES, type ShippedSkillName } from "../claude-skills.js";
 
 const { mockSyncStartupModels, mockShouldUseHybridExecutor, mockHybridExecutorCtor, mockHybridExecutorInitialize, mockHybridExecutorShutdown } = vi.hoisted(() => ({
   mockSyncStartupModels: vi.fn().mockResolvedValue(undefined),
@@ -707,6 +708,16 @@ vi.mock("../task-lifecycle.js", () => ({
   createPrReconcileGithubOps: vi.fn(() => ({})),
 }));
 
+const { mockInstallSkillsForProject, mockEnsureSkillsOnStartup } = vi.hoisted(() => ({
+  mockInstallSkillsForProject: vi.fn(() => []),
+  mockEnsureSkillsOnStartup: vi.fn(() => []),
+}));
+
+vi.mock("../claude-skills-runner.js", () => ({
+  maybeInstallClaudeSkillForNewProject: mockInstallSkillsForProject,
+  ensureClaudeSkillsForAllProjectsOnStartup: mockEnsureSkillsOnStartup,
+}));
+
 vi.mock("../project-context.js", () => ({
   resolveProject: vi.fn().mockRejectedValue(new Error("project not initialized")),
 }));
@@ -714,10 +725,49 @@ vi.mock("../project-context.js", () => ({
 const { runDaemon } = await import("../daemon.js");
 
 describe("runDaemon", () => {
+  it("C6/C7c: fn daemon drives project registration and startup multi-skill paths", async () => {
+    /* FNXC:ComputerUseSkill 2026-08-11-07:43: This executes daemon's server options and startup
+     * path; its reload startup site is separately pinned by C7d's seven-site inventory. */
+    mockInstallSkillsForProject.mockClear();
+    mockEnsureSkillsOnStartup.mockClear();
+    const projectPath = mkdtempSync(join(tmpdir(), "fusion-daemon-skills-"));
+    const sources = Object.fromEntries(SHIPPED_SKILL_NAMES.map((skillName) => {
+      const source = join(projectPath, "sources", skillName);
+      mkdirSync(source, { recursive: true });
+      writeFileSync(join(source, "SKILL.md"), `name: ${skillName}`);
+      return [skillName, source];
+    })) as Record<ShippedSkillName, string>;
+    mockInstallSkillsForProject.mockImplementationOnce((path: string) => installShippedSkillsIntoProject(path, { enabled: true, sources }));
+    mockEnsureSkillsOnStartup.mockImplementationOnce(() => SHIPPED_SKILL_NAMES.map((skillName) => ({ outcome: "already-installed", target: skillName })));
+    await runDaemon({});
+    const options = mocks.createServerMock.mock.calls.at(-1)?.[1] as { onProjectRegistered?: (project: { path: string }) => void };
+    options.onProjectRegistered?.({ path: projectPath });
+    expect(mockInstallSkillsForProject).toHaveBeenCalledWith(projectPath);
+    expect(mockInstallSkillsForProject.mock.results[0]?.value.map((result: { outcome: string }) => result.outcome)).toEqual(["installed", "installed"]);
+    expect(mockEnsureSkillsOnStartup.mock.results[0]?.value.map((result: { outcome: string }) => result.outcome)).toEqual(["already-installed", "already-installed"]);
+    await triggerSignal("SIGINT");
+  });
+
   it("invokes shared startup model sync", async () => {
     const { runDaemon } = await import("../daemon.js");
     await runDaemon({});
     expect(mockSyncStartupModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds native auto-merge to the executing engine's store", async () => {
+    const lifecycle = await import("../task-lifecycle.js");
+    const { ProjectEngineManager } = await import("@fusion/engine");
+    await runDaemon({});
+
+    const factory = vi.mocked(ProjectEngineManager).mock.calls.at(-1)?.[1]?.createPrNodeGithubOps;
+    const otherProjectStore = { getSettings: vi.fn().mockResolvedValue({ githubNativeAutoMerge: true }) };
+    factory?.(otherProjectStore as never);
+    const resolver = vi.mocked(lifecycle.createPrNodeGithubOps).mock.calls.at(-1)?.[1]?.isNativeAutoMergeEnabled;
+
+    await expect(resolver?.({ id: "FN-shared" } as never)).resolves.toBe(true);
+    expect(otherProjectStore.getSettings).toHaveBeenCalledOnce();
+
+    await triggerSignal("SIGINT");
   });
 
   it("registers built-in zai GLM-5.2 before refreshing models", async () => {

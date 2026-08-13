@@ -87,6 +87,7 @@ export interface TaskRow {
   nextRecoveryAt: string | null;
   error: string | null;
   summary: string | null;
+  recommendations: string | null;
   thinkingLevel: string | null;
   validatorThinkingLevel: string | null;
   planningThinkingLevel: string | null;
@@ -192,15 +193,31 @@ export type TaskColumnDescriptor = {
  * FNXC:TaskStateReconciliation 2026-07-29-20:53:
  * A generic PostgreSQL task write may carry an active wedge snapshot that was read before the live API resolved that episode. Preserve the durable resolution for the same episode so changed-column persistence, task.json projection, and cache publication cannot reactivate an acknowledged operator notification; a genuinely new wedge must use a new episode ID.
  */
-export function preserveResolvedTaskWedgeEpisode(existingRow: Pick<TaskRow, "wedgeNotification">, task: Task): void {
+export function preserveDurableTaskWedgeInvariants(existingRow: Pick<TaskRow, "wedgeNotification">, task: Task): void {
   const durable = fromJson<Task["wedgeNotification"]>(existingRow.wedgeNotification);
   const incoming = task.wedgeNotification;
+  // Keep the legacy resolved-episode rule first and byte-for-byte equivalent in behavior.
   if (
     durable?.status === "resolved"
     && incoming?.status === "active"
     && durable.episodeId === incoming.episodeId
   ) {
     task.wedgeNotification = durable;
+    return;
+  }
+  /*
+  FNXC:TaskWedgeNotifications 2026-08-10-18:54:
+  Wedge JSON is persisted wholesale from task snapshots. A newer durable budget revision
+  must win over an ordinary stale writer, including durable absence after a reset, without
+  overwriting the caller's unrelated episode fields.
+  */
+  const durableRevision = durable?.budgetRevision ?? 0;
+  const incomingRevision = incoming?.budgetRevision ?? 0;
+  if (durableRevision > incomingRevision) {
+    task.wedgeNotification = {
+      ...(incoming ?? durable ?? {} as Task["wedgeNotification"]),
+      ...(durable ? { budgetRevision: durableRevision, autoRecovery: durable.autoRecovery } : {}),
+    } as Task["wedgeNotification"];
   }
 }
 
@@ -213,7 +230,7 @@ export const TASK_JSONB_COLUMNS: ReadonlySet<string> = new Set([
   "comments", "review", "reviewState", "workflowStepResults", "prInfo", "prInfos",
   "issueInfo", "githubTracking", "gitlabTracking", "mergeDetails", "workspaceWorktrees", "enabledWorkflowSteps",
   "modifiedFiles", "declaredSymbols", "scopeAutoWiden", "sourceMetadata", "tokenUsagePerModel",
-  "tokenBudgetOverride", "columnDwellMs", "workflowTransitionNotification",
+  "tokenBudgetOverride", "columnDwellMs", "workflowTransitionNotification", "recommendations",
 ]);
 
 export function defineTaskColumn(
@@ -312,6 +329,7 @@ export const TASK_COLUMN_DESCRIPTORS: TaskColumnDescriptor[] = [
   defineTaskColumn("nextRecoveryAt", (task) => task.nextRecoveryAt ?? null),
   defineTaskColumn("error", (task) => task.error ?? null),
   defineTaskColumn("summary", (task) => task.summary ?? null),
+  defineTaskColumn("recommendations", (task) => toJsonNullable(task.recommendations)),
   defineTaskColumn("thinkingLevel", (task) => task.thinkingLevel ?? null),
   // FNXC:Settings-ThinkingLevel 2026-07-13 (merge port): per-task validator/planning reasoning-effort overrides.
   defineTaskColumn("validatorThinkingLevel", (task) => task.validatorThinkingLevel ?? null),

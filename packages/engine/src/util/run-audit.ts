@@ -130,7 +130,14 @@ export type GitMutationType =
    * distinguish a mechanical C1 advance, a typed block/conflict, compensated persistence failure,
    * and stateless C0-to-C1 reconciliation without recording command output or branch prose.
    */
+  /*
+   * FNXC:WorktreeBaseRefresh 2026-08-09-23:49:
+   * `-skipped` is the ordinary declined-refresh outcome (dirty tree, own-commit conflict, unresolvable base):
+   * the checkout kept its existing base and execution continued. `-blocked` is now reserved for the rare
+   * unproven tree that genuinely refused execution, so the two are no longer conflated in operator triage.
+   */
   | "worktree:base-refreshed"
+  | "worktree:base-refresh-skipped"
   | "worktree:base-refresh-blocked"
   | "worktree:base-refresh-conflict"
   | "worktree:base-refresh-persistence-failed-compensated"
@@ -209,6 +216,8 @@ export type GitMutationType =
   | "merge:resolve"
   | "merge:file-scope-violation"
   | "merge:file-scope-enforcement-disabled"
+  // FNXC:MergerUnification 2026-08-09-12:04: Legacy-only audit events emitted
+  // exclusively by soft-deprecated aiMergeTask, never by production runAiMerge.
   | "merge:auto-prerebase:applied"
   | "merge:auto-prerebase:skipped"
   | "merge:auto-prerebase:failed"
@@ -536,6 +545,13 @@ export type DatabaseMutationType =
   | "mergeQueue:stale-lease-on-column-exit"
   | "mergeQueue:auto-cleanup-stale-row"
   | "task:auto-recover-already-merged"
+  /*
+  FNXC:TaskWedgeNotifications 2026-08-10-19:12:
+  Generic terminal recovery records only durable identifiers and bounded outcomes.
+  The apply token is a fencing capability, so audit rows must never persist it or task error prose.
+  */
+  | "task:auto-recover-terminal-failure"
+  | "task:auto-recover-terminal-failure-exhausted"
   | "task:auto-recover-finalize-already-on-main"
   /** Metadata: { taskId, previousColumn, targetColumn, commitSha, status, blockedBy, overlapBlockedBy, reason } */
   | "task:auto-merge-finalize-column-mismatch-reconciled"
@@ -557,6 +573,8 @@ export type DatabaseMutationType =
   */
   | "task:autostash-orphan-live-detected"
   | "mission:stranded-feature-triaged"
+  /* FNXC:MissionAutoReconcile 2026-08-11-02:39: Periodic reconcile records only IDs, source enums, and bounded counters. */
+  | "mission:reconcile-pass"
   | "task:auto-recover-branch-misbound"
   | "task:auto-recover-misrouted-foreign-commit"
   | "task:auto-recover-foreign-only-contamination"
@@ -809,6 +827,27 @@ export type DatabaseMutationType =
   | "reflection:skipped"
   | "reflection:failed"
   | "reflection:captured"
+  /*
+   * FNXC:MemoryAgent 2026-08-11-09:41:
+   * Memory consolidation telemetry is ids/counts/outcomes only. Completed metadata forwards the
+   * closed graphRecoveryReason enum so a manifest-last inconsistent-artifact rebuild loop is
+   * diagnosable; skipped reasons and failure stages are closed enums. No memory content, paths,
+   * node ids, error class/message, prompt text, or reasoning may be recorded. No-op ticks emit no row.
+   */
+  | "memory:consolidation-completed"
+  | "memory:consolidation-skipped"
+  | "memory:consolidation-failed"
+  /*
+   * FNXC:MemoryAgent 2026-08-11-10:55:
+   * FN-8933 semantic and capture telemetry remains ids/counts/outcomes-only. `memory:semantics-inferred`
+   * carries edge/proposal counts; `memory:semantics-skipped` carries a closed reason; capture events
+   * carry a recall record id (when created), origin, and fixed outcome/error class only. Never record
+   * edge or node labels, recalled prose, prompt text, model output, or model reasoning in metadata.
+   */
+  | "memory:semantics-inferred"
+  | "memory:semantics-skipped"
+  | "memory:capture-recorded"
+  | "memory:capture-failed"
   | "task:in-review-stall-deadlock-disposed"
   | "task:in-review-stall-terminal-provider-error"
   | "task:finalize-unproven-blocked"

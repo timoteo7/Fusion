@@ -130,6 +130,7 @@ describe("gating-classifications parity", () => {
       [
         "find",
         "fn_agent_org_chart",
+        "fn_agent_read_evaluations",
         "fn_agent_show",
         "fn_artifact_list",
         "fn_artifact_register",
@@ -218,6 +219,14 @@ describe("gating-classifications parity", () => {
       disposition: "allow",
       recognized: true,
     });
+  });
+
+  it("classifies mission blocked-badge repair in both gate paths without readonly exemptions", () => {
+    const toolName = "fn_mission_clear_blocked";
+    expect(ACTION_GATE_TASK_AGENT_MANAGEMENT_TOOLS.has(toolName)).toBe(true);
+    expect(PERMANENT_AGENT_TASK_MUTATION_TOOLS.has(toolName)).toBe(true);
+    expect(READONLY_FN_TOOLS.has(toolName)).toBe(false);
+    expect((COORDINATION_EXEMPT_TOOLS as readonly string[]).includes(toolName)).toBe(false);
   });
 
   it("classifies ideation reads and mutations in both policy paths", () => {

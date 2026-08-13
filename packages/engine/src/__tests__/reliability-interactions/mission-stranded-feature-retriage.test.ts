@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MissionFeature, TaskStore } from "@fusion/core";
+import { schedulerLog } from "../../logger.js";
 import { Scheduler } from "../../scheduler.js";
 
 function createTaskStore(tasks: any[] = []): TaskStore {
@@ -444,5 +445,113 @@ describe("FN-5754 reliability: mission stranded feature retriage", () => {
     await scheduler.reconcileAllMissionFeatures();
 
     expect((store.recordRunAuditEvent as any).mock.calls.some(([event]: any[]) => event.mutationType === "mission:stranded-feature-triaged" && event.metadata?.featureId === "F-001" && event.metadata?.taskId === "FN-001")).toBe(true);
+  });
+});
+
+
+describe("FN-9013 regression: mission listFeatures receiver and containment", () => {
+  class ReceiverDependentMissionStore {
+    readonly db: { features: (sliceId: string) => MissionFeature[] | Promise<MissionFeature[]> };
+    readonly listMissions: ReturnType<typeof vi.fn>;
+    readonly getMissionWithHierarchy: ReturnType<typeof vi.fn>;
+    readonly reconcileSupersededGeneratedFixFeatures = vi.fn(async () => ({ supersededCount: 0, featureIds: [] as string[] }));
+    readonly triageFeature: ReturnType<typeof vi.fn>;
+    readonly updateFeature = vi.fn();
+
+    constructor(
+      featuresBySlice: Record<string, MissionFeature[]>,
+      options: { asyncListFeatures: boolean; failSliceId?: string; missions?: Array<{ id: string; status: string; autopilotEnabled: boolean }>; hierarchyByMission?: Record<string, unknown> },
+    ) {
+      this.db = {
+        features: (sliceId) => {
+          if (sliceId === options.failSliceId) throw new Error(`slice ${sliceId} failed`);
+          const features = featuresBySlice[sliceId] ?? [];
+          return options.asyncListFeatures ? Promise.resolve(features) : features;
+        },
+      };
+      this.listMissions = vi.fn(() => options.missions ?? [{ id: "M-001", status: "active", autopilotEnabled: true }]);
+      this.getMissionWithHierarchy = vi.fn((missionId: string) => options.hierarchyByMission?.[missionId] ?? {
+        id: missionId,
+        status: "active",
+        milestones: [{ id: `MS-${missionId}`, slices: [{ id: "SL-001", status: "active", features: featuresBySlice["SL-001"] ?? [] }] }],
+      });
+      this.triageFeature = vi.fn(async (featureId: string) => {
+        const candidate = Object.values(featuresBySlice).flat().find((item) => item.id === featureId)!;
+        return { ...candidate, taskId: `FN-${featureId}`, status: "triaged" };
+      });
+    }
+
+    listFeatures(sliceId: string): MissionFeature[] | Promise<MissionFeature[]> {
+      return this.db.features(sliceId);
+    }
+  }
+
+  it.each([true, false])("preserves the receiver for %s listFeatures stores and retriages stranded features", async (asyncListFeatures) => {
+    const features = { "SL-001": [feature({ id: asyncListFeatures ? "F-ASYNC" : "F-SYNC" })] };
+    const missionStore = new ReceiverDependentMissionStore(features, { asyncListFeatures });
+    const errorSpy = vi.spyOn(schedulerLog, "error").mockImplementation(() => {});
+
+    try {
+      const fixed = await new Scheduler(createTaskStore(), { missionStore: missionStore as any }).reconcileAllMissionFeatures();
+
+      expect(missionStore.triageFeature).toHaveBeenCalledWith(features["SL-001"][0].id);
+      expect(fixed).toBeGreaterThan(0);
+      expect(errorSpy.mock.calls.some(([, error]) => error instanceof TypeError)).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("falls back to hierarchy features when the optional capability is absent", async () => {
+    const features = [feature({ id: "F-FALLBACK" })];
+    const missionStore = {
+      listMissions: vi.fn(() => [{ id: "M-001", status: "active", autopilotEnabled: true }]),
+      getMissionWithHierarchy: vi.fn(() => ({
+        id: "M-001",
+        status: "active",
+        milestones: [{ id: "MS-001", slices: [{ id: "SL-001", status: "active", features }] }],
+      })),
+      reconcileSupersededGeneratedFixFeatures: vi.fn(async () => ({ supersededCount: 0, featureIds: [] as string[] })),
+      triageFeature: vi.fn(async () => ({ ...features[0], taskId: "FN-FALLBACK", status: "triaged" })),
+    };
+
+    await new Scheduler(createTaskStore(), { missionStore: missionStore as any }).reconcileAllMissionFeatures();
+
+    expect(missionStore.triageFeature).toHaveBeenCalledWith("F-FALLBACK");
+  });
+
+  it("logs one failing slice and continues remaining slices and missions", async () => {
+    const featuresBySlice = {
+      "SL-001": [feature({ id: "F-FAILED", sliceId: "SL-001" })],
+      "SL-002": [feature({ id: "F-SECOND-SLICE", sliceId: "SL-002" })],
+      "SL-003": [feature({ id: "F-SECOND-MISSION", sliceId: "SL-003" })],
+      "SL-004": [feature({ id: "F-SECOND-MISSION-SECOND-SLICE", sliceId: "SL-004" })],
+    };
+    const missionStore = new ReceiverDependentMissionStore(featuresBySlice, {
+      asyncListFeatures: true,
+      failSliceId: "SL-001",
+      missions: [
+        { id: "M-001", status: "active", autopilotEnabled: true },
+        { id: "M-002", status: "active", autopilotEnabled: true },
+      ],
+      hierarchyByMission: {
+        "M-001": { id: "M-001", status: "active", milestones: [{ id: "MS-001", slices: [{ id: "SL-001", status: "active", features: featuresBySlice["SL-001"] }, { id: "SL-002", status: "active", features: featuresBySlice["SL-002"] }] }] },
+        "M-002": { id: "M-002", status: "active", milestones: [{ id: "MS-002", slices: [{ id: "SL-003", status: "active", features: featuresBySlice["SL-003"] }, { id: "SL-004", status: "active", features: featuresBySlice["SL-004"] }] }] },
+      },
+    });
+    const errorSpy = vi.spyOn(schedulerLog, "error").mockImplementation(() => {});
+
+    try {
+      const fixed = await new Scheduler(createTaskStore(), { missionStore: missionStore as any }).reconcileAllMissionFeatures();
+
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("SL-001"), expect.any(Error));
+      expect(missionStore.triageFeature).toHaveBeenCalledWith("F-SECOND-SLICE");
+      expect(missionStore.triageFeature).toHaveBeenCalledWith("F-SECOND-MISSION");
+      expect(missionStore.triageFeature).toHaveBeenCalledWith("F-SECOND-MISSION-SECOND-SLICE");
+      expect(missionStore.triageFeature).not.toHaveBeenCalledWith("F-FAILED");
+      expect(fixed).toBeGreaterThan(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

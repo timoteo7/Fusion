@@ -53,6 +53,34 @@ describe("claimDueWorkflowWorkItem", () => {
     );
   });
 
+  it("claims a rehomed task through its canonical feature instead of stale follow-up lineage", async () => {
+    const acquireWorkflowWorkItemLease = vi.fn(() => item);
+    const acquireSymbolLocks = vi.fn(async () => ({ acquired: true as const, conflicts: [] }));
+    const result = await claimDueWorkflowWorkItem({
+      listDueWorkflowWorkItems: () => [item], acquireWorkflowWorkItemLease,
+      getTask: async () => ({
+        id: "FN-1", missionId: "M-1", sliceId: "SL-2", declaredSymbols: ["pkg/a.ts#A"],
+        sourceMetadata: { missionLineage: { missionId: "M-1", sliceId: "SL-OLD", featureId: "F-OLD" } },
+      } as any),
+      getMissionStore: () => ({
+        getFeatureByTaskId: async () => ({ id: "F-2", taskId: "FN-1", sliceId: "SL-2", status: "triaged" }),
+        getFeature: async () => ({ id: "F-OLD", taskId: "FN-OLD", sliceId: "SL-OLD", status: "done" }),
+        getSlice: async () => ({ id: "SL-2", milestoneId: "MS-1", status: "active" }),
+        getMilestone: async () => ({ id: "MS-1", missionId: "M-1", status: "active" }),
+        getMission: async () => ({ id: "M-1", status: "active" }),
+      } as any),
+      acquireSymbolLocks,
+    }, { leaseOwner: "worker", leaseDurationMs: 1000 });
+
+    expect(result).toMatchObject({ taskId: "FN-1", workItem: item });
+    expect(acquireSymbolLocks).toHaveBeenCalledWith(
+      ["pkg/a.ts#a"],
+      { ownerTaskId: "FN-1", missionId: "M-1", featureId: "F-2", agentId: "worker" },
+      expect.any(Number),
+    );
+    expect(acquireWorkflowWorkItemLease).toHaveBeenCalledOnce();
+  });
+
   it("releases an acquired symbol lock when the workflow lease races", async () => {
     const releaseSymbolLocks = vi.fn(async () => undefined);
     const result = await claimDueWorkflowWorkItem({

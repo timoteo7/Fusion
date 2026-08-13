@@ -4,13 +4,35 @@ import { WorkflowAgentCapacity } from "../agents/workflow-agent-capacity.js";
 const agent = (id: string, maxWorkflowSessions?: number) => ({ id, runtimeConfig: { maxWorkflowSessions } }) as any;
 
 describe("WorkflowAgentCapacity", () => {
-  it("keeps workflow and heartbeat limits independent while enforcing project then agent limits", async () => {
+  /*
+  FNXC:WorkflowAgentRouting 2026-08-11-09:12:
+  Replaces the former "enforces project then agent limits" case. Workflow principals have NO execution
+  cap: one Workflow Executor must be able to hold many concurrent sessions, because a per-principal
+  ceiling serialized the whole board (there is typically exactly one agent per role) and its refusal
+  became a durable `held` row no dispatcher re-polled.
+  */
+  it("never refuses a workflow principal, however many sessions it already holds", async () => {
     const capacity = new WorkflowAgentCapacity();
+    // `maxWorkflowSessions: 1` is deliberately set and must be ignored — it is the exact config that
+    // used to serialize a single-executor board.
     const constrained = agent("executor", 1);
-    expect(await capacity.acquire({ projectId: "project-a", agent: constrained, attemptId: "one", maxProjectSessions: 2 })).toMatchObject({ status: "acquired" });
-    expect(await capacity.acquire({ projectId: "project-a", agent: constrained, attemptId: "two", maxProjectSessions: 2 })).toEqual({ status: "held", reason: "agent-capacity" });
-    expect(await capacity.acquire({ projectId: "project-a", agent: agent("reviewer"), attemptId: "three", maxProjectSessions: 2 })).toMatchObject({ status: "acquired" });
-    expect(await capacity.acquire({ projectId: "project-a", agent: agent("merger"), attemptId: "four", maxProjectSessions: 2 })).toEqual({ status: "held", reason: "project-capacity" });
+    for (const attemptId of ["one", "two", "three", "four", "five"]) {
+      expect(await capacity.acquire({ projectId: "project-a", agent: constrained, attemptId })).toMatchObject({ status: "acquired" });
+    }
+    expect(capacity.activeSessions("executor", "project-a")).toBe(5);
+    // A second role on the same project is likewise uncapped.
+    expect(await capacity.acquire({ projectId: "project-a", agent: agent("reviewer"), attemptId: "six" })).toMatchObject({ status: "acquired" });
+  });
+
+  it("passes no session limits to the durable store, so a cap cannot be reintroduced by the caller", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const capacity = new WorkflowAgentCapacity({
+      acquireWorkflowSessionCapacity: async (input) => { calls.push(input); return "acquired"; },
+      releaseWorkflowSessionCapacity: async () => undefined,
+    });
+    await capacity.acquire({ projectId: "project-a", agent: agent("executor", 1), attemptId: "uncapped" });
+    expect(calls[0]).not.toHaveProperty("maxProjectSessions");
+    expect(calls[0]).not.toHaveProperty("maxAgentSessions");
   });
 
   it("isolates matching agent and attempt IDs across projects", async () => {
@@ -25,7 +47,7 @@ describe("WorkflowAgentCapacity", () => {
 
   it("allows a fenced attempt to reacquire and releases exactly once", async () => {
     const capacity = new WorkflowAgentCapacity();
-    const input = { projectId: "project-a", agent: agent("executor", 1), attemptId: "attempt", maxProjectSessions: 1 };
+    const input = { projectId: "project-a", agent: agent("executor", 1), attemptId: "attempt" };
     const first = await capacity.acquire(input);
     expect(await capacity.acquire(input)).toEqual(first);
     expect(capacity.activeSessions("executor")).toBe(1);

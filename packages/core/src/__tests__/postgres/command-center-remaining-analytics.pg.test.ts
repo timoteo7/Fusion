@@ -104,13 +104,19 @@ pgTest("Command Center remaining analytics aggregators (PostgreSQL backend mode)
       { description: "workflow target", column: "done" },
       { taskId: "FN-WF-1", createdAt: IN_RANGE, updatedAt: IN_RANGE, applyDefaultWorkflowSteps: false },
     );
+    /*
+     * FNXC:PostgresCommandCenterAnalytics 2026-08-12-16:15:
+     * FN-8998 scopes custom workflow-name prefetches by project_id. Omitting this
+     * owner lets the trigger stamp __legacy_unscoped__, which a p1-bound analytics
+     * layer cannot resolve; keep this workflow and its selection in p1 together.
+     */
     await adminDb.execute(sql`
-      INSERT INTO project.workflows (id, name, description, ir, layout, kind, created_at, updated_at)
-      VALUES ('wf-custom', 'Custom WF', '', ${JSON.stringify({ version: "v2" })}::jsonb, '{}'::jsonb, 'workflow', ${IN_RANGE}, ${IN_RANGE})
+      INSERT INTO project.workflows (project_id, id, name, description, ir, layout, kind, created_at, updated_at)
+      VALUES ('p1', 'wf-custom', 'Custom WF', '', ${JSON.stringify({ version: "v2" })}::jsonb, '{}'::jsonb, 'workflow', ${IN_RANGE}, ${IN_RANGE})
     `);
     await adminDb.execute(sql`
-      INSERT INTO project.task_workflow_selection (task_id, workflow_id, step_ids, updated_at)
-      VALUES ('FN-WF-1', 'wf-custom', '[]'::jsonb, ${IN_RANGE})
+      INSERT INTO project.task_workflow_selection (project_id, task_id, workflow_id, step_ids, updated_at)
+      VALUES ('p1', 'FN-WF-1', 'wf-custom', '[]'::jsonb, ${IN_RANGE})
     `);
     await adminDb.execute(sql`
       UPDATE project.tasks SET
@@ -225,6 +231,65 @@ pgTest("Command Center remaining analytics aggregators (PostgreSQL backend mode)
     const columnCounts = Object.fromEntries(live.columns.map((c) => [c.column, c.count]));
     expect(columnCounts["done"]).toBe(2); // FN-WF-1 + FN-GH-2
     expect(columnCounts["in-progress"]).toBe(1); // FN-GH-1
+  });
+
+  /*
+   * FNXC:PostgresCommandCenterAnalytics 2026-08-12-16:15:
+   * A project-bound workflow analytics layer may resolve custom display names
+   * only from its own workflow partition. Foreign and trigger-stamped legacy
+   * rows can still supply joined workflow ids, but must never supply a name.
+   */
+  it("resolves workflow names only from the bound project partition", async () => {
+    const store = h.store();
+    const adminDb = h.adminDb();
+    const taskIds = ["FN-WF-SCOPED", "FN-WF-LEGACY", "FN-WF-BUILTIN"];
+
+    for (const taskId of taskIds) {
+      await store.createTaskWithReservedId(
+        { description: `workflow partition fixture ${taskId}`, column: "done" },
+        { taskId, createdAt: IN_RANGE, updatedAt: IN_RANGE, applyDefaultWorkflowSteps: false },
+      );
+    }
+    await adminDb.execute(sql`
+      UPDATE project.tasks SET column_moved_at = ${IN_RANGE}
+      WHERE id IN ('FN-WF-SCOPED', 'FN-WF-LEGACY', 'FN-WF-BUILTIN')
+    `);
+    await adminDb.execute(sql`
+      INSERT INTO project.workflows (project_id, id, name, description, ir, layout, kind, created_at, updated_at)
+      VALUES
+        ('p1', 'wf-custom', 'Custom WF', '', ${JSON.stringify({ version: "v2" })}::jsonb, '{}'::jsonb, 'workflow', ${IN_RANGE}, ${IN_RANGE}),
+        ('p2', 'wf-custom', 'Foreign WF', '', ${JSON.stringify({ version: "v2" })}::jsonb, '{}'::jsonb, 'workflow', ${IN_RANGE}, ${IN_RANGE})
+    `);
+    await adminDb.execute(sql`
+      INSERT INTO project.workflows (id, name, description, ir, layout, kind, created_at, updated_at)
+      VALUES ('wf-legacy-only', 'Legacy WF', '', ${JSON.stringify({ version: "v2" })}::jsonb, '{}'::jsonb, 'workflow', ${IN_RANGE}, ${IN_RANGE})
+    `);
+    expect(await h.adminSql()<Array<{ project_id: string }>>`
+      SELECT project_id FROM project.workflows WHERE id = 'wf-legacy-only'
+    `).toEqual([{ project_id: "__legacy_unscoped__" }]);
+    await adminDb.execute(sql`
+      INSERT INTO project.task_workflow_selection (project_id, task_id, workflow_id, step_ids, updated_at)
+      VALUES
+        ('p1', 'FN-WF-SCOPED', 'wf-custom', '[]'::jsonb, ${IN_RANGE}),
+        ('p2', 'FN-WF-BUILTIN', 'builtin:coding', '[]'::jsonb, ${IN_RANGE})
+    `);
+    await adminDb.execute(sql`
+      INSERT INTO project.task_workflow_selection (task_id, workflow_id, step_ids, updated_at)
+      VALUES ('FN-WF-LEGACY', 'wf-legacy-only', '[]'::jsonb, ${IN_RANGE})
+    `);
+
+    const workflow = await aggregateWorkflowAnalytics(
+      Object.assign(h.layer(), { projectId: "p1" }),
+      { from: FROM, to: TO, defaultWorkflowId: "builtin:coding" },
+    );
+    const custom = workflow.workflows.find((row) => row.workflowId === "wf-custom");
+    const legacy = workflow.workflows.find((row) => row.workflowId === "wf-legacy-only");
+    const builtin = workflow.workflows.find((row) => row.workflowId === "builtin:coding");
+
+    expect(custom).toMatchObject({ workflowId: "wf-custom", workflowName: "Custom WF", isBuiltin: false });
+    expect(workflow.workflows.some((row) => row.workflowName === "Foreign WF")).toBe(false);
+    expect(legacy).toMatchObject({ workflowId: "wf-legacy-only", workflowName: "wf-legacy-only", isBuiltin: false });
+    expect(builtin).toMatchObject({ workflowId: "builtin:coding", workflowName: "Coding", isBuiltin: true });
   });
 
   /*

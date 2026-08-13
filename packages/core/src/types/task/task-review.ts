@@ -6,10 +6,16 @@
 export type TaskReviewMode = "pull-request" | "direct";
 export type TaskReviewSource = "github-pr" | "reviewer-agent";
 export type TaskReviewDecision = "approved" | "changes-requested" | "commented" | "pending";
-export type TaskReviewVerdict = "APPROVE" | "APPROVE_WITH_NOTES" | "REVISE" | "RETHINK" | "UNAVAILABLE";
+/*
+ * FNXC:PlanReviewNoOp 2026-08-09-01:17:
+ * The Review data projection must retain the Plan-Review-only close verdict as audit evidence;
+ * consumers render it as a terminal review decision rather than converting it into a revision.
+ */
+export type TaskReviewVerdict = "APPROVE" | "APPROVE_WITH_NOTES" | "REVISE" | "RETHINK" | "UNAVAILABLE" | "CLOSE_NO_OP";
 export type TaskReviewerType = "plan" | "code";
 export type TaskReviewItemStatus = "queued" | "in-progress" | "addressed" | "failed";
 export type TaskReviewFindingSeverity = "low" | "medium" | "high" | "critical";
+export type TaskReviewFindingResolution = "open" | "resolved-in-review" | "superseded";
 
 export interface LegacyTaskReviewItem {
   id: string;
@@ -95,6 +101,7 @@ export interface TaskReviewStateItem {
   step?: number;
   summary?: string;
   severity?: TaskReviewFindingSeverity;
+  resolution?: TaskReviewFindingResolution;
 }
 
 export type ReviewAddressingStatus = "queued" | "in-progress" | "addressed" | "failed";
@@ -109,6 +116,7 @@ export interface ReviewAddressingSnapshot {
   filePath?: string;
   lineNumber?: number;
   severity?: TaskReviewFindingSeverity;
+  resolution?: TaskReviewFindingResolution;
   threadId?: string;
   url?: string;
 }
@@ -166,6 +174,7 @@ export interface TaskReviewDataItem {
   filePath?: string;
   line?: number;
   severity?: TaskReviewFindingSeverity;
+  resolution?: TaskReviewFindingResolution;
   threadId?: string;
   reviewState?: string | null;
   /** Machine-readable reviewer verdict when the source supplied one. */

@@ -33,7 +33,7 @@ Fusion stores multi-project and multi-node coordination state in **PostgreSQL**:
 
 **Default (single machine):** unset `DATABASE_URL` → embedded Postgres under `~/.fusion/embedded-postgres/`. That data directory is **local to the host**. Two laptops each running embedded Postgres do **not** share a board.
 
-**Multi-node (shared board):** every Fusion node sets the **same external** `DATABASE_URL` (and `DATABASE_MIGRATION_URL` when the runtime URL is a transaction pooler). All nodes share one database; execution (worktrees, agent processes) stays per node.
+**Multi-node (shared board):** every Fusion node sets the **same external** `DATABASE_URL`. A direct URL needs no duplicate `DATABASE_MIGRATION_URL`; set that override only when the runtime URL is a transaction pooler or schema work needs a separate direct endpoint. All nodes share one database; execution (worktrees, agent processes) stays per node.
 
 Core `central` tables (names as exposed by the data layer; SQL uses snake_case):
 
@@ -48,6 +48,15 @@ Core `central` tables (names as exposed by the data layer; SQL uses snake_case):
 
 Per-project task data is keyed by `projectId` in PostgreSQL's `project` schema. Each repo keeps `.fusion/project.json` as its filesystem identity marker; `.fusion/fusion.db` is read only by the one-time legacy migrator.
 
+### Agent ownership predicates
+
+<!--
+FNXC:MultiProjectIsolation 2026-08-11-09:31:
+Runfusion/Fusion#3414 requires every `project.agents` read, update, and delete—plus its agent-owned satellite rows—to carry the same ownership predicate as writes. External PostgreSQL deployments commonly use owner or superuser connections that bypass RLS, so application predicates remain the isolation boundary.
+-->
+
+Bound agent-store layers scope those operations with `projectScopeFor(..., projectId)`. An unbound or blank layer is intentionally a no-op scope for compatibility and cross-project analytics callers; it must not be converted to a literal empty `project_id` filter or a throwing project-id accessor.
+
 Use PostgreSQL-native backup/restore tooling for authoritative runtime data. Legacy `fn backup` SQLite artifacts remain migration/recovery inputs; restoring one does not replace the live PostgreSQL registry.
 
 `taskClaims` is the central cross-node lease mutex introduced by FN-4819 §2: claim acquisition/renewal/release happen in PostgreSQL, while per-project lease fields mirror the central winner for local scheduler/runtime consumption.
@@ -59,7 +68,7 @@ Legacy SQLite paths (`~/.fusion/fusion-central.db`, `<repo>/.fusion/fusion.db`) 
 ### Shared Postgres multi-node runbook
 
 1. Provision one Postgres (local Docker, RDS, Supabase, etc.).
-2. On **every** Fusion node: `export DATABASE_URL=...` (same URL). If you use PgBouncer/Supavisor in transaction mode, also set `DATABASE_MIGRATION_URL` to a direct (non-pooled) connection for schema work.
+2. On **every** Fusion node: `export DATABASE_URL=...` (same URL). Do not duplicate a direct URL into `DATABASE_MIGRATION_URL`; if you use PgBouncer/Supavisor in transaction mode, set that override to a direct (non-pooled) connection for schema work and planning lifecycle locks.
 3. Register projects and nodes so they appear in shared `central.projects` / `central.nodes`.
 4. For each host, set `project_node_path_mappings` so that host’s absolute checkout path is recorded for each project.
 5. Run `fn serve` / the engine on each node. Task IDs and settings are shared via Postgres; checkout exclusivity uses `task_claims`; abandoned-owner recovery uses `MeshLeaseManager`.

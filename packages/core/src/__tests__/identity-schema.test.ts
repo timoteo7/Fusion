@@ -35,9 +35,17 @@ import type { ResolvedBackend } from "../postgres/backend-resolver.js";
 const NOW = "2026-08-09T03:04:00.000Z";
 
 describe("identity schema: migration identity", () => {
+  /*
+  FNXC:Identity 2026-08-09-03:04:
+  Renumbered 0047 -> 0059 when this branch refreshed from main. Main had already landed its own
+  0047 (task recommendations), and two migrations sharing one bookkeeping identity means whichever
+  check runs first records the version and marks the OTHER already-applied — so the identity tables
+  would silently never be created on an upgraded database while a fresh one looked fine. A
+  per-migration identity is immutable only once released; this one had not been.
+  */
   it("assigns the identity schema its own immutable migration version at the current ceiling", () => {
-    expect(IDENTITY_ACTORS_VERSION).toBe("0047");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0047");
+    expect(IDENTITY_ACTORS_VERSION).toBe("0059");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0059");
   });
 });
 

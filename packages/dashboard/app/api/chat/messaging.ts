@@ -123,13 +123,14 @@ export interface ApprovalListResponse {
 
 /** Fetch inbox messages for the current user. */
 export function fetchInbox(
-  options?: { limit?: number; offset?: number; unreadOnly?: boolean; type?: MessageType },
+  options?: { limit?: number; offset?: number; unreadOnly?: boolean; type?: MessageType; archived?: boolean },
   projectId?: string,
 ): Promise<InboxResponse> {
   const params = new URLSearchParams();
   if (options?.limit !== undefined) params.set("limit", String(options.limit));
   if (options?.offset !== undefined) params.set("offset", String(options.offset));
   if (options?.unreadOnly) params.set("unreadOnly", "true");
+  if (options?.archived) params.set("archived", "true");
   if (options?.type) params.set("type", options.type);
   if (projectId) params.set("projectId", projectId);
   const query = params.size > 0 ? `?${params.toString()}` : "";
@@ -138,12 +139,13 @@ export function fetchInbox(
 
 /** Fetch sent messages for the current user. */
 export function fetchOutbox(
-  options?: { limit?: number; offset?: number; type?: MessageType },
+  options?: { limit?: number; offset?: number; type?: MessageType; archived?: boolean },
   projectId?: string,
 ): Promise<OutboxResponse> {
   const params = new URLSearchParams();
   if (options?.limit !== undefined) params.set("limit", String(options.limit));
   if (options?.offset !== undefined) params.set("offset", String(options.offset));
+  if (options?.archived) params.set("archived", "true");
   if (options?.type) params.set("type", options.type);
   if (projectId) params.set("projectId", projectId);
   const query = params.size > 0 ? `?${params.toString()}` : "";
@@ -187,6 +189,16 @@ export function markAllMessagesRead(projectId?: string): Promise<MarkAllReadResp
   });
 }
 
+/** Archive a message without permanently deleting it. */
+export function archiveMessage(id: string, projectId?: string): Promise<Message> {
+  return api<Message>(withProjectId(`/messages/${encodeURIComponent(id)}/archive`, projectId), { method: "POST" });
+}
+
+/** Restore a previously archived message. */
+export function unarchiveMessage(id: string, projectId?: string): Promise<Message> {
+  return api<Message>(withProjectId(`/messages/${encodeURIComponent(id)}/unarchive`, projectId), { method: "POST" });
+}
+
 /** Delete a message. */
 export function deleteMessage(id: string, projectId?: string): Promise<void> {
   return api<void>(withProjectId(`/messages/${encodeURIComponent(id)}`, projectId), {
@@ -199,19 +211,30 @@ export function fetchConversation(
   participantId: string,
   participantType: ParticipantType,
   projectId?: string,
+  options?: { archived?: boolean },
 ): Promise<Message[]> {
   const path = `/messages/conversation/${encodeURIComponent(participantType)}/${encodeURIComponent(participantId)}`;
-  return api<Message[]>(withProjectId(path, projectId));
+  const params = new URLSearchParams();
+  if (options?.archived) params.set("archived", "true");
+  if (projectId) params.set("projectId", projectId);
+  return api<Message[]>(`${path}${params.size ? `?${params.toString()}` : ""}`);
 }
 
 /** Fetch an agent's mailbox (admin read-only view). */
-export function fetchAgentMailbox(agentId: string, projectId?: string): Promise<AgentMailboxResponse> {
-  return api<AgentMailboxResponse>(withProjectId(`/agents/${encodeURIComponent(agentId)}/mailbox`, projectId));
+export function fetchAgentMailbox(agentId: string, projectId?: string, options?: { archived?: boolean }): Promise<AgentMailboxResponse> {
+  const path = `/agents/${encodeURIComponent(agentId)}/mailbox`;
+  const params = new URLSearchParams();
+  if (options?.archived) params.set("archived", "true");
+  if (projectId) params.set("projectId", projectId);
+  return api<AgentMailboxResponse>(`${path}${params.size ? `?${params.toString()}` : ""}`);
 }
 
 /** Fetch aggregate mailbox across all agent-to-agent messages (admin read-only view). */
-export function fetchAllAgentMailbox(projectId?: string): Promise<AllAgentsMailboxResponse> {
-  return api<AllAgentsMailboxResponse>(withProjectId("/agents/mailbox/all", projectId));
+export function fetchAllAgentMailbox(projectId?: string, options?: { archived?: boolean }): Promise<AllAgentsMailboxResponse> {
+  const params = new URLSearchParams();
+  if (options?.archived) params.set("archived", "true");
+  if (projectId) params.set("projectId", projectId);
+  return api<AllAgentsMailboxResponse>(`/agents/mailbox/all${params.size ? `?${params.toString()}` : ""}`);
 }
 
 export function fetchApprovals(

@@ -34,6 +34,8 @@ import { emitGoalRetrievalAudit } from "./goals/goal-anchoring-audit.js";
 import { recordRetry } from "./errors/retry-burned-logger.js";
 import { acquireWorkspaceRepoWorktree, WorkspaceRepoAcquireBusyError } from "./worktree/worktree-acquisition.js";
 import { validateCodeNodeSources } from "./execution/code-node-runner.js";
+import { resolveFeatureRepairTargets } from "./missions/mission-feature-sync.js";
+import { reconcileMissionState } from "./missions/mission-state-reconcile.js";
 
 // ── Tool parameter schemas (canonical definitions) ────────────────────────
 
@@ -560,6 +562,13 @@ export const sendMessageParams = Type.Object({
   reply_to_message_id: Type.Optional(
     Type.String({ description: "Optional ID of the message you are replying to. Parent-based recipient inference is allowed only when that message was addressed to you." }),
   ),
+  mail_kind: Type.Optional(Type.Union([
+    Type.Literal("message"), Type.Literal("report"), Type.Literal("approval"),
+  ], { description: "Structural mail kind. Use report for a composed writeup; approval is engine-managed." })),
+  report: Type.Optional(Type.Object({
+    title: Type.String({ description: "Report title" }),
+    sections: Type.Array(Type.Object({ heading: Type.String(), body: Type.String() }), { description: "Non-empty report sections" }),
+  }, { description: "Structured report payload for mail" })),
 });
 
 export const readMessagesParams = Type.Object({
@@ -4436,6 +4445,8 @@ export const missionCreateParams = Type.Object({
 });
 export const missionUpdateParams = Type.Object({ id: Type.String(), title: Type.Optional(Type.String()), description: Type.Optional(Type.String()) });
 export const missionDeleteParams = Type.Object({ id: Type.String() });
+export const missionSetStatusParams = Type.Object({ id: Type.String(), status: Type.Union(fusionCore.MISSION_STATUSES.map((status) => Type.Literal(status))), reason: Type.Optional(Type.String()) });
+export const missionReconcileParams = Type.Object({ id: Type.Optional(Type.String()), dryRun: Type.Optional(Type.Boolean()) });
 export const milestoneAddParams = Type.Object({ missionId: Type.String(), title: Type.String(), description: Type.Optional(Type.String()) });
 export const milestoneUpdateParams = Type.Object({ id: Type.String(), title: Type.Optional(Type.String()), description: Type.Optional(Type.String()), acceptanceCriteria: Type.Optional(Type.String()) });
 export const milestoneDeleteParams = Type.Object({ milestoneId: Type.String(), force: Type.Optional(Type.Boolean()) });
@@ -4445,7 +4456,9 @@ export const sliceDeleteParams = Type.Object({ sliceId: Type.String(), force: Ty
 export const featureAddParams = Type.Object({ sliceId: Type.String(), title: Type.String(), description: Type.Optional(Type.String()), acceptanceCriteria: Type.Optional(Type.String()) });
 export const featureUpdateParams = Type.Object({ id: Type.String(), title: Type.Optional(Type.String()), description: Type.Optional(Type.String()), acceptanceCriteria: Type.Optional(Type.String()) });
 export const featureDeleteParams = Type.Object({ featureId: Type.String(), force: Type.Optional(Type.Boolean()) });
+export const featureSetStatusParams = Type.Object({ id: Type.String(), status: Type.Union(fusionCore.FEATURE_STATUSES.map((status) => Type.Literal(status))), reason: Type.Optional(Type.String()) });
 export const featureLinkTaskParams = Type.Object({ featureId: Type.String(), taskId: Type.String() });
+export const featureRepairValidationParams = Type.Object({ id: Type.String(), action: Type.Union([Type.Literal("clear"), Type.Literal("re_run")]), reason: Type.Optional(Type.String()) });
 export const researchFindingPromoteParams = Type.Object({
   runId: Type.String(),
   findingId: Type.String(),
@@ -4576,7 +4589,16 @@ export function createMissionTools(store: TaskStore, context: MissionToolActorCo
     tool("fn_mission_show", "Show Mission", "Show a mission with its full milestone, slice, and feature hierarchy.", missionShowParams, async ({ id }) => { const mission = await store.getMissionStore().getMissionWithHierarchy(id); return mission ? missionToolResult(formatMissionHierarchy(mission), { mission }) : missionToolResult(`Mission ${id} not found`, { code: "MISSION_NOT_FOUND", missionId: id }, true); }),
     tool("fn_mission_create", "Create Mission", "Create a high-level mission.", missionCreateParams, async (p) => { const ms = store.getMissionStore(); const mission = await ms.createMission({ title: p.title.trim(), description: optionalText(p.description), baseBranch: optionalText(p.baseBranch) }); const updated = p.autoAdvance === undefined ? mission : await ms.updateMission(mission.id, { autoAdvance: p.autoAdvance }, { actor }); return missionToolResult(`Created ${updated.id}: ${updated.title}`, { mission: updated }); }),
     tool("fn_mission_update", "Update Mission", "Partially update a mission.", missionUpdateParams, async (p) => { const updates = updateFields(p, ["title", "description"]); if (!Object.keys(updates).length) return missionToolResult("No fields to update", {}, true); const mission = await store.getMissionStore().updateMission(p.id, updates, { actor }); return missionToolResult(`Updated ${mission.id}: ${mission.title}`, { mission }); }),
+    tool("fn_mission_set_status", "Set Mission Status", "Set a mission lifecycle status.", missionSetStatusParams, async (p) => {
+      if (!fusionCore.MISSION_STATUSES.includes(p.status)) return missionToolResult(`Invalid status. Must be one of: ${fusionCore.MISSION_STATUSES.join(", ")}`, {}, true);
+      const mission = await store.getMissionStore().updateMission(p.id, { status: p.status }, { actor, reason: p.reason });
+      return missionToolResult(`Set ${mission.id} status to ${mission.status}`, { mission });
+    }),
     tool("fn_mission_delete", "Delete Mission", "Delete a mission and its hierarchy.", missionDeleteParams, async ({ id }) => { await store.getMissionStore().deleteMission(id); return missionToolResult(`Deleted ${id}`, { missionId: id }); }),
+    tool("fn_mission_reconcile", "Reconcile Mission", "Reconcile mission state against deterministic delivery ground truth.", missionReconcileParams, async (p) => {
+      const result = await reconcileMissionState({ taskStore: store, missionStore: store.getMissionStore() }, { missionId: p.id, dryRun: p.dryRun === true, source: "tool", actor });
+      return missionToolResult(`Reconciled ${p.id ?? "project"}`, result as unknown as Record<string, unknown>);
+    }),
     tool("fn_milestone_add", "Add Milestone", "Add a milestone to a mission.", milestoneAddParams, async (p) => { const milestone = await store.getMissionStore().addMilestone(p.missionId, { title: p.title.trim(), description: optionalText(p.description) }); return missionToolResult(`Added ${milestone.id}`, { milestone }); }),
     tool("fn_milestone_update", "Update Milestone", "Partially update a milestone.", milestoneUpdateParams, async (p) => { const updates = updateFields(p, ["title", "description", "acceptanceCriteria"]); if (!Object.keys(updates).length) return missionToolResult("No fields to update", {}, true); const milestone = await store.getMissionStore().updateMilestone(p.id, updates); return missionToolResult(`Updated ${milestone.id}`, { milestone }); }),
     tool("fn_milestone_delete", "Delete Milestone", "Delete a milestone and descendants.", milestoneDeleteParams, async (p) => { await store.getMissionStore().deleteMilestone(p.milestoneId, p.force === true); return missionToolResult(`Deleted ${p.milestoneId}`, { milestoneId: p.milestoneId }); }),
@@ -4585,6 +4607,51 @@ export function createMissionTools(store: TaskStore, context: MissionToolActorCo
     tool("fn_slice_delete", "Delete Slice", "Delete a slice and descendants.", sliceDeleteParams, async (p) => { await store.getMissionStore().deleteSlice(p.sliceId, p.force === true); return missionToolResult(`Deleted ${p.sliceId}`, { sliceId: p.sliceId }); }),
     tool("fn_feature_add", "Add Feature", "Add a feature to a slice.", featureAddParams, async (p) => { const feature = await store.getMissionStore().addFeature(p.sliceId, { title: p.title.trim(), description: optionalText(p.description), acceptanceCriteria: optionalText(p.acceptanceCriteria) }); return missionToolResult(`Added ${feature.id}`, { feature }); }),
     tool("fn_feature_update", "Update Feature", "Partially update a feature.", featureUpdateParams, async (p) => { const updates = updateFields(p, ["title", "description", "acceptanceCriteria"]); if (!Object.keys(updates).length) return missionToolResult("No fields to update", {}, true); const feature = await store.getMissionStore().updateFeature(p.id, updates); return missionToolResult(`Updated ${feature.id}`, { feature }); }),
+    tool("fn_feature_repair_validation", "Repair Feature Validation", "Clear a stale validation badge or re-run validation.", featureRepairValidationParams, async (p) => {
+      const missionStore = store.getMissionStore();
+      if (!("repairFeatureValidationState" in missionStore)) {
+        return missionToolResult("Validation repair requires the PostgreSQL mission store", { code: "POSTGRES_REQUIRED" }, true);
+      }
+      const feature = await missionStore.getFeature(p.id);
+      if (!feature) return missionToolResult(`Feature ${p.id} not found`, { code: "FEATURE_NOT_FOUND", featureId: p.id }, true);
+      const eligibility = fusionCore.featureValidationRepairEligibility(feature);
+      if ((p.action === "clear" && !eligibility.clear) || (p.action === "re_run" && !eligibility.reRun)) {
+        return missionToolResult(`Cannot ${p.action === "clear" ? "clear" : "re-run"} validation for ${feature.id}: current loop state is ${feature.loopState ?? "idle"} and status is ${feature.status}.`, { code: "FEATURE_REPAIR_INELIGIBLE", feature }, true);
+      }
+      if (p.action === "re_run") {
+        const repaired = await missionStore.repairFeatureValidationState(p.id, { action: p.action, actor, reason: p.reason });
+        return missionToolResult(`Re-ran validation for ${p.id}`, { feature: repaired.feature, run: repaired.run });
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const currentFeature = await missionStore.getFeature(p.id);
+        if (!currentFeature) return missionToolResult(`Feature ${p.id} not found`, { code: "FEATURE_NOT_FOUND", featureId: p.id }, true);
+        const targets = await resolveFeatureRepairTargets(store, currentFeature);
+        try {
+          const repaired = await missionStore.repairFeatureValidationState(p.id, {
+            action: "clear", actor, reason: p.reason, resolvedStatus: targets.status,
+            resolvedLoopState: targets.resumeImplementation ? "implementing" : "idle", groundTruth: targets.groundTruth,
+          });
+          return missionToolResult(`Cleared validation state for ${p.id}`, { feature: repaired.feature ?? repaired });
+        } catch (error) {
+          if (!(error instanceof fusionCore.RepairGroundTruthStaleError) || attempt === 1) {
+            if (error instanceof fusionCore.RepairGroundTruthStaleError) return missionToolResult("Linked task state changed while repairing; re-check the feature and retry.", { code: "FEATURE_REPAIR_STALE" }, true);
+            throw error;
+          }
+        }
+      }
+      return missionToolResult("Linked task state changed while repairing; re-check the feature and retry.", { code: "FEATURE_REPAIR_STALE" }, true);
+    }),
+    /* FNXC:MissionStatusWrites 2026-08-10-12:47: Dedicated status tools preserve the linked-task guard; generic partial updates intentionally cannot bypass it. */
+    tool("fn_feature_set_status", "Set Feature Status", "Set a feature lifecycle status.", featureSetStatusParams, async (p) => {
+      if (!fusionCore.FEATURE_STATUSES.includes(p.status)) return missionToolResult(`Invalid status. Must be one of: ${fusionCore.FEATURE_STATUSES.join(", ")}`, {}, true);
+      const missionStore = store.getMissionStore(); const feature = await missionStore.getFeature(p.id);
+      if (!feature) return missionToolResult(`Feature ${p.id} not found`, { code: "FEATURE_NOT_FOUND", featureId: p.id }, true);
+      if ((["triaged", "in-progress", "done", "blocked"] as const).includes(p.status) && !feature.taskId) {
+        return missionToolResult(`Cannot set status to '${p.status}' without a linked task. Use the triage endpoint to create and link a task first, or link an existing task via fn_feature_link_task.`, { error: "FEATURE_TASK_REQUIRED" }, true);
+      }
+      const updated = await missionStore.updateFeatureStatus(p.id, p.status, { actor, reason: p.reason });
+      return missionToolResult(`Set ${updated.id} status to ${updated.status}`, { feature: updated });
+    }),
     tool("fn_feature_delete", "Delete Feature", "Delete a feature, respecting linked-task guards.", featureDeleteParams, async (p) => { await store.getMissionStore().deleteFeature(p.featureId, p.force ===true); return missionToolResult(`Deleted ${p.featureId}`, { featureId: p.featureId }); }),
     tool("fn_feature_link_task", "Link Feature to Task", "Link a feature to a live project-scoped task.", featureLinkTaskParams, async (p) => { const feature = await store.getMissionStore().linkFeatureToTask(p.featureId, p.taskId); return missionToolResult(`Linked ${feature.id} to ${p.taskId}`, { feature }); }),
     tool("fn_research_promote_finding", "Promote Research Finding", "Promote a completed research finding into a canonical mission feature.", researchFindingPromoteParams, async (p) => {
@@ -4592,7 +4659,15 @@ export function createMissionTools(store: TaskStore, context: MissionToolActorCo
       if (!("addResearchFeature" in missionStore)) return missionToolResult("Research promotion requires the PostgreSQL mission store", { code: "POSTGRES_REQUIRED" }, true);
       let promoted: Awaited<ReturnType<typeof fusionCore.promoteResearchFinding>>;
       try {
-        promoted = await fusionCore.promoteResearchFinding(store.getResearchStore() as never, missionStore, p);
+        const layer = store.getAsyncLayer();
+        promoted = await fusionCore.promoteResearchFinding(
+          store.getResearchStore() as never,
+          missionStore,
+          p,
+          layer
+            ? fusionCore.createRecallCaptureWriter({ layer, logger: fusionCore.createLogger("research-recall-capture") })
+            : fusionCore.NOOP_RECALL_CAPTURE_WRITER,
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return missionToolResult(message, { code: message.includes("not completed") ? "RUN_NOT_COMPLETED" : message.includes("not found") ? "FINDING_OR_RUN_NOT_FOUND" : "PROMOTION_FAILED", runId: p.runId, findingId: p.findingId }, true);
@@ -5727,7 +5802,7 @@ export function createSendMessageTool(
       "Send a message to another agent or user. The recipient will be woken if they have " +
       "`messageResponseMode: 'immediate'` configured. When replying, include `reply_to_message_id`; omit " +
       "`to_id` to reply to that message's sender only when the parent was addressed to you. Otherwise provide " +
-      "the exact recipient ID and appropriate type explicitly.",
+      "the exact recipient ID and appropriate type explicitly. Use mail for structured reports and approval items; use chat for quick back-and-forth.",
     parameters: sendMessageParams,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     execute: async (_id: string, params: Static<typeof sendMessageParams>, _signal?: any, _onUpdate?: any, _ctx?: any) => {
@@ -5746,6 +5821,17 @@ export function createSendMessageTool(
       }
 
       try {
+        if (params.mail_kind === "approval") {
+          return { content: [{ type: "text" as const, text: "ERROR: approval mail is emitted by the engine only" }], details: {} };
+        }
+        if (params.mail_kind === "report" && !params.report) {
+          return { content: [{ type: "text" as const, text: "ERROR: mail_kind report requires report" }], details: {} };
+        }
+        if (params.report) {
+          if (!params.report.title.trim()) return { content: [{ type: "text" as const, text: "ERROR: report.title must be a non-empty string" }], details: {} };
+          if (params.report.sections.length === 0) return { content: [{ type: "text" as const, text: "ERROR: report.sections must not be empty" }], details: {} };
+          if (params.report.sections.some((section) => !section.heading.trim() || !section.body.trim())) return { content: [{ type: "text" as const, text: "ERROR: report sections require non-empty heading and body" }], details: {} };
+        }
         const replyToMessageId = params.reply_to_message_id?.trim();
 
         if (params.reply_to_message_id !== undefined && !replyToMessageId) {
@@ -5832,7 +5918,13 @@ export function createSendMessageTool(
             toType: recipient.type,
             content,
             type: messageType,
-            ...(replyToMessageId ? { metadata: { replyTo: { messageId: replyToMessageId } } } : {}),
+            ...((replyToMessageId || params.mail_kind || params.report) ? {
+              metadata: {
+                ...(replyToMessageId ? { replyTo: { messageId: replyToMessageId } } : {}),
+                ...(params.mail_kind ? { mailKind: params.mail_kind } : {}),
+                ...(params.report ? { report: params.report } : {}),
+              },
+            } : {}),
           }),
           correlation: { kind: "direct", fromAgentId, toId: recipient.id },
         }, options?.autoRecovery ?? { mode: "deterministic-only", maxRetries: 3 }, async () => {
@@ -5958,10 +6050,12 @@ export function createResearchTools(options: ResearchToolsOptions): ToolDefiniti
           .map((type) => registry.getProvider(type))
           .filter((provider): provider is NonNullable<typeof provider> => Boolean(provider)),
       });
+      const layer = options.store.getAsyncLayer();
       orchestratorState.orchestrator = new ResearchOrchestrator({
         store: resolveResearchStore(),
         stepRunner,
         maxConcurrentRuns: resolved.limits.maxConcurrentRuns,
+        ...(layer ? { recallCaptureWriter: fusionCore.createRecallCaptureWriter({ layer, logger: fusionCore.createLogger("research-recall-capture") }) } : {}),
       });
     }
 

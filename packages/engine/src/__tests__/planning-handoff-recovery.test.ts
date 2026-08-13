@@ -54,4 +54,21 @@ describe("classifyPersistedPlanHandoff", () => {
       awaitingApprovalReason: "require-all",
     }), options)).toBeNull();
   });
+
+  it("recovers a planning-status task with its retained planning worktree", () => {
+    expect(classifyPersistedPlanHandoff(approvedNullTask({
+      status: "planning",
+      workflowStepResults: [],
+      worktree: "/tmp/fusion-planning-worktree",
+    }), options)).toBe("planning");
+  });
+
+  it("keeps the retained-worktree fence for null-status legacy recovery", () => {
+    expect(classifyPersistedPlanHandoff(approvedNullTask({
+      status: null,
+      workflowStepResults: [],
+      steps: [{ id: "planned-step", description: "planned", status: "pending" }],
+      worktree: "/tmp/fusion-planning-worktree",
+    }), options)).toBeNull();
+  });
 });

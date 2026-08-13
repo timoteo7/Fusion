@@ -40,6 +40,7 @@ vi.mock("lucide-react", () => ({
   Inbox: () => <span data-testid="icon-inbox">Inbox</span>,
   Bot: () => <span data-testid="icon-bot">Bot</span>,
   Trash2: () => <span data-testid="icon-trash">Trash</span>,
+  Archive: () => <span data-testid="icon-archive">Archive</span>,
   Check: () => <span data-testid="icon-check">Check</span>,
   CheckCheck: () => <span data-testid="icon-checkcheck">CheckCheck</span>,
   Loader2: ({ className }: { className?: string }) => (
@@ -679,7 +680,7 @@ describe("MailboxModal", () => {
     });
   });
 
-  it("deletes message when clicking delete in detail view", async () => {
+  it("requires explicit confirmation before deleting a message in detail view", async () => {
     render(<MailboxModal {...defaultProps} />);
     await waitFor(() => {
       expect(screen.getByTestId("mailbox-item-msg-001")).toBeDefined();
@@ -693,6 +694,9 @@ describe("MailboxModal", () => {
     expect(deleteButton).toHaveClass("btn", "btn-sm", "btn-secondary");
 
     fireEvent.click(deleteButton);
+    expect(mockDeleteMessage).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("mailbox-delete-confirm"));
     await waitFor(() => {
       expect(mockDeleteMessage).toHaveBeenCalledWith("msg-001", undefined);
     });

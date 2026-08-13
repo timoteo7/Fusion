@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockResolveCli, mockInstallFusionSkill } = vi.hoisted(() => ({
+const { mockResolveCli, mockInstallComputerUseSkill, mockInstallFusionSkill, mockShouldInstallComputerUseSkill } = vi.hoisted(() => ({
   mockResolveCli: vi.fn().mockReturnValue({
     binaryPath: "hermes",
     model: undefined,
@@ -9,6 +9,12 @@ const { mockResolveCli, mockInstallFusionSkill } = vi.hoisted(() => ({
     yolo: false,
     cliTimeoutMs: 300_000,
   }),
+  mockInstallComputerUseSkill: vi.fn().mockReturnValue({
+    outcome: "installed",
+    sourceDir: "/tmp/source",
+    targetDir: "/tmp/computer-use",
+  }),
+  mockShouldInstallComputerUseSkill: vi.fn().mockReturnValue(false),
   mockInstallFusionSkill: vi.fn().mockReturnValue({
     outcome: "installed",
     sourceDir: "/tmp/source",
@@ -30,7 +36,9 @@ vi.mock("../fusion-skill-install.js", async () => {
   );
   return {
     ...actual,
+    installComputerUseSkillIntoHermesHome: mockInstallComputerUseSkill,
     installFusionSkillIntoHermesHome: mockInstallFusionSkill,
+    shouldInstallComputerUseSkill: mockShouldInstallComputerUseSkill,
   };
 });
 
@@ -58,6 +66,12 @@ describe("hermes-runtime plugin", () => {
       yolo: false,
       cliTimeoutMs: 300_000,
       profile: undefined,
+    });
+    mockShouldInstallComputerUseSkill.mockReturnValue(false);
+    mockInstallComputerUseSkill.mockReturnValue({
+      outcome: "installed",
+      sourceDir: "/tmp/source",
+      targetDir: "/tmp/computer-use",
     });
     mockInstallFusionSkill.mockReturnValue({
       outcome: "installed",
@@ -104,6 +118,12 @@ describe("hermes-runtime plugin", () => {
   });
 
   it("onLoad warns but continues when skill install warns", async () => {
+    mockShouldInstallComputerUseSkill.mockReturnValue(false);
+    mockInstallComputerUseSkill.mockReturnValue({
+      outcome: "installed",
+      sourceDir: "/tmp/source",
+      targetDir: "/tmp/computer-use",
+    });
     mockInstallFusionSkill.mockReturnValue({
       outcome: "warning",
       sourceDir: null,
@@ -119,6 +139,21 @@ describe("hermes-runtime plugin", () => {
       runtimeId: "hermes",
       version: plugin.manifest.version,
     });
+  });
+
+  it("installs computer-use only when the caller platform gate permits it", async () => {
+    mockShouldInstallComputerUseSkill.mockReturnValue(true);
+    const ctx = createMockContext();
+    await plugin.hooks!.onLoad!(ctx as any);
+    expect(mockInstallComputerUseSkill).toHaveBeenCalledWith({ profile: undefined });
+    expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("computerUseSkill=installed"));
+
+    vi.clearAllMocks();
+    mockShouldInstallComputerUseSkill.mockReturnValue(false);
+    await plugin.hooks!.onLoad!(ctx as any);
+    expect(mockInstallFusionSkill).toHaveBeenCalledWith({ profile: undefined });
+    expect(mockInstallComputerUseSkill).not.toHaveBeenCalled();
+    expect(ctx.logger.info).toHaveBeenCalledWith(expect.not.stringContaining("computerUseSkill="));
   });
 
   it("factory returns a HermesRuntimeAdapter", async () => {

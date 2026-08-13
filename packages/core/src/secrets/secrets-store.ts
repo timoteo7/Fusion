@@ -147,7 +147,7 @@ export class SecretsStore {
   }
 
   async listSecrets(scope?: SecretScope): Promise<SecretRecord[]> {
-        return asyncSecretsStore.listSecrets(this.asyncLayer!.db, scope);
+        return asyncSecretsStore.listSecrets(this.asyncLayer!.db, scope, this.asyncLayer!.projectId);
 }
 
   async listEnvExportable(opts?: { keyPrefix?: string }): Promise<EnvExportableSecret[]> {
@@ -195,7 +195,7 @@ export class SecretsStore {
   }
 
   async getSecretMetadata(id: string, scope: SecretScope): Promise<SecretRecord | null> {
-        return asyncSecretsStore.getSecretMetadata(this.asyncLayer!.db, id, scope);
+        return asyncSecretsStore.getSecretMetadata(this.asyncLayer!.db, id, scope, this.asyncLayer!.projectId);
 }
 
   async createSecret(input: {
@@ -215,7 +215,7 @@ export class SecretsStore {
       throw new SecretsStoreError({ code: "invalid-policy", message: "Invalid access policy" });
     }
 
-        const created = await asyncSecretsStore.createSecret(this.asyncLayer!.db, this.cipher, input);
+        const created = await asyncSecretsStore.createSecret(this.asyncLayer!.db, this.cipher, input, this.asyncLayer!.projectId);
     this.emitAudit({ mutationType: "secret:create", scope: input.scope, secretId: created.id, key: created.key });
     return created;
 }
@@ -228,7 +228,7 @@ export class SecretsStore {
     envExportable?: boolean;
     envExportKey?: string | null;
   }): Promise<SecretRecord> {
-        const updated = await asyncSecretsStore.updateSecret(this.asyncLayer!.db, this.cipher, id, scope, patch);
+        const updated = await asyncSecretsStore.updateSecret(this.asyncLayer!.db, this.cipher, id, scope, patch, this.asyncLayer!.projectId);
     this.emitAudit({ mutationType: "secret:update", scope, secretId: updated.id, key: updated.key });
     return updated;
 }
@@ -238,7 +238,7 @@ export class SecretsStore {
     if (!existing) {
       throw new SecretsStoreError({ code: "not-found", message: "Secret not found" });
     }
-    await asyncSecretsStore.deleteSecret(this.asyncLayer!.db, id, scope);
+    await asyncSecretsStore.deleteSecret(this.asyncLayer!.db, id, scope, this.asyncLayer!.projectId);
     this.emitAudit({ mutationType: "secret:delete", scope, secretId: id, key: existing.key });
     return;
 }
@@ -248,7 +248,7 @@ export class SecretsStore {
     scope: SecretScope,
     reader: { agentId?: string | null; userId?: string | null },
   ): Promise<{ key: string; plaintextValue: string }> {
-        const revealed = await asyncSecretsStore.revealSecret(this.asyncLayer!.db, this.cipher, id, scope, reader);
+        const revealed = await asyncSecretsStore.revealSecret(this.asyncLayer!.db, this.cipher, id, scope, reader, this.asyncLayer!.projectId);
     this.emitAudit({ mutationType: "secret:read", scope, secretId: id, key: revealed.key, actor: reader });
     return revealed;
 }

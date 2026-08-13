@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 import { PluginLoader } from "../plugins/plugin-loader.js";
@@ -388,6 +388,29 @@ describe("PluginLoader Hot-Reload", () => {
       // Verify new version is active
       expect(pluginLoader.isPluginLoaded("hot-reload-test")).toBe(true);
       expect(pluginLoader.getPluginTools()[0].name).toBe("reloaded_tool");
+    });
+
+    it("removes the cache-busting copy after a successful reload", async () => {
+      const entryPath = await writePluginModule(tmpDir, "index.js", baseManifest);
+      (mockPluginStore as any)._installation.path = entryPath;
+      await pluginLoader.loadPlugin("hot-reload-test");
+
+      await writePluginModule(tmpDir, "index.js", makeManifest({ version: "2.0.0" }));
+      await pluginLoader.reloadPlugin("hot-reload-test");
+
+      expect(pluginLoader.getPlugin("hot-reload-test")?.manifest.version).toBe("2.0.0");
+      expect(readdirSync(tmpDir).filter((entry) => /^\.index\.reload-/.test(entry))).toEqual([]);
+    });
+
+    it("removes the cache-busting copy when the reload import fails", async () => {
+      const entryPath = await writePluginModule(tmpDir, "index.js", baseManifest);
+      (mockPluginStore as any)._installation.path = entryPath;
+      await pluginLoader.loadPlugin("hot-reload-test");
+
+      await writeFile(entryPath, 'throw new Error("reload import failure");');
+
+      await expect(pluginLoader.reloadPlugin("hot-reload-test")).rejects.toThrow("reload import failure");
+      expect(readdirSync(tmpDir).filter((entry) => /^\.index\.reload-/.test(entry))).toEqual([]);
     });
 
     it("should emit plugin:reloaded event on successful reload", async () => {

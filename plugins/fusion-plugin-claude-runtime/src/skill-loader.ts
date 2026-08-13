@@ -23,6 +23,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -33,6 +34,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const FUSION_SKILL_NAME = "fusion";
+export const COMPUTER_USE_SKILL_NAME = "computer-use";
 
 export interface ClaudeSkillStagingResult {
   pluginDir: string;
@@ -50,81 +52,100 @@ function pushUnique(out: string[], candidate: string | null | undefined): void {
   if (!out.includes(resolved)) out.push(resolved);
 }
 
-function pushSkillLayoutsAtRoot(out: string[], root: string): void {
-  pushUnique(out, join(root, "skill", FUSION_SKILL_NAME));
-  pushUnique(out, join(root, "packages", "cli", "skill", FUSION_SKILL_NAME));
+function pushSkillLayoutsAtRoot(out: string[], root: string, skillName: string): void {
+  pushUnique(out, join(root, "skill", skillName));
+  pushUnique(out, join(root, "packages", "cli", "skill", skillName));
 }
 
-function walkAncestorSkillCandidates(out: string[], startDir: string, maxParents = 8): void {
+function walkAncestorSkillCandidates(out: string[], startDir: string, skillName: string, maxParents = 8): void {
   let dir = startDir;
   for (let i = 0; i < maxParents; i++) {
-    pushSkillLayoutsAtRoot(out, dir);
+    pushSkillLayoutsAtRoot(out, dir, skillName);
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
 }
 
-function pushPackageRequireCandidates(out: string[], from: string): void {
+function pushPackageRequireCandidates(out: string[], from: string, skillName: string): void {
   try {
     const require = createRequire(from);
     const pkgJson = require.resolve("@runfusion/fusion/package.json");
-    pushUnique(out, join(dirname(pkgJson), "skill", FUSION_SKILL_NAME));
+    pushUnique(out, join(dirname(pkgJson), "skill", skillName));
   } catch {
     // Package not resolvable from this origin (plugin-only tree, tests, etc.).
   }
 }
 
-/**
- * Ordered candidate directories for the bundled Fusion skill (`skill/fusion` with SKILL.md).
- * First existing skill dir wins in resolveBundledFusionSkillSource.
- */
-export function getFusionSkillSourceCandidates(moduleUrl = import.meta.url): string[] {
+/** Ordered candidate directories for a bundled skill. First existing directory wins. */
+function getSkillSourceCandidates(skillName: string, moduleUrl = import.meta.url): string[] {
   const candidates: string[] = [];
-  const envSource = process.env.FUSION_SKILL_SOURCE?.trim();
-  if (envSource) {
-    pushUnique(candidates, envSource);
-  }
-
   const here = fileURLToPath(moduleUrl);
   const moduleDir = dirname(here);
 
-  // Monorepo source checkout relative to plugins/fusion-plugin-claude-runtime/src
-  pushUnique(candidates, resolve(moduleDir, "..", "..", "..", "packages", "cli", "skill", FUSION_SKILL_NAME));
-  // Relative siblings used in various dist layouts
-  pushUnique(candidates, resolve(moduleDir, "..", "..", "skill", FUSION_SKILL_NAME));
-  pushUnique(candidates, resolve(moduleDir, "..", "skill", FUSION_SKILL_NAME));
-  pushUnique(candidates, resolve(moduleDir, "..", "..", "..", "skill", FUSION_SKILL_NAME));
-  /*
-  FNXC:ClaudeAcp 2026-07-12-06:15:
-  Published package layout: dist/plugins/fusion-plugin-claude-runtime/* → ../../../skill/fusion
-  at the @runfusion/fusion package root (files includes skill/**).
-  */
-  pushUnique(candidates, resolve(moduleDir, "..", "..", "..", "skill", FUSION_SKILL_NAME));
-  pushUnique(candidates, resolve(moduleDir, "../../../skill", FUSION_SKILL_NAME));
+  pushUnique(candidates, resolve(moduleDir, "..", "..", "..", "packages", "cli", "skill", skillName));
+  pushUnique(candidates, resolve(moduleDir, "..", "..", "skill", skillName));
+  pushUnique(candidates, resolve(moduleDir, "..", "skill", skillName));
+  pushUnique(candidates, resolve(moduleDir, "..", "..", "..", "skill", skillName));
+  pushUnique(candidates, resolve(moduleDir, "../../../skill", skillName));
 
-  walkAncestorSkillCandidates(candidates, moduleDir, 8);
-  pushPackageRequireCandidates(candidates, moduleUrl);
+  walkAncestorSkillCandidates(candidates, moduleDir, skillName, 8);
+  pushPackageRequireCandidates(candidates, moduleUrl, skillName);
 
   const argv1 = typeof process.argv[1] === "string" ? process.argv[1].trim() : "";
   if (argv1) {
     try {
       const argvPath = resolve(argv1);
-      pushPackageRequireCandidates(candidates, argvPath);
-      walkAncestorSkillCandidates(candidates, dirname(argvPath), 8);
+      pushPackageRequireCandidates(candidates, argvPath, skillName);
+      walkAncestorSkillCandidates(candidates, dirname(argvPath), skillName, 8);
     } catch {
       // ignore bad argv paths
     }
   }
-
   return candidates;
 }
 
-export function resolveBundledFusionSkillSource(moduleUrl = import.meta.url): string | null {
-  for (const candidate of getFusionSkillSourceCandidates(moduleUrl)) {
-    if (isSkillDir(candidate)) return candidate;
-  }
+/** Candidate ordering and FUSION_SKILL_SOURCE precedence remain fusion-only. */
+export function getFusionSkillSourceCandidates(moduleUrl = import.meta.url): string[] {
+  const candidates: string[] = [];
+  const envSource = process.env.FUSION_SKILL_SOURCE?.trim();
+  if (envSource) pushUnique(candidates, envSource);
+  for (const candidate of getSkillSourceCandidates(FUSION_SKILL_NAME, moduleUrl)) pushUnique(candidates, candidate);
+  return candidates;
+}
+
+export function getComputerUseSkillSourceCandidates(moduleUrl = import.meta.url): string[] {
+  return getSkillSourceCandidates(COMPUTER_USE_SKILL_NAME, moduleUrl);
+}
+
+function resolveSkillSource(candidates: string[]): string | null {
+  for (const candidate of candidates) if (isSkillDir(candidate)) return candidate;
   return null;
+}
+
+export function resolveBundledFusionSkillSource(moduleUrl = import.meta.url): string | null {
+  return resolveSkillSource(getFusionSkillSourceCandidates(moduleUrl));
+}
+
+export function shouldStageComputerUseSkill(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "darwin";
+}
+
+export function resolveBundledComputerUseSkillSource(
+  moduleUrl = import.meta.url,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  if (!shouldStageComputerUseSkill(platform)) return null;
+  return resolveSkillSource(getComputerUseSkillSourceCandidates(moduleUrl));
+}
+
+function resolvedRealPath(path: string | null): string | null {
+  if (!path) return null;
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
 }
 
 function installSkillDir(sourceDir: string, targetDir: string): boolean {
@@ -174,6 +195,12 @@ export interface StageClaudeSkillsOptions {
   additionalSkillPaths?: string[];
   /** Always include the bundled Fusion skill (default true). */
   includeFusionSkill?: boolean;
+  /** Platform injection keeps both platform branches testable on every host. */
+  platform?: NodeJS.Platform;
+  /** Suppression-only: it can disable computer-use, never override its Darwin gate. */
+  includeComputerUseSkill?: boolean;
+  /** Module URL override for packaged-layout resolution tests. */
+  moduleUrl?: string;
 }
 
 /**
@@ -185,31 +212,52 @@ export function stageClaudeSessionSkills(options: StageClaudeSkillsOptions = {})
   mkdirSync(skillsDir, { recursive: true });
 
   const installed = new Map<string, string>();
+  const platform = options.platform ?? process.platform;
   const includeFusion = options.includeFusionSkill !== false;
+  const moduleUrl = options.moduleUrl ?? import.meta.url;
+  // FNXC:ClaudeAcp 2026-08-11-09:23: FN-8984 requires computer-use only on Darwin.
+  // Gate both source resolution and installation so no requested/additional option can force
+  // the FN-8961 discovery stub (and never its command flags/body) onto another platform.
+  const includeComputerUse = options.includeComputerUseSkill !== false && shouldStageComputerUseSkill(platform);
+  const bundledComputerUseSource = resolveBundledComputerUseSkillSource(moduleUrl, "darwin");
+  const bundledComputerUseRealPath = resolvedRealPath(bundledComputerUseSource);
+  const installedBundledNames = new Set<string>();
 
   if (includeFusion) {
-    const fusionSource = resolveBundledFusionSkillSource();
+    const fusionSource = resolveBundledFusionSkillSource(moduleUrl);
     if (fusionSource && installSkillDir(fusionSource, join(skillsDir, FUSION_SKILL_NAME))) {
       installed.set(FUSION_SKILL_NAME, fusionSource);
+      installedBundledNames.add(FUSION_SKILL_NAME);
+    }
+  }
+  if (includeComputerUse) {
+    const computerUseSource = resolveBundledComputerUseSkillSource(moduleUrl, platform);
+    if (computerUseSource && installSkillDir(computerUseSource, join(skillsDir, COMPUTER_USE_SKILL_NAME))) {
+      installed.set(COMPUTER_USE_SKILL_NAME, computerUseSource);
+      installedBundledNames.add(COMPUTER_USE_SKILL_NAME);
     }
   }
 
   for (const root of options.additionalSkillPaths ?? []) {
     if (typeof root !== "string" || !root.trim()) continue;
-    collectSkillsFromRoot(root.trim(), installed);
+    const collected = new Map<string, string>();
+    collectSkillsFromRoot(root.trim(), collected);
+    for (const [name, source] of collected) {
+      if (!shouldStageComputerUseSkill(platform) && bundledComputerUseRealPath && resolvedRealPath(source) === bundledComputerUseRealPath) continue;
+      installed.set(name, source);
+    }
   }
 
-  // Re-install collected skills (may overwrite with higher-priority roots).
+  // FNXC:ClaudeAcp 2026-08-11-09:41: Preserve Fusion's existing bundled precedence, but let a
+  // user-owned computer-use root override the Darwin bundle without reinstalling the same source.
   for (const [name, source] of installed) {
-    if (name === FUSION_SKILL_NAME && includeFusion) continue; // already installed
+    if (name === FUSION_SKILL_NAME && includeFusion) continue;
+    if (name === COMPUTER_USE_SKILL_NAME && installedBundledNames.has(name) && source === bundledComputerUseSource) continue;
     installSkillDir(source, join(skillsDir, name));
   }
 
-  // Second pass: additionalSkillPaths may have added fusion under a different name path.
   for (const [name, source] of installed) {
-    if (!existsSync(join(skillsDir, name))) {
-      installSkillDir(source, join(skillsDir, name));
-    }
+    if (!existsSync(join(skillsDir, name))) installSkillDir(source, join(skillsDir, name));
   }
 
   writeFileSync(
@@ -228,7 +276,10 @@ export function stageClaudeSessionSkills(options: StageClaudeSkillsOptions = {})
   const skillNames = Array.from(
     new Set([
       ...installed.keys(),
-      ...(options.requestedSkillNames ?? []).filter((n) => typeof n === "string" && n.trim().length > 0),
+      ...(options.requestedSkillNames ?? []).filter(
+        (n) => typeof n === "string" && n.trim().length > 0 &&
+          (n !== COMPUTER_USE_SKILL_NAME || shouldStageComputerUseSkill(platform) || installed.has(n)),
+      ),
     ]),
   );
 

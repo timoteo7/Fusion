@@ -25,7 +25,7 @@
  */
 import { and, asc, count, desc, eq, gt, gte, isNotNull, lte, or, sql } from "drizzle-orm";
 import * as schema from "../../postgres/schema/index.js";
-import type { AsyncDataLayer, DbTransaction } from "../../postgres/data-layer.js";
+import { projectScopeFor, type AsyncDataLayer, type DbTransaction } from "../../postgres/data-layer.js";
 import {
   recordRunAuditEventWithinTransaction,
   recordRunAuditEvent,
@@ -89,8 +89,17 @@ function safeJsonParse(value: string | null): Record<string, unknown> | null {
 export async function queryRunAuditEvents(
   db: AsyncDataLayer["db"] | DbTransaction,
   filter: RunAuditEventFilter = {},
+  projectId?: string,
 ): Promise<RunAuditEvent[]> {
-  const conditions = [];
+  /*
+  FNXC:ProjectSchemaOwnership 2026-08-12-14:14:
+  Run-audit events share the flat project schema, so bound runtime readers must
+  classify rows by their owning project before applying audit filters. An absent
+  binding deliberately remains an analytics-wide read for compatibility layers.
+  */
+  const conditions = [projectScopeFor(schema.project.runAuditEvents.projectId, projectId)].filter(
+    (condition): condition is NonNullable<typeof condition> => condition !== undefined,
+  );
   if (filter.runId) {
     conditions.push(eq(schema.project.runAuditEvents.runId, filter.runId));
   }
@@ -136,8 +145,11 @@ export async function queryRunAuditEvents(
 export async function countRunAuditEvents(
   db: AsyncDataLayer["db"] | DbTransaction,
   filter: RunAuditEventFilter = {},
+  projectId?: string,
 ): Promise<number> {
-  const conditions = [];
+  const conditions = [projectScopeFor(schema.project.runAuditEvents.projectId, projectId)].filter(
+    (condition): condition is NonNullable<typeof condition> => condition !== undefined,
+  );
   if (filter.runId) {
     conditions.push(eq(schema.project.runAuditEvents.runId, filter.runId));
   }

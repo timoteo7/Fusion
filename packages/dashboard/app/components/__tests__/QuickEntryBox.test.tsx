@@ -2863,7 +2863,7 @@ describe("QuickEntryBox", () => {
       expect(screen.getByTestId("model-nested-menu")).toBeTruthy();
     });
 
-    it("shows Plan, Executor, and Reviewer options in model menu", () => {
+    it("uses bare role labels and uniform icon spacing for every model-menu row", () => {
       renderQuickEntryBox({});
       expandQuickEntry();
       const textarea = screen.getByTestId("quick-entry-input");
@@ -2871,9 +2871,42 @@ describe("QuickEntryBox", () => {
       fireEvent.change(textarea, { target: { value: "Task with models" } });
       openModelMenu();
 
-      expect(screen.getByTestId("model-menu-plan")).toBeTruthy();
-      expect(screen.getByTestId("model-menu-executor")).toBeTruthy();
-      expect(screen.getByTestId("model-menu-validator")).toBeTruthy();
+      for (const [testId, role] of [
+        ["model-menu-plan", "Plan"],
+        ["model-menu-executor", "Executor"],
+        ["model-menu-validator", "Reviewer"],
+        ["model-menu-merger", "Merger"],
+      ]) {
+        const row = screen.getByTestId(testId);
+        const label = row.querySelector(".model-menu-item-label");
+        const icon = label?.querySelector("svg") as SVGSVGElement | null;
+
+        expect(label?.textContent).toBe(role);
+        expect(icon).not.toBeNull();
+        expect(icon?.style.verticalAlign).toBe("middle");
+        expect(icon?.style.marginRight).toBe("6px");
+      }
+
+      expect(screen.getByTestId("model-menu-merger").textContent).not.toContain("Model");
+    });
+
+    it("keeps the Merger label after an override and opens its Model submenu", () => {
+      renderQuickEntryBox({});
+      expandQuickEntry();
+      const textarea = screen.getByTestId("quick-entry-input");
+
+      fireEvent.change(textarea, { target: { value: "Task with models" } });
+      openModelMenu();
+      fireEvent.click(screen.getByTestId("model-menu-merger"));
+      fireEvent.click(screen.getByTestId("dropdown-select-merger model"));
+      fireEvent.click(screen.getByTestId("model-submenu-back"));
+
+      const mergerRow = screen.getByTestId("model-menu-merger");
+      expect(mergerRow.querySelector(".model-menu-item-label")?.textContent).toBe("Merger");
+      expect(mergerRow.classList.contains("model-menu-item--active")).toBe(true);
+
+      fireEvent.click(mergerRow);
+      expect(screen.getByText("Merger Model")).toBeTruthy();
     });
 
     it("does not render a separate Thinking option in the model menu", () => {

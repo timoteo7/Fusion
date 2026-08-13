@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import "./executor-test-helpers.js";
 import { TaskExecutor } from "../executor.js";
+import { graphActiveContextKey } from "../executor/task-predicates.js";
 import { createMockStore, resetExecutorMocks } from "./executor-test-helpers.js";
 import type { Task } from "@fusion/core";
 
@@ -27,11 +28,14 @@ describe("runGraphTaskStep (FIX 3)", () => {
       steps: stepStatus ? [{ name: "S1", status: stepStatus }] : [{ name: "S1", status: "pending" }],
     });
     const executor: any = new TaskExecutor(store, "/tmp/test", {});
-    // Stamp the active foreach context the seam would normally stamp, keyed by
-    // the composite per-instance key (T7).
+    /*
+    FNXC:WorkflowGraph 2026-08-12-01:13:
+    The composite foreach key moved from TaskExecutor to a module helper; tests must use the imported helper
+    while graphStepActiveContext remains a protected instance field.
+    */
     if (active) {
       executor.graphStepActiveContext.set(
-        executor.graphActiveContextKey("FN-001", "inst-0"),
+        graphActiveContextKey("FN-001", "inst-0"),
         { stepIndex: 0, instanceId: "inst-0", ...active },
       );
     }
@@ -160,11 +164,11 @@ describe("runGraphTaskStep (FIX 3)", () => {
     // Instance A defers done to review (non-terminal → success); instance B does not
     // (non-terminal → failure). A per-task key would let one overwrite the other.
     executor.graphStepActiveContext.set(
-      executor.graphActiveContextKey("FN-001", "inst-A"),
+      graphActiveContextKey("FN-001", "inst-A"),
       { stepIndex: 0, instanceId: "inst-A", deferDoneToReview: true },
     );
     executor.graphStepActiveContext.set(
-      executor.graphActiveContextKey("FN-001", "inst-B"),
+      graphActiveContextKey("FN-001", "inst-B"),
       { stepIndex: 0, instanceId: "inst-B", deferDoneToReview: false },
     );
     executor.runImplementationPhase = vi.fn().mockResolvedValue({ taskDone: false, modifiedFiles: [] });

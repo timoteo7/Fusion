@@ -22,6 +22,7 @@ import {
   buildArtifactBootstrapStep,
   buildStaticCheckStep,
   buildVerifyPlan,
+  batchVerifySteps,
   runStep,
   runVerifyPlan,
   PRETEST_STATIC_CHECK_SCRIPTS,
@@ -53,6 +54,7 @@ const PRETEST_CHECKS = [
     "4040.mjs",
   ].join(""),
   "scripts/check-no-getdatabase.mjs",
+  "scripts/check-prerebase-inert.mjs",
   /* FNXC:TestInfrastructure 2026-07-31-19:15: added when the assertion below went red on `main`.
      Both validators are real scripts, both run in `package.json`'s pretest chain, and
      `PRETEST_STATIC_CHECK_SCRIPTS` already picked them up — verify:fast was RIGHT and this mirror was
@@ -63,6 +65,7 @@ const PRETEST_CHECKS = [
   "scripts/check-no-test-timeout-appeasement.mjs",
   "scripts/check-changeset-format.mjs",
   "scripts/check-routes-modular.mjs",
+  "scripts/check-runtime-skill-loader-drift.mjs",
 ];
 const STATIC_STEP_IDS = PRETEST_CHECKS.map((script) => `static-check:${script.slice("scripts/".length, -".mjs".length)}`);
 
@@ -280,4 +283,121 @@ test("buildVerifyPlan: scopes to exactly the packages resolveAffectedPackages se
   const packageMeta = new Map([["@fusion/engine", { hasTypecheck: true, hasBuild: true }]]);
   const plan = buildVerifyPlan({ packages: affected, packageMeta, staticCheckScripts: [], bootSmokeScriptPath: SMOKE, nodeBin: NODE });
   assert.deepEqual(stepIds(plan), ["bootstrap-artifacts", "typecheck:@fusion/engine", "build:@fusion/engine", "build:@runfusion/fusion", "boot-smoke"]);
+});
+
+// ---------------------------------------------------------------------------
+// Parallel step batching
+//
+// The wall-clock win only exists if independent steps actually overlap, and it is
+// only SAFE if the ordering that matters still holds. Both halves are pinned here:
+// a timing-free overlap probe (concurrent peak > 1) plus barrier assertions, so a
+// future refactor cannot quietly serialize the groups or hoist a dependent step.
+// ---------------------------------------------------------------------------
+
+test("batchVerifySteps groups consecutive parallel steps and isolates serial ones", () => {
+  const plan = buildVerifyPlan({
+    packages: ["@fusion/engine", "@fusion/dashboard"],
+    packageMeta: new Map([
+      ["@fusion/engine", { hasTypecheck: true, hasBuild: true }],
+      ["@fusion/dashboard", { hasTypecheck: true, hasBuild: true }],
+      ["@runfusion/fusion", { hasTypecheck: true, hasBuild: true }],
+    ]),
+    staticCheckScripts: ["scripts/check-a.mjs", "scripts/check-b.mjs"],
+    staticCheckRoot: REPO_ROOT,
+    bootSmokeScriptPath: SMOKE,
+    artifactBootstrapScriptPath: BOOTSTRAP,
+  });
+
+  const batches = batchVerifySteps(plan.steps);
+  assert.deepEqual(
+    batches.map((b) => [b.group, b.steps.map((s) => s.id)]),
+    [
+      ["static-checks", ["static-check:check-a", "static-check:check-b"]],
+      [null, ["bootstrap-artifacts"]],
+      ["typecheck", ["typecheck:@fusion/engine", "typecheck:@fusion/dashboard"]],
+      [null, ["build:@fusion/engine"]],
+      [null, ["build:@fusion/dashboard"]],
+      [null, ["build:@runfusion/fusion"]],
+      [null, ["boot-smoke"]],
+    ],
+  );
+});
+
+test("batchVerifySteps honours the serial escape hatch", () => {
+  const steps = [
+    buildStaticCheckStep("scripts/check-a.mjs", REPO_ROOT),
+    buildStaticCheckStep("scripts/check-b.mjs", REPO_ROOT),
+  ];
+  assert.equal(batchVerifySteps(steps, false).length, 1);
+  assert.equal(batchVerifySteps(steps, true).length, 2);
+});
+
+test("runVerifyPlan overlaps a group but keeps serial steps as barriers", async () => {
+  const plan = buildVerifyPlan({
+    packages: ["@fusion/engine", "@fusion/dashboard"],
+    packageMeta: new Map([
+      ["@fusion/engine", { hasTypecheck: true, hasBuild: true }],
+      ["@fusion/dashboard", { hasTypecheck: true, hasBuild: true }],
+      ["@runfusion/fusion", { hasTypecheck: true, hasBuild: true }],
+    ]),
+    staticCheckScripts: ["scripts/check-a.mjs", "scripts/check-b.mjs", "scripts/check-c.mjs"],
+    staticCheckRoot: REPO_ROOT,
+    bootSmokeScriptPath: SMOKE,
+    artifactBootstrapScriptPath: BOOTSTRAP,
+  });
+
+  let inFlight = 0;
+  const peakByGroup = new Map();
+  const finished = [];
+  const run = async (step) => {
+    const group = step.parallelGroup ?? `serial:${step.id}`;
+    inFlight += 1;
+    peakByGroup.set(group, Math.max(peakByGroup.get(group) ?? 0, inFlight));
+    await Promise.resolve();
+    inFlight -= 1;
+    finished.push(step.id);
+  };
+
+  await runVerifyPlan(plan.steps, { run, serial: false });
+
+  // Both groups genuinely overlapped...
+  assert.ok(peakByGroup.get("static-checks") > 1, "static checks should overlap");
+  assert.ok(peakByGroup.get("typecheck") > 1, "typechecks should overlap");
+  // ...while every serial step ran alone.
+  for (const [group, peak] of peakByGroup) {
+    if (group.startsWith("serial:")) assert.equal(peak, 1, `${group} must not overlap`);
+  }
+
+  // Barriers: bootstrap precedes every typecheck, and boot smoke follows every build.
+  const at = (id) => finished.indexOf(id);
+  assert.ok(at("bootstrap-artifacts") < at("typecheck:@fusion/engine"));
+  assert.ok(at("bootstrap-artifacts") < at("typecheck:@fusion/dashboard"));
+  assert.ok(at("typecheck:@fusion/dashboard") < at("build:@fusion/engine"));
+  assert.equal(finished[finished.length - 1], "boot-smoke");
+});
+
+test("runVerifyPlan reports the first failure in plan order and skips later batches", async () => {
+  const steps = [
+    buildStaticCheckStep("scripts/check-a.mjs", REPO_ROOT),
+    buildStaticCheckStep("scripts/check-b.mjs", REPO_ROOT),
+    buildStaticCheckStep("scripts/check-c.mjs", REPO_ROOT),
+    buildBootSmokeStep(SMOKE),
+  ];
+  const started = [];
+  const settled = [];
+  const run = async (step) => {
+    started.push(step.id);
+    await Promise.resolve();
+    settled.push(step.id);
+    // b and c both fail; a passes. The reported error must be b's (plan order),
+    // not whichever settled first.
+    if (step.id === "static-check:check-b") throw new Error("check-b exploded");
+    if (step.id === "static-check:check-c") throw new Error("check-c exploded");
+  };
+
+  await assert.rejects(() => runVerifyPlan(steps, { run, serial: false }), /check-b exploded/);
+  // Siblings already in flight are awaited rather than abandoned...
+  assert.deepEqual(settled.sort(), ["static-check:check-a", "static-check:check-b", "static-check:check-c"]);
+  // ...and the next batch never starts.
+  assert.ok(!started.includes("boot-smoke"));
 });

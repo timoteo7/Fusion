@@ -49,6 +49,13 @@ vi.mock("../../hooks/useMobileKeyboard", () => ({
   useMobileKeyboard: vi.fn(),
 }));
 
+/*
+FNXC:StructuralMail 2026-08-09-10:50:
+Report-mode prefill opens the existing drafting panel by default. Keep mailbox integration tests focused
+on the real host-to-composer handoff rather than the panel's separately tested chat session.
+*/
+vi.mock("../ComposeChatPanel", () => ({ ComposeChatPanel: () => null }));
+
 const sseSubscriptions: Array<Record<string, () => void>> = [];
 vi.mock("../../sse-bus", () => ({
   subscribeSse: vi.fn((_url: string, options: { events: Record<string, () => void> }) => {
@@ -65,6 +72,7 @@ vi.mock("lucide-react", () => ({
   Inbox: () => <span data-testid="icon-inbox">Inbox</span>,
   Bot: () => <span data-testid="icon-bot">Bot</span>,
   Trash2: () => <span data-testid="icon-trash">Trash</span>,
+  Archive: () => <span data-testid="icon-archive">Archive</span>,
   Check: () => <span data-testid="icon-check">Check</span>,
   CheckCheck: () => <span data-testid="icon-checkcheck">CheckCheck</span>,
   Loader2: ({ className }: { className?: string }) => (
@@ -233,6 +241,27 @@ describe("MailboxView", () => {
 
     expect(screen.getByTestId("mailbox-view")).toBeDefined();
     expect(screen.getByTestId("mailbox-tabs")).toBeDefined();
+  });
+
+  it.each(["desktop", "mobile"] as const)("opens a %s report composer from a fresh chat handoff without leaking it after close", async (viewport) => {
+    const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
+    mockUseViewportMode.mockReturnValue(viewport);
+    mockFetchInbox.mockResolvedValue(makeInboxResponse([], 0));
+    mockFetchOutbox.mockResolvedValue(makeOutboxResponse([]));
+    const prefill = { body: "Assistant report body", title: "Assistant report", nonce: 10 };
+    const { rerender } = render(<MailboxView {...defaultProps} composePrefill={prefill} />);
+
+    expect(await screen.findByTestId("report-title")).toHaveValue("Assistant report");
+    expect(screen.getByTestId("message-composer-content")).toHaveValue("Assistant report body");
+    expect(screen.getByTestId("message-composer-send")).toBeDisabled();
+
+    await user.click(screen.getByTestId("message-composer-cancel"));
+    expect(screen.queryByTestId("report-title")).not.toBeInTheDocument();
+    rerender(<MailboxView {...defaultProps} composePrefill={prefill} />);
+    expect(screen.queryByTestId("report-title")).not.toBeInTheDocument();
+
+    rerender(<MailboxView {...defaultProps} composePrefill={{ ...prefill, nonce: 11 }} />);
+    expect(await screen.findByTestId("report-title")).toHaveValue("Assistant report");
   });
 
   it("shows the Mailbox title with unread count badge", async () => {
@@ -1191,7 +1220,10 @@ describe("MailboxView", () => {
 
   it.each([
     ["the in-pane Back button", async () => fireEvent.click(screen.getByTestId("mailbox-back-to-list"))],
-    ["delete", async () => fireEvent.click(screen.getByTestId("mailbox-delete"))],
+    ["delete", async () => {
+      fireEvent.click(screen.getByTestId("mailbox-delete"));
+      fireEvent.click(screen.getByTestId("mailbox-delete-confirm"));
+    }],
     ["an agent tab switch", async () => fireEvent.click(screen.getByTestId("mailbox-tab-outbox"))],
   ])("consumes the message entry before %s", async (_label, close) => {
     mockUseViewportMode.mockReturnValue("mobile");
@@ -1547,7 +1579,11 @@ describe("MailboxView", () => {
     await act(async () => {
       fireEvent.click(deleteButton);
     });
+    expect(mockDeleteMessage).not.toHaveBeenCalled();
 
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("mailbox-delete-confirm"));
+    });
     await waitFor(() => {
       expect(mockDeleteMessage).toHaveBeenCalledWith("msg-001", undefined);
     });

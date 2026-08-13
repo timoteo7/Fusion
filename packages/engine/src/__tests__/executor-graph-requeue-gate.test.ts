@@ -335,8 +335,80 @@ describe("executor graph execute self-requeue gate", () => {
       expect.anything(),
       expect.anything(),
     );
-    expect(store.updateTask).toHaveBeenCalledWith(live.id, { status: null, error: null }, ANY_MUTATION_CONTEXT);
-    expect(store.updateTask).toHaveBeenCalledWith(live.id, { workflowStepResults: [] }, ANY_MUTATION_CONTEXT);
+    /*
+    FNXC:EngineTests 2026-08-12-01:20:
+    FN-8910 turned these two writes into a NEGATIVE assertion (the card must stay parked). Main
+    spelled the negative as a three-argument call whose run context is `undefined`; U18 Stage C makes
+    the executor always pass a real context, so that spelling would pass vacuously. Scan the recorded
+    calls by patch shape instead, which is arity-independent and therefore cannot be satisfied by the
+    added context argument.
+    */
+    const resumeResetWrites = store.updateTask.mock.calls.filter(
+      ([id, patch]: [string, Record<string, unknown> | undefined, unknown?]) => id === live.id && patch?.status === null && patch?.error === null,
+    );
+    expect(resumeResetWrites).toEqual([]);
+    const stepResultClears = store.updateTask.mock.calls.filter(
+      ([id, patch]: [string, Record<string, unknown> | undefined, unknown?]) => id === live.id
+        && Array.isArray(patch?.workflowStepResults) && (patch?.workflowStepResults as unknown[]).length === 0,
+    );
+    expect(stepResultClears).toEqual([]);
+  });
+
+  it.each(["remediation-not-scheduled", "missing-remediation-context"])("FN-8910 keeps a completed review card in place when remediation reports %s", async (failureValue) => {
+    resetExecutorMocks();
+    const store = createMockStore();
+    const live = task({
+      id: `FN-8910-${failureValue}`,
+      column: "in-review",
+      steps: [{ name: "Implement", status: "done" }],
+    });
+    store.getTask.mockResolvedValue(live);
+    const executor = new TaskExecutor(store, "/tmp/test");
+
+    await expect((executor as any).routeGraphFailureToExecutionResume(
+      live,
+      "code-review-remediation",
+      failureValue,
+    )).resolves.toBe(false);
+
+    await (executor as any).handleGraphFailure(live, {
+      disposition: "failed",
+      outcome: "failure",
+      visitedNodeIds: ["code-review", "code-review-remediation"],
+      context: { "node:code-review-remediation:value": failureValue },
+    });
+
+    /*
+    FNXC:WorkflowRemediation 2026-08-09-21:53:
+    FN-8910 requires policy-refused remediation to remain visibly parked in the
+    review lane after implementation is complete, never rebound to execution.
+    */
+    expect(store.moveTask).not.toHaveBeenCalled();
+  });
+
+  it("still resumes an incomplete review card after a refused remediation", async () => {
+    resetExecutorMocks();
+    const store = createMockStore();
+    const live = task({
+      id: "FN-8910-INCOMPLETE",
+      column: "in-review",
+      steps: [{ name: "Implement", status: "pending" }],
+    });
+    store.getTask.mockResolvedValue(live);
+    const executor = new TaskExecutor(store, "/tmp/test");
+
+    await expect((executor as any).routeGraphFailureToExecutionResume(
+      live,
+      "code-review-remediation",
+      "remediation-not-scheduled",
+    )).resolves.toBe(true);
+
+    expect(store.moveTask).toHaveBeenCalledWith(
+      live.id,
+      "todo",
+      expect.objectContaining({ preserveProgress: true, recoveryRehome: true }),
+      ANY_MUTATION_CONTEXT,
+    );
   });
 
   it("still parks a remediation-node graph failure as failed when no durable failed gate result exists", async () => {

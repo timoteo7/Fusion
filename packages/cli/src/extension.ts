@@ -8,6 +8,7 @@ import {
   createTaskStoreForBackend,
   drizzleSql,
   AgentStore,
+  ReflectionStore,
   isEphemeralAgent,
   evaluateImplementationTaskBind,
   AGENT_VALID_TRANSITIONS,
@@ -24,6 +25,7 @@ import {
   type InsightStatus,
   type InsightRunStatus,
   type InsightRunTrigger,
+  type Agent,
   type AgentCapability,
   type AgentUpdateInput,
   getTaskDuplicateLineage,
@@ -86,6 +88,8 @@ import {
   createAgentTask,
   evaluateAgentActionGate,
   resolveGateOutcome,
+  resolveFeatureRepairTargets,
+  reconcileMissionState,
 } from "@fusion/engine";
 import * as dashboard from "@fusion/dashboard";
 import { resolve, relative, isAbsolute, sep, basename, extname, join } from "node:path";
@@ -681,6 +685,68 @@ async function getAgentStore(cwd: string): Promise<AgentStore> {
   return new AgentStore({ rootDir: getFusionDir(cwd), asyncLayer: requireProjectLayer(projectStore, "CLI AgentStore") });
 }
 
+type ManagerEvaluationToolErrorResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError: true;
+  details: Record<string, unknown>;
+};
+
+type ManagerEvaluationTargetResolution =
+  | { kind: "error"; response: ManagerEvaluationToolErrorResult }
+  | { kind: "allowed"; target: Agent; callerAgentId?: string };
+
+/** Resolve and authorize a manager's evaluation target under the shared org-subtree boundary. */
+async function resolveManagerEvaluationTarget(
+  agentStore: AgentStore,
+  agentId: string,
+  ctx: ExtensionCallerContext,
+): Promise<ManagerEvaluationTargetResolution> {
+  const target = await agentStore.resolveAgent(agentId);
+  if (!target) {
+    return {
+      kind: "error",
+      response: {
+        content: [{ type: "text" as const, text: `Agent '${agentId}' not found` }],
+        isError: true as const,
+        details: { outcome: "not_found", error: "Agent not found", agentId },
+      },
+    };
+  }
+  if (isEphemeralAgent(target)) {
+    return {
+      kind: "error",
+      response: {
+        content: [{ type: "text" as const, text: `ERROR: Cannot evaluate ephemeral/runtime agent ${target.id}` }],
+        isError: true as const,
+        details: { outcome: "invalid", field: "agent_id", agentId: target.id },
+      },
+    };
+  }
+
+  const callerAgentId = typeof ctx.agentId === "string" && ctx.agentId ? ctx.agentId : undefined;
+  if (callerAgentId) {
+    const chain = await agentStore.getChainOfCommand(target.id);
+    const callerIndex = chain.findIndex((agent) => agent.id === callerAgentId);
+    if (callerAgentId === target.id || callerIndex < 1) {
+      return {
+        kind: "error",
+        response: {
+          content: [{ type: "text" as const, text: "ERROR: You can only access evaluations for your own direct or indirect reports." }],
+          isError: true as const,
+          details: {
+            outcome: "denied",
+            agentId: target.id,
+            callerAgentId,
+            rule: "direct-or-indirect-reports-only",
+          },
+        },
+      };
+    }
+  }
+
+  return { kind: "allowed", target, callerAgentId };
+}
+
 function emitSecretAudit(
   store: TaskStore,
   ctx: { runId?: string; agentId?: string; taskId?: string },
@@ -944,6 +1010,7 @@ const WITHHELD_FROM_AGENT_EXTENSION_TOOLS: ReadonlySet<string> = new Set([
   "fn_task_bypass_review",
   "fn_workflow_step_resume",
   "fn_mission_delete",
+  "fn_mission_clear_blocked",
   "fn_milestone_delete",
   "fn_slice_delete",
   "fn_feature_delete",
@@ -2496,6 +2563,8 @@ export default function kbExtension(pi: ExtensionAPI) {
       const autoPauseClearPatch = buildAutoPauseClearPatch(task);
       const clearedDeadlockAutoPause = Object.keys(autoPauseClearPatch).length > 0;
       const retryLogSuffix = clearedDeadlockAutoPause ? ", cleared deadlock auto-pause" : "";
+      // FNXC:TaskWedgeNotifications 2026-08-10-20:15: an operator retry ends the prior terminal-failure episode and mints a fresh budget.
+      await store.resetTerminalFailureAutoRecoveryBudget(params.id);
 
       if (isMissingWorktreeSessionRetry) {
         await store.updateTask(params.id, {
@@ -4672,6 +4741,71 @@ export default function kbExtension(pi: ExtensionAPI) {
     },
   });
 
+  // ── fn_mission_set_status ───────────────────────────────────────
+  pi.registerTool({
+    name: "fn_mission_set_status", label: "fn: Set Mission Status", description: "Set a mission lifecycle status.", promptSnippet: "Set a mission status", promptGuidelines: ["Use lifecycle statuses only"],
+    parameters: Type.Object({ id: Type.String(), status: Type.Union(fusionCore.MISSION_STATUSES.map((status) => Type.Literal(status))), reason: Type.Optional(Type.String()) }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!fusionCore.MISSION_STATUSES.includes(params.status)) return { content: [{ type: "text", text: `Invalid status. Must be one of: ${fusionCore.MISSION_STATUSES.join(", ")}` }], isError: true, details: { error: "Invalid status" } };
+      const missionStore = (await getStore(ctx.cwd)).getMissionStore();
+      try { const mission = await missionStore.updateMission(params.id, { status: params.status }, { actor: missionTransitionActor(ctx), reason: params.reason }); return { content: [{ type: "text", text: `Set ${mission.id} status to ${mission.status}` }], details: { mission } }; }
+      catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: message }], isError: true, details: { error: message } }; }
+    },
+  });
+
+  /*
+   * FNXC:MissionBlockedRepair 2026-08-11-03:58:
+   * Clear repairs a stale blocked badge without re-arming automation. Because it overrides a
+   * durable pause, stop, or manual PATCH signal, it is operator-only and absent from
+   * createMissionTools so engine lanes and dashboard chat never receive it.
+   */
+  // ── fn_mission_clear_blocked ─────────────────────────────────────
+  pi.registerTool({
+    name: "fn_mission_clear_blocked",
+    label: "fn: Clear Mission Blocked Status",
+    description: "Clear a stale mission-level blocked badge without resuming automation.",
+    promptSnippet: "Clear a stale mission blocked badge",
+    promptGuidelines: [
+      "Repairs the badge only; it does not resume mission automation",
+      "Use Resume mission as the only path that re-arms automation",
+    ],
+    parameters: Type.Object({
+      id: Type.String({ description: "Mission ID (e.g., M-001)" }),
+      reason: Type.Optional(Type.String({ description: "Why the badge is stale (audit-logged)" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const withheldDenied = denyWithheldToolForAgentPrincipal("fn_mission_clear_blocked", ctx as ExtensionCallerContext);
+      if (withheldDenied) return withheldDenied;
+      const missionStore = (await getStore(ctx.cwd)).getMissionStore();
+      if (!("clearMissionBlockedStatus" in missionStore)) {
+        return { content: [{ type: "text", text: "Clearing mission blocked status requires the PostgreSQL mission store" }], isError: true, details: { code: "POSTGRES_REQUIRED" } };
+      }
+      const mission = await missionStore.getMission(params.id);
+      if (!mission) {
+        return { content: [{ type: "text", text: `Mission ${params.id} not found` }], isError: true, details: { code: "MISSION_NOT_FOUND" } };
+      }
+      try {
+        const { mission: clearedMission, blockers } = await missionStore.clearMissionBlockedStatus(params.id, {
+          actor: missionTransitionActor(ctx),
+          reason: params.reason,
+        });
+        const residualWarning = blockers.length > 0
+          ? `\n${blockers.length} blocker(s) remain; automation stays gated until they are resolved or the mission is resumed.`
+          : "";
+        return {
+          content: [{ type: "text", text: `Cleared blocked status for ${params.id} → ${clearedMission.status}${residualWarning}` }],
+          details: { mission: clearedMission, blockers },
+        };
+      } catch (error) {
+        if (error instanceof fusionCore.MissionBlockedClearConflictError) {
+          return { content: [{ type: "text", text: `Mission ${params.id} is not blocked (status: ${error.status})` }], isError: true, details: { code: "MISSION_NOT_BLOCKED", status: error.status } };
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: message }], isError: true, details: { error: message } };
+      }
+    },
+  });
+
   // ── fn_mission_update ───────────────────────────────────────────
 
   pi.registerTool({
@@ -5114,6 +5248,73 @@ export default function kbExtension(pi: ExtensionAPI) {
           details: { error: message },
         };
       }
+    },
+  });
+
+  // ── fn_feature_set_status ───────────────────────────────────────
+  /* FNXC:MissionStatusWrites 2026-08-10-12:47: Dedicated tools keep the linked-task execution-status guard unambiguous instead of widening generic updates. */
+  pi.registerTool({
+    name: "fn_feature_set_status", label: "fn: Set Feature Status", description: "Set a feature lifecycle status.", promptSnippet: "Set a feature status", promptGuidelines: ["Link a task before execution statuses"],
+    parameters: Type.Object({ id: Type.String(), status: Type.Union(fusionCore.FEATURE_STATUSES.map((status) => Type.Literal(status))), reason: Type.Optional(Type.String()) }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!fusionCore.FEATURE_STATUSES.includes(params.status)) return { content: [{ type: "text", text: `Invalid status. Must be one of: ${fusionCore.FEATURE_STATUSES.join(", ")}` }], isError: true, details: { error: "Invalid status" } };
+      const missionStore = (await getStore(ctx.cwd)).getMissionStore(); const feature = await missionStore.getFeature(params.id);
+      if (!feature) return { content: [{ type: "text", text: `Feature ${params.id} not found` }], isError: true, details: { error: "Feature not found" } };
+      if ((["triaged", "in-progress", "done", "blocked"] as const).includes(params.status) && !feature.taskId) return { content: [{ type: "text", text: `Cannot set status to '${params.status}' without a linked task. Use the triage endpoint to create and link a task first, or link an existing task via fn_feature_link_task.` }], isError: true, details: { error: "FEATURE_TASK_REQUIRED" } };
+      try { const updated = await missionStore.updateFeatureStatus(params.id, params.status, { actor: missionTransitionActor(ctx), reason: params.reason }); return { content: [{ type: "text", text: `Set ${updated.id} status to ${updated.status}` }], details: { feature: updated } }; }
+      catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: message }], isError: true, details: { error: message } }; }
+    },
+  });
+
+  // ── fn_mission_reconcile ─────────────────────────────────────────
+  pi.registerTool({
+    name: "fn_mission_reconcile", label: "fn: Reconcile Mission", description: "Reconcile mission state against deterministic delivery ground truth.",
+    parameters: Type.Object({ id: Type.Optional(Type.String()), dryRun: Type.Optional(Type.Boolean()) }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      try {
+        const store = await getStore(ctx.cwd);
+        const result = await reconcileMissionState({ taskStore: store, missionStore: store.getMissionStore() }, { missionId: params.id, dryRun: params.dryRun === true, source: "tool", actor: missionTransitionActor(ctx) });
+        return { content: [{ type: "text", text: `Reconciled ${params.id ?? "project"}` }], details: result };
+      } catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: message }], isError: true, details: { error: message } }; }
+    },
+  });
+
+  // ── fn_feature_repair_validation ──────────────────────────────────
+  /* FNXC:MissionValidationRepair 2026-08-10-17:20: CLI mirrors the engine tool so either agent surface performs the same fenced, single-retry repair rather than bypassing store validation. */
+  pi.registerTool({
+    name: "fn_feature_repair_validation", label: "fn: Repair Feature Validation",
+    description: "Clear a stale validation badge or re-run validation.", promptSnippet: "Repair a feature validation badge",
+    promptGuidelines: ["Use Clear for stale blocked badges", "Use re-run only when validation is not already live"],
+    parameters: Type.Object({ id: Type.String(), action: Type.Union([Type.Literal("clear"), Type.Literal("re_run")]), reason: Type.Optional(Type.String()) }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const store = await getStore(ctx.cwd); const missionStore = store.getMissionStore();
+      if (!("repairFeatureValidationState" in missionStore)) return { content: [{ type: "text", text: "Validation repair requires the PostgreSQL mission store" }], isError: true, details: { code: "POSTGRES_REQUIRED" } };
+      const feature = await missionStore.getFeature(params.id);
+      if (!feature) return { content: [{ type: "text", text: `Feature ${params.id} not found` }], isError: true, details: { code: "FEATURE_NOT_FOUND" } };
+      const eligible = fusionCore.featureValidationRepairEligibility(feature);
+      if ((params.action === "clear" && !eligible.clear) || (params.action === "re_run" && !eligible.reRun)) return { content: [{ type: "text", text: `Cannot ${params.action === "clear" ? "clear" : "re-run"} validation for ${feature.id}: current loop state is ${feature.loopState ?? "idle"} and status is ${feature.status}.` }], isError: true, details: { code: "FEATURE_REPAIR_INELIGIBLE" } };
+      try {
+        if (params.action === "re_run") {
+          const repaired = await missionStore.repairFeatureValidationState(params.id, { action: "re_run", actor: missionTransitionActor(ctx), reason: params.reason });
+          return { content: [{ type: "text", text: `Re-ran validation for ${params.id}` }], details: repaired };
+        }
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const current = await missionStore.getFeature(params.id);
+          if (!current) return { content: [{ type: "text", text: `Feature ${params.id} not found` }], isError: true, details: { code: "FEATURE_NOT_FOUND" } };
+          const targets = await resolveFeatureRepairTargets(store, current);
+          try {
+            const repaired = await missionStore.repairFeatureValidationState(params.id, { action: "clear", actor: missionTransitionActor(ctx), reason: params.reason, resolvedStatus: targets.status, resolvedLoopState: targets.resumeImplementation ? "implementing" : "idle", groundTruth: targets.groundTruth });
+            return { content: [{ type: "text", text: `Cleared validation state for ${params.id}` }], details: repaired };
+          } catch (error) {
+            if (!(error instanceof fusionCore.RepairGroundTruthStaleError) || attempt === 1) throw error;
+          }
+        }
+      } catch (error) {
+        if (error instanceof fusionCore.RepairGroundTruthStaleError) return { content: [{ type: "text", text: "Linked task state changed while repairing; re-check the feature and retry." }], isError: true, details: { code: "FEATURE_REPAIR_STALE" } };
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: message }], isError: true, details: { error: message } };
+      }
+      return { content: [{ type: "text", text: "Linked task state changed while repairing; re-check the feature and retry." }], isError: true, details: { code: "FEATURE_REPAIR_STALE" } };
     },
   });
 
@@ -5869,6 +6070,169 @@ export default function kbExtension(pi: ExtensionAPI) {
           text: `Updated ${updated.name} (${updated.id}) instructions: ${updatedFields.join(", ")}`,
         }],
         details: { outcome: "updated", agentId: updated.id, updatedFields },
+      };
+    },
+  });
+
+  // ── fn_agent_read_evaluations ──────────────────────────────────
+
+  /**
+   * FNXC:AgentEvaluations 2026-08-12-22:11:
+   * Manager agents need cross-agent evaluation visibility for direct and indirect reports,
+   * while peers, ancestors, and self remain private. This intentionally reuses
+   * getChainOfCommand so the management-subtree boundary has one auditable rule.
+   * Reads use AgentStore and ReflectionStore rather than duplicating evaluation storage.
+   */
+  pi.registerTool({
+    name: "fn_agent_read_evaluations",
+    label: "fn: Read Report Evaluations",
+    description: "Read ratings, feedback, reflections, and performance data for a direct or indirect report.",
+    promptSnippet: "Review evaluation and reflection results for an agent in your management subtree",
+    promptGuidelines: [
+      "Use to review evaluation data for a direct or indirect report in your management subtree",
+      "Agent callers cannot target themselves, peers, ancestors, or agents outside their subtree",
+      "Operator and CLI calls are privileged and may read any durable agent",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({ description: "Target agent ID or resolvable name" }),
+      rating_limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: "Maximum ratings to return (default 10)" })),
+      reflection_limit: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: "Maximum reflections to return (default 5)" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const agentStore = await getAgentStore(ctx.cwd);
+      await agentStore.init();
+      const resolved = await resolveManagerEvaluationTarget(agentStore, params.agent_id, ctx as ExtensionCallerContext);
+      if (resolved.kind === "error") return resolved.response;
+
+      const ratingLimit = params.rating_limit ?? 10;
+      const reflectionLimit = params.reflection_limit ?? 5;
+      const reflectionStore = new ReflectionStore({ rootDir: getFusionDir(ctx.cwd) });
+      await reflectionStore.init();
+      const [summary, ratings, latestReflection, reflections, performance] = await Promise.all([
+        agentStore.getRatingSummary(resolved.target.id),
+        agentStore.getRatings(resolved.target.id, { limit: ratingLimit }),
+        reflectionStore.getLatestReflection(resolved.target.id),
+        reflectionStore.getReflections(resolved.target.id, reflectionLimit),
+        reflectionStore.getPerformanceSummary(resolved.target.id),
+      ]);
+
+      const hasRatings = ratings.length > 0 || summary.totalRatings > 0;
+      const hasReflections = Boolean(latestReflection) || reflections.length > 0;
+      if (!hasRatings && !hasReflections) {
+        return {
+          content: [{ type: "text" as const, text: `${resolved.target.name} (${resolved.target.id})\n\nNo evaluation data available yet.` }],
+          details: { outcome: "empty", agentId: resolved.target.id, agentName: resolved.target.name, summary, ratings, reflections, latestReflection, performance },
+        };
+      }
+
+      const formatScore = (score: number | null | undefined) =>
+        typeof score === "number" && Number.isFinite(score) ? score.toFixed(2) : "n/a";
+      const lines: string[] = [
+        `Evaluation Summary: ${resolved.target.name} (${resolved.target.id})`,
+        `- Average score: ${formatScore(summary.averageScore)}`,
+        `- Trend: ${summary.trend}`,
+        `- Total ratings: ${summary.totalRatings}`,
+      ];
+      const categoryEntries = Object.entries(summary.categoryAverages ?? {});
+      if (categoryEntries.length > 0) {
+        lines.push("", "Category averages:");
+        categoryEntries.forEach(([category, score]) => lines.push(`- ${category}: ${formatScore(score)}`));
+      }
+      const commentedRatings = ratings.filter((rating) => rating.comment?.trim());
+      if (commentedRatings.length > 0) {
+        lines.push("", "Recent rating comments:");
+        commentedRatings.slice(0, 5).forEach((rating) => lines.push(`- [${rating.score}/5] ${rating.comment!.trim()}`));
+      }
+      if (latestReflection) {
+        lines.push("", "Latest reflection:", `- Summary: ${latestReflection.summary}`);
+        if (latestReflection.insights.length > 0) {
+          lines.push("- Insights:");
+          latestReflection.insights.forEach((insight) => lines.push(`  - ${insight}`));
+        }
+        if (latestReflection.suggestedImprovements.length > 0) {
+          lines.push("- Suggested improvements:");
+          latestReflection.suggestedImprovements.forEach((item) => lines.push(`  - ${item}`));
+        }
+      }
+      if (reflections.length > 0) {
+        lines.push("", "Recent reflection history:");
+        reflections.slice(0, 5).forEach((reflection) => lines.push(`- ${reflection.timestamp}: ${reflection.summary}`));
+      }
+
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+        details: { outcome: "read", agentId: resolved.target.id, agentName: resolved.target.name, summary, ratings, reflections, latestReflection, performance },
+      };
+    },
+  });
+
+  // ── fn_agent_evaluation_followup ───────────────────────────────
+
+  /*
+   * FNXC:AgentEvaluations 2026-08-12-22:11:
+   * Follow-ups reuse AgentStore.addRating, the same evaluation row read by the report's
+   * self-improvement loop and dashboard rating routes, instead of creating a parallel
+   * feedback channel. Task-level routing remains with fn_delegate_task and fn_task_create.
+   */
+  pi.registerTool({
+    name: "fn_agent_evaluation_followup",
+    label: "fn: Record Evaluation Follow-up",
+    description: "Record a coaching evaluation follow-up for a direct or indirect report to read through its self-improvement loop.",
+    promptSnippet: "Record coaching feedback for an agent in your management subtree",
+    promptGuidelines: [
+      "Use to record actionable coaching feedback for a direct or indirect report",
+      "Agent callers cannot target themselves, peers, ancestors, or agents outside their subtree",
+      "Create or delegate separate implementation work with fn_task_create or fn_delegate_task",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({ description: "Target agent ID or resolvable name" }),
+      score: Type.Number({ minimum: 1, maximum: 5, description: "Evaluation score from 1 to 5" }),
+      comment: Type.String({ minLength: 1, maxLength: 4000, description: "Coaching or follow-up note" }),
+      category: Type.Optional(Type.String({ maxLength: 100, description: "Optional evaluation category" })),
+      task_id: Type.Optional(Type.String({ description: "Optional related task ID" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      // FNXC:ToolPermissionGates 2026-08-12-22:11: This mutation intentionally falls through the exempt fallback as task_agent_mutation; do not classify it as a read-only coordination tool.
+      const gated = await applyAgentPolicyGateForExtensionTool(
+        "fn_agent_evaluation_followup",
+        params as Record<string, unknown>,
+        ctx as ExtensionCallerContext,
+      );
+      if (gated) return gated;
+
+      const agentStore = await getAgentStore(ctx.cwd);
+      await agentStore.init();
+      const resolved = await resolveManagerEvaluationTarget(agentStore, params.agent_id, ctx as ExtensionCallerContext);
+      if (resolved.kind === "error") return resolved.response;
+
+      if (!Number.isFinite(params.score) || params.score < 1 || params.score > 5) {
+        return {
+          content: [{ type: "text" as const, text: "ERROR: score must be a finite value from 1 to 5" }],
+          isError: true,
+          details: { outcome: "invalid", field: "score" },
+        };
+      }
+      const comment = params.comment.trim();
+      if (!comment) {
+        return {
+          content: [{ type: "text" as const, text: "ERROR: comment must not be empty" }],
+          isError: true,
+          details: { outcome: "invalid", field: "comment" },
+        };
+      }
+
+      const raterType = resolved.callerAgentId ? "agent" as const : "user" as const;
+      const rating = await agentStore.addRating(resolved.target.id, {
+        raterType,
+        ...(resolved.callerAgentId ? { raterId: resolved.callerAgentId } : {}),
+        score: params.score,
+        ...(params.category !== undefined ? { category: params.category } : {}),
+        comment,
+        ...(params.task_id !== undefined ? { taskId: params.task_id } : {}),
+      });
+      return {
+        content: [{ type: "text" as const, text: `Recorded evaluation follow-up for ${resolved.target.name} (${resolved.target.id}).` }],
+        details: { outcome: "recorded", agentId: resolved.target.id, ratingId: rating.id, score: rating.score, raterType },
       };
     },
   });

@@ -72,6 +72,18 @@ export interface ProposedTaskMetadata {
  */
 export type NativeStructureEmbed = NativeStructureRef & { label?: string };
 
+export type MailKind = "message" | "report" | "approval";
+
+export interface MailReportSection {
+  heading: string;
+  body: string;
+}
+
+export interface MailReport {
+  title: string;
+  sections: MailReportSection[];
+}
+
 export interface MessageMetadata extends Record<string, unknown> {
   /** Optional link to the original message when this message is a reply. */
   replyTo?: MessageReplyReference;
@@ -110,6 +122,15 @@ export interface MessageMetadata extends Record<string, unknown> {
    * unavailable target a human-readable fallback after lazy preview resolution.
    */
   nativeStructures?: NativeStructureEmbed[];
+  /*
+  FNXC:StructuralMail 2026-08-09-07:16:
+  Absent mailKind preserves every legacy row's quick-message semantics. Reports are a small
+  serializable writeup alongside (not instead of) nativeStructures; approvalRequestId is a
+  reference only, never an approval snapshot, so live state resolves from ApprovalRequestStore.
+  */
+  mailKind?: MailKind;
+  report?: MailReport;
+  approvalRequestId?: string;
 }
 
 /** Message record stored in the system */
@@ -130,6 +151,13 @@ export interface Message {
   type: MessageType;
   /** Whether the recipient has read this message */
   read: boolean;
+  /*
+  FNXC:MessageArchive 2026-08-12-22:14:
+  Archive is the default non-destructive removal action; delete remains an explicit
+  operator choice. Default message reads exclude archived correspondence.
+  */
+  /** Whether the message is archived */
+  archived: boolean;
   /** Optional extra data */
   metadata?: MessageMetadata;
   /** ISO-8601 timestamp of creation */
@@ -162,6 +190,8 @@ export interface MessageFilter {
   type?: MessageType;
   /** Filter by read status */
   read?: boolean;
+  /** Filter by archived status; omitted excludes archived messages. */
+  archived?: boolean;
   /** Maximum number of messages to return */
   limit?: number;
   /** Number of messages to skip (for pagination) */

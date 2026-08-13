@@ -110,6 +110,7 @@ const TASK_DETAIL_ACTIVITY_LOG_LIMIT = 500;
  * intentionally remain exported from this file for existing tests/importers.
  */
 export { __resetBatchImportRateLimiter } from "./routes/register-git-github.js";
+export { __resetModelRegistryRefreshCacheForTests } from "./model-registry-refresh-cache.js";
 
 /**
  * Minimal interface matching pi 0.80.8+ ModelRuntime's ModelRegistry
@@ -120,8 +121,16 @@ export interface ModelRegistryLike {
    * FNXC:ModelCatalog 2026-07-16-17:55:
    * pi 0.80.8 refreshes asynchronously, so the models endpoint must wait for it
    * before reading getAvailable() and surface any refresh failure to the caller.
+   *
+   * FNXC:ModelCatalog 2026-08-12-20:46:
+   * Pi 0.84.1 returns refresh metadata instead of void. Preserve it as unknown because
+   * the route needs only completion while structural compatibility must track the SDK.
    */
-  refresh(): Promise<void>;
+  refresh(): Promise<unknown>;
+  /** Optional runtime passthrough lets request refreshes use the engine abort-aware path. */
+  modelRuntime?: {
+    refresh: (options?: { allowNetwork?: boolean; signal?: AbortSignal; force?: boolean }) => Promise<unknown>;
+  };
   /** Get models that have auth configured. */
   getAvailable(): Array<{ id: string; name: string; provider: string; reasoning: boolean; contextWindow: number }>;
   /** Optional pi ModelRegistry surface used for supplemental model registration. */

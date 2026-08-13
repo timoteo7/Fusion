@@ -35,6 +35,7 @@ function createStore(task: Task, mergeQueuedTaskIds: string[] = []) {
   return {
     getSettings: vi.fn(async () => ({ globalPause: false, enginePaused: false })),
     listTasks: vi.fn(async () => [current]),
+    getBranchGroup: vi.fn(async () => null),
     updateTask: vi.fn(async (_id: string, updates: Partial<Task>) => {
       current = { ...current, ...updates } as Task;
       return current;
@@ -110,6 +111,69 @@ describe("FN-4999 reliability interactions: completion-handoff-limbo", () => {
     const manager = new SelfHealingManager(store, { rootDir: "/repo", requeueForAutoMerge, isTaskActive: () => true });
     await manager.recoverCompletionHandoffLimbo();
     expect(requeueForAutoMerge).not.toHaveBeenCalled();
+  });
+
+  // FNXC:CompletionHandoffRecovery 2026-08-11-12:05: Manual holds suppress recovery unless a permitted live shared group owns the integration path.
+  it.each([
+    {
+      label: "task-level user hold while project auto-merge is on",
+      task: { autoMerge: false, autoMergeProvenance: "user" as const },
+      projectAutoMerge: true,
+    },
+    {
+      label: "standalone mission-policy hold while project auto-merge is on",
+      task: { autoMerge: false, autoMergeProvenance: "mission" as const },
+      projectAutoMerge: true,
+    },
+    {
+      label: "inherited hold while project auto-merge is off",
+      task: {},
+      projectAutoMerge: false,
+    },
+  ])("preserves $label instead of recreating merge work", async ({ task, projectAutoMerge }) => {
+    const store = createStore(limboTask(task));
+    store.getSettings.mockResolvedValue({
+      globalPause: false,
+      enginePaused: false,
+      autoMerge: projectAutoMerge,
+      integrationBranch: "main",
+    });
+    const requeueForAutoMerge = vi.fn(() => true);
+    const manager = new SelfHealingManager(store, { rootDir: "/repo", requeueForAutoMerge });
+
+    await manager.recoverCompletionHandoffLimbo();
+
+    expect(requeueForAutoMerge).not.toHaveBeenCalled();
+    expect(store.enqueueMergeQueue).not.toHaveBeenCalled();
+    expect(store.updateTask).not.toHaveBeenCalled();
+    expect(store.recordRunAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("keeps a permitted live shared-group member recovery flowing", async () => {
+    const store = createStore(limboTask({
+      autoMerge: false,
+      autoMergeProvenance: "mission",
+      branchContext: { assignmentMode: "shared", groupId: "BG-4999", source: "mission" },
+    }));
+    store.getSettings.mockResolvedValue({
+      globalPause: false,
+      enginePaused: false,
+      autoMerge: true,
+      integrationBranch: "main",
+    });
+    store.getBranchGroup.mockResolvedValue({
+      id: "BG-4999",
+      status: "open",
+      branchName: "mission/M-4999",
+    });
+    const requeueForAutoMerge = vi.fn(() => true);
+    const manager = new SelfHealingManager(store, { rootDir: "/repo", requeueForAutoMerge });
+
+    await manager.recoverCompletionHandoffLimbo();
+
+    expect(store.getBranchGroup).toHaveBeenCalledWith("BG-4999");
+    expect(store.enqueueMergeQueue).toHaveBeenCalledWith("FN-4999-T");
+    expect(requeueForAutoMerge).toHaveBeenCalledWith("FN-4999-T");
   });
 
   it("honors legitimate merge blockers", async () => {
@@ -199,12 +263,21 @@ describe("FN-4999 reliability interactions: completion-handoff-limbo", () => {
     expect(store.logEntry).not.toHaveBeenCalled();
   });
 
+  // FNXC:CompletionHandoffRecovery 2026-08-11-12:05: Merge-queue ownership clears false exhaustion before auto-merge admission is evaluated.
   it("clears false handoff exhaustion for tasks already held by the merge queue", async () => {
     const store = createStore(limboTask({
       status: "failed",
       error: "Completion handoff limbo recovery exhausted",
       completionHandoffLimboRecoveryCount: MAX_COMPLETION_HANDOFF_LIMBO_RECOVERIES,
+      autoMerge: false,
+      autoMergeProvenance: "user",
     }), ["FN-4999-T"]);
+    store.getSettings.mockResolvedValue({
+      globalPause: false,
+      enginePaused: false,
+      autoMerge: true,
+      integrationBranch: "main",
+    });
     const requeueForAutoMerge = vi.fn(() => false);
     const manager = new SelfHealingManager(store, { rootDir: "/repo", requeueForAutoMerge });
 

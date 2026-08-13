@@ -17,7 +17,7 @@ import {resolveWorkflowIrForTask} from "../workflows/workflow-ir-resolver.js";
 import {toTaskMoveLanes} from "../workflows/workflow-lifecycle-traits.js";
 import { countAgentLogEntries, readAgentLogEntries } from "../agents/agent-log-file-store.js";
 import { toJsonNullable } from "../db/db.js";
-import { DbTransaction, recordRunAuditEventWithinTransaction } from "../postgres/data-layer.js";
+import { DbTransaction, projectScopeFor, recordRunAuditEventWithinTransaction } from "../postgres/data-layer.js";
 import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
 import { runCommandAsync } from "../process/run-command.js";
@@ -273,19 +273,32 @@ export async function syncAgentTaskLinkOnReassignmentImpl(store: TaskStore,
     /*
     FNXC:PostgresCutover 2026-07-04-00:00:
     Backend-mode agent-task-link sync: update the agents.taskId column via async Drizzle. Only the dedicated taskId column is authoritative in PG (agent.data jsonb is not read for the link), so the SQLite json_set/json_remove on data is not mirrored.
+
+    FNXC:MultiProjectIsolation 2026-08-11-09:13:
+    Runfusion/Fusion#3414 requires reassignment updates to carry project ownership because
+    owner/superuser PostgreSQL connections bypass RLS. An unbound store intentionally leaves
+    the scope empty for compatibility callers.
     */
         const db = store.asyncLayer!.db;
+    const projectId = store.asyncLayer?.projectId;
     if (previousAgentId) {
       await db
         .update(schema.project.agents)
         .set({ taskId: null, updatedAt })
-        .where(and(eq(schema.project.agents.id, previousAgentId), eq(schema.project.agents.taskId, taskId)));
+        .where(and(
+          eq(schema.project.agents.id, previousAgentId),
+          eq(schema.project.agents.taskId, taskId),
+          projectScopeFor(schema.project.agents.projectId, projectId),
+        ));
     }
     if (newAgentId) {
       await db
         .update(schema.project.agents)
         .set({ taskId, updatedAt })
-        .where(eq(schema.project.agents.id, newAgentId));
+        .where(and(
+          eq(schema.project.agents.id, newAgentId),
+          projectScopeFor(schema.project.agents.projectId, projectId),
+        ));
     }
     return;
 }
@@ -823,7 +836,7 @@ export function insertArtifactRowImpl(store: TaskStore, input: ArtifactCreateInp
 
 export async function getArtifactImpl(store: TaskStore, id: string): Promise<Artifact | null> {
         const layer = store.asyncLayer!;
-    return getArtifactAsync(layer.db, id);
+    return getArtifactAsync(layer.db, id, layer.projectId);
 }
 
 /**

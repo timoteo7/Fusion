@@ -123,8 +123,8 @@ describe("seedDashboardProviders", () => {
   });
 
   it("keeps native Kimi K3 available through the installed pi model registry", async () => {
-    // FNXC:ModelCatalog 2026-07-24-12:00: FN-8564 keeps catalog coverage on Pi
-    // 0.82.0's real built-in registry, not a hand-written Kimi fixture.
+    // FNXC:ModelCatalog 2026-08-12-20:46: FN-9007 keeps catalog coverage on Pi
+    // 0.84.1's real built-in registry, not a hand-written Kimi fixture.
     const modelRegistry = await createInMemoryModelRegistry();
     await modelRegistry.refresh();
 

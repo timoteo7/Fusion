@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import * as core from "@fusion/core";
+import * as engine from "@fusion/engine";
 import type { Column, Task, TaskStore } from "@fusion/core";
 import { registerTaskWorkflowRoutes } from "../routes/register-task-workflow-routes.js";
 import { request as performRequest } from "../test-request.js";
@@ -62,6 +63,7 @@ function buildApp(seed: Task[]) {
       tasks[index] = next;
       return next;
     }),
+    logEntry: vi.fn().mockResolvedValue(undefined),
     recordActivity: vi.fn().mockResolvedValue(undefined),
   };
 
@@ -266,6 +268,53 @@ describe("routes /api/tasks near duplicate", () => {
     expect(match.reason).toBeUndefined();
   });
 
+  it.each([
+    ["no proposal claim", undefined],
+    ["an unrelated proposal claim", "recommendation:FN-1:rec-1"],
+  ])("blocks an ordinary deterministic duplicate with %s", async (_label, proposalClaimId) => {
+    const title = routeIncoming.title;
+    const description = routeIncoming.description;
+    const fingerprint = core.computeContentFingerprint({ title, description }) as string;
+    const { app, tasks } = buildApp([
+      mkTask({
+        id: "FN-8002",
+        title,
+        description,
+        column: "todo",
+        proposalClaimId,
+        source: { sourceType: "api", sourceMetadata: { contentFingerprint: fingerprint } },
+      }),
+    ]);
+
+    const res = await performRequest(app, "POST", "/api/tasks", JSON.stringify({ title, description }), { "content-type": "application/json" });
+
+    expect(res.status).toBe(409);
+    const match = (res.body as { details: { matches: Array<{ id: string; deterministic?: boolean; reason?: string }> } }).details.matches[0];
+    expect(match).toMatchObject({ id: "FN-8002", deterministic: true });
+    expect(match.reason).toBeUndefined();
+    expect(tasks).toHaveLength(1);
+  });
+
+  it.each(["done", "archived"] as const)("allows an ordinary deterministic create when the canonical is %s", async (column) => {
+    const title = routeIncoming.title;
+    const description = routeIncoming.description;
+    const fingerprint = core.computeContentFingerprint({ title, description }) as string;
+    const { app, tasks } = buildApp([
+      mkTask({
+        id: "FN-8003",
+        title,
+        description,
+        column,
+        source: { sourceType: "api", sourceMetadata: { contentFingerprint: fingerprint } },
+      }),
+    ]);
+
+    const res = await performRequest(app, "POST", "/api/tasks", JSON.stringify({ title, description }), { "content-type": "application/json" });
+
+    expect(res.status).toBe(201);
+    expect(tasks).toHaveLength(2);
+  });
+
   it("fails open when intent extraction throws", async () => {
     const extractorSpy = vi.spyOn(core, "extractIntentSignature").mockImplementation(() => {
       throw new Error("boom");
@@ -337,6 +386,67 @@ describe("routes /api/tasks near duplicate", () => {
     expect(tasks[0]?.sourceMetadata).toMatchObject({
       nearDuplicateOf: "FN-1000",
       nearDuplicateDismissed: true,
+    });
+  });
+
+  it("PATCH external-checkout persists one clean Git checkout for execution and review", async () => {
+    const inspection = vi.spyOn(engine, "inspectExternalGitCheckout").mockResolvedValue({
+      valid: true,
+      checkoutPath: "/tmp/external-runtime",
+      branch: "local/runtime-fixes",
+    });
+    const seeded = mkTask({
+      id: "FN-6097",
+      title: "External runtime task",
+      description: "Implement in a supported external checkout",
+      column: "todo",
+    });
+    const { app, tasks } = buildApp([seeded]);
+
+    const res = await performRequest(
+      app,
+      "PATCH",
+      "/api/tasks/FN-6097/external-checkout",
+      JSON.stringify({ checkoutPath: "/tmp/external-runtime" }),
+      { "content-type": "application/json" },
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(inspection).toHaveBeenCalledWith("/tmp/external-runtime", {
+      requireClean: true,
+    });
+    expect((res.body as Task).sourceMetadata).toMatchObject({
+      externalExecutionCheckout: "/tmp/external-runtime",
+      externalExecutionBranch: "local/runtime-fixes",
+      externalReviewCheckout: "/tmp/external-runtime",
+    });
+    expect((res.body as Task).sourceMetadata?.externalExecutionCheckout).toBe("/tmp/external-runtime");
+    expect((res.body as Task).sourceMetadata?.externalExecutionBranch).toBe("local/runtime-fixes");
+    expect((res.body as Task).sourceMetadata?.externalReviewCheckout).toBe("/tmp/external-runtime");
+    expect(tasks[0]?.sourceMetadata).toMatchObject((res.body as Task).sourceMetadata ?? {});
+
+    inspection.mockResolvedValueOnce({ valid: false, reason: "checkoutPath must be clean before routing" });
+    const dirty = await performRequest(
+      app,
+      "PATCH",
+      "/api/tasks/FN-6097/external-checkout",
+      JSON.stringify({ checkoutPath: "/tmp/external-runtime" }),
+      { "content-type": "application/json" },
+    );
+    expect(dirty.status).toBe(400);
+
+    const cleared = await performRequest(
+      app,
+      "PATCH",
+      "/api/tasks/FN-6097/external-checkout",
+      JSON.stringify({ checkoutPath: null }),
+      { "content-type": "application/json" },
+    );
+    expect(cleared.status).toBe(200);
+    expect((cleared.body as Task).sourceMetadata).toMatchObject({
+      externalExecutionCheckout: null,
+      externalExecutionBranch: null,
+      externalReviewCheckout: null,
     });
   });
 });

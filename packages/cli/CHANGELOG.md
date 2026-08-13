@@ -1,5 +1,520 @@
 # @runfusion/fusion
 
+## 0.76.0-beta.2
+
+### Minor Changes
+
+- 508ebc3: summary: Add Grok 4.6 to the built-in Grok model catalog across every model picker.
+  category: feature
+  dev: Registers Grok 4.6 in `GROK_PROVIDER_REGISTRATION` in `packages/core/src/ai/grok-provider.ts`, which fans out through `seedDashboardProviders` and `pi.ts`.
+- fc56161: summary: Add archive and restore views for mailbox messages and chat conversations.
+  category: feature
+  dev: Adds project.messages.archived via migration 0058 and POST /messages/:id/archive|unarchive routes.
+- 8699ff4: summary: Let managers review and coach evaluation results for agents in their reporting tree.
+  category: feature
+  dev: Adds `fn_agent_read_evaluations` and `fn_agent_evaluation_followup`, reusing the management-subtree boundary and action-gate classification.
+
+### Patch Changes
+
+- 6e04b31: summary: Fix the Quick Add model dropdown filter box so typing narrows the model list.
+  category: fix
+  dev: The quick-entry model menu's blanket onMouseDown preventDefault crossed the React portal boundary and suppressed focus on CustomModelDropdown's search input.
+- 52facd1: summary: Keep verification-cache results and project records isolated per project.
+  category: fix
+  dev: Runtime predicates now scope eight project tables; verification-cache results are no longer shared across projects.
+- 0ed0e53: summary: Model eight project-owned storage tables with their partition identities.
+  category: internal
+  dev: Eight declarations now match the 0006 project partition; runtime predicates land in FN-9000.
+- b1dad5c: summary: Keep approval audit history isolated to the active project.
+  category: fix
+  dev: Reconciles approval audit event ownership declarations and threads getApprovalAuditHistory projectId from ApprovalRequestStore.
+- b6839f4: summary: Reconcile PostgreSQL GitHub check-state ownership defaults during upgrades.
+  category: fix
+  dev: Migration 0057 restores the project_id ownership default for github_check_states.
+- c4467b0: summary: Upgrade the bundled Pi runtime to 0.84.1 for updated provider and model support.
+  category: internal
+  dev: Advance the exact Pi closure from 0.82.1 to 0.84.1 and guard pi-client, pi-protocol, and pi-telemetry.
+- e144e8c: summary: Quick Add model menu now labels the merger row “Merger” with spacing matching other roles.
+  category: fix
+  dev: Adds the tasks.modelMerger translation key for the top-level Quick Add menu row.
+- 02f7b58: summary: Fix the collapse/expand toggle in model selection dropdowns.
+  category: fix
+  dev: Stop portal-bound pointer and mouse events before document-level outside-close handlers can unmount CustomModelDropdown.
+- cc10412: summary: Show the task Recommendations tab only when a completed task has recommendations.
+  category: fix
+  dev: TaskDetailModal gates hasRecommendations on task-owned recommendations (fullDetail?.id === task.id, else the live prop); tab reconciliation waits for that same proof, not detailLoading.
+- b0f623b: summary: Fix mission reconciliation failing every cycle with an internal scheduler error.
+  category: fix
+  dev: Preserves the listFeatures receiver and contains per-slice failures in Scheduler.reconcileActiveMissionAutomation.
+
+## 0.76.0-beta.1
+
+### Minor Changes
+
+- f038d04: summary: Let macOS runtime sessions automatically discover the computer-use skill.
+  category: feature
+  dev: Adds installer-boundary Darwin gating in Hermes and suppression-only staging in Claude, Grok, and Hermes loaders.
+- 7611ce7: summary: Let Plan Review close stale or duplicate work before implementation starts.
+  category: feature
+  dev: Adds the Plan-Review-only CLOSE_NO_OP sentinel verdict and terminal graph route.
+- e610c72: summary: Preserve approved plans and surface deterministic execution drift.
+  category: feature
+  dev: Adds immutable spec-lock, current-plan evidence, and retained drift-report storage.
+- fe9fe88: summary: Remove the retired ephemeral-agent compatibility setting and control.
+  category: breaking
+  dev: Stale ephemeralAgentsEnabled values are discarded during settings reads and updates.
+- d59c1b1: summary: Require named GitHub checks before Fusion merges pull requests.
+  category: feature
+  dev: Adds `requiredChecks`, `resolveRequiredCheckNames` in @fusion/core, and getPrMergeStatus options.
+- ec52a91: summary: Attach roadmap items to mailbox messages and open them in Roadmaps.
+  category: feature
+  dev: Adds PluginDashboardViewContext.beginNativeStructureDrag, the roadmap-item drag kind, and cross-project drop rejection.
+- d09e3e5: summary: Planning a GitHub issue now creates a task linked to that issue as a tracked source issue.
+  category: feature
+  dev: Planning sessions persist GitHub source context, preserve the issue body, and exclusively adopt concurrent source links.
+- 6bd178b: summary: Add durable org-wide agent activity history and live stream.
+  category: feature
+  dev: Adds GET /api/agent-activity, agent:activity SSE, and migration 0049.
+- 234430a: summary: Show live agent activity and handoff flow in the Agents view.
+  category: feature
+  dev: Adds a shared dashboard activity SSE store with expiry-aware org-map and live-card state.
+- aac090d: summary: Add Command Center live agent activity and scroll-back timeline.
+  category: feature
+  dev: Uses the inspectable agent activity history API and SSE stream.
+- 9c43736: summary: Add structural reports and approval items to agent mail.
+  category: feature
+  dev: Adds mailKind/report/approvalRequestId metadata, fn_send_message report params, and approval-mail:<approvalRequestId> idempotency.
+- 98ad663: summary: Add structural reports, inline mail approvals, and chat-to-report handoff.
+  category: feature
+  dev: Adds MailboxStructuralItem, ChatReportHandoff, and report-mode composer prefill props.
+- b6af369: summary: Import GitHub issue and loaded comment screenshots from Planning Mode.
+  category: feature
+  dev: Uses importIssueImagesFromUrls with persisted imageUrls plus commentsUnavailable and droppedBodyCount markers.
+- 2643f4e: summary: Add opt-in GitHub-native pull request auto-merge.
+  category: feature
+  dev: Adds githubNativeAutoMerge using gh and token-pinned GraphQL transports with deferred merge reconciliation.
+- 569d2ee: summary: Add signed GitHub CI signal ingestion with taskless green recovery.
+  category: feature
+  dev: FUSION_SIGNAL_GITHUB_SECRET enables POST /api/signals/github; recovery-only greens use atomic single-incident conditional resolution.
+- 7c034f4: summary: Approvals raised while planning a task now appear in the mailbox.
+  category: feature
+  dev: Reuses emitApprovalMail through an optional TriageProcessor message-store option.
+- c7c8799: summary: Let verified GitHub CI signals update configured merge checks without waiting for polling.
+  category: feature
+  dev: Adds github_check_states migration 0048, resolveIngestedChecks gate input, and prune-github-check-states maintenance.
+- 3143f95: summary: Automatically retry generic terminal task failures before alerting operators.
+  category: fix
+  dev: Adds a durable recovery budget, fenced retry application, bounded escalation delivery, operator retry reset, and stale-mirror cleanup.
+- 27cb2d2: summary: Add `fn knowledge-graph build` to generate a committable code knowledge graph.
+  category: feature
+  dev: Adds deterministic core graph extraction and tracked-artifact support; generated artifacts remain operator-committed.
+- 5573d04: summary: Add durable project recall for decisions, preferences, and solutions.
+  category: feature
+  dev: Adds project.memory_recall_records migration, advisory-lock dedup, optional rank-only vector provider with store-side limits; no MCP surface yet.
+- a839c61: summary: Add Fusion memory tools through the built-in MCP server.
+  category: feature
+  dev: Adds injectable entry resolution, root plumbing and A/B/C/D/R lane coverage, store-resident budget fallback, reserved-name tombstones, browser-safe availability, and bounded JSON-RPC results.
+- 637854a: summary: Add Memory Keeper for deterministic knowledge graph and recall consolidation.
+  category: feature
+  dev: Adds the Memory Keeper agent, memoryConsolidationEnabled setting, mergeRecallGraphNodeIds, and memory:consolidation audit events.
+- eef68fe: summary: Add provenance-tagged memory semantics and automatic recall capture.
+  category: feature
+  dev: Adds the inferred-edge writer, detached task/research/insight capture roots, and memory semantics audit events.
+- 5a1853c: summary: Steer every agent lane to search memory first and show Memory Keeper consolidation history.
+  category: feature
+  dev: Mode-aware pre-steering nudge across project-memory builders, heartbeat prompts, and agent instructions; Agent Detail reads memory:consolidation-\* run-audit events from FN-8932.
+- 0fc6f3d: summary: Let agents reconcile mission and feature status with attributed audit events.
+  category: feature
+  dev: Adds fn_feature_set_status and fn_mission_set_status, atomic actor-attributed feature_status_changed events across all status writers, a shared ids-only bounded metadata builder for both status events, and the linked-task guard.
+- b82f1a4: summary: Add clear and re-run controls for repairable mission validation badges.
+  category: feature
+  dev: Adds fn_feature_repair_validation, POST /api/missions/features/:featureId/repair-validation, and repairFeatureValidationState.
+- cef0752: summary: Reconcile mission feature state automatically from delivery task ground truth.
+  category: feature
+  dev: Adds fn_mission_reconcile, a scoped REST endpoint, and bounded reconcile audit events.
+- 6ae9299: summary: Hold terminal-failure alerts until the task fails to recover on its own.
+  category: fix
+  dev: Adds wedgeNotificationSettleMs, durable pending wedge evidence with stale-hold re-stamping, and a self-healing backstop.
+- 9f24a51: summary: Keep resolved review findings visible without allowing no-op revision requests.
+  category: feature
+  dev: Adds WorkflowReviewFinding.resolution and prompt/script supersededFindingIds claims persisted at the result sink; resolved findings bypass gate/remediation actions and POST /tasks/:id/review/address rejects them.
+- 1da61f3: summary: Add macOS `fn computer` desktop-app discovery, snapshots, actions, and permission reporting.
+  category: feature
+  dev: Adds capabilities, permissions, discovery, state, and action subcommands with a versioned JSON envelope, preflight outcome matrix, durable cross-invocation snapshots, deterministic error ordering, and an honest macOS-only support matrix.
+- eacd668: summary: Add a version-matched computer-use agent skill and guide command.
+  category: feature
+  dev: Adds `fn skills get computer-use` and installs both shipped skills for supported clients.
+- 5dd3031: summary: Let operators clear stale mission blocked badges without resuming automation.
+  category: feature
+  dev: Adds the audited clearMissionBlockedStatus primitive and REST pair; new surfaces use canonical blocker descriptors while resume retains its legacy payload.
+- 3eec133: summary: Add a Mission Manager "Reconcile now" control with a dry-run preview before applying.
+  category: feature
+  dev: Thin client over POST /api/missions/:missionId/reconcile; new reconcileMission API wrapper in the dashboard app.
+- 8f61909: summary: Add an operator-only tool to clear a stale mission blocked badge from the CLI.
+  category: feature
+  dev: Registers fn_mission_clear_blocked in the pi extension (withheld from agent principals), classifies it as task_agent_mutation in gating-classifications.ts, and denies it in readonly workflow steps.
+- 918a4c4: summary: Show versioned mission resume blockers with clear root-stop details.
+  category: feature
+  dev: Adds the versioned blockers/legacyBlockers conflict envelope; the v0 mirror remains for one deprecation window.
+- 7ddcf7e: summary: Remove deprecated v0 mission resume blockers in favor of canonical descriptors.
+  category: breaking
+  dev: Removes legacyBlockers from the resume 409, MissionResumeConflictError.blockers, LegacyMissionBlocker, fromLegacyMissionBlocker, toLegacyMissionBlocker, their barrel exports, and client v0 upgrade branches after auditing supported consumers; canonical blockers now deduplicate on (rootFeatureId, source, reason).
+- a6ce7f8: summary: Promote now appears on every board card the server would actually release.
+  category: feature
+  dev: Adds evaluateTaskReleaseGate, transient Task.releaseGate API enrichment, and bounded client freshness handling.
+- c05d44d: summary: Planning failures now retry with backoff and park after 3 attempts instead of looping forever.
+  category: fix
+  dev: Two bounds on the triage planning path plus a log-level fix. (1) The unclassified-failure branch in `specifyTask` restored the card's claimable status and wrote no counter, no `nextRecoveryAt` and no park, so triage rediscovery re-admitted it every poll indefinitely; it now consumes the shared `recoveryRetryCount`/`nextRecoveryAt` budget (`MAX_RECOVERY_RETRIES` = 3, 60s/120s/300s backoff) and parks `status: "failed"` with a `PLANNING_FAILED_EXHAUSTED:` error once spent. (2) New workflow-native setting `planningTimeoutMs` (default `DEFAULT_PLANNING_TIMEOUT_MS` = 5_400_000, declared in `BUILTIN_TRIAGE_POLICY_SETTINGS`) caps a planning turn — previously nothing did, since `workflowStepTimeoutMs` covers pre-merge steps only and the provider SDK's 300s cap is time-to-first-byte and is cleared once headers arrive; a timeout aborts the session and consumes one bounded attempt. Default is generous by design (successful plans measured p99 ≈ 106 min) — it bounds hung turns, not slow ones. (3) `[event:task:moved]` executor tracing dropped from `log` to `debug`; it fired on every move and was the loudest line in engine output.
+- a09e0cb: summary: Add Português (Brasil) (pt-BR) as a dashboard, terminal UI, and translation target language.
+  category: feature
+  dev: Adds `pt-BR` to `SUPPORTED_LOCALES` with machine-drafted catalogs (flagged in packages/i18n/locales/TRANSLATION_STATUS.md) and Portuguese content-language detection stopwords.
+- 477f3fa: summary: Allow operators to route task execution and review through one validated external Git checkout.
+  category: feature
+  dev: PATCH /api/tasks/:id/external-checkout persists a clean checkout path and branch fence in task source metadata.
+- 963dba6: summary: Reviews now block only on high-priority findings, cutting repeated plan/code review fix rounds.
+  category: feature
+  dev: Adds `applyReviewSeverityGate`/`resolveReviewBlockingSeverity` (`packages/core/src/workflows/review-severity-gate.ts`) making the existing `WorkflowReviewFinding.severity` load-bearing. New per-workflow settings `planReviewBlockingSeverity` (default `high`) and `codeReviewBlockingSeverity` (default `critical`); set either to `any` to restore the previous behavior where every REVISE blocks. A REVISE carrying no finding at or above the threshold is recorded as APPROVE_WITH_NOTES and its findings are written to PROMPT.md as a non-blocking `## Review Advisory Notes` section. Fails closed: a REVISE with no findings, or with any unclassified finding, still blocks. Plan/Code Review prompts now request the structured findings schema, define the severity vocabulary as P0/P1/P2, suppress nits, and use an incremental re-review contract; remediation injection renders findings grouped by priority and sanctions an explicit decline with rationale.
+- 06ea444: summary: Remove workflow principal session caps and auto-resume continuations stranded in running or held.
+  category: fix
+  dev: `WorkflowAgentCapacity.acquire` drops `maxProjectSessions`/`maxWorkflowSessions` (leases become bookkeeping only) and `routeWorkflowPrincipal`'s availability test is now eligibility-only, so the capacity re-route loops in `triage.ts` and `workflow-principal-before-node.ts` are deleted. New self-healing sweep `reconcileStrandedWorkflowContinuations` (startup + periodic) re-queues `running` rows with a dead/absent lease and `held` rows the claim predicate cannot re-take, and retires active-state rows belonging to deleted/archived tasks; decision logic is the pure `evaluateStrandedContinuationReclaim`. New run-audit types: `workflowWorkItem:reconcile-stranded-requeued`, `workflowWorkItem:reconcile-stranded-retired`.
+
+### Patch Changes
+
+- 66c5103: summary: Prevent worktree conflict cleanup from crashing before its active-session safety check.
+  category: fix
+  dev: Binds the executor live-worktree probe when the self-owned reconcile facade calls its extracted helper.
+- e573178: summary: Fix a deadlock where built-in workflow agents were unroutable, leaving every task stuck and spinning.
+  category: fix
+  dev: `provisionBuiltinWorkflowRoleAgents` seeded the four permanent owners with `runtimeConfig.enabled: false` while the router's `available()` rejects `enabled === false`, so no built-in role could ever be routed. Built-ins are now seeded enabled, existing rows converge on provisioning, and `enforceBuiltinWorkflowRoleRoutability` coerces them back at the durable `writeAgent` seam so no API/UI/plugin path can disable them. The static routability predicate (`isWorkflowPrincipalEligible`) is shared by provisioning and the router so they cannot drift. Separately, a workflow-principal hold now uses a backoff ladder (`PRINCIPAL_HOLD_BACKOFF_MS`, 15s→5m) checked before graph entry, instead of re-dispatching immediately — the old path spun ~3.5×/sec writing ~19k audit rows/hour with nothing executing.
+- 2286a7a: summary: Refresh reacquired execution worktrees against the current local integration branch.
+  category: fix
+  dev: Apply the existing stale-base reconciliation to native fresh and pooled acquisitions so a retained task branch cannot omit a dependency that landed while its original base branch disappeared.
+- b30508c: summary: Prevent Fusion from modifying or deleting operator-owned external execution checkouts.
+  category: fix
+  dev: Preserves base capture while fencing managed cleanup, reconciliation, and worktree backend behavior.
+- 26ea9fd: summary: Keep operator-routed external checkouts authoritative across recovery, remediation, verification, and cleanup.
+  category: fix
+  dev: Re-reads persisted checkout metadata and prevents managed-worktree fallback or cleanup on external routes.
+- b28b6d1: summary: Fail closed when external remediation routing lacks a checkout path.
+  category: fix
+  dev: Strengthens live-route recovery, verification, and cleanup regression coverage.
+- a3e3775: summary: Fix Grok ACP startup by making --no-auto-update opt-in.
+  category: fix
+  dev: Released Grok CLI v1.0.0 rejects --no-auto-update; buildGrokAcpArgs now only pushes it when noAutoUpdate === true. Updated acp-settings.test.ts.
+- 167e17c: summary: Resume planned mission follow-ups after their source task completes or the task is rehomed.
+  category: fix
+  dev: Keeps source features active for live Decision-A descendants and prefers canonical feature links during admission.
+- 6cc15fd: summary: Fix mission reconciliation, blocked diagnostics, and superseded validator ownership.
+  category: fix
+  dev: Corrects dry-run actions, binds TaskStore access, scopes blocked-feature reads, and guards stale run completion.
+- 2b22838: summary: Fix "Failed to create chat session" on model chats, and tasks wrongly failed as branch conflicts.
+  category: fix
+  dev: Chat — FN-8869 hoisted the agent-existence check out of its `else` branch in `register-chat-routes.ts`, so model-target chats sending the agent-less `__fn_agent__` sentinel 404'd; the agent is now required only when it is the source of model resolution. Self-healing — a failed `tip-already-merged` cleanup was rethrown and classified `branch-conflict-unrecoverable`, failing and pausing tasks whose branch was already an ancestor of the integration ref (every observed case was a `git worktree remove --force` / `ENOTEMPTY rmdir node_modules` pnpm race). Cleanup failure now retries on the next sweep, and `git worktree prune` runs before removal so stale registrations stop causing the failure they would have prevented.
+- d9a0ed7: summary: Prevent completed planning sessions from stalling before Plan Review or execution.
+  category: fix
+  dev: Avoids nested planning lifecycle locks and preserves recoverable written plans during orphan cleanup.
+- 54d1ccb: summary: Prevent auto-merge attempts for branch-protected, behind, conflicting, or unknown PR states.
+  category: fix
+  dev: The legacy PR merge gate now requires normalized mergeability to be `clean` while preserving optional approval and check policy.
+- c0e2ba2: summary: Report GitHub branch-protection merge blocks instead of false merge conflicts.
+  category: fix
+  dev: Classifies refreshed BLOCKED PR state as merge-blocked-by-policy.
+- 72623ec: summary: Make pull-request merge retries honest and pause branch-policy blocks for operator action.
+  category: fix
+  dev: Enforces persisted PR retry backoff and resumes policy holds through manual merge.
+- b3504f0: summary: Refresh automated pull-request heads before creating or merging them.
+  category: fix
+  dev: Automated task, group, promotion, and workflow PR paths use verified checkout refreshes and leased rewrites.
+- e2522eb: summary: Rebase fresh worktrees onto the configured integration branch and log skipped refreshes.
+  category: fix
+  dev: Reuses the canonical integration-branch resolver and removes ambient root HEAD selection.
+- f36e238: summary: Recognize duplicate redirects in task titles and with custom task prefixes.
+  category: fix
+  dev: Uses the shared strict duplicate-marker parser across decision, admission, and recovery surfaces.
+- ad91795: summary: Assign eligible executor owners to newly created tasks automatically.
+  category: fix
+  dev: Resolves role-safe owners before the shared insert boundary; public payloads cannot forge exemption.
+- b181f20: summary: Show Recommendations for every completed task, including an empty result state.
+  category: fix
+  dev: Completed task detail now retains the Recommendations tab when no records were produced.
+- 75796eb: summary: Capture executor-discovered completion recommendations for completed tasks.
+  category: fix
+  dev: Executor prompts now require bounded task-ready recommendations or an explicit empty list.
+- 53416f6: summary: Record truthful provenance for settings revisions from API and system writes.
+  category: fix
+  dev: Adds api provenance actors for verified daemon tokens, unverified HTTP calls, and verified node keys.
+- fb125b6: summary: Prevent engine heartbeat noise from flooding settings history and add revision API paging.
+  category: fix
+  dev: Uses a non-versioned key registry, preserves live heartbeat values on rollback, and adds limit/offset/hasMore.
+- 1e5d80d: summary: Activity Log now records every settings change, not just four keys.
+  category: fix
+  dev: Adds the settings-activity.ts seam with engine-churn exclusions, value redaction, and bounded summaries; legacy details now use generic key: from → to wording.
+- c60a116: summary: Keep scheduler hold-release sweeps and health probes responsive under PostgreSQL load.
+  category: performance
+  dev: Adds batched workflow-selection reads, pass-scoped cache, per-project sweep guard, tri-state dependency evaluation, sweep deadline, and health probe deadline.
+- 65bf309: summary: Clear stale task dispatch routes when a node override changes.
+  category: fix
+  dev: shouldInvalidateEffectiveRoute at the updateTaskUnlockedImpl seam uses load-time checkout capture and clears only unsupplied fields of a replacement route.
+- 0a2fe91: summary: Restore plan-review replan and review fix handoffs in projects with auto-merge off.
+  category: fix
+  dev: Uses hasPreMergeRemediationAutoMergeHold at the two executor pre-merge remediation seams.
+- 0e8d743: summary: Stop sending "needs operator action" alerts for tasks that are running normally.
+  category: fix
+  dev: Wedge classification now requires real pause state for pause-reason-derived reasons, and NotificationService revalidates the descriptor against the live task before claiming an episode.
+- 29bb6d0: summary: Restore Activity telemetry for durable agent sessions.
+  category: fix
+  dev: Durable lane session and tool events now write usage_events and Activity counts agent sessions.
+- 5b9e664: summary: Role-based permanent agents inherit project model override and thinking in Agents and Chat.
+  category: fix
+  dev: Shared resolvePermanentAgentEffectiveModel/Thinking in @fusion/core wires role inheritance into Chat, Agents, and model-less heartbeats.
+- 2d52908: summary: Keep PR and review updates visible in open task details.
+  category: fix
+  dev: Adds applyLocalTaskPatch so FN-8796 server-clock arbitration does not reject local detail patches.
+- 12eeeaf: summary: Restore duplicate conflict responses for ordinary task intake.
+  category: fix
+  dev: createTaskThroughGuardedIntake now requires a named proposalClaimId before trusted duplicate reuse.
+- 5ce3a97: summary: Model list no longer hangs when a provider catalog stalls.
+  category: fix
+  dev: Adds bounded engine refresh seams, a generation-keyed per-registry request cache, and credential-mutation invalidation.
+- e72d9da: summary: Hide Promote on board cards that are still being planned.
+  category: fix
+  dev: Gates the TaskCard Promote render path on existing planning signals.
+- c1c41ac: summary: Keep planning-time recovery running when archived tasks retain timing anchors.
+  category: fix
+  dev: Self-healing now enumerates live non-archived tasks and isolates per-task failures.
+- 3aa32a8: summary: Review REVISE now schedules fixes for shared-branch tasks in auto-merge-off projects.
+  category: fix
+  dev: Narrows hasPreMergeRemediationAutoMergeHold; logs both executor recovery-budget refusals and guards the resume router.
+- 8a7ab1d: summary: Allow direct DATABASE_URL connections to finalize planning lifecycle locks.
+  category: fix
+  dev: Adds runtime-direct provenance, core lock exports, and a durable planning lock transport marker.
+- f5a9cf0: summary: Recover timed-out merges without leaving retries blocked by stale merge status.
+  category: fix
+  dev: Fences superseded merger status writes and reconciles abort, pump, and stale-sweep status recovery.
+- 3ca5d4d: summary: Prefer older same-priority tasks when scheduling after priority and overlap checks.
+  category: fix
+  dev: Hold/release auto-release candidates rank via compareTasksByPriorityThenAgeAndId (priority desc, createdAt ASC, id).
+- 1474c61: summary: Stop sending needs-operator-action alerts for tasks still running or intentionally held.
+  category: fix
+  dev: Tightens task-wedge classifier proof handling and live-row delivery validation.
+- 08a3f28: summary: Stale agent task links no longer stop self-healing from reconciling later agents.
+  category: fix
+  dev: Harden recoverAgentsRunningOnInactiveTasks and recoverDriftedAgentTaskLinks with isMissingTaskLookupError/readLinkedTaskOrUndefined for Runfusion/Fusion#3397.
+- d9a2d9d: summary: Clear orphaned merge status from eligible engine-paused review cards without resuming them.
+  category: fix
+  dev: The stale merge sweep permits only merge-deadlock-detected clear-only recovery and never enqueues paused cards.
+- a48594f: summary: Chat attachment thumbnails now clear as soon as the message is accepted.
+  category: fix
+  dev: Adds direct-stream acceptance and room delivery callbacks, plus staged-attachment guards for /clear and /new.
+- a270902: summary: Task cards now distinguish the assigned agent from the agent that created the task.
+  category: fix
+  dev: TaskCard provenance chip uses a Sparkles icon, a "by <name>" label, and the .card-agent-created-badge--provenance style variant; assigned-owner chip keeps Bot.
+- 313eea1: summary: Make the Agents Overview Active Agents list scrollable on mobile.
+  category: fix
+  dev: Overview bar now participates in the Agents flex height chain with a touch scroll owner so long active-agent lists are not clipped; covered by a Chromium browser-layout smoke assertion mirroring the production DOM chain.
+- e610c72: summary: Keep re-locked plans marked as previously diverged instead of resetting to on plan.
+  category: fix
+  dev: Engine spec-drift snapshot derives priorDivergence from the retained report history via the shared hasPriorLockDivergence helper.
+- 82b5d78: summary: Keep approved plans accurate when parent task lineage is removed.
+  category: fix
+  dev: Parent delete and archive now invalidate approved lineage evidence atomically.
+- 967e981: summary: Hide Promote until a task’s required plan review and approval holds clear.
+  category: fix
+  dev: Adds `isPlanReviewGateUnsatisfied` and `isTaskBlockedOnApprovalHold`, mirroring server predicates with the default-on plan-review fallback and column-independent approval holds.
+- 25e292d: summary: Fix CLI commands aborting mid-command on Node 22.4+ so fn init completes.
+  category: fix
+  dev: Keeps awaited startup handles ref'd and declares Node >=22.4.0 support.
+- 4314146: summary: Reviewer verdicts and findings no longer drop when review prose contains stray braces.
+  category: fix
+  dev: Harden `extractJsonObjectCandidates` recovery and share structured-verdict-key guards across review parsers.
+- 41bb94b: summary: Keep durable agent data isolated to the active project in shared PostgreSQL.
+  category: fix
+  dev: Agent reads, mutations, satellite tables, analytics, and reassignment links now apply the bound project scope.
+- 5134a55: summary: Prevent canceled AI merge bodies from overwriting successor merge state.
+  category: fix
+  dev: Adds `merge-write-fence` with per-mutation ownership checks, optional squash-landing signals and ref-advance checkpoints. Aborts rethrow as `MergeAbortedError`; the injected `merge:orphan-write-fenced` audit emits once at first interaction with an emit-time suppression count.
+- 90573e3: summary: Prevent duplicate manual mission validation runs for a feature.
+  category: fix
+  dev: Adds startManualValidatorRun and the 409 VALIDATION_ALREADY_RUNNING API contract.
+- 4c9f14e: summary: Restore explicit engineer and operator-override task assignment in CLI tools.
+  category: fix
+  dev: resolveTaskIntakeOwner now accepts explicit engineer routing and sourceMetadata.executorRoleOverride while retaining automatic executor-only routing.
+- 33d4fa4: summary: Fix plan writes failing permanently after a plan-evidence version collision.
+  category: fix
+  dev: Converges evidence writers on the conflict-tolerant appendPlanEvidenceInTransaction helper.
+- 9571f73: summary: Paused missions no longer un-pause when hierarchy status rolls up.
+  category: fix
+  dev: Guards shouldApplyRecomputedStatus, store recompute helpers, and terminal-task reconcile milestone writes.
+- 844512e: summary: Automatic mission validation no longer starts a second run while manual validation is in flight.
+  category: fix
+  dev: Uses a feature-scoped live-run check and exposes optional ValidatorRunAdmission.blockingScope.
+- 79502c6: summary: Clean up the published CLI manifest so TypeScript is declared once as a runtime dependency.
+  category: internal
+  dev: Removed the duplicate `typescript` devDependencies entry from packages/cli/package.json (the runtime `dependencies` entry required by the tsup `external` list is unchanged) and regenerated pnpm-lock.yaml.
+- 3b1c788: summary: Agent ratings are now isolated per project on shared PostgreSQL databases.
+  category: fix
+  dev: Migration 0055 and SCHEMA_BASELINE_VERSION protect the composite partition; addRating/getRatings/deleteRating use bound project scope.
+- 0eaa3c7: summary: Plugin hot reload no longer leaves scratch reload files in plugin folders.
+  category: internal
+  dev: Removes seven tracked artifacts and cleans importPluginModule cache-busting copies after import.
+- 9c5176f: summary: Prevent project-bound workflow and chat data from crossing project partitions.
+  category: fix
+  dev: Adds idempotent migration 0056 for partition-prefixed ownership indexes.
+- 11334b1: summary: Keep custom workflows private to their project on shared databases.
+  category: fix
+  dev: Models project.workflows as (project_id, id), scopes predicates with projectScopeFor, and preserves global ID occupancy allocation.
+- 9622a62: summary: Keep completed manual-review tasks parked instead of retrying automatic merge handoffs.
+  category: fix
+  dev: Reuses the shared merge-recovery consent gate for completion-handoff self-healing.
+- ccebe5c: summary: Harden orphaned planning recovery audits so failed rows cannot abort the sweep.
+  category: fix
+  dev: Keep FN-8909 live-row enumeration; isolate audit emission failures and distinguish all-attempts-failed no-action outcomes (PR #3392).
+- a5c3476: summary: Harden task-pinned orphan preservation and retention against unsafe recovery cleanup.
+  category: fix
+  dev: Serializes recovery under the pinned-path reservation, bounds retained orphans, and excludes recovery containers from scans.
+- 7b3bd75: summary: The Plan Review replan cap setting now actually works; lowering it takes effect.
+  category: fix
+  dev: `planReviewReplanCap` was declared, validated, documented and editable in the Workflow Editor but read by nothing — the unbounded-default backstop was hardcoded to `PLAN_REVIEW_FEEDBACK_HISTORY_LIMIT`, a bound on how much reviewer prose is replayed into the next planning prompt, so two unrelated concerns shared one number and trimming prompt history would have silently tightened a safety ceiling. `requestPreMergeOptionalStepFix` now resolves the backstop from the setting, defaulting to the new `DEFAULT_PLAN_REVIEW_REPLAN_CAP` (15, the previously-effective value, so this is a pure re-wiring); `0` parks on the first REVISE. An explicit `planReviewMaxRevisions` / node `maxRevisions` budget remains a stricter, earlier gate. Also deletes the dead `PLAN_REVIEW_GATE_REPLAN_CAP` constant (an unread ceiling belonging to the U10-deleted triage gate) and ratchets it in `legacy-tombstones.test.ts`; `Task.planReviewReplanCount` is documented as legacy/never-written, with the live owner named.
+- a39a511: summary: Keep recommendation-created tasks recoverable across custom and legacy archive lanes.
+  category: fix
+  dev: Treats undeclared legacy archive IDs as tombstones and re-homes active rows without cold-storage restore.
+- a2deae0: summary: Stop the engine log repeating dispatch-blocked and symbol-lock-loss lines every poll for a stuck task.
+  category: fix
+  dev: Shared `createRepeatSuppressedLog` (packages/engine/src/util/repeat-suppressed-log.ts) backs the executor's unmet-dependency/ephemeral-disabled pre-dispatch gates and the scheduler's symbol-lock renewal: first occurrence per task/signature logs at full level, identical repeats drop to `debug()` (`FUSION_DEBUG=executor,scheduler`), a changed signature logs again, and the memo clears when the condition resolves. Symbol-lock loss also gated its per-poll `store.logEntry` append on the same decision.
+- f0218ef: summary: Keep required pull-request check settings labels available in every dashboard locale.
+  category: fix
+  dev: Synchronizes the new required-checks keys into all secondary app catalogs.
+- 351c3b7: summary: Restore completion-recommendation capture and the worktree base-refresh guard dropped by a refactor.
+  category: fix
+  dev: PR #3317 (U4 executor peel) rewrote executor.ts from a pre-change base, silently deleting two landed fixes. FN-8850's `getCompletionRecommendationGuidance` and its call site are restored in `executor/system-prompt.ts` (the `fn_task_done` validator survived, so recommendations were validated but never requested). The `WorktreeBaseRefreshError` guard is restored in `executor/run-implementation.ts` so a pre-session checkout refusal is left queued instead of terminally parking the task. New `executor-prompt-completion-recommendations.test.ts` pins the prompt wiring that had no coverage.
+- dfd88e7: summary: Fix queued tasks never starting after the board fills up.
+  category: fix
+  dev: `resolvePlanningContinuationCandidate` no longer gates on `waitReason === "planning"`. That skip meant a continuation parked by the capacity-suspend path (`waitReason: "capacity"`) or carrying a NULL reason was owned by nobody — skipped by the only drain that dispatches `runnable` task continuations, and passed over by the self-healing reclaim sweep, which by design leaves `runnable` rows to that drain. Cards sat runnable indefinitely with no state change and no audit row while the engine was idle. Dispatch stays admission-gated by `admitPlanningContinuation`, so a capacity-parked card still resumes only when a slot is genuinely free. Also repairs two stale path allowlists in `planning-claim-single-writer.test.ts` (mission stores and `replan-target.ts` moved into subdirectories), which had left that ratchet red on main.
+- 51a5e1c: summary: Built-in workflow agents no longer need heartbeats enabled to receive work.
+  category: fix
+  dev: `runtimeConfig.enabled` governs the durable heartbeat runtime only; workflow-stage routability is answered by `isWorkflowPrincipalEligible`, which treats the four built-in role owners (triage/executor/reviewer/merger) as routable structurally. Built-ins are provisioned `{ enabled: false, autoClaimRelevantTasks: false }` — no autonomous loops, no auto-claim — while every built-in role stays routable. Replaces the earlier write-seam coercion that forced `enabled: true`. Also re-applies the principal-hold backoff ladder (15s→5m, checked before graph entry) into `executor/execute-workflow-graph.ts`, where PR #3317's executor peel dropped it.
+- 55fd20e: summary: Fix Fusion hanging on startup — spec-drift reconciliation exhausted the database connection pool.
+  category: fix
+  dev: `SpecDriftReconciler.enqueue` released every id into its own microtask, and each reconcile costs a DEDICATED PostgreSQL connection (`appendSpecDriftReport` -> `withPlanningLifecycleLock` opens its own session-scoped `max: 1` client). `project-engine.ts` enqueues every task at runtime-boundary setup, so a 1,082-task project opened ~1,082 lock sessions at once against `max_connections = 500`, saturating the cluster ~25s into boot; every later query then failed with "sorry, too many clients already" and the dashboard wedged on "starting" behind the migration holding server. The flat 1s retry made it self-sustaining (measured 4,777 lock sessions in 17s). Adds a concurrency bound (`maxConcurrent`, default 4) with a fair insertion-ordered pump, per-task in-flight dedupe, and exponential backoff with jitter capped at 60s; retries re-enter through `enqueue` so they are bounded too. Verified against the real project: connections stay flat at 3-10 across a 70s boot that previously hit 1,109 and saturated.
+- 73f428c: summary: Recover task-pinned worktrees when an incomplete directory occupies the pinned path.
+  category: fix
+  dev: Preserve inactive incomplete or unregistered directories under .fusion/recovery before recreating the task worktree.
+- 81139db: summary: Provider request timeouts now retry with backoff instead of looping planning forever.
+  category: fix
+  dev: Adds `/\brequest timed out\b/i` and `/\bAPIConnectionTimeoutError\b/i` to `TRANSIENT_ERROR_PATTERNS` (`packages/engine/src/errors/transient-error-patterns.ts`). The Anthropic/OpenAI SDK `APIConnectionTimeoutError` default message `"Request timed out."` matched no pattern, so it fell through to `specifyTask`'s generic failure branch which restores `status: null` with no counter and no `nextRecoveryAt` — triage rediscovery then re-admitted the card every poll indefinitely. Now routes into the bounded `MAX_RECOVERY_RETRIES` (3) + 60s/120s/300s backoff policy. Pattern is anchored to "request timed out" rather than a bare timeout match so agent prose and verification output ("BuildKit timed out", "Test suite timed out after 30000ms") stay permanent. Does not affect model fallback, which pi decides internally.
+- 14c8793: summary: Tunnels now restart automatically with backoff after crashing, instead of staying failed until manually restarted.
+  category: fix
+  dev: `TunnelProcessManager` gains `autoRestart` (default on), `restartBaseDelayMs`, `restartMaxDelayMs`; explicit stop or provider switch cancels any pending restart; exit/readiness handlers are guarded by process-handle identity so stale events cannot clobber a restarted tunnel.
+- 37d3235: summary: Fix four stalls that left tasks stuck for hours with no retry and no visible error.
+  category: fix
+  dev: |
+  Workflow principal routing separates structural capability from availability. A named principal that can
+  never satisfy a node (wrong role, deleted, authority edited away) is no longer authority for it — routing
+  falls through to the column binding and role pool, and a resumed continuation discards the stale fence and
+  re-routes. A role-capable principal that is only paused/disabled/at capacity still holds. An explicitly
+  assigned engineer-role agent is now valid `task-assignee` authority for an executor node; the role pool
+  stays strict. An unresolvable node instance or absent IR still fails closed rather than re-routing.
+
+  Dependency auto-unblock (`scheduler.ts` plus the three `self-healing.ts` sites) now clears only the `queued`
+  marker it owns instead of nulling any status, so a `needs-replan` signal survives a blocker completing.
+
+  New self-healing sweep `reconcilePrincipalHeldPlanningContinuations` re-queues planning for a card stranded
+  on a principal-routing hold, gated on the planning lane, effective auto-merge, an owned (null) status, and
+  the planning lifecycle lock. Emits `task:reconcile-principal-held-planning[-no-action]`.
+
+  Workflow node-instance-id materialization is idempotent for foreach, loop, and optional-group containers;
+  it previously re-wrapped its own output each dispatch, growing the persisted `run_id` without bound.
+
+- a06a498: summary: Stop failing tasks over a stale worktree base — refreshing the base no longer blocks execution.
+  category: fix
+  dev: `refreshReusedWorktreeBase` now returns `executionSafe: true` with `skipped: true` for dirty checkouts, own-commit rebase conflicts, unresolvable bases, and compensated persistence failures; only an unproven tree (failed compensation) still throws `WorktreeBaseRefreshError`. The dirty-tree check moved after the up-to-date check so a worktree already on the current base is never refused. `execute()` now catches the residual throw and routes it into the shared bounded non-parking hold (`holdForWorktreeBaseRefresh`), which the graph-failure lane also uses. New git run-audit type `worktree:base-refresh-skipped` separates a declined refresh from a genuine block.
+
+## 0.76.0-beta.0
+
+### Minor Changes
+
+- eaadd15: summary: Route workflow stages through durable multi-role agents instead of ephemeral workers.
+  category: feature
+  dev: Removes ephemeral workflow-worker lifecycle dispatch; existing singular role input remains migration-compatible.
+- d450dbe: summary: Add completed-task recommendations with guarded one-click task creation.
+  category: feature
+  dev: Project setting `maxRecommendationsPerTask` controls the accepted completion cap.
+- f7ca14b: summary: Add fn_workflow_step_resume operator tool to unstick permanently-pending merge review steps.
+  category: feature
+  dev: New CLI/pi-extension operator-only tool `fn_workflow_step_resume` (with `TaskStore.resumeWorkflowStep` + `findPendingPreMergeStep` helper) transitions a stuck `pending` pre-merge workflow step to `failed` with resume audit metadata so the existing `fn_task_bypass_review` escape hatch can clear the merge blocker. Audit-logged via the new `task:resume-step` run-audit event. Not exposed to executor/reviewer/triage agent surfaces.
+
+### Patch Changes
+
+- 6bacfd7: summary: Stop verified no-op tasks from repeatedly bouncing between lifecycle states.
+  category: fix
+  dev: Trust verified intentional skips and preserve durable merger blockers during graph unwind.
+- 8eb050e: summary: Clear stale Planning badges when refreshed task state shows execution has advanced.
+  category: fix
+  dev: Equal-clock complete snapshots clear stale lifecycle status without erasing newer planner activity.
+- 4739f8a: summary: Warm extension-host task stores up front so fn*task*\* tools never hit a lazy second-pool boot.
+  category: fix
+  dev: Populates setHostTaskStore for every registered project from the already-running ProjectEngine TaskStores at dashboard startup, so extension API tools (fn_task_update, fn_task_archive, fn_agent_show) find a cached store and never fall through to createTaskStoreForBackend, which could time out creating a second connection pool. cwd is skipped because its store is already injected. Non-fatal warnings on any per-project failure.
+- 1f9b0e6: summary: Fix a startup deadlock that made the dashboard stop responding to all requests.
+  category: fix
+  dev: `provisionBuiltinWorkflowRoleAgents` (FN-8764) held a `pg_advisory_xact_lock` transaction while running its reads/writes on the pool, requiring a second connection. With concurrent callers blocking on the same lock and `DEFAULT_POOL_MAX=3`, the pool self-deadlocked and every DB-backed API route queued forever. `listAgents`/`findAgentByName`/`createAgent`/`writeAgent` now accept an optional `QueryHandle` so the provisioning work runs on the locking transaction.
+- 8c76416: summary: Keep every open dashboard synchronized when a task is paused or unpaused.
+  category: fix
+  dev: Treat omitted fields in newer task snapshots as cleared pause lifecycle state.
+- 3ed31e9: summary: Retry execution after the first terminal tool-call failure by default.
+  category: fix
+  dev: The project threshold remains configurable and existing explicit overrides are preserved.
+- 5532019: summary: Keep Planning Mode running when browser storage is unavailable.
+  category: fix
+  dev: Planning draft and active-session persistence now evicts only its scoped key and retries once.
+- c3f4af6: summary: Show four distinct Planning Mode responses plus one write-your-own choice.
+  category: fix
+  dev: Planning question normalization reserves localized fallback alternatives for malformed or restored responses.
+- 297ec17: summary: Let Planning Mode show a useful, context-appropriate set of choices.
+  category: fix
+  dev: Planning prompts now guide 3–5 alternatives without truncating larger valid option sets.
+- 6fd49f7: summary: Keep Messages structure selection within narrow mobile composers.
+  category: fix
+  dev: Shared MessageComposer sizing now contains long structure labels in full-page and modal Messages.
+- fc2040c: summary: Keep legacy agent setting input from changing mission or workflow routing.
+  category: fix
+  dev: Retires residual scheduler, executor, and mission-start compatibility routing authority.
+- 36f20f8: summary: Prevent inactive retained worktrees from exhausting live task capacity.
+  category: fix
+  dev: Shares worktree-capacity admission across execution, planning, merge, and workflow continuation lanes.
+- 3dd824d: summary: Honor project auto-merge consent for shared members and show review advisories before promotion.
+  category: fix
+  dev: Shared member integration now uses canonical task-plus-project consent precedence.
+- 7b010ec: summary: Keep mission autopilot slice progression serial and milestone ordered.
+  category: fix
+  dev: Duplicate completion and recovery signals now stop at the shared serial admission rule.
+- e78c09c: summary: Keep secrets environment fingerprint records out of task worktrees.
+  category: fix
+  dev: Reconciles legacy root records before strict worktree refresh and preserves ambiguous metadata.
+- 1f5c44a: summary: Restore the In progress badge for active dashboard tasks with no transient status.
+  category: fix
+  dev: Uses resolved workflow WIP traits and lifecycle labels across board and list views.
+- cdf81a2: summary: Resume partially completed tasks after restart without reporting a false failure.
+  category: fix
+  dev: Extends bounded unknown-node recovery to resumable partial steps and ignores recovered tool errors in failure attribution.
+- 70a830d: summary: Backfill detailed identities for built-in workflow agents.
+  category: fix
+  dev: Seeds non-destructive instructions, souls, and managed Markdown files while reconciling duplicate built-in provenance.
+- 15418d2: summary: State the enabled default for the ephemeral-agent compatibility setting.
+  category: fix
+  dev: Maps the surfaced Settings help to its canonical project default.
+- 168f7fb: summary: Clarify mission merge behavior and show read-only shared branch status.
+  category: fix
+  dev: Mission detail validates BranchGroup ownership before displaying branch, member, and PR data.
+- ef8828f: summary: Fix tasks stalling forever in progress with no session after the workflow role-agent rollout.
+  category: fix
+  dev: Two deadlocks in FN-8764's role routing, both silent. (1) The in-process runtime never passed its AgentStore into `TaskExecutorOptions`, so routing failed closed at every role-classified node. (2) Durable continuation writes used a bare `upsertWorkflowWorkItem`, whose ON CONFLICT target is not `idx_workflow_work_items_one_active_task_continuation`, so a predecessor the run had already left (the resumed continuation, or a sibling foreach instance sharing the template nodeId) made the write RAISE; the run then re-suspended every dispatch until an operator bounced the card. Every `kind:"task"` continuation write in the executor and triage now goes through the atomic `replaceActiveTaskWorkflowContinuation`. Adds the `task:workflow-run-suspended` run-audit event, logs principal holds and fence-write errors instead of swallowing them, pins the invariant against a real Postgres index, and ratchets the hand-rolled handover as a tombstone.
+- 55e8484: summary: Refresh an empty task Activity Feed when operators open it after execution has started.
+  category: fix
+  dev: Shared task-detail hosts refetch complete task logs when an empty Feed is selected.
+- 039db99: summary: The Todo Lists and Roadmaps plugins now appear in dashboard navigation after being enabled.
+  category: fix
+  dev: Both plugin `manifest.json` files were missing the `dashboardViews` block that `PluginLoader.getPluginDashboardViews` treats as authoritative, so the module-level `dashboardViews` in each `src/index.ts` was discarded and the views were absent from every nav surface.
+
 ## 0.75.1
 
 ### Patch Changes

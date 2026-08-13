@@ -26,7 +26,7 @@ import {
 import { maybeInstallClaudeSkillForNewProject } from "./claude-skills-runner.js";
 import { isGitRepo } from "./git.js";
 import {
-  installBundledFusionSkill,
+  installBundledShippedSkills,
   type SkillInstallResult,
 } from "./skill-installation.js";
 
@@ -121,7 +121,7 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
   await addLocalStorageToGitignore(cwd);
   await warnIfQmdMissing();
 
-  const bundledSkillInstall = installBundledFusionSkill();
+  const bundledSkillInstall = installBundledShippedSkills();
   logBundledSkillInstallResults(bundledSkillInstall.results);
 
   // Register in central database

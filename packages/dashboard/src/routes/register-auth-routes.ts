@@ -13,6 +13,7 @@ import { probeLlamaCpp } from "../llama-cpp-probe.js";
 import { ApiError, badRequest, conflict } from "../api-error.js";
 import { clearUsageCache } from "../usage.js";
 import { invalidateAllGlobalSettingsCaches } from "../project-store-resolver.js";
+import { invalidateModelRegistryRefreshCache } from "../model-registry-refresh-cache.js";
 import type { AuthStorageLike } from "../routes.js";
 import type { ApiRouteRegistrar } from "./types.js";
 import {
@@ -34,6 +35,17 @@ export function parseGitHubCopilotDeviceCode(instructions: string): string | und
 export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
   const { router, options, store, getScopedStore, rethrowAsApiError } = ctx;
   const authStorage = options?.authStorage;
+
+  /*
+  FNXC:ModelCatalog 2026-08-12-01:00:
+  FN-8902 makes catalog freshness safe across credential changes by bumping only
+  this registry's generation. The bump clears success and failure windows but
+  preserves an uncancellable in-flight refresh: a mutation during that flight
+  deliberately accepts bounded temporary staleness rather than overlapping it.
+  */
+  const invalidateModelsAfterCredentialMutation = () => {
+    if (options?.modelRegistry) invalidateModelRegistryRefreshCache(options.modelRegistry);
+  };
 
   /*
   FNXC:ProviderAuth 2026-07-14-14:22:
@@ -1717,7 +1729,8 @@ export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
 
       loginPromise
         .then(() => {
-          // Login completed (user finished OAuth in browser)
+          // Login completed (user finished OAuth in browser).
+          invalidateModelsAfterCredentialMutation();
         })
         .catch((err: unknown) => {
           // Login failed — also reject auth URL if not yet received
@@ -1842,6 +1855,7 @@ export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
       activeLogin.inputSubmitted = true;
       await deliverManualOAuthCallbackToLocalListener(storageProvider, code);
       activeLogin.resolveInput(normalizeManualOAuthInputForProvider(storageProvider, code));
+      invalidateModelsAfterCredentialMutation();
       res.json({ success: true, submitted: true });
     } catch (err: unknown) {
       if (err instanceof ApiError) {
@@ -1933,6 +1947,7 @@ export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
         await storage.logout(toOauthCredentialProviderId(provider));
       }
       clearUsageCache();
+      invalidateModelsAfterCredentialMutation();
       res.json({ success: true });
     } catch (err: unknown) {
       if (err instanceof ApiError) {
@@ -1997,7 +2012,7 @@ export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
         refreshError = error instanceof Error ? error.message : String(error);
       }
 
-      options?.modelRegistry?.refresh?.();
+      invalidateModelsAfterCredentialMutation();
       clearUsageCache();
       res.json({
         success: true,
@@ -2049,7 +2064,7 @@ export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
       } else {
         await storage.clearApiKey(provider);
       }
-      // No model refresh needed on delete: removing the key leaves nothing to sync.
+      invalidateModelsAfterCredentialMutation();
       clearUsageCache();
       res.json({ success: true });
     } catch (err: unknown) {
@@ -2102,6 +2117,8 @@ export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
       const storage = getAuthStorage();
       if (!storage.getInstance?.(ref) || !storage.setDefaultInstance) throw new ApiError(404, "Credential instance not found");
       await storage.setDefaultInstance(ref);
+      invalidateModelsAfterCredentialMutation();
+      clearUsageCache();
       res.json({ success: true });
     } catch (err: unknown) { if (err instanceof ApiError) throw err; rethrowAsApiError(err); }
   });
@@ -2112,6 +2129,7 @@ export const registerAuthRoutes: ApiRouteRegistrar = (ctx) => {
       const storage = getAuthStorage();
       if (!storage.getInstance?.(ref) || !storage.removeInstance) throw new ApiError(404, "Credential instance not found");
       await storage.removeInstance(ref);
+      invalidateModelsAfterCredentialMutation();
       clearUsageCache();
       res.json({ success: true });
     } catch (err: unknown) { if (err instanceof ApiError) throw err; rethrowAsApiError(err); }

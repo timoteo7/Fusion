@@ -394,7 +394,7 @@ export async function listArtifactsImpl(store: TaskStore, options?: { type?: Art
     // PG backend mode: delegate to the AsyncDataLayer helper. The sync path
     // below dereferences store.db (no SQLite handle in backend mode) and 500'd
     // the dashboard /api/artifacts list.
-        return listArtifactsAsync(store.asyncLayer!.db, options);
+        return listArtifactsAsync(store.asyncLayer!.db, options, store.asyncLayer!.projectId);
 }
 
 /*

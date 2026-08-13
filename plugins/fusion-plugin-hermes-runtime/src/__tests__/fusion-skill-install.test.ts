@@ -1,11 +1,13 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   getFusionSkillSourceCandidates,
+  installComputerUseSkillIntoHermesHome,
   installFusionSkillIntoHermesHome,
   resolveBundledFusionSkillSourceFromCandidates,
+  shouldInstallComputerUseSkill,
 } from "../fusion-skill-install.js";
 
 const tempDirs: string[] = [];
@@ -16,9 +18,9 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-function makeSkillSource(dir: string): void {
+function makeSkillSource(dir: string, body = "# Fusion Skill\n"): void {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(path.join(dir, "SKILL.md"), "# Fusion Skill\n");
+  writeFileSync(path.join(dir, "SKILL.md"), body);
 }
 
 afterEach(() => {
@@ -115,5 +117,59 @@ describe("fusion skill installer", () => {
 
     const result = installFusionSkillIntoHermesHome({ sourceDir: source });
     expect(result.outcome).toBe("replaced");
+  });
+
+  it("installs computer-use on Darwin and preserves repeat/profile outcomes", () => {
+    const home = tempDir("hermes-home-");
+    const source = path.join(tempDir("computer-source-"), "computer-use");
+    makeSkillSource(source, "# computer-use skill\n");
+    process.env.HERMES_HOME = home;
+    expect(installComputerUseSkillIntoHermesHome({ sourceDir: source, platform: "darwin" }).outcome).toBe("installed");
+    expect(installComputerUseSkillIntoHermesHome({ sourceDir: source, platform: "darwin" }).outcome).toBe("already-installed");
+    const profiled = installComputerUseSkillIntoHermesHome({ sourceDir: source, platform: "darwin", profile: "work" });
+    expect(profiled.targetDir).toBe(path.join(home, "profiles", "work", "skills", "computer-use"));
+  });
+
+  it("replaces stale computer-use installs but protects user targets", () => {
+    const home = tempDir("hermes-home-");
+    const source = path.join(tempDir("computer-source-"), "computer-use");
+    const old = path.join(tempDir("computer-old-"), "computer-use");
+    makeSkillSource(source, "# computer-use skill\n");
+    makeSkillSource(old, "# computer-use skill\n");
+    process.env.HERMES_HOME = home;
+    const target = path.join(home, "skills", "computer-use");
+    makeSkillSource(target, "# computer-use skill\n");
+    expect(installComputerUseSkillIntoHermesHome({ sourceDir: source, platform: "darwin" }).outcome).toBe("replaced");
+    rmSync(target, { recursive: true, force: true });
+    symlinkSync(old, target, "dir");
+    expect(installComputerUseSkillIntoHermesHome({ sourceDir: source, platform: "darwin" }).outcome).toBe("replaced");
+    rmSync(target, { recursive: true, force: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(path.join(target, "README.md"), "mine");
+    expect(installComputerUseSkillIntoHermesHome({ sourceDir: source, platform: "darwin" }).outcome).toBe("skipped");
+  });
+
+  it("enforces the platform gate before touching Hermes home", () => {
+    const home = tempDir("hermes-home-");
+    const source = path.join(tempDir("computer-source-"), "computer-use");
+    makeSkillSource(source, "# computer-use skill\n");
+    process.env.HERMES_HOME = home;
+    expect(shouldInstallComputerUseSkill("darwin")).toBe(true);
+    expect(shouldInstallComputerUseSkill("linux")).toBe(false);
+    expect(shouldInstallComputerUseSkill("win32")).toBe(false);
+    for (const platform of ["linux", "win32"] as const) {
+      expect(installComputerUseSkillIntoHermesHome({ sourceDir: source, platform }).outcome).toBe("skipped");
+      expect(existsSync(path.join(home, "skills"))).toBe(false);
+    }
+    const stale = path.join(home, "skills", "computer-use");
+    makeSkillSource(stale, "# computer-use skill\nold");
+    expect(installComputerUseSkillIntoHermesHome({ sourceDir: source, platform: "linux" }).outcome).toBe("skipped");
+    expect(readFileSync(path.join(stale, "SKILL.md"), "utf8")).toContain("old");
+    expect(installFusionSkillIntoHermesHome({ sourceDir: source }).outcome).toBe("installed");
+  });
+
+  it("warns for a missing computer-use source on Darwin", () => {
+    process.env.HERMES_HOME = tempDir("hermes-home-");
+    expect(installComputerUseSkillIntoHermesHome({ sourceDir: null, platform: "darwin" }).outcome).toBe("warning");
   });
 });

@@ -1,9 +1,15 @@
 import "./MissionManager.css";
-import { useState, useEffect, useCallback, useRef, useMemo, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getErrorMessage, type Goal } from "@fusion/core";
+import {
+  featureValidationRepairEligibility,
+  getErrorMessage,
+  type DriftAlignment,
+  type Goal,
+  type MissionBlockerDescriptor,
+} from "@fusion/core";
 import {
   X,
   Plus,
@@ -81,6 +87,10 @@ import {
   previewEnrichedDescription,
   resumeMission,
   stopMission,
+  clearMissionBlockedStatus,
+  fetchMissionBlockedDiagnostics,
+  normalizeMissionBlockers,
+  parseMissionResumeConflict,
   startMission,
   updateMissionAutopilot,
   fetchMissionsHealth,
@@ -95,6 +105,9 @@ import {
   fetchMilestoneValidation,
   fetchMilestoneValidationTelemetry,
   triggerValidation,
+  VALIDATION_ALREADY_RUNNING,
+  repairFeatureValidation,
+  reconcileMission,
   fetchValidationLoopState,
   fetchValidationRuns,
   fetchValidationRun,
@@ -107,6 +120,7 @@ import {
   api,
   type AiSessionSummary,
   type BranchGroupSummary,
+  type MissionReconcilePassResult,
 } from "../api";
 import type { AutopilotState, MissionInterviewDraftSummary } from "./mission-types";
 import { readCache, SWR_CACHE_KEYS, writeCache } from "../utils/swrCache";
@@ -235,6 +249,15 @@ function getInterviewStatusLabel(status: AiSessionSummary["status"], t: (key: st
   }
 }
 
+/**
+ * FNXC:MissionBlockedRepair 2026-08-11-02:56:
+ * Feature-validation repair intentionally does not change mission status. Both badge surfaces use
+ * this shared eligibility helper so a stale mission badge always has the same explicit repair path.
+ */
+export function getMissionBlockedRepairState(mission: Pick<Mission, "status">, blockers: MissionBlockerDescriptor[]): { showClear: boolean; blockers: MissionBlockerDescriptor[] } {
+  return { showClear: mission.status === "blocked", blockers: mission.status === "blocked" ? blockers : [] };
+}
+
 function getMissionRunHelperText(status: MissionStatus, t: (key: string, fallback: string) => string): string | null {
   switch (status) {
     case "planning":
@@ -242,7 +265,7 @@ function getMissionRunHelperText(status: MissionStatus, t: (key: string, fallbac
     case "active":
       return t("missions.runHelperActive", "Stopping pauses linked tasks and marks the mission blocked.");
     case "blocked":
-      return t("missions.runHelperBlocked", "Resuming re-activates the mission and continues execution.");
+      return t("missions.runHelperBlocked", "Resume re-activates execution; Clear blocked status repairs only a stale badge.");
     default:
       return null;
   }
@@ -358,6 +381,42 @@ const EMPTY_MISSION_FORM: MissionFormData = {
   },
   taskPrefix: "",
 };
+
+interface MissionMergeBehaviorFieldProps {
+  value: MissionAutoMergeOverride;
+  onChange: (value: MissionAutoMergeOverride) => void;
+  t: (key: string, fallback: string) => string;
+}
+
+/*
+FNXC:MissionAutoMerge 2026-08-08-16:11:
+Every Mission Manager create and edit surface must explain the same three merge
+choices beside its selector: inherited project behavior, feature-by-feature
+auto-merge, and the shared-branch single-pull-request review path. A shared
+field prevents a duplicated form path from silently omitting that contract.
+*/
+export function MissionMergeBehaviorField({ value, onChange, t }: MissionMergeBehaviorFieldProps) {
+  return (
+    <label>
+      {t("missions.autoMergeOverride", "Merge behavior")}
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value as MissionAutoMergeOverride)}
+        aria-label={t("missions.autoMergeOverrideAriaLabel", "Mission auto-merge override")}
+      >
+        <option value="inherit">{t("missions.autoMergeInherited", "Use project default")}</option>
+        <option value="on">{t("missions.autoMergeOn", "Auto-merge")}</option>
+        <option value="off">{t("missions.singlePullRequest", "Single pull request")}</option>
+      </select>
+      <small className="mission-detail__autopilot-description">
+        {t(
+          "missions.autoMergeOverrideDescription",
+          "Inherited follows the project setting. Auto-merge lands each feature as it passes. Single pull request keeps every feature on one shared branch for joint review and merge.",
+        )}
+      </small>
+    </label>
+  );
+}
 
 const EMPTY_MILESTONE_FORM: MilestoneFormData = {
   title: "",
@@ -695,6 +754,112 @@ function normalizeMissionHierarchy(mission: MissionWithHierarchy): MissionWithHi
   };
 }
 
+/*
+FNXC:MissionValidationRepair 2026-08-11-00:07:
+Both feature presentations must expose the same narrowly-scoped escape from a stale validation badge. This renders only actions allowed by the core predicate, so a live validation or implementation cycle is never pre-empted and the execution loop remains unable to escape blocked on its own.
+*/
+/*
+FNXC:MissionReconcileControl 2026-08-11-06:49:
+Preview content is the dry-run result from the server authority, not a browser-derived plan.
+Nothing mutates until the operator explicitly applies this panel.
+*/
+function MissionReconcilePreview({
+  result,
+  featureTitles,
+  busy,
+  disabled,
+  onApply,
+  onDismiss,
+  t,
+}: {
+  result: MissionReconcilePassResult;
+  featureTitles: Map<string, string>;
+  busy: "preview" | "apply" | null;
+  disabled: boolean;
+  onApply: () => void;
+  onDismiss: () => void;
+  t: ReturnType<typeof useTranslation>["t"];
+}) {
+  const planned = result.planned ?? [];
+  const isEmpty = planned.length === 0 && result.statusUpdates === 0 && result.badgeRepairs === 0 && result.terminalRepairs === 0;
+  /*
+  FNXC:MissionReconcileUI 2026-08-11-07:37 DELIBERATE-LITERAL:
+  The reconciliation API's `skippedReason` discriminant describes mission state; it is not a task lifecycle column or move target.
+  Hoist the check so preview copy and apply eligibility share one interpretation of the archived-mission response.
+  */
+  const missionIsArchived = result.skippedReason === "archived";
+  const canApply = !missionIsArchived && !isEmpty && planned.length > 0;
+
+  return (
+    <section className="mission-detail__reconcile-panel" aria-label={t("missions.reconcilePreview", "Reconcile preview")}>
+      <div className="mission-detail__reconcile-summary">
+        <span>{t("missions.reconcileStatusUpdates", "Status updates: {{count}}", { count: result.statusUpdates })}</span>
+        <span>{t("missions.reconcileBadgeRepairs", "Badge repairs: {{count}}", { count: result.badgeRepairs })}</span>
+        <span>{t("missions.reconcileTerminalRepairs", "Terminal repairs: {{count}}", { count: result.terminalRepairs })}</span>
+      </div>
+      {missionIsArchived ? <p>{t("missions.reconcileArchived", "Mission is archived — nothing reconciled")}</p>
+        : isEmpty ? <p>{t("missions.reconcileUpToDate", "Already up to date")}</p>
+          : <ul className="mission-detail__reconcile-list">{planned.map((entry) => (
+            <li key={`${entry.featureId}:${entry.action}`}>
+              {featureTitles.get(entry.featureId) ?? entry.featureId} — {entry.action}
+            </li>
+          ))}</ul>}
+      <div className="mission-detail__reconcile-actions">
+        {canApply && <button className="mission-btn mission-btn--primary mission-btn--sm" onClick={onApply} disabled={busy !== null || disabled} data-testid="mission-reconcile-apply">
+          {busy === "apply" ? <Loader2 className="spinner" /> : <Check />}<span>{t("missions.applyReconcile", "Apply reconcile")}</span>
+        </button>}
+        <button className="mission-btn mission-btn--ghost mission-btn--sm" onClick={onDismiss} disabled={busy !== null}>
+          <span>{t("common.dismiss", "Dismiss")}</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function FeatureValidationRepairActions({
+  feature,
+  busy,
+  onClear,
+  onReRun,
+  t,
+}: {
+  feature: Pick<MissionFeature, "id" | "status" | "loopState">;
+  busy: boolean;
+  onClear: (featureId: string) => void;
+  onReRun: (featureId: string) => void;
+  t: ReturnType<typeof useTranslation>["t"];
+}) {
+  const eligibility = featureValidationRepairEligibility(feature);
+  if (!eligibility.clear && !eligibility.reRun) return null;
+
+  return (
+    <>
+      {eligibility.clear && (
+        <button
+          className="mission-icon-btn mission-icon-btn--repair"
+          onClick={() => onClear(feature.id)}
+          title={t("missions.clearValidationBadge", "Clear validation badge")}
+          aria-label={t("missions.clearValidationBadge", "Clear validation badge")}
+          disabled={busy}
+        >
+          {busy ? <Loader2 size={14} className="spinner" /> : <X size={14} />}
+        </button>
+      )}
+      {eligibility.reRun && (
+        <button
+          className="mission-icon-btn mission-icon-btn--repair"
+          onClick={() => onReRun(feature.id)}
+          title={t("missions.rerunValidation", "Re-run validation")}
+          aria-label={t("missions.rerunValidation", "Re-run validation")}
+          disabled={busy}
+        >
+          {busy ? <Loader2 size={14} className="spinner" /> : <RefreshCw size={14} />}
+        </button>
+      )}
+    </>
+  );
+}
+
 export function MissionManager({ isOpen, isInline = false, onClose, addToast, projectId, workflowId, onSelectTask, availableTasks = [], resumeSessionId, targetMissionId, milestoneSliceResumeSessionId, onMilestoneSliceResumeFetchError, onNavigateToGoal }: MissionManagerProps) {
   const { t } = useTranslation("app");
   const { confirm } = useConfirm();
@@ -708,6 +873,9 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
   const initialMissions = readCache<MissionWithSummary[]>(missionsCacheKey);
   const [missions, setMissions] = useState<MissionWithSummary[]>(() => (Array.isArray(initialMissions) ? initialMissions : []));
   const [selectedMission, setSelectedMission] = useState<MissionWithHierarchy | null>(null);
+  const [selectedMissionIntentId, setSelectedMissionIntentId] = useState<string | null>(null);
+  const [reconcileBusy, setReconcileBusy] = useState<"preview" | "apply" | null>(null);
+  const [reconcilePreview, setReconcilePreview] = useState<{ missionId: string; result: MissionReconcilePassResult } | null>(null);
   const [selectedMissionBranchGroup, setSelectedMissionBranchGroup] = useState<BranchGroupSummary | null>(null);
   const [loading, setLoading] = useState(!(Array.isArray(initialMissions) && initialMissions.length > 0));
   const hasHydratedRef = useRef(Array.isArray(initialMissions) && initialMissions.length > 0);
@@ -781,7 +949,6 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
     persistSidebarWidth(nextWidth);
   }, [isMobile, persistSidebarWidth, sidebarWidth]);
 
-  // Form states
   const [isCreatingMission, setIsCreatingMission] = useState(false);
   const [editingMissionId, setEditingMissionId] = useState<string | null>(null);
   const [missionForm, setMissionForm] = useState<MissionFormData>(EMPTY_MISSION_FORM);
@@ -981,6 +1148,11 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
   const [validationTelemetry, setValidationTelemetry] = useState<MilestoneValidationTelemetry | null>(null);
   const [validationRoundsExpanded, setValidationRoundsExpanded] = useState(true);
   const [validatingFeatures, setValidatingFeatures] = useState<Set<string>>(new Set());
+  const [repairingValidationFeatures, setRepairingValidationFeatures] = useState<Set<string>>(new Set());
+  const [missionBlockers, setMissionBlockers] = useState<MissionBlockerDescriptor[]>([]);
+  const [missionBlockedDiagnosticsError, setMissionBlockedDiagnosticsError] = useState(false);
+  const [clearingBlockedMissionId, setClearingBlockedMissionId] = useState<string | null>(null);
+  const [missionBlockedReason, setMissionBlockedReason] = useState("");
 
   // Feature loop state
   const [featureLoopStates, setFeatureLoopStates] = useState<Map<string, MissionFeatureLoopSnapshot>>(new Map());
@@ -1004,7 +1176,40 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
   const missionEventsRef = useRef<MissionEvent[]>([]);
   const missionsRef = useRef<MissionWithSummary[]>([]);
   const selectedMissionRef = useRef<MissionWithHierarchy | null>(null);
+  // Intent changes synchronously on list clicks while committed detail intentionally lags its fetch.
+  const selectedMissionIntentRef = useRef<string | null>(null);
   const selectedMilestoneIdRef = useRef<string | null>(null);
+  /*
+  FNXC:MissionBranchGroupDetail 2026-08-08-16:58:
+  Mission selection can issue overlapping detail requests. Keep only the latest
+  response authoritative so a delayed prior mission cannot restore its hierarchy
+  or trigger a stale shared-branch scan after the operator has selected another.
+  */
+  const missionDetailRequestGenerationRef = useRef(0);
+  /*
+  FNXC:MissionReconcileControl 2026-08-11-06:49:
+  Reconcile responses are generation-guarded on success, rejection, and cleanup. A late loser
+  cannot alter a new mission, while a selection boundary owns synchronous busy/preview release.
+  */
+  const reconcileRequestGenerationRef = useRef(0);
+  const invalidateReconcileRequests = useCallback((nextIntentMissionId: string | null) => {
+    reconcileRequestGenerationRef.current += 1;
+    selectedMissionIntentRef.current = nextIntentMissionId;
+    setSelectedMissionIntentId(nextIntentMissionId);
+    setReconcileBusy(null);
+    setReconcilePreview(null);
+  }, []);
+  /*
+  FNXC:MissionBranchGroupDetail 2026-08-08-17:07:
+  Returning to the mission list, deleting the selected mission, hiding this
+  inline view, or unmounting also changes selection. Invalidate in-flight
+  detail reads at each of those boundaries so they cannot resurrect a detail
+  after the operator has left it.
+  */
+  const invalidateMissionDetailRequests = useCallback(() => {
+    missionDetailRequestGenerationRef.current += 1;
+    invalidateReconcileRequests(null);
+  }, [invalidateReconcileRequests]);
   // FNXC:MilestoneValidationFreshness 2026-08-01-20:42: Rollup and telemetry responses share one per-milestone generation so an older request cannot restore a repaired failed badge, while a newer failure remains valid.
   const validationRequestGenerationRef = useRef(new MilestoneValidationFreshnessCoordinator());
   const activeTabRef = useRef<"structure" | "activity">("structure");
@@ -1036,6 +1241,15 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
   }, [eventsTotal, missions, selectedMission?.eventCount, selectedMission?.id]);
 
   const displayedMissionEvents = useMemo(() => [...missionEvents].reverse(), [missionEvents]);
+  const reconcileFeatureTitles = useMemo(() => new Map(
+    (selectedMission?.milestones ?? []).flatMap((milestone) => milestone.slices.flatMap((slice) =>
+      slice.features.map((feature) => [feature.id, feature.title] as const),
+    )),
+  ), [selectedMission]);
+
+  useEffect(() => {
+    setReconcilePreview(null);
+  }, [selectedMission?.id]);
 
   // Keep latest state available to long-lived SSE handlers without reconnect churn.
   missionsRef.current = missions;
@@ -1147,14 +1361,28 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
   }, [addToast, projectId, t]);
 
   const loadMissionDetail = useCallback(async (missionId: string) => {
+    /*
+    FNXC:MissionReconcileControl 2026-08-11-07:20:
+    Every detail-load entry point, including `targetMissionId` deep links, is a selection boundary.
+    Update intent before fetching so a new deep-linked mission can reconcile once it commits.
+    */
+    if (selectedMissionIntentRef.current !== missionId) {
+      invalidateReconcileRequests(missionId);
+    }
+    const requestGeneration = ++missionDetailRequestGenerationRef.current;
     try {
       setDetailLoading(true);
       const payload = await fetchMission(missionId, projectId);
+      if (requestGeneration !== missionDetailRequestGenerationRef.current) return;
       if (!payload || typeof payload !== "object") {
         throw new Error("Malformed mission detail response");
       }
 
       const data = normalizeMissionHierarchy(payload as MissionWithHierarchy);
+      if (selectedMissionIntentRef.current === null) {
+        selectedMissionIntentRef.current = data.id;
+        setSelectedMissionIntentId(data.id);
+      }
       setSelectedMission(data);
       if (data.milestones.length > 0) {
         const firstMilestoneId = data.milestones[0].id;
@@ -1200,12 +1428,38 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
         setValidationTelemetry(null);
       }
     } catch (err) {
+      if (requestGeneration !== missionDetailRequestGenerationRef.current) return;
       console.error("[MissionManager] loadMissionDetail:", err);
       addToast(getErrorMessage(err) || t("missions.loadDetailFailed", "Failed to load mission details"), "error");
     } finally {
-      setDetailLoading(false);
+      if (requestGeneration === missionDetailRequestGenerationRef.current) {
+        setDetailLoading(false);
+      }
     }
-  }, [addToast, loadAssertionsForMilestone, loadValidationRollup, projectId]);
+  }, [addToast, invalidateReconcileRequests, loadAssertionsForMilestone, loadValidationRollup, projectId]);
+
+  /*
+  FNXC:MissionBranchGroupDetail 2026-08-08-16:11:
+  Mission detail may resolve multiple linked tasks asynchronously. Reset first and
+  cancel the prior scan when mission, project, or component ownership changes so
+  an unavailable candidate can be skipped but an old response never leaks its
+  branch, member count, or PR state into the current mission.
+  */
+  /*
+  FNXC:SpecLockMissionAlignment 2026-08-10-16:17:
+  FN-8845 keeps delivery status and spec alignment independent. Mission reconciliation persists
+  its deterministic projection on linked features; render that shared state rather than performing
+  browser-only task-report joins that can disagree with periodic/autopilot reconciliation. An
+  unlinked or archived feature remains unavailable and never receives a fabricated projection.
+  */
+  const featureSpecAlignments = useMemo<Record<string, DriftAlignment>>(() => Object.fromEntries(
+    (selectedMission?.milestones ?? []).flatMap((milestone) => milestone.slices.flatMap((slice) =>
+      slice.features.map((feature) => [
+        feature.id,
+        feature.taskId ? (feature.specAlignment ?? "unavailable") : "unavailable",
+      ] as const),
+    )),
+  ), [selectedMission]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1304,38 +1558,32 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
     });
   }, [selectedMilestoneId]);
 
-  const refreshValidationTelemetry = useCallback((milestoneId: string) => {
-    if (!milestoneId || milestoneId !== selectedMilestoneIdRef.current) {
-      return;
-    }
+  const refreshValidationTelemetry = useCallback(async (milestoneId: string) => {
+    if (!milestoneId || milestoneId !== selectedMilestoneIdRef.current) return;
     const generation = beginValidationRequest(milestoneId);
-
-    void fetchMilestoneValidationTelemetry(milestoneId, projectId)
-      .then((telemetry) => {
-        if (selectedMilestoneIdRef.current !== milestoneId
-          || !isCurrentValidationRequest(milestoneId, generation)) {
-          return;
-        }
-        if (!isMilestoneValidationTelemetry(telemetry)) {
-          setValidationTelemetry(null);
-          void loadValidationRollup(milestoneId);
-          return;
-        }
-        setValidationTelemetry(telemetry);
-        setValidationRollupByMilestone((prev) => {
-          const next = new Map(prev);
-          next.set(milestoneId, telemetry.rollup);
-          return next;
-        });
-      })
-      .catch(() => {
-        // Telemetry is supplemental, but the shared generation requires a fresh rollup fallback.
-        if (selectedMilestoneIdRef.current === milestoneId
-          && isCurrentValidationRequest(milestoneId, generation)) {
-          setValidationTelemetry(null);
-          void loadValidationRollup(milestoneId);
-        }
+    try {
+      const telemetry = await fetchMilestoneValidationTelemetry(milestoneId, projectId);
+      if (selectedMilestoneIdRef.current !== milestoneId
+        || !isCurrentValidationRequest(milestoneId, generation)) return;
+      if (!isMilestoneValidationTelemetry(telemetry)) {
+        setValidationTelemetry(null);
+        void loadValidationRollup(milestoneId);
+        return;
+      }
+      setValidationTelemetry(telemetry);
+      setValidationRollupByMilestone((prev) => {
+        const next = new Map(prev);
+        next.set(milestoneId, telemetry.rollup);
+        return next;
       });
+    } catch {
+      // Telemetry is supplemental, but the shared generation requires a fresh rollup fallback.
+      if (selectedMilestoneIdRef.current === milestoneId
+        && isCurrentValidationRequest(milestoneId, generation)) {
+        setValidationTelemetry(null);
+        void loadValidationRollup(milestoneId);
+      }
+    }
   }, [beginValidationRequest, isCurrentValidationRequest, loadValidationRollup, projectId]);
 
   const loadMissionEvents = useCallback(async (
@@ -1511,6 +1759,7 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
         try {
           const deletedMissionId = JSON.parse(messageEvent.data) as string;
           if (deletedMissionId && selectedMissionRef.current?.id === deletedMissionId) {
+            invalidateMissionDetailRequests();
             setSelectedMission(null);
           }
         } catch {
@@ -1744,6 +1993,7 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
   }, [
     isActive,
     isActivityScrolledNearBottom,
+    invalidateMissionDetailRequests,
     loadMissionDetail,
     loadMissionHealth,
     loadMissions,
@@ -1858,13 +2108,14 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
       await deleteMission(missionId, projectId);
       addToast(t("missions.deleted", "Mission deleted"), "success");
       if (selectedMission?.id === missionId) {
+        invalidateMissionDetailRequests();
         setSelectedMission(null);
       }
       await loadMissions();
     } catch (err) {
       addToast(getErrorMessage(err) || t("missions.deleteFailed", "Failed to delete mission"), "error");
     }
-  }, [addToast, loadMissions, selectedMission, projectId, t]);
+  }, [addToast, invalidateMissionDetailRequests, loadMissions, selectedMission, projectId, t]);
 
   const requestDeleteMission = useCallback(async (missionId: string) => {
     /*
@@ -2380,7 +2631,19 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
         return next;
       });
     } catch (err) {
-      addToast(getErrorMessage(err) || t("missions.validationTriggerFailed", "Failed to trigger validation"), "error");
+      if (err instanceof ApiRequestError
+        && err.status === 409
+        && (err.details as { code?: string } | undefined)?.code === VALIDATION_ALREADY_RUNNING) {
+        addToast(t("missions.validationAlreadyRunning", "Validation is already running for this feature"), "info");
+        try {
+          const snapshot = await fetchValidationLoopState(featureId, projectId);
+          setFeatureLoopStates((prev) => new Map(prev).set(featureId, snapshot));
+        } catch {
+          // FNXC:MissionValidation 2026-08-11-03:43: Preserve the specific conflict message when the live-state refresh races its owning validator.
+        }
+      } else {
+        addToast(getErrorMessage(err) || t("missions.validationTriggerFailed", "Failed to trigger validation"), "error");
+      }
     } finally {
       setValidatingFeatures((prev) => {
         const next = new Set(prev);
@@ -2402,6 +2665,84 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
       // Silently fail
     }
   }, [projectId]);
+
+
+  const applyValidationRepairSnapshot = useCallback((updated: MissionFeature) => {
+    setSelectedMission((current) => current ? {
+      ...current,
+      milestones: current.milestones.map((milestone) => ({
+        ...milestone,
+        slices: milestone.slices.map((slice) => ({
+          ...slice,
+          features: slice.features.map((feature) => feature.id === updated.id ? { ...feature, ...updated } : feature),
+        })),
+      })),
+    } : current);
+    setValidationTelemetry((current) => current ? {
+      ...current,
+      fixFeatures: current.fixFeatures.map((feature) => feature.id === updated.id ? { ...feature, ...updated } : feature),
+    } : current);
+  }, []);
+
+  const handleClearValidationBadge = useCallback(async (featureId: string) => {
+    try {
+      setRepairingValidationFeatures((prev) => new Set(prev).add(featureId));
+      const repaired = await repairFeatureValidation(featureId, "clear", undefined, projectId);
+      if ("id" in repaired) applyValidationRepairSnapshot(repaired);
+      addToast(t("missions.validationBadgeCleared", "Validation badge cleared"), "success");
+      /*
+      FNXC:MissionValidationRepair 2026-08-11-02:10:
+      A successful repair changes the feature row itself, not only its validation snapshot.
+      Refresh the selected mission and validation telemetry so both the canonical row and generated
+      fix-feature header lose stale badges immediately without a browser reload.
+      */
+      await Promise.all([
+        loadFeatureLoopState(featureId),
+        selectedMission?.id ? loadMissionDetail(selectedMission.id) : Promise.resolve(),
+        selectedMilestoneId ? refreshValidationTelemetry(selectedMilestoneId) : Promise.resolve(),
+      ]);
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        addToast(t("missions.validationStateChanged", "Feature state changed — refreshed"), "error");
+        await loadFeatureLoopState(featureId);
+      } else {
+        addToast(getErrorMessage(err) || t("missions.validationRepairFailed", "Failed to repair validation state"), "error");
+      }
+    } finally {
+      setRepairingValidationFeatures((prev) => {
+        const next = new Set(prev);
+        next.delete(featureId);
+        return next;
+      });
+    }
+  }, [addToast, applyValidationRepairSnapshot, loadFeatureLoopState, loadMissionDetail, projectId, refreshValidationTelemetry, selectedMilestoneId, selectedMission?.id]);
+
+  const handleRerunValidation = useCallback(async (featureId: string) => {
+    try {
+      setRepairingValidationFeatures((prev) => new Set(prev).add(featureId));
+      const repaired = await repairFeatureValidation(featureId, "re_run", undefined, projectId);
+      if ("id" in repaired) applyValidationRepairSnapshot(repaired);
+      addToast(t("missions.validationRerun", "Validation re-run started"), "success");
+      await Promise.all([
+        loadFeatureLoopState(featureId),
+        selectedMission?.id ? loadMissionDetail(selectedMission.id) : Promise.resolve(),
+        selectedMilestoneId ? refreshValidationTelemetry(selectedMilestoneId) : Promise.resolve(),
+      ]);
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        addToast(t("missions.validationStateChanged", "Feature state changed — refreshed"), "error");
+        await loadFeatureLoopState(featureId);
+      } else {
+        addToast(getErrorMessage(err) || t("missions.validationRepairFailed", "Failed to repair validation state"), "error");
+      }
+    } finally {
+      setRepairingValidationFeatures((prev) => {
+        const next = new Set(prev);
+        next.delete(featureId);
+        return next;
+      });
+    }
+  }, [addToast, applyValidationRepairSnapshot, loadFeatureLoopState, loadMissionDetail, projectId, refreshValidationTelemetry, selectedMilestoneId, selectedMission?.id]);
 
   // Load validation runs for a feature
   const loadValidationRuns = useCallback(async (featureId: string) => {
@@ -2471,6 +2812,35 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
     }
   }, [projectId]);
 
+  useEffect(() => {
+    if (!selectedMission || selectedMission.status !== "blocked") {
+      setMissionBlockers([]); setMissionBlockedDiagnosticsError(false); return;
+    }
+    let cancelled = false;
+    fetchMissionBlockedDiagnostics(selectedMission.id, projectId).then((diagnostics) => {
+      if (!cancelled) {
+        const blockers = diagnostics?.blockers;
+        // FNXC:MissionBlockedRepair 2026-08-11-03:15:
+        // A malformed diagnostics response must retain the clear control but identify its blocker
+        // explanation as unavailable instead of presenting an authoritative-looking empty list.
+        setMissionBlockers(normalizeMissionBlockers(blockers));
+        setMissionBlockedDiagnosticsError(!Array.isArray(blockers));
+      }
+    }).catch(() => { if (!cancelled) { setMissionBlockers([]); setMissionBlockedDiagnosticsError(true); } });
+    return () => { cancelled = true; };
+  }, [projectId, selectedMission?.id, selectedMission?.status]);
+
+  const handleClearMissionBlockedStatus = useCallback(async (missionId: string, reason?: string) => {
+    try {
+      setClearingBlockedMissionId(missionId);
+      const result = await clearMissionBlockedStatus(missionId, reason?.trim() ? { reason: reason.trim() } : {}, projectId);
+      setMissionBlockers(normalizeMissionBlockers(result.blockers));
+      addToast(result.blockers.length > 0 ? t("missions.blockedClearedStillGated", "Blocked status cleared; automation remains gated until Resume.") : t("missions.blockedCleared", "Blocked status cleared"), result.blockers.length > 0 ? "warning" : "success");
+      await loadMissionDetail(missionId); loadMissions();
+    } catch (err) { addToast(getErrorMessage(err) || t("missions.clearBlockedFailed", "Failed to clear blocked status"), "error"); }
+    finally { setClearingBlockedMissionId(null); }
+  }, [addToast, loadMissionDetail, loadMissions, projectId, t]);
+
   // Toggle feature expansion to show run history
   const toggleFeatureExpanded = useCallback(async (featureId: string) => {
     if (expandedFeatureId === featureId) {
@@ -2501,9 +2871,15 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
       await loadMissionDetail(missionId);
       loadMissions();
     } catch (err) {
-      addToast(getErrorMessage(err) || t("missions.resumeFailed", "Failed to resume mission"), "error");
+      const conflict = parseMissionResumeConflict(err);
+      if (conflict && conflict.blockers.length > 0) {
+        setMissionBlockers(conflict.blockers);
+        setMissionBlockedDiagnosticsError(false);
+        const rendered = conflict.blockers.map((blocker) => `${blocker.rootFeatureId} — ${blocker.reason}`).join(", ");
+        addToast(t("missions.resumeBlocked", { blockers: rendered, defaultValue: "Mission cannot resume until its recorded blockers are resolved: {{blockers}}" }), "error");
+      } else addToast(getErrorMessage(err) || t("missions.resumeFailed", "Failed to resume mission"), "error");
     }
-  }, [addToast, loadMissionDetail, loadMissions, projectId]);
+  }, [addToast, loadMissionDetail, loadMissions, projectId, t]);
 
   // Stop mission — set status to "blocked" and pause all linked tasks
   const handleStopMission = useCallback(async (missionId: string) => {
@@ -2591,7 +2967,57 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
     }
   }, [addToast, loadMissionDetail, loadMissions, projectId]);
 
+  const isReconcileRequestStale = useCallback((generation: number, missionId: string) =>
+    generation !== reconcileRequestGenerationRef.current || selectedMissionRef.current?.id !== missionId,
+  []);
+
+  const handleReconcilePreview = useCallback(async (missionId: string) => {
+    // The committed selectedMission is not an intent signal during a detail-load switch.
+    if (missionId !== selectedMissionIntentRef.current) return;
+    const generation = ++reconcileRequestGenerationRef.current;
+    setReconcileBusy("preview");
+    try {
+      const result = await reconcileMission(missionId, { dryRun: true }, projectId);
+      if (isReconcileRequestStale(generation, missionId)) return;
+      setReconcilePreview({ missionId, result });
+    } catch (err) {
+      if (isReconcileRequestStale(generation, missionId)) return;
+      addToast(getErrorMessage(err) || t("missions.reconcilePreviewFailed", "Failed to preview reconcile"), "error");
+    } finally {
+      if (!isReconcileRequestStale(generation, missionId)) setReconcileBusy(null);
+    }
+  }, [addToast, isReconcileRequestStale, projectId, t]);
+
+  const handleReconcileApply = useCallback(async (missionId: string) => {
+    // Refuse an apply dispatched from an old header in the synchronous selection window.
+    if (missionId !== selectedMissionIntentRef.current) return;
+    const generation = ++reconcileRequestGenerationRef.current;
+    setReconcileBusy("apply");
+    try {
+      const result = await reconcileMission(missionId, { dryRun: false }, projectId);
+      if (isReconcileRequestStale(generation, missionId)) return;
+      addToast(t("missions.reconcileApplied", "Reconciled: {{status}} status, {{badge}} badge, {{terminal}} terminal repairs", {
+        status: result.statusUpdates, badge: result.badgeRepairs, terminal: result.terminalRepairs,
+      }), "success");
+      setReconcilePreview(null);
+      await loadMissionDetail(missionId);
+      if (isReconcileRequestStale(generation, missionId)) return;
+      void loadMissions();
+    } catch (err) {
+      if (isReconcileRequestStale(generation, missionId)) return;
+      addToast(getErrorMessage(err) || t("missions.reconcileApplyFailed", "Failed to apply reconcile"), "error");
+    } finally {
+      if (!isReconcileRequestStale(generation, missionId)) setReconcileBusy(null);
+    }
+  }, [addToast, isReconcileRequestStale, loadMissionDetail, loadMissions, projectId, t]);
+
   const handleSelectMission = useCallback((mission: Mission) => {
+    /*
+    FNXC:MissionReconcileControl 2026-08-11-06:49:
+    Detail refs lag a direct mission switch until its fetch commits. Record operator intent and
+    invalidate/release synchronously so the retained old header cannot reconcile an abandoned mission.
+    */
+    invalidateReconcileRequests(mission.id);
     setActiveTab("structure");
     setSelectedMilestoneId(null);
     setValidationTelemetry(null);
@@ -2600,9 +3026,10 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
     setEventsFilter("all");
     setExpandedEventMetadata(new Set());
     loadMissionDetail(mission.id);
-  }, [loadMissionDetail]);
+  }, [invalidateReconcileRequests, loadMissionDetail]);
 
   const handleBackToList = useCallback(() => {
+    invalidateMissionDetailRequests();
     setSelectedMission(null);
     setSelectedMilestoneId(null);
     setValidationTelemetry(null);
@@ -2612,7 +3039,11 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
     setEventsFilter("all");
     setExpandedEventMetadata(new Set());
     loadMissions();
-  }, [loadMissions]);
+  }, [invalidateMissionDetailRequests, loadMissions]);
+
+  useEffect(() => () => {
+    invalidateMissionDetailRequests();
+  }, [invalidateMissionDetailRequests]);
 
   const hasMoreEvents = missionEvents.length < eventsTotal;
   const autopilotState = (selectedMission?.autopilotState ?? "inactive") as AutopilotState;
@@ -2627,9 +3058,15 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
 
   useEffect(() => {
     if (!isActive) {
+      /*
+      FNXC:MissionReconcileControl 2026-08-11-06:49:
+      Inline Mission Manager stays mounted when hidden. Treat that visibility boundary like a
+      deselection so an in-flight reconcile cannot toast or update hidden, abandoned detail.
+      */
+      invalidateMissionDetailRequests();
       previousMobileDetailVisibleRef.current = false;
     }
-  }, [isActive]);
+  }, [invalidateMissionDetailRequests, isActive]);
 
   useEffect(() => {
     const isMobileDetailVisible = isActive && isMobile && Boolean(selectedMission);
@@ -2967,6 +3404,28 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
 
                   <div className="mission-detail__actions">
                     <div className="mission-detail__run-controls">
+                    <button
+                      className="mission-btn mission-btn--ghost"
+                      onClick={() => handleReconcilePreview(selectedMission.id)}
+                      title={t("missions.reconcileNow", "Reconcile now")}
+                      aria-label={t("missions.reconcileNow", "Reconcile now")}
+                      data-testid="mission-reconcile-now"
+                      disabled={reconcileBusy !== null || selectedMissionIntentId !== selectedMission.id}
+                    >
+                      {reconcileBusy === "preview" ? <Loader2 className="spinner" /> : <RefreshCw />}
+                      <span>{t("missions.reconcileNow", "Reconcile now")}</span>
+                    </button>
+                    {reconcilePreview?.missionId === selectedMission.id && (
+                      <MissionReconcilePreview
+                        result={reconcilePreview.result}
+                        featureTitles={reconcileFeatureTitles}
+                        busy={reconcileBusy}
+                        disabled={selectedMissionIntentId !== selectedMission.id}
+                        onApply={() => handleReconcileApply(selectedMission.id)}
+                        onDismiss={() => setReconcilePreview(null)}
+                        t={t}
+                      />
+                    )}
                     {selectedMission.status === "active" && (
                       <button
                         className="mission-btn mission-btn--danger"
@@ -2988,6 +3447,28 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                         <Play size={14} />
                         <span>{t("missions.resumeMission", "Resume mission")}</span>
                       </button>
+                    )}
+                    {getMissionBlockedRepairState(selectedMission, missionBlockers).showClear && (
+                      <>
+                        {/* FNXC:MissionBlockedRepair 2026-08-11-02:56: This mission-level control is separate from feature validation repair because that repair never alters the durable mission badge. */}
+                        <button
+                          className="mission-btn mission-btn--ghost"
+                          onClick={() => handleClearMissionBlockedStatus(selectedMission.id, missionBlockedReason)}
+                          title={t("missions.clearBlockedStatus", "Clear blocked status")}
+                          aria-label={t("missions.clearBlockedStatus", "Clear blocked status")}
+                          disabled={clearingBlockedMissionId === selectedMission.id}
+                        >
+                          <Check size={14} />
+                          <span>{t("missions.clearBlockedStatus", "Clear blocked status")}</span>
+                        </button>
+                        <div className="mission-blocked-repair" aria-label={t("missions.whyBlocked", "Why blocked")}>
+                          <strong>{t("missions.whyBlocked", "Why blocked")}</strong>
+                          {missionBlockedDiagnosticsError ? <span>{t("missions.blockedDiagnosticsUnknown", "Blocker diagnostics are unavailable.")}</span> : missionBlockers.length === 0 ? <span>{t("missions.noRecordedBlockers", "No recorded blockers.")}</span> : (
+                            <ul>{missionBlockers.map((blocker) => <li key={`${blocker.rootFeatureId}\u0000${blocker.source}\u0000${blocker.reason}`}>{blocker.rootFeatureId}: {blocker.reason} ({blocker.source})</li>)}</ul>
+                          )}
+                          <input className="input" value={missionBlockedReason} onChange={(event) => setMissionBlockedReason(event.target.value)} placeholder={t("missions.clearBlockedReason", "Optional repair reason")} aria-label={t("missions.clearBlockedReason", "Optional repair reason")} />
+                        </div>
+                      </>
                     )}
                     {selectedMission.status === "planning" && (
                       <button
@@ -3084,25 +3565,11 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                       <option value="custom-new">{t("missions.branchStrategyCustomNew", "Create custom branch")}</option>
                     </select>
                   </label>
-                  <label>
-                    {t("missions.autoMergeOverride", "Merge behavior")}
-                    <select
-                      value={missionForm.autoMergeOverride}
-                      onChange={(e) => setMissionForm({ ...missionForm, autoMergeOverride: e.target.value as MissionAutoMergeOverride })}
-                      aria-label={t("missions.autoMergeOverrideAriaLabel", "Mission auto-merge override")}
-                    >
-                      <option value="inherit">{t("missions.autoMergeInherited", "Use project default")}</option>
-                      <option value="on">{t("missions.autoMergeOn", "Auto-merge")}</option>
-                      <option value="off">{t("missions.singlePullRequest", "Single pull request")}</option>
-                    </select>
-                    {/*
-                    FNXC:MissionAutoMerge 2026-07-19-00:00:
-                    Operators need in-context guidance for the per-mission merge choice: auto-merge lands each feature independently, while a single pull request keeps all features on one shared branch for joint review.
-                    */}
-                    <span className="mission-detail__autopilot-description">
-                      {t("missions.autoMergeOverrideDescription", "Auto-merge merges each feature as it passes. Single pull request keeps every feature on one shared branch to review and merge together.")}
-                    </span>
-                  </label>
+                  <MissionMergeBehaviorField
+                    value={missionForm.autoMergeOverride}
+                    onChange={(autoMergeOverride) => setMissionForm({ ...missionForm, autoMergeOverride })}
+                    t={t}
+                  />
                   {(missionForm.branchStrategy.mode === "existing" || missionForm.branchStrategy.mode === "custom-new") && (
                     <label>
                       {t("missions.branchName", "Branch name")}
@@ -3453,6 +3920,17 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                                             {fixFeature.loopState}
                                           </span>
                                         )}
+                                        {featureValidationRepairEligibility(fixFeature).clear || featureValidationRepairEligibility(fixFeature).reRun ? (
+                                          <div className="mission-fix-feature__actions">
+                                            <FeatureValidationRepairActions
+                                              feature={fixFeature}
+                                              busy={repairingValidationFeatures.has(fixFeature.id)}
+                                              onClear={handleClearValidationBadge}
+                                              onReRun={handleRerunValidation}
+                                              t={t}
+                                            />
+                                          </div>
+                                        ) : null}
                                       </div>
                                       <div className="mission-fix-feature__meta">
                                         <span>{t("missions.source", "Source:")}</span>
@@ -3668,6 +4146,15 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                                           >
                                             {feature.status}
                                           </span>
+                                          {feature.taskId && featureSpecAlignments[feature.id] && (
+                                            <span
+                                              className={`mission-status-badge mission-status-badge--sm mission-spec-alignment mission-spec-alignment--${featureSpecAlignments[feature.id]}`}
+                                              data-testid={`mission-feature-spec-alignment-${feature.id}`}
+                                              aria-label={t("missions.specAlignment", "Spec alignment: {{alignment}}", { alignment: featureSpecAlignments[feature.id] })}
+                                            >
+                                              {featureSpecAlignments[feature.id]}
+                                            </span>
+                                          )}
                                           {/* Loop state indicator */}
                                           {(feature.loopState && feature.loopState !== "idle") && (
                                             <span
@@ -3736,6 +4223,13 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                                             </span>
                                           )}
                                           <div className="mission-feature__actions">
+                                            <FeatureValidationRepairActions
+                                              feature={feature}
+                                              busy={repairingValidationFeatures.has(feature.id)}
+                                              onClear={handleClearValidationBadge}
+                                              onReRun={handleRerunValidation}
+                                              t={t}
+                                            />
                                             {feature.status === "defined" && !feature.taskId && (
                                               <button
                                                 className="mission-icon-btn"
@@ -4479,6 +4973,20 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
     );
   };
 
+  /*
+  FNXC:MissionAutoMerge 2026-08-08-17:21:
+  Keep AI planning as the primary Plan New Mission CTA, but retain a visible,
+  production manual-create path for operators who need to choose merge behavior
+  before a mission exists. This link opens the existing form without changing
+  the frozen planning button set.
+  */
+  const openDirectMissionCreate = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    setMissionForm(EMPTY_MISSION_FORM);
+    setEditingMissionId(null);
+    setIsCreatingMission(true);
+  };
+
   const openNewMissionInterview = () => {
     if (resumeSessionId) {
       dismissedResumeSessionIdRef.current = resumeSessionId;
@@ -4737,6 +5245,18 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                 <span>{t("missions.resumeMission", "Resume mission")}</span>
               </button>
             )}
+            {getMissionBlockedRepairState(m, []).showClear && (
+              <button
+                className="mission-btn mission-btn--ghost mission-btn--sm"
+                onClick={() => handleClearMissionBlockedStatus(m.id)}
+                title={t("missions.clearBlockedStatus", "Clear blocked status")}
+                aria-label={t("missions.clearBlockedStatus", "Clear blocked status")}
+                disabled={clearingBlockedMissionId === m.id}
+              >
+                <Check size={14} />
+                <span>{t("missions.clearBlockedStatus", "Clear blocked status")}</span>
+              </button>
+            )}
             {m.status === "planning" && (
               <button
                 className="mission-btn mission-btn--primary mission-btn--sm"
@@ -4838,21 +5358,11 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                       <option value="custom-new">{t("missions.branchStrategyCustomNew", "Create custom branch")}</option>
                     </select>
                   </label>
-                  <label>
-                    {t("missions.autoMergeOverride", "Merge behavior")}
-                    <select
-                      value={missionForm.autoMergeOverride}
-                      onChange={(e) => setMissionForm({ ...missionForm, autoMergeOverride: e.target.value as MissionAutoMergeOverride })}
-                      aria-label={t("missions.autoMergeOverrideAriaLabel", "Mission auto-merge override")}
-                    >
-                      <option value="inherit">{t("missions.autoMergeInherited", "Use project default")}</option>
-                      <option value="on">{t("missions.autoMergeOn", "Auto-merge")}</option>
-                      <option value="off">{t("missions.singlePullRequest", "Single pull request")}</option>
-                    </select>
-                    <span className="mission-detail__autopilot-description">
-                      {t("missions.autoMergeOverrideDescription", "Auto-merge merges each feature as it passes. Single pull request keeps every feature on one shared branch to review and merge together.")}
-                    </span>
-                  </label>
+                  <MissionMergeBehaviorField
+                    value={missionForm.autoMergeOverride}
+                    onChange={(autoMergeOverride) => setMissionForm({ ...missionForm, autoMergeOverride })}
+                    t={t}
+                  />
                   {(missionForm.branchStrategy.mode === "existing" || missionForm.branchStrategy.mode === "custom-new") && (
                     <label>
                       {t("missions.branchName", "Branch name")}
@@ -4957,21 +5467,11 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                       <option value="custom-new">{t("missions.branchStrategyCustomNew", "Create custom branch")}</option>
                     </select>
                   </label>
-                  <label>
-                    {t("missions.autoMergeOverride", "Merge behavior")}
-                    <select
-                      value={missionForm.autoMergeOverride}
-                      onChange={(e) => setMissionForm({ ...missionForm, autoMergeOverride: e.target.value as MissionAutoMergeOverride })}
-                      aria-label={t("missions.autoMergeOverrideAriaLabel", "Mission auto-merge override")}
-                    >
-                      <option value="inherit">{t("missions.autoMergeInherited", "Use project default")}</option>
-                      <option value="on">{t("missions.autoMergeOn", "Auto-merge")}</option>
-                      <option value="off">{t("missions.singlePullRequest", "Single pull request")}</option>
-                    </select>
-                    <span className="mission-detail__autopilot-description">
-                      {t("missions.autoMergeOverrideDescription", "Auto-merge merges each feature as it passes. Single pull request keeps every feature on one shared branch to review and merge together.")}
-                    </span>
-                  </label>
+                  <MissionMergeBehaviorField
+                    value={missionForm.autoMergeOverride}
+                    onChange={(autoMergeOverride) => setMissionForm({ ...missionForm, autoMergeOverride })}
+                    t={t}
+                  />
                   {(missionForm.branchStrategy.mode === "existing" || missionForm.branchStrategy.mode === "custom-new") && (
                     <label>
                       {t("missions.branchName", "Branch name")}
@@ -5038,6 +5538,9 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                     <Sparkles size={14} />
                     {t("missions.planNewMission", "Plan New Mission")}
                   </button>
+                  <a className="mission-list__manual-create-link" href="#mission-create" onClick={openDirectMissionCreate}>
+                    {t("missions.createButton", "Create")}
+                  </a>
                 </div>
               )}
 
@@ -5049,6 +5552,9 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                         <Sparkles size={14} />
                         {t("missions.planNewMission", "Plan New Mission")}
                       </button>
+                      <a className="mission-list__manual-create-link" href="#mission-create" onClick={openDirectMissionCreate}>
+                        {t("missions.createButton", "Create")}
+                      </a>
                     </div>
                   )}
                 </div>
@@ -5180,7 +5686,7 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
               <Loader2 size={24} className="spinner" />
               <span>{t("missions.loadingMissions", "Loading missions...")}</span>
             </div>
-          ) : detailLoading ? (
+          ) : detailLoading && !selectedMission ? (
             <div className="mission-manager__loading">
               <Loader2 size={24} className="spinner" />
               <span>{t("missions.loadingMissionDetails", "Loading mission details...")}</span>
@@ -5222,6 +5728,9 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
                 <Sparkles size={14} />
                 {t("missions.planNewMission", "Plan New Mission")}
               </button>
+              <a className="mission-list__manual-create-link" href="#mission-create" onClick={openDirectMissionCreate}>
+                {t("missions.createButton", "Create")}
+              </a>
             </div>
           </aside>
 
@@ -5241,7 +5750,7 @@ export function MissionManager({ isOpen, isInline = false, onClose, addToast, pr
           )}
 
           <div className="mission-manager__detail-pane">
-            {detailLoading ? (
+            {detailLoading && !selectedMission ? (
               <div className="mission-manager__loading">
                 <Loader2 size={24} className="spinner" />
                 <span>{t("missions.loadingMissionDetails", "Loading mission details...")}</span>

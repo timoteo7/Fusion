@@ -167,6 +167,14 @@ describe("WorkflowSettingsPanel — Definitions tab", () => {
 });
 
 describe("WorkflowSettingsPanel — Values tab", () => {
+  it("renders Memory consolidation enabled in Oversight with its default and override", async () => {
+    mockFetchValues.mockResolvedValue(payload({ effective: { memoryConsolidationEnabled: false } }));
+    render(<Host readOnly initial={[{ id: "memoryConsolidationEnabled", name: "Memory consolidation enabled", type: "boolean", default: true }]} />);
+    await waitFor(() => expect(mockFetchValues).toHaveBeenCalled());
+    expect(within(screen.getByTestId("wf-settings-group-oversight")).getByText("Planner Oversight")).toBeInTheDocument();
+    expect(screen.getByLabelText("Memory consolidation enabled")).not.toBeChecked();
+  });
+
   const decls: WorkflowSettingDefinition[] = [
     { id: "timeout-ms", name: "Timeout", type: "number", default: 1000 },
     { id: "new-sessions", name: "New sessions", type: "boolean", default: false },

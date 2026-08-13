@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "./executor-test-helpers.js";
-import { TaskExecutor } from "../executor.js";
+/*
+FNXC:CodeOrganization 2026-08-03-14:10:
+captureBaseCommitSha peeled to executor/worktree-git-refs.ts (U4 Slice B).
+Gate suite calls the free function with an injected store — no TaskExecutor method.
+*/
+import { captureBaseCommitSha } from "../executor/worktree-git-refs.js";
 import { executorLog } from "../logger.js";
 import type { Task } from "@fusion/core";
 import { createMockStore, mockedExec, mockedExecSync, resetExecutorMocks } from "./executor-test-helpers.js";
@@ -34,10 +39,9 @@ describe("captureBaseCommitSha", () => {
       return {} as any;
     }) as any);
     const store = createMockStore();
-    const executor = new TaskExecutor(store, "/tmp/test");
     const audit = { git: vi.fn().mockResolvedValue(undefined) };
 
-    await (executor as any).captureBaseCommitSha(makeTask(), "/tmp/test/.worktrees/fn-4383", audit);
+    await captureBaseCommitSha(store, makeTask(), "/tmp/test/.worktrees/fn-4383", audit);
 
     expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "abc1234" }, ANY_MUTATION_CONTEXT);
     expect(audit.git).toHaveBeenCalledWith(expect.objectContaining({ metadata: { purpose: "base", preserved: false } }));
@@ -46,10 +50,10 @@ describe("captureBaseCommitSha", () => {
   it("preserves existing valid baseCommitSha across resumed sessions", async () => {
     mockedExecSync.mockReturnValue("");
     const store = createMockStore();
-    const executor = new TaskExecutor(store, "/tmp/test");
     const audit = { git: vi.fn().mockResolvedValue(undefined) };
 
-    await (executor as any).captureBaseCommitSha(
+    await captureBaseCommitSha(
+      store,
       makeTask({ baseCommitSha: "old123" }),
       "/tmp/test/.worktrees/fn-4383",
       audit,
@@ -71,10 +75,10 @@ describe("captureBaseCommitSha", () => {
       return {} as any;
     }) as any);
     const store = createMockStore();
-    const executor = new TaskExecutor(store, "/tmp/test");
     const audit = { git: vi.fn().mockResolvedValue(undefined) };
 
-    await (executor as any).captureBaseCommitSha(
+    await captureBaseCommitSha(
+      store,
       makeTask({ baseCommitSha: "stale_main_sha" }),
       "/tmp/test/.worktrees/fn-4383",
       audit,
@@ -98,10 +102,9 @@ describe("captureBaseCommitSha", () => {
       return {} as any;
     }) as any);
     const store = createMockStore();
-    const executor = new TaskExecutor(store, "/tmp/test");
     const audit = { git: vi.fn().mockResolvedValue(undefined) };
 
-    await (executor as any).captureBaseCommitSha(makeTask({ baseCommitSha: "stale999" }), "/tmp/test/.worktrees/fn-4383", audit);
+    await captureBaseCommitSha(store, makeTask({ baseCommitSha: "stale999" }), "/tmp/test/.worktrees/fn-4383", audit);
 
     expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "new456" }, ANY_MUTATION_CONTEXT);
   });
@@ -109,10 +112,10 @@ describe("captureBaseCommitSha", () => {
   it("preserves prior merge base on resume for FN-4309/FN-4383 multi-session regression", async () => {
     mockedExecSync.mockReturnValue("");
     const store = createMockStore();
-    const executor = new TaskExecutor(store, "/tmp/test");
     const audit = { git: vi.fn().mockResolvedValue(undefined) };
 
-    await (executor as any).captureBaseCommitSha(
+    await captureBaseCommitSha(
+      store,
       makeTask({ baseCommitSha: "merge_base_sha" }),
       "/tmp/test/.worktrees/fn-4383",
       audit,
@@ -133,10 +136,9 @@ describe("captureBaseCommitSha", () => {
       return {} as any;
     }) as any);
     const store = createMockStore();
-    const executor = new TaskExecutor(store, "/tmp/test");
     const audit = { git: vi.fn().mockResolvedValue(undefined) };
 
-    await (executor as any).captureBaseCommitSha(makeTask(), "/tmp/test/.worktrees/fn-4383", audit);
+    await captureBaseCommitSha(store, makeTask(), "/tmp/test/.worktrees/fn-4383", audit);
 
     expect(store.updateTask).toHaveBeenCalledWith("FN-4383", { baseCommitSha: "head777" }, ANY_MUTATION_CONTEXT);
     expect(vi.mocked(executorLog.warn)).toHaveBeenCalledWith(expect.stringContaining("falling back to HEAD"));

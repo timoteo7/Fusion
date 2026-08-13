@@ -18,7 +18,7 @@ const severityAuditLog = createLogger("core-mission-store");
 import { EventEmitter } from "node:events";
 import type { Database } from "../db/db.js";
 import { fromJson, toJson, toJsonNullable } from "../db/db.js";
-import { FEATURE_LOOP_TRANSITIONS, normalizeMissionAssertionOrigin, normalizeMissionAssertionScope, normalizeMissionAssertionType, renderValidationCause } from "./mission-types.js";
+import { FEATURE_LOOP_TRANSITIONS, normalizeMissionAssertionOrigin, normalizeMissionAssertionScope, normalizeMissionAssertionType, renderValidationCause, ROLLUP_OWNED_MILESTONE_STATUSES, ROLLUP_OWNED_MISSION_STATUSES, selectNextSerialMissionSlice, shouldApplyRecomputedStatus, VALIDATION_INFLIGHT_STALE_MAX_AGE_MS } from "./mission-types.js";
 import type { Goal, GoalStatus } from "../goals/goal-types.js";
 import type {
   Mission,
@@ -27,6 +27,7 @@ import type {
   Slice,
   MissionFeature,
   MissionValidatorRun,
+  MissionManualValidatorRunAdmission,
   MissionAssertionFailureRecord,
   MissionFixFeatureLineage,
   MissionFeatureLoopSnapshot,
@@ -327,6 +328,7 @@ interface FeatureRow {
   description: string | null;
   acceptanceCriteria: string | null;
   status: string;
+  specAlignment: string | null;
   createdAt: string;
   updatedAt: string;
   loopState: string | null;
@@ -625,6 +627,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
       description: row.description || undefined,
       acceptanceCriteria: row.acceptanceCriteria || undefined,
       status: row.status as FeatureStatus,
+      specAlignment: row.specAlignment as import("./mission-types.js").MissionFeatureSpecAlignment || undefined,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       loopState: (row.loopState as import("./mission-types.js").FeatureLoopState) || "idle",
@@ -2092,6 +2095,41 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
    * @returns The activated slice
    * @throws Error if slice not found
    */
+  /**
+   * FNXC:MissionSliceAdmission 2026-08-08-03:07:
+   * Compatibility storage follows the PostgreSQL admission contract: decide
+   * and claim serial mission work atomically, then triage only the winner.
+   */
+  async tryActivateNextPendingSlice(missionId: string): Promise<Slice | undefined> {
+    let admitted: Slice | undefined;
+    this.db.transaction(() => {
+      const hierarchy = this.getMissionWithHierarchy(missionId);
+      const candidate = hierarchy ? selectNextSerialMissionSlice(hierarchy) : undefined;
+      if (!candidate) return;
+      const now = new Date().toISOString();
+      const result = this.db.prepare("UPDATE slices SET status = ?, activatedAt = ?, updatedAt = ? WHERE id = ? AND status = 'pending'")
+        .run("active", now, now, candidate.id);
+      if (result.changes !== 1) return;
+      admitted = { ...candidate, status: "active", activatedAt: now, updatedAt: now };
+    });
+    if (!admitted) return undefined;
+
+    this.db.bumpLastModified();
+    this.emit("slice:updated", admitted);
+    this.recomputeMilestoneStatus(admitted.milestoneId);
+    const milestone = this.getMilestone(admitted.milestoneId);
+    const mission = milestone ? this.getMission(milestone.missionId) : undefined;
+    if (mission?.autopilotEnabled === true || mission?.autoAdvance === true) {
+      try {
+        await this.triageSlice(admitted.id);
+      } catch (err) {
+        severityAuditLog.error(`[MissionStore] Auto-triage failed for slice ${admitted.id}:`, err);
+      }
+    }
+    this.emit("slice:activated", admitted);
+    return admitted;
+  }
+
   async activateSlice(id: string): Promise<Slice> {
     const slice = this.getSlice(id);
     if (!slice) {
@@ -2183,8 +2221,8 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     };
 
     this.db.prepare(`
-      INSERT INTO mission_features (id, sliceId, title, description, acceptanceCriteria, status, loopState, implementationAttemptCount, validatorAttemptCount, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO mission_features (id, sliceId, title, description, acceptanceCriteria, status, specAlignment, loopState, implementationAttemptCount, validatorAttemptCount, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       feature.id,
       feature.sliceId,
@@ -2192,6 +2230,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
       feature.description ?? null,
       feature.acceptanceCriteria ?? null,
       feature.status,
+      feature.specAlignment ?? null,
       feature.loopState ?? "idle",
       feature.implementationAttemptCount ?? 0,
       feature.validatorAttemptCount ?? 0,
@@ -2246,7 +2285,8 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
    * @returns The updated feature
    * @throws Error if feature not found
    */
-  updateFeature(id: string, updates: Partial<MissionFeature>): MissionFeature {
+  /* FNXC:MissionStatusWrites 2026-08-10-12:47: The SQLite store is a non-production legacy mirror; retain options signature parity without adding a second audit implementation. */
+  updateFeature(id: string, updates: Partial<MissionFeature>, _options: MissionUpdateOptions = {}): MissionFeature {
     const feature = this.getFeature(id);
     if (!feature) {
       throw new Error(`Feature ${id} not found`);
@@ -2267,6 +2307,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
         description = ?,
         acceptanceCriteria = ?,
         status = ?,
+        specAlignment = ?,
         taskId = ?,
         loopState = ?,
         implementationAttemptCount = ?,
@@ -2282,6 +2323,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
       updated.description ?? null,
       updated.acceptanceCriteria ?? null,
       updated.status,
+      updated.specAlignment ?? null,
       updated.taskId ?? null,
       updated.loopState ?? "idle",
       updated.implementationAttemptCount ?? 0,
@@ -2725,13 +2767,13 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
    * @returns The updated feature
    * @throws Error if feature not found
    */
-  updateFeatureStatus(featureId: string, status: FeatureStatus): MissionFeature {
+  updateFeatureStatus(featureId: string, status: FeatureStatus, options: MissionUpdateOptions = {}): MissionFeature {
     const feature = this.getFeature(featureId);
     if (!feature) {
       throw new Error(`Feature ${featureId} not found`);
     }
 
-    const updated = this.updateFeature(featureId, { status });
+    const updated = this.updateFeature(featureId, { status }, options);
 
     // Recompute slice status
     this.recomputeSliceStatus(updated.sliceId);
@@ -2764,6 +2806,64 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
    * @returns The created validator run
    * @throws Error if feature not found
    */
+  /*
+  FNXC:MissionValidation 2026-08-11-03:43:
+  SQLite keeps the same feature-scoped manual admission contract as PostgreSQL. It blocks fresh
+  engine-started runs but lets runs older than the reaper window expire; FN-8976 tracks the known
+  fingerprint-less manual-to-automatic boundary without changing automatic admission here.
+  */
+  startManualValidatorRun(
+    featureId: string,
+    input: { triggerType?: string; taskId?: string } = {},
+  ): MissionManualValidatorRunAdmission {
+    let admission: MissionManualValidatorRunAdmission | undefined;
+    this.db.transaction(() => {
+      const feature = this.getFeature(featureId);
+      if (!feature) throw new Error(`Feature ${featureId} not found`);
+      const cutoff = new Date(Date.now() - VALIDATION_INFLIGHT_STALE_MAX_AGE_MS).toISOString();
+      const rows = this.db.prepare(
+        "SELECT * FROM mission_validator_runs WHERE featureId = ? AND status = 'running' AND startedAt >= ? ORDER BY startedAt DESC, createdAt DESC, id DESC"
+      ).all(featureId, cutoff) as unknown as ValidatorRunRow[];
+      const blockingRun = rows[0] ? this.rowToValidatorRun(rows[0]) : undefined;
+      if (blockingRun) {
+        admission = { outcome: "already-running", run: blockingRun };
+        return;
+      }
+      const slice = this.getSlice(feature.sliceId);
+      if (!slice) throw new Error(`Slice ${feature.sliceId} not found`);
+      const milestone = this.getMilestone(slice.milestoneId);
+      if (!milestone) throw new Error(`Milestone ${slice.milestoneId} not found`);
+      const now = new Date().toISOString();
+      const run: MissionValidatorRun = {
+        id: this.generateValidatorRunId(), featureId, milestoneId: milestone.id, sliceId: slice.id,
+        status: "running", triggerType: input.triggerType ?? "manual",
+        implementationAttempt: feature.implementationAttemptCount ?? 0,
+        validatorAttempt: (feature.validatorAttemptCount ?? 0) + 1,
+        taskId: input.taskId, startedAt: now, createdAt: now, updatedAt: now,
+      };
+      this.db.prepare(`
+        INSERT INTO mission_validator_runs (id, featureId, milestoneId, sliceId, status, triggerType, implementationAttempt, validatorAttempt, taskId, inputFingerprint, startedAt, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(run.id, run.featureId, run.milestoneId, run.sliceId, run.status, run.triggerType ?? "auto", run.implementationAttempt, run.validatorAttempt, run.taskId ?? null, null, run.startedAt, run.createdAt, run.updatedAt);
+      this.updateFeature(featureId, {
+        validatorAttemptCount: run.validatorAttempt,
+        lastValidatorRunId: run.id,
+        loopState: "validating",
+      });
+      admission = { outcome: "started", run };
+    });
+    if (!admission) throw new Error(`Manual validator admission did not resolve for ${featureId}`);
+    this.db.bumpLastModified();
+    if (admission.outcome === "started") this.emit("validator-run:started", admission.run);
+    return admission;
+  }
+
+  /*
+  FNXC:MissionValidation 2026-08-11-04:27:
+  Keep SQLite's non-memo engine fallback aligned with PostgreSQL: it shares manual admission's
+  transaction and cannot append a task-completion run behind a fresh manual run. This does not
+  change automatic fingerprint admission or unrestricted legacy automatic-run seeding.
+  */
   startValidatorRun(featureId: string, triggerType?: string, taskId?: string, inputFingerprint?: string): MissionValidatorRun {
     const feature = this.getFeature(featureId);
     if (!feature) {
@@ -2804,6 +2904,14 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     };
 
     this.db.transaction(() => {
+      if (triggerType === "task_completion") {
+        const cutoff = new Date(Date.now() - VALIDATION_INFLIGHT_STALE_MAX_AGE_MS).toISOString();
+        const manualRun = this.db.prepare(
+          "SELECT id FROM mission_validator_runs WHERE featureId = ? AND status = 'running' AND triggerType = 'manual' AND startedAt >= ? LIMIT 1"
+        ).get(featureId, cutoff) as { id: string } | undefined;
+        if (manualRun) throw new Error(`Validator run ${manualRun.id} is already running for feature ${featureId}`);
+      }
+
       // Insert the validator run
       this.db.prepare(`
         INSERT INTO mission_validator_runs (id, featureId, milestoneId, sliceId, status, triggerType, implementationAttempt, validatorAttempt, taskId, inputFingerprint, startedAt, createdAt, updatedAt)
@@ -2901,6 +3009,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
         break;
     }
 
+    let ownsFeature = false;
     this.db.transaction(() => {
       // Update the validator run
       this.db.prepare(`
@@ -2920,11 +3029,16 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
         runId,
       );
 
-      // Update the feature's loop state and lastValidatorStatus
-      this.updateFeature(run.featureId, {
-        loopState: featureLoopState,
-        lastValidatorStatus: featureLastValidatorStatus,
-      });
+      const currentFeature = this.getFeature(run.featureId);
+      if (!currentFeature) throw new Error(`Feature ${run.featureId} not found`);
+      ownsFeature = currentFeature.lastValidatorRunId === run.id;
+      // FNXC:MissionValidation 2026-08-11-05:26: Keep SQLite parity with PostgreSQL: historical completions become terminal records but cannot overwrite the newer validator owner's feature state.
+      if (ownsFeature) {
+        this.updateFeature(run.featureId, {
+          loopState: featureLoopState,
+          lastValidatorStatus: featureLastValidatorStatus,
+        });
+      }
     });
 
     this.db.bumpLastModified();
@@ -2933,7 +3047,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     const updatedRun = this.getValidatorRun(runId)!;
     this.emit("validator-run:completed", updatedRun, result, durationMs);
 
-    if (result === "passed") {
+    if (result === "passed" && ownsFeature) {
       const passedFeature = this.getFeature(run.featureId);
       if (passedFeature) {
         this.reconcileSupersededGeneratedFixFeatures(passedFeature.sliceId);
@@ -3104,7 +3218,8 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     const startedAtMs = new Date(run.startedAt).getTime();
     const completedAtMs = new Date(completedAt).getTime();
     const durationMs = Math.max(0, completedAtMs - startedAtMs);
-    const shouldUpdateFeature = mission.status !== "archived" && mission.status !== "complete" && feature.status !== "done";
+    // FNXC:MissionValidation 2026-08-11-05:26: Reaping a superseded SQLite run must not reopen the feature owned by its newer validator run.
+    const shouldUpdateFeature = feature.lastValidatorRunId === run.id && mission.status !== "archived" && mission.status !== "complete" && feature.status !== "done";
 
     this.db.transaction(() => {
       this.db.prepare(`
@@ -4506,6 +4621,12 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     }
   }
 
+  /*
+  FNXC:MissionStatusRollup 2026-08-11-04:27:
+  FN-8962's audit found this synchronous backend is test-only, but it remains behaviorally aligned
+  with AsyncMissionStore. Its two recompute helpers are its complete rollup-writer set: grep confirms
+  it has no reconcileFeatureDoneWithTerminalTask equivalent, so protected intent cannot drift here.
+  */
   /**
    * Recompute and update the milestone status.
    * Called automatically after slice changes.
@@ -4514,7 +4635,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     const newStatus = this.computeMilestoneStatus(milestoneId);
     const milestone = this.getMilestone(milestoneId);
 
-    if (milestone && milestone.status !== newStatus) {
+    if (milestone && shouldApplyRecomputedStatus(milestone.status, newStatus, ROLLUP_OWNED_MILESTONE_STATUSES)) {
       this.updateMilestone(milestoneId, { status: newStatus });
       // Don't emit here - updateMilestone already emits and triggers mission recompute
     }
@@ -4528,7 +4649,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     const newStatus = this.computeMissionStatus(missionId);
     const mission = this.getMission(missionId);
 
-    if (mission && mission.status !== newStatus) {
+    if (mission && shouldApplyRecomputedStatus(mission.status, newStatus, ROLLUP_OWNED_MISSION_STATUSES)) {
       this.updateMission(missionId, { status: newStatus });
       // Don't emit here - updateMission already emits
     }

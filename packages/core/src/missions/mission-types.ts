@@ -11,6 +11,7 @@
 
 import type { Goal } from "../goals/goal-types.js";
 import { redactSecrets } from "../secrets/redact-secrets.js";
+import { createMissionBlockerDescriptor, dedupeMissionBlockerDescriptors, sortMissionBlockerDescriptors } from "./mission-blockers.js";
 
 // ── Status Enums ─────────────────────────────────────────────────────
 
@@ -18,9 +19,83 @@ import { redactSecrets } from "../secrets/redact-secrets.js";
 export const MISSION_STATUSES = ["planning", "active", "blocked", "complete", "archived"] as const;
 export type MissionStatus = (typeof MISSION_STATUSES)[number];
 
+/** Statuses that hierarchy rollup can derive for missions. */
+export const ROLLUP_OWNED_MISSION_STATUSES = ["planning", "active", "complete"] as const satisfies readonly MissionStatus[];
+
+/** Version gate for the public mission-resume blocker contract. */
+export const MISSION_BLOCKER_DESCRIPTOR_SCHEMA_VERSION = 1 as const;
+
+/** Closed fail-safe vocabulary for a non-resumable mission root. */
+export type MissionBlockerReason = "budget-exhausted" | "operator-intervention" | "legacy-unknown-stop";
+
+/** Durable location from which the stop was read. */
+export type MissionBlockerSource = "feature-row" | "lineage-stop";
+
+/** Canonical versioned explanation for a mission resume conflict. */
+export interface MissionBlockerDescriptor {
+  schemaVersion: 1;
+  kind: "mission-resume-conflict";
+  rootFeatureId: string;
+  reason: MissionBlockerReason;
+  source: MissionBlockerSource;
+  missionId?: string;
+  stoppedAt?: string;
+  origin?: string;
+  rawReason?: string;
+}
+
+export interface MissionBlockedDiagnostics {
+  missionId: string;
+  status: MissionStatus;
+  recomputedStatus: MissionStatus;
+  clearable: boolean;
+  resumable: boolean;
+  blockers: MissionBlockerDescriptor[];
+}
+
+/**
+ * FNXC:MissionBlockedRepair 2026-08-11-05:07:
+ * Diagnostics and resume share the versioned descriptor so blocked-state repair cannot reinterpret
+ * a persisted reason differently from the all-or-nothing resume gate.
+ */
+export function classifyMissionResumeBlockers(input: {
+  rootFeatures: ReadonlyArray<Pick<MissionFeature, "id" | "implementationStopReason" | "implementationStoppedAt" | "implementationStopOrigin">>;
+  lineageStops: ReadonlyArray<{ rootFeatureId: string; reason: string | null; stoppedAt?: string; origin?: string; missionId?: string | null }>;
+  missionId?: string;
+}): { blockers: MissionBlockerDescriptor[]; clearableFeatureIds: string[] } {
+  const blockers = dedupeMissionBlockerDescriptors(sortMissionBlockerDescriptors([
+    ...input.rootFeatures.filter((root) => root.implementationStopReason !== "operator-intervention")
+      .map((root) => createMissionBlockerDescriptor({ rootFeatureId: root.id, source: "feature-row", missionId: input.missionId, rawReason: root.implementationStopReason, stoppedAt: root.implementationStoppedAt, origin: root.implementationStopOrigin })),
+    ...input.lineageStops.filter((stop) => stop.reason !== "operator-intervention")
+      .map((stop) => createMissionBlockerDescriptor({ rootFeatureId: stop.rootFeatureId, source: "lineage-stop", missionId: stop.missionId ?? input.missionId, rawReason: stop.reason, stoppedAt: stop.stoppedAt, origin: stop.origin })),
+  ]));
+  return { blockers, clearableFeatureIds: [...new Set([
+    ...input.rootFeatures.filter((root) => root.implementationStopReason === "operator-intervention").map((root) => root.id),
+    ...input.rootFeatures.filter((root) => input.lineageStops.some((stop) => stop.rootFeatureId === root.id)).map((root) => root.id),
+  ])] };
+}
+
 /** Status values for a Milestone within a mission */
 export const MILESTONE_STATUSES = ["planning", "active", "blocked", "complete"] as const;
 export type MilestoneStatus = (typeof MILESTONE_STATUSES)[number];
+
+/** Statuses that hierarchy rollup can derive for milestones. */
+export const ROLLUP_OWNED_MILESTONE_STATUSES = ["planning", "active", "complete"] as const satisfies readonly MilestoneStatus[];
+
+/*
+FNXC:MissionStatusRollup 2026-08-11-04:27:
+Every automatic rollup writer—the recompute helpers in both stores and AsyncMissionStore's
+in-transaction terminal-task reconcile—may move a row only between statuses it can derive.
+blocked/archived are operator or system intent from pause, stop, PATCH, and fn_mission_set_status;
+only explicit resumeMission, clearMissionBlockedStatus, or autopilot completion clears them.
+*/
+export function shouldApplyRecomputedStatus<T extends string>(
+  current: T,
+  computed: T,
+  rollupOwned: readonly T[],
+): boolean {
+  return current !== computed && rollupOwned.includes(current);
+}
 
 /** Status values for a Slice (work unit) */
 export const SLICE_STATUSES = ["pending", "active", "complete"] as const;
@@ -51,6 +126,21 @@ export const FEATURE_LOOP_TRANSITIONS: Readonly<Record<FeatureLoopState, readonl
   blocked: [],
 };
 
+/*
+FNXC:MissionValidationRepair 2026-08-11-00:06:
+The execution loop consults only FEATURE_LOOP_TRANSITIONS, so failed work cannot launder its
+own blocked state. Only repairFeatureValidationState, with an explicit actor, uses these repair
+edges; re_run uses the validator-run path and consults neither transition table.
+*/
+export const FEATURE_LOOP_REPAIR_TRANSITIONS: Readonly<Record<FeatureLoopState, readonly FeatureLoopState[]>> = {
+  idle: [],
+  implementing: [],
+  validating: [],
+  needs_fix: ["idle", "implementing"],
+  passed: [],
+  blocked: ["idle", "implementing"],
+};
+
 /** Status values for a validator run */
 export const VALIDATOR_RUN_STATUSES = ["running", "passed", "failed", "blocked", "error"] as const;
 export type ValidatorRunStatus = (typeof VALIDATOR_RUN_STATUSES)[number];
@@ -63,6 +153,8 @@ export type ValidatorRunStatus = (typeof VALIDATOR_RUN_STATUSES)[number];
  */
 export const VALIDATION_DIAGNOSTICS_MAX_EVIDENCE_PER_ASSERTION = 16;
 export const VALIDATION_DIAGNOSTICS_MAX_TEXT_BYTES = 4096;
+export const MISSION_EVENT_REASON_MAX_BYTES = 512;
+export const MISSION_EVENT_METADATA_MAX_BYTES = 2048;
 
 export type ValidationAssertionVerdict = "pass" | "fail" | "blocked";
 
@@ -107,10 +199,16 @@ export interface ValidationDiagnosticsInput {
   projectRoot?: string;
 }
 
-function boundValidationText(value: unknown, projectRoot?: string): { value?: string; truncated?: boolean } {
+/*
+FNXC:MissionStatusWrites 2026-08-10-12:47:
+Mission status audit metadata is constructed at the store boundary because agent reasons and
+identity strings are untrusted. The total builder runs after the row write in its transaction,
+so a malformed caller value cannot roll back a legitimate status repair.
+*/
+function boundMissionText(value: unknown, limit: number, projectRoot?: string): { value?: string; truncated?: boolean } {
   if (typeof value !== "string") return {};
-  let text = redactSecrets(value);
-  // Paths from the project are useful evidence; disposable/external paths are not.
+  let text: string;
+  try { text = redactSecrets(value); } catch { return {}; }
   text = text.replace(/(?:[A-Za-z]:\\|\/)[^\s'"`]+/g, (path) => {
     const normalizedRoot = projectRoot?.replace(/\\/g, "/").replace(/\/+$/, "");
     const normalizedPath = path.replace(/\\/g, "/");
@@ -119,20 +217,88 @@ function boundValidationText(value: unknown, projectRoot?: string): { value?: st
       : "[external path omitted]";
   });
   const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes <= VALIDATION_DIAGNOSTICS_MAX_TEXT_BYTES) return { value: text };
+  if (bytes <= limit) return { value: text };
   const marker = "… [truncated]";
-  const limit = VALIDATION_DIAGNOSTICS_MAX_TEXT_BYTES - Buffer.byteLength(marker, "utf8");
-  let end = 0;
-  let used = 0;
+  const remaining = limit - Buffer.byteLength(marker, "utf8");
+  let end = 0; let used = 0;
   for (const character of text) {
     const size = Buffer.byteLength(character, "utf8");
-    if (used + size > limit) break;
-    used += size;
-    end += character.length;
+    if (used + size > remaining) break;
+    used += size; end += character.length;
   }
   return { value: `${text.slice(0, end)}${marker}`, truncated: true };
 }
+function boundValidationText(value: unknown, projectRoot?: string): { value?: string; truncated?: boolean } {
+  return boundMissionText(value, VALIDATION_DIAGNOSTICS_MAX_TEXT_BYTES, projectRoot);
+}
 
+/** Bounds untrusted agent/operator prose before it enters a mission-event row. */
+export function boundMissionEventReason(reason: unknown): { value?: string; truncated?: boolean } {
+  // Check semantic emptiness before adding the truncation marker: whitespace-only
+  // input must not become audit prose merely because it exceeds the byte limit.
+  if (typeof reason !== "string" || !reason.trim()) return {};
+  return boundMissionText(reason, MISSION_EVENT_REASON_MAX_BYTES);
+}
+
+export function normalizeMissionTransitionActorForEvent(actor: unknown): { type: MissionTransitionActorType; id: string; source: string } {
+  try {
+    const candidate = actor && typeof actor === "object" ? actor as Record<string, unknown> : {};
+    const type = MISSION_TRANSITION_ACTOR_TYPES.includes(candidate.type as MissionTransitionActorType) ? candidate.type as MissionTransitionActorType : "system";
+    const id = boundMissionText(typeof candidate.id === "string" ? candidate.id : "mission-store", 200).value || "mission-store";
+    const source = boundMissionText(typeof candidate.source === "string" ? candidate.source : "mission-store", 200).value || "mission-store";
+    return { type, id, source };
+  } catch { return { type: "system", id: "mission-store", source: "mission-store" }; }
+}
+
+/** Builds the only persisted metadata shape for mission and feature transitions. */
+export function buildMissionStatusEventMetadata(input: { entity: "feature" | "mission"; field: string; from: unknown; to: unknown; ids: Record<string, string | undefined>; actor: unknown; reason?: unknown }): Record<string, unknown> {
+  /*
+  FNXC:MissionStatusWrites 2026-08-10-13:04:
+  This builder executes after a status row changes but before its transaction commits. It must
+  tolerate hostile values and bound even its required fields, so audit metadata can never roll
+  back a legitimate repair or exceed the event-row budget.
+  */
+  const fallbackActor = { type: "system" as const, id: "mission-store", source: "mission-store" };
+  const safeText = (value: unknown, fallback: string): string => {
+    try { return boundMissionText(typeof value === "string" ? value : fallback, 200).value || fallback; } catch { return fallback; }
+  };
+  const safePrimitive = (value: unknown): string | number | boolean | null => {
+    try {
+      if (typeof value === "string") return safeText(value, "");
+      if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+      return safeText(String(value ?? ""), "");
+    } catch { return ""; }
+  };
+  try {
+    const actor = normalizeMissionTransitionActorForEvent(input?.actor);
+    const minimal: Record<string, unknown> = {
+      source: actor.source,
+      actor,
+      field: safeText(input?.field, "status"),
+      from: safePrimitive(input?.from),
+      to: safePrimitive(input?.to),
+    };
+    const ids = Object.fromEntries(Object.entries(input?.ids ?? {}).flatMap(([key, value]) =>
+      value === undefined ? [] : [[safeText(key, "id"), safeText(value, "mission-store")]],
+    ));
+    const reason = boundMissionEventReason(input?.reason);
+    const result: Record<string, unknown> = {
+      ...minimal,
+      ...ids,
+      ...(reason.value !== undefined ? { reason: reason.value } : {}),
+      ...(reason.truncated ? { reasonTruncated: true } : {}),
+    };
+    const fits = () => {
+      try { return Buffer.byteLength(JSON.stringify(result), "utf8") <= MISSION_EVENT_METADATA_MAX_BYTES; } catch { return false; }
+    };
+    if (!fits()) { delete result.reason; result.metadataTrimmed = true; }
+    if (!fits()) { delete result.reasonTruncated; result.metadataTrimmed = true; }
+    if (!fits()) return { ...minimal, metadataTrimmed: true };
+    return result;
+  } catch {
+    return { source: fallbackActor.source, actor: fallbackActor, field: "status", from: "", to: "", metadataTrimmed: true };
+  }
+}
 /** Normalize and redact validation evidence before any mission artifact persists it. */
 export function normalizeValidationDiagnostics(input: ValidationDiagnosticsInput): ValidationDiagnostics {
   return {
@@ -208,6 +374,8 @@ export const MISSION_EVENT_TYPES = [
   "mission_completed",
   "mission_started",
   "mission_status_changed",
+  "feature_status_changed",
+  "feature_validation_repaired",
   "mission_paused",
   "mission_resumed",
   "autopilot_enabled",
@@ -236,9 +404,44 @@ export interface MissionTransitionActor {
   source: string;
 }
 
+/*
+FNXC:MissionValidationRepair 2026-08-11-00:06:
+Core owns this fence shape so its store can verify caller-derived status without importing the
+engine. An absent linked task is ground truth too: dangling and archived links must repair to
+defined rather than remain permanently blocked. Lane classification stays in the engine to avoid
+duplicating its workflow resolver here.
+*/
+export interface MissionFeatureRepairGroundTruth {
+  featureId: string;
+  taskId: string | null;
+  taskLiveness: "live" | "absent";
+  taskColumn: string | null;
+  taskUpdatedAt: string | null;
+  laneRole: "planner" | "wip" | "none";
+  resolvedAt: string;
+}
+
+/*
+FNXC:MissionValidationRepair 2026-08-11-00:06:
+Blocked and needs-fix loop states are explicit stale-badge repair candidates even when feature
+status remains live. A validating, implementing, or passed loop must not start another validator
+run; passed validation remains available through the normal Validate control.
+*/
+export function featureValidationRepairEligibility(
+  feature: Pick<MissionFeature, "loopState" | "status">,
+): { clear: boolean; reRun: boolean } {
+  const repairableLoop = feature.loopState === "blocked" || feature.loopState === "needs_fix";
+  return {
+    clear: repairableLoop || feature.status === "blocked",
+    reRun: repairableLoop || (feature.status === "blocked" && (feature.loopState === undefined || feature.loopState === "idle")),
+  };
+}
+
 /** Optional attribution supplied to a mission mutation that can arm autonomy. */
 export interface MissionUpdateOptions {
   actor?: MissionTransitionActor;
+  /** Untrusted caller prose; the store redacts and bounds it before persistence. */
+  reason?: string;
 }
 
 /** Autopilot status for a mission */
@@ -416,6 +619,14 @@ export interface ResearchFeatureProvenance {
 
 export type ImplementationStopReason = "budget-exhausted" | "operator-intervention";
 
+/**
+ * FNXC:SpecLockMissionAlignment 2026-08-10-16:17:
+ * Alignment is a persisted roadmap projection from the linked task's deterministic drift report.
+ * It stays separate from delivery and validation lifecycle state, so divergence never fabricates
+ * completion or blocks work.
+ */
+export type MissionFeatureSpecAlignment = "on-plan" | "diverged-needs-review" | "diverged-relocked-approved" | "unavailable";
+
 export interface MissionFeature {
   /** Unique identifier (e.g., "F-J6K9AB-G7H3") */
   id: string;
@@ -431,6 +642,8 @@ export interface MissionFeature {
   acceptanceCriteria?: string;
   /** Current lifecycle status */
   status: FeatureStatus;
+  /** Orthogonal, machine-derived alignment of the linked task's current plan and execution. */
+  specAlignment?: MissionFeatureSpecAlignment;
   /** Durable lineage when this canonical feature came from Fusion Research. */
   researchProvenance?: ResearchFeatureProvenance;
   /** ISO-8601 timestamp of creation */
@@ -465,10 +678,25 @@ export interface MissionFeature {
 // ── Validator Run & Loop Types ──────────────────────────────────────
 
 /** Atomic admission result for an automatic content-addressed validator dispatch. */
+/*
+FNXC:MissionValidation 2026-08-11-03:43:
+Manual validation must share the reaper's six-hour liveness window so a stranded run cannot
+permanently wedge an operator control. Engine parity is pinned outside core because core must not
+import the engine's healing constants.
+*/
+export const VALIDATION_INFLIGHT_STALE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/** Atomic admission result for a feature-scoped manual validator dispatch. */
+export type MissionManualValidatorRunAdmission =
+  | { outcome: "started"; run: MissionValidatorRun }
+  | { outcome: "already-running"; run: MissionValidatorRun };
+
 export type ValidatorRunAdmissionOutcome = "start" | "running" | "reuse-pass" | "budget-exhausted";
 export interface ValidatorRunAdmission {
   outcome: ValidatorRunAdmissionOutcome;
   run?: MissionValidatorRun;
+  /** FNXC:MissionValidation 2026-08-11-05:38: Distinguish content and feature-liveness refusals without changing the outcome contract. */
+  blockingScope?: "fingerprint" | "feature";
 }
 export interface ValidatorRunAdmissionInput {
   inputFingerprint: string;
@@ -678,6 +906,41 @@ export interface SliceWithFeatures extends Slice {
  * A Mission with complete hierarchy loaded:
  * Mission → Milestones → Slices → Features
  */
+/**
+ * FNXC:MissionSliceAdmission 2026-08-08-03:30:
+ * Automatic mission progression is serial: duplicate completion and recovery
+ * signals may admit only the first pending slice after every earlier slice is
+ * complete. Dependencies can further block admission, never bypass ordering.
+ * A blocked, empty, or stale non-complete milestone is likewise an ordered
+ * gate, so a later milestone cannot silently start before reconciliation.
+ */
+export function selectNextSerialMissionSlice(mission: MissionWithHierarchy): Slice | undefined {
+  if (mission.status !== "active") return undefined;
+  const milestones = [...mission.milestones].sort((a, b) => a.orderIndex - b.orderIndex);
+  if (milestones.some((milestone) => milestone.slices.some((slice) => slice.status === "active"))) return undefined;
+
+  for (const milestone of milestones) {
+    if (milestone.status === "blocked") return undefined;
+    const dependenciesMet = milestone.dependencies.every((dependencyId) =>
+      milestones.some((candidate) => candidate.id === dependencyId && candidate.status === "complete"),
+    );
+    if (!dependenciesMet) return undefined;
+    const slices = [...milestone.slices].sort((a, b) => a.orderIndex - b.orderIndex);
+    // An empty planning milestone has no completed slice evidence that permits
+    // crossing it; only an explicitly complete empty milestone may be passed.
+    if (slices.length === 0) {
+      if (milestone.status !== "complete") return undefined;
+      continue;
+    }
+    for (const slice of slices) {
+      if (slice.status === "complete") continue;
+      return slice.status === "pending" ? slice : undefined;
+    }
+    if (milestone.status !== "complete") return undefined;
+  }
+  return undefined;
+}
+
 export interface MissionWithHierarchy extends Mission {
   /** Goals linked to this mission */
   linkedGoals?: Goal[];

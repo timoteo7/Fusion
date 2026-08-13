@@ -62,6 +62,8 @@ import { normalizeAgentPermissionPolicy } from "./agent-permission-policy.js";
 import { normalizeAgentRoles } from "../types/agents/agents.js";
 import { Database } from "../db/db.js";
 import type { AsyncDataLayer } from "../postgres/data-layer.js";
+import { appendAgentActivityEvent } from "../task-store/async/async-agent-activity.js";
+import { resolveAgentActivityAttribution } from "../task-store/agent-activity-outbox.js";
 import * as postgresSchema from "../postgres/schema/index.js";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
 /*
@@ -70,6 +72,7 @@ import { and, eq, gt, lte, sql } from "drizzle-orm";
  * Each helper targets the project-schema tables via Drizzle and is the async
  * equivalent of the sync this.db.prepare() call sites below.
  */
+import type { QueryHandle } from "../async-stores/async-mission-store-queries.js";
 import {
   writeAgent as writeAgentAsync,
   readAgent as readAgentAsync,
@@ -110,8 +113,46 @@ import { mintToken, parseToken, TOKEN_PREFIX, verifyTokenSecret } from "../ident
 import { mutationContextForAgent, UNATTRIBUTED_MUTATION_CONTEXT } from "../identity/mutation-context.js";
 import { createLogger } from "../process/logger.js";
 import { FsWatchPollController } from "../process/fs-watch-poll-controller.js";
+import {
+  BUILTIN_WORKFLOW_AGENT_BUNDLE_CONFIG,
+  BUILTIN_WORKFLOW_ROLE_AGENT_DEFAULT_LIST,
+  type BuiltinWorkflowRole,
+} from "./workflow-role-agent-defaults.js";
+import {
+  BUILTIN_MEMORY_AGENT_DEFAULT,
+  BUILTIN_MEMORY_AGENT_FALLBACK_NAME,
+  BUILTIN_MEMORY_AGENT_NAME,
+  BUILTIN_MEMORY_AGENT_PROVENANCE_KEY,
+} from "./memory-agent-defaults.js";
 
 const agentStoreLog = createLogger("agent-store");
+
+/*
+FNXC:WorkflowAgentIdentities 2026-08-08-06:11:
+Only a unique subset of the two managed mirror names is an incomplete default bundle eligible for
+repair. Extra or duplicate inventory entries are operator-owned configuration and must not be
+silently normalized during startup.
+*/
+function isCanonicalOrPartialBuiltinWorkflowBundle(config: InstructionsBundleConfig | undefined): boolean {
+  if (config?.mode !== "managed" || config.entryFile !== "AGENTS.md") return false;
+  return config.files.every((file) => (file === "AGENTS.md" || file === "soul.md")
+    && config.files.indexOf(file) === config.files.lastIndexOf(file));
+}
+
+function isCompleteBuiltinWorkflowBundle(config: InstructionsBundleConfig | undefined): boolean {
+  return isCanonicalOrPartialBuiltinWorkflowBundle(config)
+    && config!.files.length === BUILTIN_WORKFLOW_AGENT_BUNDLE_CONFIG.files.length;
+}
+
+function compareBuiltinWorkflowOwnerAge(a: Agent, b: Agent): number {
+  const aTime = Date.parse(a.createdAt);
+  const bTime = Date.parse(b.createdAt);
+  const aValid = Number.isFinite(aTime);
+  const bValid = Number.isFinite(bTime);
+  if (aValid && bValid && aTime !== bTime) return aTime - bTime;
+  if (aValid !== bValid) return aValid ? -1 : 1;
+  return a.id.localeCompare(b.id);
+}
 
 /** Database row shape returned by SELECT on agentRatings. */
 interface AgentRatingRow {
@@ -531,6 +572,12 @@ export class AgentStore extends EventEmitter {
     still invoke them independently of the heartbeat scheduler.
     */
     await this.provisionBuiltinWorkflowRoleAgents();
+    // Memory upkeep is optional; its collision-safe provisioning must never prevent startup.
+    try {
+      await this.provisionBuiltinMemoryAgent();
+    } catch (error) {
+      agentStoreLog.warn(`Unable to provision built-in memory agent: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**
@@ -739,10 +786,14 @@ export class AgentStore extends EventEmitter {
    * @param name - Agent name to match exactly
    * @returns Matching non-ephemeral agent, or null when none exists
    */
-  async findAgentByName(name: string): Promise<Agent | null> {
+  async findAgentByName(name: string, executor?: QueryHandle): Promise<Agent | null> {
     // FNXC:SqliteFinalRemoval 2026-06-25-23:45:
     // Backend mode: read via async Drizzle helper, filter ephemeral in-memory.
-        const agents = await findAgentRowsByNameAsync(this.asyncLayer!.db, name);
+        const agents = await findAgentRowsByNameAsync(
+      executor ?? this.asyncLayer!.db,
+      name,
+      this.workflowProjectId,
+    );
     for (const agent of agents) {
       if (!isEphemeralAgent(agent)) {
         return this.parseAgent(agent as unknown as AgentData);
@@ -780,7 +831,7 @@ export class AgentStore extends EventEmitter {
    * @returns The created agent
    * @throws Error if input is invalid or a duplicate non-ephemeral name exists
    */
-  async createAgent(input: AgentCreateInput): Promise<Agent> {
+  async createAgent(input: AgentCreateInput, executor?: QueryHandle): Promise<Agent> {
     if (!input.name?.trim()) {
       throw new Error("Agent name is required");
     }
@@ -791,7 +842,7 @@ export class AgentStore extends EventEmitter {
     const ephemeral = isEphemeralAgent({ metadata, name: input.name, role: roles[0], reportsTo: input.reportsTo });
 
     if (!ephemeral) {
-      const existing = await this.findAgentByName(normalizedName);
+      const existing = await this.findAgentByName(normalizedName, executor);
       if (existing) {
         throw new Error(`Agent with name "${normalizedName}" already exists (agentId: ${existing.id})`);
       }
@@ -846,7 +897,7 @@ export class AgentStore extends EventEmitter {
       ...(resolvedHeartbeatProcedurePath && { heartbeatProcedurePath: resolvedHeartbeatProcedurePath }),
     };
 
-    await this.writeAgent(agent);
+    await this.writeAgent(agent, executor);
     this.emit("agent:created", agent);
 
     return agent;
@@ -862,7 +913,7 @@ export class AgentStore extends EventEmitter {
     FNXC:SqliteDualPathCleanup 2026-07-26-14:05:
     Agent reads are PostgreSQL-only via readAgentAsync. Populate getCachedAgent memory so sync heartbeat resolveAgentConfig can honor per-agent runtimeConfig without a SQLite handle.
     */
-    const agent = await readAgentAsync(this.asyncLayer!.db, agentId);
+    const agent = await readAgentAsync(this.asyncLayer!.db, agentId, this.workflowProjectId);
     const parsed = agent ? this.parseAgent(agent) : null;
     if (parsed) this.agentMemoryCache.set(agentId, parsed);
     else this.agentMemoryCache.delete(agentId);
@@ -997,8 +1048,12 @@ export class AgentStore extends EventEmitter {
      * FNXC:SqliteFinalRemoval 2026-06-26-09:15:
      * Backend-mode: delegate to async Drizzle addRating helper. The score CHECK
      * constraint is enforced by PostgreSQL (VAL-SCHEMA-005).
+     *
+     * FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00:
+     * Ratings use the soft workflow project accessor: unbound compatibility stores
+     * must retain trigger-stamped writes rather than throw like heartbeat operations.
      */
-        const saved = await addRatingAsync(this.asyncLayer!.db, rating);
+    const saved = await addRatingAsync(this.asyncLayer!.db, rating, this.workflowProjectId);
     this.emit("rating:added", saved);
     return saved;
 }
@@ -1007,8 +1062,12 @@ export class AgentStore extends EventEmitter {
     /*
      * FNXC:SqliteFinalRemoval 2026-06-26-09:15:
      * Backend-mode: delegate to async Drizzle getRatings helper.
+     *
+     * FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00:
+     * workflowProjectId is intentionally soft so an unbound store keeps its historic
+     * unscoped compatibility read instead of invoking backendProjectId's hard guard.
      */
-        return getRatingsAsync(this.asyncLayer!.db, agentId, options);
+    return getRatingsAsync(this.asyncLayer!.db, agentId, options, this.workflowProjectId);
 }
 
   async getRatingSummary(agentId: string): Promise<AgentRatingSummary> {
@@ -1075,8 +1134,12 @@ export class AgentStore extends EventEmitter {
     /*
      * FNXC:SqliteFinalRemoval 2026-06-26-09:15:
      * Backend-mode: delegate to async Drizzle deleteRating helper.
+     *
+     * FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00:
+     * Use the soft workflow project binding to scope bound deletes without breaking
+     * the documented unbound compatibility path.
      */
-        await deleteRatingAsync(this.asyncLayer!.db, ratingId);
+    await deleteRatingAsync(this.asyncLayer!.db, ratingId, this.workflowProjectId);
     return;
 }
 
@@ -1448,6 +1511,8 @@ export class AgentStore extends EventEmitter {
 
       await this.writeAgent(updated);
       this.emit("agent:stateChanged", agentId, currentState, newState);
+      /* FNXC:AgentActivityStream 2026-08-09-09:09: monitoring is fail-soft and still probes this in-memory agent against the live roster. */
+      if (this.asyncLayer) try { await appendAgentActivityEvent(this.asyncLayer, { type: "agent:state-changed", attributionClaim: resolveAgentActivityAttribution([{ id: agentId, provenance: "roster" }], "executor"), taskId: updated.taskId, occurredAt: updated.updatedAt, discriminator: updated.updatedAt, metadata: { fromState: currentState, toState: newState, source: "update" } }); } catch { /* monitoring must not block a state transition */ }
       this.emit("agent:updated", updated, currentState);
 
       return updated;
@@ -1494,6 +1559,8 @@ export class AgentStore extends EventEmitter {
     // Emit agent:assigned only when assigning a task (not when clearing)
     if (taskId !== undefined) {
       this.emit("agent:assigned", updated, taskId);
+      // FNXC:AgentActivityStream 2026-08-09-09:09: assignment does not observe an acting manager, so no fromAgentId is inferred.
+      if (this.asyncLayer) try { await appendAgentActivityEvent(this.asyncLayer, { type: "task:handed-off", attributionClaim: resolveAgentActivityAttribution([{ id: agentId, provenance: "roster" }], "executor"), toAgentIdClaim: resolveAgentActivityAttribution([{ id: agentId, provenance: "roster" }], "executor"), taskId, occurredAt: updated.updatedAt, discriminator: `${taskId}:${updated.updatedAt}`, metadata: { reason: "unlisted", source: "executor", delegationDirection: "unknown" } }); } catch { /* monitoring must not block assignment */ }
     }
 
     // Log the assignment to the task when a non-empty taskId is provided
@@ -1976,11 +2043,18 @@ export class AgentStore extends EventEmitter {
    * @param filter - Optional filter criteria
    * @returns Array of agents
    */
-  async listAgents(filter?: { state?: AgentState; role?: AgentCapability; includeEphemeral?: boolean }): Promise<Agent[]> {
+  async listAgents(
+    filter?: { state?: AgentState; role?: AgentCapability; includeEphemeral?: boolean },
+    executor?: QueryHandle,
+  ): Promise<Agent[]> {
     // FNXC:WorkflowAgentRouting 2026-08-07-03:12:
     // Role-pool membership is canonical multi-tag state, so SQL must not use the
     // deprecated singular projection to exclude a matching durable principal.
-    const agents = await listAgentRowsAsync(this.asyncLayer!.db, { state: filter?.state });
+    const agents = await listAgentRowsAsync(
+      executor ?? this.asyncLayer!.db,
+      { state: filter?.state },
+      this.workflowProjectId,
+    );
     return agents
       .map((a) => this.parseAgent(a as unknown as AgentData))
       .filter((agent) => !filter?.role || agent.roles.includes(filter.role))
@@ -1994,38 +2068,85 @@ export class AgentStore extends EventEmitter {
    * members with the same tag.
    */
   async provisionBuiltinWorkflowRoleAgents(): Promise<Agent[]> {
-    const provision = async (): Promise<Agent[]> => {
-      const definitions: ReadonlyArray<{ role: AgentCapability; name: string; title: string }> = [
-        { role: "triage", name: "Workflow Planner", title: "Built-in workflow planning owner" },
-        { role: "executor", name: "Workflow Executor", title: "Built-in workflow execution owner" },
-        { role: "reviewer", name: "Workflow Reviewer", title: "Built-in workflow review owner" },
-        { role: "merger", name: "Workflow Merger", title: "Built-in workflow merge owner" },
-      ];
-      const existing = await this.listAgents({ includeEphemeral: true });
-      const builtins = new Map(
-        existing
-          .filter((agent) => agent.metadata?.builtInWorkflowRole === true)
-          .map((agent) => [agent.metadata.workflowRole as AgentCapability, agent]),
-      );
-      const result: Agent[] = [];
-      for (const definition of definitions) {
-        const present = builtins.get(definition.role);
-        if (present) {
-          result.push(present);
-          continue;
+    const provision = async (executor?: QueryHandle): Promise<Agent[]> => {
+      const existing = await this.listAgents({ includeEphemeral: true }, executor);
+      const supportedRoles = new Set<BuiltinWorkflowRole>(BUILTIN_WORKFLOW_ROLE_AGENT_DEFAULT_LIST.map(({ role }) => role));
+      const groups = new Map<BuiltinWorkflowRole, Agent[]>();
+      for (const agent of existing) {
+        const role = agent.metadata?.workflowRole;
+        if (agent.metadata?.builtInWorkflowRole === true && typeof role === "string" && supportedRoles.has(role as BuiltinWorkflowRole)) {
+          const group = groups.get(role as BuiltinWorkflowRole) ?? [];
+          group.push(agent);
+          groups.set(role as BuiltinWorkflowRole, group);
         }
-        result.push(await this.createAgent({
-          name: definition.name,
-          roles: [definition.role],
-          title: definition.title,
-          metadata: { builtInWorkflowRole: true, workflowRole: definition.role },
-          // Disabled scheduling does not make the agent unavailable for graph sessions.
-          runtimeConfig: { enabled: false },
-        }));
+      }
+
+      /*
+      FNXC:WorkflowAgentIdentities 2026-08-08-06:11:
+      Corrupt legacy data can contain multiple provenance owners. Select by creation time then id,
+      not query order, and demote only the two built-in provenance keys so every losing durable
+      agent remains usable with its operator-owned identity and policy intact.
+      */
+      const winners = new Map<BuiltinWorkflowRole, Agent>();
+      for (const [role, group] of groups) {
+        group.sort(compareBuiltinWorkflowOwnerAge);
+        winners.set(role, group[0]!);
+        for (const loser of group.slice(1)) {
+          const { builtInWorkflowRole: _builtIn, workflowRole: _role, ...metadata } = loser.metadata;
+          await this.writeAgent({ ...loser, metadata, updatedAt: new Date().toISOString() }, executor);
+        }
+      }
+
+      const result: Agent[] = [];
+      for (const definition of BUILTIN_WORKFLOW_ROLE_AGENT_DEFAULT_LIST) {
+        let agent = winners.get(definition.role);
+        if (!agent) {
+          agent = await this.createAgent({
+            name: definition.name,
+            roles: [definition.role],
+            title: definition.title,
+            metadata: { builtInWorkflowRole: true, workflowRole: definition.role },
+            /*
+            FNXC:WorkflowAgentRouting 2026-08-10-01:15:
+            Heartbeat OFF and auto-claim OFF is correct for these four: they are invoked BY the workflow engine
+            as stage principals and must not run autonomous loops or claim work on their own. This no longer
+            costs routability — `isWorkflowPrincipalEligible` treats built-in owners as routable structurally,
+            precisely so the heartbeat setting and the routing question stay separate concerns.
+            */
+            runtimeConfig: { enabled: false, autoClaimRelevantTasks: false },
+            instructionsText: definition.instructionsText,
+            soul: definition.soul,
+            bundleConfig: { ...BUILTIN_WORKFLOW_AGENT_BUNDLE_CONFIG, files: [...BUILTIN_WORKFLOW_AGENT_BUNDLE_CONFIG.files] },
+          }, executor);
+        } else {
+          const canonicalOrPartialBundle = isCanonicalOrPartialBuiltinWorkflowBundle(agent.bundleConfig);
+          const customInstructions = Boolean(agent.instructionsPath?.trim())
+            || agent.bundleConfig?.mode === "external"
+            || (agent.bundleConfig !== undefined && !canonicalOrPartialBundle)
+            || (Boolean(agent.instructionsText?.trim()) && agent.instructionsText !== definition.instructionsText);
+          const updates: Partial<Agent> = {};
+          if (!customInstructions && !agent.instructionsText?.trim()) updates.instructionsText = definition.instructionsText;
+          if (!agent.soul?.trim()) updates.soul = definition.soul;
+          // FNXC:WorkflowAgentIdentities 2026-08-08-06:38: Do not rewrite complete canonical
+          // rows on every startup; partial default-owned inventories converge once, while
+          // noncanonical inventories remain operator-owned.
+          if (!customInstructions && !isCompleteBuiltinWorkflowBundle(agent.bundleConfig)) {
+            updates.bundleConfig = { ...BUILTIN_WORKFLOW_AGENT_BUNDLE_CONFIG, files: [...BUILTIN_WORKFLOW_AGENT_BUNDLE_CONFIG.files] };
+          }
+          if (Object.keys(updates).length > 0) {
+            agent = { ...agent, ...updates, updatedAt: new Date().toISOString() };
+            await this.writeAgent(agent, executor);
+          }
+        }
+        result.push(agent);
       }
       return result;
     };
-    if (!this.asyncLayer) return provision();
+    if (!this.asyncLayer) {
+      const agents = await provision();
+      await Promise.all(agents.map((agent) => this.materializeBuiltinWorkflowRoleBundle(agent)));
+      return agents;
+    }
     /*
      * FNXC:WorkflowAgentRouting 2026-08-07-07:16:
      * Startup and onboarding can run in separate engine processes. Serialize the
@@ -2034,9 +2155,100 @@ export class AgentStore extends EventEmitter {
      * duplicate owners. User-created same-role agents are intentionally outside
      * this provenance lock and remain valid pool members.
      */
-    return this.asyncLayer.transactionImmediate(async (tx) => {
+    /*
+     * FNXC:WorkflowAgentRouting 2026-08-07-16:22:
+     * The provisioning work MUST run on `tx`, not on the pool. The lock holder
+     * previously called provision() with no executor, so its reads/writes asked
+     * the pool for a SECOND connection while concurrent callers occupied the
+     * remaining slots blocking on this same advisory lock. With DEFAULT_POOL_MAX=3
+     * that self-deadlocks: the holder can never finish, the waiters can never take
+     * the lock, and every later query — i.e. every DB-backed API route — queues
+     * forever behind an exhausted pool. Keep the lock and the work on one connection.
+     */
+    const agents = await this.asyncLayer.transactionImmediate(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${this.backendProjectId}), hashtext('builtin-workflow-role-provisioning'))`);
-      return provision();
+      return provision(tx);
+    });
+    /*
+    FNXC:WorkflowAgentIdentities 2026-08-08-06:11:
+    Commit durable ownership before writing managed mirrors. A filesystem failure leaves a complete,
+    retryable row state; later provisioning can converge without holding an agent file lock while it
+    waits for the project advisory lock.
+    */
+    await Promise.all(agents.map((agent) => this.materializeBuiltinWorkflowRoleBundle(agent)));
+    return agents;
+  }
+
+  /*
+  FNXC:MemoryAgent 2026-08-11-09:41:
+  Memory Keeper is custom because it is not a workflow-stage principal. Unlike the four routed
+  owners its heartbeat is enabled, while auto-claim remains off because it only maintains memory.
+  This runs during init, where createAgent name collisions would abort startup; preflight probes,
+  a fallback name, a null degraded result, and the init-side catch keep an operator's same-named
+  agent untouched and the project runnable.
+  */
+  async provisionBuiltinMemoryAgent(): Promise<Agent | null> {
+    const provision = async (executor?: QueryHandle): Promise<Agent | null> => {
+      const existing = await this.listAgents({ includeEphemeral: true }, executor);
+      const owners = existing
+        .filter((agent) => agent.metadata?.[BUILTIN_MEMORY_AGENT_PROVENANCE_KEY] === true)
+        .sort(compareBuiltinWorkflowOwnerAge);
+      let owner = owners[0];
+      for (const loser of owners.slice(1)) {
+        const { [BUILTIN_MEMORY_AGENT_PROVENANCE_KEY]: _builtInMemoryAgent, ...metadata } = loser.metadata ?? {};
+        await this.writeAgent({ ...loser, metadata, updatedAt: new Date().toISOString() }, executor);
+      }
+      if (!owner) {
+        /*
+        FNXC:MemoryAgent 2026-08-11-10:17:
+        Probe through the provisioning transaction executor. Opening a second pooled query while the
+        startup advisory lock is held can exhaust a small pool behind concurrent startup callers.
+        */
+        const canonicalTaken = (await this.findAgentByName(BUILTIN_MEMORY_AGENT_NAME, executor)) !== null;
+        const name = canonicalTaken ? BUILTIN_MEMORY_AGENT_FALLBACK_NAME : BUILTIN_MEMORY_AGENT_NAME;
+        if (canonicalTaken && (await this.findAgentByName(BUILTIN_MEMORY_AGENT_FALLBACK_NAME, executor)) !== null) {
+          agentStoreLog.warn(`Built-in memory agent not provisioned: both "${BUILTIN_MEMORY_AGENT_NAME}" and "${BUILTIN_MEMORY_AGENT_FALLBACK_NAME}" are in use`);
+          return null;
+        }
+        try {
+          owner = await this.createAgent({
+            name,
+            roles: [...BUILTIN_MEMORY_AGENT_DEFAULT.roles],
+            title: BUILTIN_MEMORY_AGENT_DEFAULT.title,
+            metadata: { [BUILTIN_MEMORY_AGENT_PROVENANCE_KEY]: true },
+            runtimeConfig: { enabled: true, autoClaimRelevantTasks: false, heartbeatIntervalMs: 3_600_000 },
+            instructionsText: BUILTIN_MEMORY_AGENT_DEFAULT.instructionsText,
+            soul: BUILTIN_MEMORY_AGENT_DEFAULT.soul,
+            bundleConfig: { ...BUILTIN_MEMORY_AGENT_DEFAULT.bundleConfig, files: [...BUILTIN_MEMORY_AGENT_DEFAULT.bundleConfig.files] },
+          }, executor);
+        } catch (error) {
+          if (error instanceof Error && error.message.includes("already exists")) {
+            agentStoreLog.warn(`Built-in memory agent not provisioned because its candidate name was claimed during creation`);
+            return null;
+          }
+          throw error;
+        }
+        return owner;
+      }
+      const metadata = { ...(owner.metadata ?? {}), [BUILTIN_MEMORY_AGENT_PROVENANCE_KEY]: true };
+      const runtimeConfig = { ...(owner.runtimeConfig ?? {}), enabled: true, autoClaimRelevantTasks: false, heartbeatIntervalMs: 3_600_000 };
+      const updates: Partial<Agent> = {
+        roles: [...BUILTIN_MEMORY_AGENT_DEFAULT.roles],
+        role: "custom",
+        title: owner.title ?? BUILTIN_MEMORY_AGENT_DEFAULT.title,
+        metadata,
+        runtimeConfig,
+        instructionsText: owner.instructionsText?.trim() ? owner.instructionsText : BUILTIN_MEMORY_AGENT_DEFAULT.instructionsText,
+        soul: owner.soul?.trim() ? owner.soul : BUILTIN_MEMORY_AGENT_DEFAULT.soul,
+      };
+      owner = { ...owner, ...updates, updatedAt: new Date().toISOString() };
+      await this.writeAgent(owner, executor);
+      return owner;
+    };
+    if (!this.asyncLayer) return provision();
+    return this.asyncLayer.transactionImmediate(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${this.backendProjectId}), hashtext('builtin-memory-agent-provisioning'))`);
+      return provision(tx);
     });
   }
 
@@ -2081,7 +2293,7 @@ export class AgentStore extends EventEmitter {
        * FNXC:SqliteFinalRemoval 2026-06-26-09:20:
        * Backend-mode: delegate to async Drizzle insertApiKey helper.
        */
-            await insertApiKeyAsync(this.asyncLayer!.db, key);
+            await insertApiKeyAsync(this.asyncLayer!.db, key, this.workflowProjectId);
 
       return { key, token };
     });
@@ -2151,7 +2363,7 @@ export class AgentStore extends EventEmitter {
        * FNXC:SqliteFinalRemoval 2026-06-26-09:20:
        * Backend-mode: delegate to async Drizzle revokeApiKeyRow helper.
        */
-            await revokeApiKeyRowAsync(this.asyncLayer!.db, keyId, agentId, revoked);
+            await revokeApiKeyRowAsync(this.asyncLayer!.db, keyId, agentId, revoked, this.workflowProjectId);
 
       return revoked;
     });
@@ -2192,7 +2404,7 @@ export class AgentStore extends EventEmitter {
       // FNXC:SqliteFinalRemoval 2026-06-25-23:55:
       // Backend mode: delete via async Drizzle helper (cascading FKs handle
       // heartbeats, runs, task sessions, API keys, config revisions, etc.).
-            await deleteAgentAsync(this.asyncLayer!.db, agentId);
+            await deleteAgentAsync(this.asyncLayer!.db, agentId, this.workflowProjectId);
 
       // FN-7723: keep this instance's own change-detection snapshot in sync
       // with its own delete so a later poll never mistakes the row's absence
@@ -2246,7 +2458,7 @@ export class AgentStore extends EventEmitter {
         timestamp: event.timestamp,
         status: event.status,
         runId: event.runId,
-      });
+      }, this.workflowProjectId);
 
       // Update agent's lastHeartbeatAt if status is ok
       if (status === "ok") {
@@ -2279,8 +2491,8 @@ export class AgentStore extends EventEmitter {
   async getHeartbeatHistory(agentId: string, limit = 50): Promise<AgentHeartbeatEvent[]> {
     // FNXC:SqliteFinalRemoval 2026-06-26-00:05:
     // Backend mode: read via async Drizzle helper.
-        void this.backendProjectId;
-    return getHeartbeatHistoryAsync(this.asyncLayer!.db, agentId, limit);
+    void this.backendProjectId;
+    return getHeartbeatHistoryAsync(this.asyncLayer!.db, agentId, limit, this.workflowProjectId);
 }
 
   /**
@@ -2404,7 +2616,7 @@ export class AgentStore extends EventEmitter {
      * FNXC:SqliteFinalRemoval 2026-06-26-09:30:
      * Backend-mode: delegate to async Drizzle getTaskSession helper.
      */
-        return getTaskSessionAsync(this.asyncLayer!.db, agentId, taskId);
+        return getTaskSessionAsync(this.asyncLayer!.db, agentId, taskId, this.workflowProjectId);
 }
 
   /**
@@ -2426,7 +2638,7 @@ export class AgentStore extends EventEmitter {
      * FNXC:SqliteFinalRemoval 2026-06-26-09:30:
      * Backend-mode: delegate to async Drizzle upsertTaskSession helper.
      */
-        await upsertTaskSessionAsync(this.asyncLayer!.db, saved);
+        await upsertTaskSessionAsync(this.asyncLayer!.db, saved, this.workflowProjectId);
 
     return saved;
   }
@@ -2441,7 +2653,7 @@ export class AgentStore extends EventEmitter {
      * FNXC:SqliteFinalRemoval 2026-06-26-09:30:
      * Backend-mode: delegate to async Drizzle deleteTaskSession helper.
      */
-        await deleteTaskSessionAsync(this.asyncLayer!.db, agentId, taskId);
+        await deleteTaskSessionAsync(this.asyncLayer!.db, agentId, taskId, this.workflowProjectId);
     return;
 }
 
@@ -2680,7 +2892,7 @@ export class AgentStore extends EventEmitter {
    */
   async getLastBlockedState(agentId: string): Promise<BlockedStateSnapshot | null> {
     // FNXC:PostgresCutover 2026-07-04: delegate to async Drizzle helper in backend mode.
-        return getLastBlockedStateAsync(this.asyncLayer!.db, agentId);
+        return getLastBlockedStateAsync(this.asyncLayer!.db, agentId, this.workflowProjectId);
 }
 
   /**
@@ -2689,7 +2901,7 @@ export class AgentStore extends EventEmitter {
   async setLastBlockedState(agentId: string, state: BlockedStateSnapshot): Promise<void> {
     await this.withLock(agentId, async () => {
       // FNXC:PostgresCutover 2026-07-04: delegate to async Drizzle helper in backend mode.
-            await setLastBlockedStateAsync(this.asyncLayer!.db, agentId, state);
+            await setLastBlockedStateAsync(this.asyncLayer!.db, agentId, state, this.workflowProjectId);
       return;
 });
   }
@@ -2700,7 +2912,7 @@ export class AgentStore extends EventEmitter {
   async clearLastBlockedState(agentId: string): Promise<void> {
     await this.withLock(agentId, async () => {
       // FNXC:PostgresCutover 2026-07-04: delegate to async Drizzle helper in backend mode.
-            await clearLastBlockedStateAsync(this.asyncLayer!.db, agentId);
+            await clearLastBlockedStateAsync(this.asyncLayer!.db, agentId, this.workflowProjectId);
       return;
 });
   }
@@ -2715,13 +2927,13 @@ export class AgentStore extends EventEmitter {
 
   private async appendConfigRevision(revision: AgentConfigRevision): Promise<void> {
     // FNXC:SqliteFinalRemoval 2026-06-26-00:10: backend mode async delegation.
-        await appendConfigRevisionAsync(this.asyncLayer!.db, revision);
+        await appendConfigRevisionAsync(this.asyncLayer!.db, revision, this.workflowProjectId);
     return;
 }
 
   private async readConfigRevisions(agentId: string): Promise<AgentConfigRevision[]> {
     // FNXC:SqliteFinalRemoval 2026-06-26-00:10: backend mode async delegation.
-        return readConfigRevisionsAsync(this.asyncLayer!.db, agentId);
+        return readConfigRevisionsAsync(this.asyncLayer!.db, agentId, this.workflowProjectId);
 }
 
   private createConfigRevision(params: {
@@ -2811,7 +3023,7 @@ export class AgentStore extends EventEmitter {
 
   private async findConfigRevisionAcrossAgents(revisionId: string): Promise<AgentConfigRevision | null> {
     // FNXC:PostgresCutover 2026-07-04: delegate to async Drizzle helper in backend mode.
-        return findConfigRevisionByIdAsync(this.asyncLayer!.db, revisionId);
+        return findConfigRevisionByIdAsync(this.asyncLayer!.db, revisionId, this.workflowProjectId);
 }
 
   private computeNextResetAt(period: AgentBudgetConfig["budgetPeriod"], resetDay?: number): string | null {
@@ -2867,6 +3079,41 @@ export class AgentStore extends EventEmitter {
     }
 
     return null;
+  }
+
+  /** Seed only missing or blank default-owned mirror files after the provisioning transaction commits. */
+  private async materializeBuiltinWorkflowRoleBundle(agent: Agent): Promise<void> {
+    // FNXC:WorkflowAgentIdentities 2026-08-08-06:38: Take the per-agent file lock only after
+    // the advisory transaction commits, serializing default seeding with dashboard file edits
+    // without creating inverse DB/file waits.
+    return this.withLock(agent.id, async () => {
+      const role = agent.metadata?.workflowRole;
+      const definition = BUILTIN_WORKFLOW_ROLE_AGENT_DEFAULT_LIST.find((candidate) => candidate.role === role);
+      if (!definition || agent.metadata?.builtInWorkflowRole !== true) return;
+      const config = agent.bundleConfig;
+      if (!isCanonicalOrPartialBuiltinWorkflowBundle(config)) return;
+      /*
+      FNXC:WorkflowAgentIdentities 2026-08-08-06:27:
+      A non-default inline body or any path is an operator-owned instruction source, even when a
+      legacy canonical mirror config remains on the row. Do not create default mirror files beside
+      that source: startup may repair default-owned rows, but it must never inject a competing setup.
+      */
+      if (agent.instructionsPath?.trim()
+        || (agent.instructionsText?.trim() && agent.instructionsText !== definition.instructionsText)) return;
+      // FNXC:WorkflowAgentIdentities 2026-08-08-06:38: Follow the public bundle APIs'
+      // legacy/display-name compatibility rule so upgrades never strand existing managed files
+      // in a second directory.
+      const bundleDir = await this.resolveCompatibleBundleDir(agent.id, true);
+      await mkdir(bundleDir, { recursive: true });
+      for (const [file, content] of [["AGENTS.md", definition.instructionsText], ["soul.md", definition.soul]] as const) {
+        const path = join(bundleDir, file);
+        let current = "";
+        try { current = await readFile(path, "utf-8"); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        if (!current.trim()) await writeFile(path, content, "utf-8");
+      }
+    });
   }
 
   private getCanonicalBundleDir(agent: Agent): string {
@@ -3012,7 +3259,7 @@ export class AgentStore extends EventEmitter {
      * FNXC:SqliteFinalRemoval 2026-06-26-09:20:
      * Backend-mode: delegate to async Drizzle readApiKeys helper.
      */
-        return readApiKeysAsync(this.asyncLayer!.db, agentId);
+        return readApiKeysAsync(this.asyncLayer!.db, agentId, this.workflowProjectId);
 }
 
   private readAgent(_agentId: string): Agent | null {
@@ -3103,10 +3350,10 @@ export class AgentStore extends EventEmitter {
     };
   }
 
-  private async writeAgent(agent: Agent): Promise<void> {
+  private async writeAgent(agent: Agent, executor?: QueryHandle): Promise<void> {
     // FNXC:SqliteFinalRemoval 2026-06-25-23:40:
     // Backend mode: delegate to async Drizzle writeAgent helper.
-        await writeAgentAsync(this.asyncLayer!.db, agent, this.asyncLayer!.projectId);
+        await writeAgentAsync(executor ?? this.asyncLayer!.db, agent, this.asyncLayer!.projectId);
     return;
 }
 
@@ -3219,6 +3466,24 @@ export class AgentStore extends EventEmitter {
 
         if (stateChanged) {
           this.emit("agent:stateChanged", agent.id, previousState, agent.state);
+          /*
+          FNXC:AgentActivityStream 2026-08-09-09:38:
+          A separate-process state transition may only become visible through this reconciliation observer. Reuse its durable updatedAt identity so an originating writer dedupes, while an older writer still gains one outbox row. Monitoring remains fail-soft.
+          */
+          if (this.asyncLayer) {
+            try {
+              await appendAgentActivityEvent(this.asyncLayer, {
+                type: "agent:state-changed",
+                attributionClaim: resolveAgentActivityAttribution([{ id: agent.id, provenance: "roster" }], "executor"),
+                taskId: agent.taskId,
+                occurredAt: agent.updatedAt,
+                discriminator: agent.updatedAt,
+                metadata: { fromState: previousState, toState: agent.state, source: "reconciliation" },
+              });
+            } catch {
+              // Monitoring must not interrupt roster reconciliation.
+            }
+          }
           this.emit("agent:updated", agent, previousState);
         } else {
           this.emit("agent:updated", agent);

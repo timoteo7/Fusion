@@ -2,6 +2,10 @@
  * Tests for project.ts commands
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tempWorkspace } from "@fusion/test-utils";
+import { installShippedSkillsIntoProject, SHIPPED_SKILL_NAMES, type ShippedSkillName } from "../claude-skills.js";
 
 function makeConstructibleMock<T extends (...args: any[]) => unknown>(impl?: T) {
   const mock = vi.fn(function () {});
@@ -44,6 +48,9 @@ const mockTaskStoreClose = vi.fn();
 const mockEnsureMemoryFileWithBackend = vi.fn();
 const mockGetTaskWorkflowSelectionAsync = vi.fn(async () => null);
 const mockGetWorkflowDefinition = vi.fn(async () => undefined);
+const { mockInstallSkillsForProject } = vi.hoisted(() => ({
+  mockInstallSkillsForProject: vi.fn(() => []),
+}));
 
 /*
 FNXC:CliTests 2026-07-30-23:10 (greptile P2 — mocks bypassed the enrichment):
@@ -106,6 +113,11 @@ vi.mock("@fusion/core", async (importOriginal) => ({
   writeProjectIdentity: vi.fn(),
 }));
 
+vi.mock("../claude-skills-runner.js", () => ({
+  maybeInstallClaudeSkillForNewProject: mockInstallSkillsForProject,
+  ensureClaudeSkillsForAllProjectsOnStartup: vi.fn(() => []),
+}));
+
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
     question: mockQuestion,
@@ -140,6 +152,7 @@ describe("project commands", () => {
       throw new Error(`process.exit:${code ?? 0}`);
     });
     mockGetSettings.mockResolvedValue({});
+    mockInstallSkillsForProject.mockClear();
     mockFormatProjectLine.mockImplementation((project, isDefault) => `${isDefault ? "* " : "  "}${project.name}`);
     mockQuestion.mockResolvedValue("y");
     mockGetProjectHealth.mockResolvedValue(undefined);
@@ -203,6 +216,31 @@ describe("project commands", () => {
     const parsed = JSON.parse(jsonOutput);
     expect(Array.isArray(parsed)).toBe(true);
     expect(parsed[0].name).toBe("app-one");
+  });
+
+  it("C3: runProjectAdd reconciles every shipped skill for the registered project", async () => {
+    /* FNXC:ComputerUseSkill 2026-08-11-14:30: Project registration needs the
+     * same per-skill reconciliation assertion as init, not a delegate-only spy. */
+    const root = tempWorkspace("fusion-project-skills-");
+    const priorCwd = process.cwd();
+    const sources = Object.fromEntries(SHIPPED_SKILL_NAMES.map((skillName) => {
+      const source = join(root, "sources", skillName);
+      mkdirSync(source, { recursive: true });
+      writeFileSync(join(source, "SKILL.md"), `name: ${skillName}`);
+      return [skillName, source];
+    })) as Record<ShippedSkillName, string>;
+    mockListProjects.mockResolvedValue([]);
+    mockRegisterProject.mockResolvedValue({ id: "proj-1", name: "demo", path: root, isolationMode: "in-process" });
+    mockInstallSkillsForProject.mockImplementationOnce((path: string) => installShippedSkillsIntoProject(path, { enabled: true, sources }));
+    try {
+      process.chdir(root);
+      const { runProjectAdd } = await import("../project.js");
+      await runProjectAdd("demo", ".", { force: true });
+      expect(mockInstallSkillsForProject).toHaveBeenCalledWith(root);
+      expect(mockInstallSkillsForProject.mock.results[0]?.value.map((result: { outcome: string }) => result.outcome)).toEqual(["installed", "installed"]);
+    } finally {
+      process.chdir(priorCwd);
+    }
   });
 
   it("runProjectAdd registers project and prints sanitized path output", async () => {

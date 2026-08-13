@@ -1832,7 +1832,8 @@
       "team": "Team",
       "workflows": "Workflows",
       "tokens": "Tokens",
-      "tools": "Tools"
+      "tools": "Tools",
+      "agentActivity": "Agent Activity"
     },
     "team": {
       "agent": "Agent",
@@ -1910,6 +1911,33 @@
       "sessions": "Sessions",
       "summaryTitle": "Summary",
       "toolCalls": "Tool calls"
+    },
+    "agentActivity": {
+      "live": "Live",
+      "timeline": "Timeline",
+      "mode": "Activity mode",
+      "empty": "No agent activity yet.",
+      "loadingOlder": "Loading…",
+      "loadOlder": "Load older",
+      "showMore": "Show more loaded activity",
+      "end": "End of activity history",
+      "agentFilter": "Filter by agent",
+      "allAgents": "All agents",
+      "taskFilter": "Filter by task",
+      "typeFilter": "Filter by event type",
+      "allTypes": "All event types",
+      "rangeNote": "Time range filters loaded events; it is not sent to the server.",
+      "openTask": "Open task {{taskId}}",
+      "openAgent": "Open agent {{agentId}}",
+      "eventTypes": {
+        "task:started": "Task started",
+        "task:handed-off": "Task handed off",
+        "task:completed": "Task completed",
+        "agent:state-changed": "Agent state changed",
+        "workflow:gate-passed": "Workflow gate passed",
+        "workflow:gate-failed": "Workflow gate failed",
+        "approval:requested": "Approval requested"
+      }
     }
   },
   "comments": {
@@ -3656,6 +3684,7 @@
     "assertionUpdateFailed": "Failed to update assertion",
     "attemptRetries_one": "Attempt {{attempt}} · {{count}} {{label}} left",
     "attemptRetries_other": "Attempt {{attempt}} · {{count}} {{label}} left",
+    "autoMergeOverrideDescription": "Inherited follows the project setting. Auto-merge lands each feature as it passes. Single pull request keeps every feature on one shared branch for joint review and merge.",
     "autopilotActivatingSlice": "Activating slice",
     "autopilotCompleting": "Completing",
     "autopilotDescription": "When on, Fusion automatically activates the next slice and plans its features as work completes.",
@@ -5966,7 +5995,6 @@
       "updating": "Updating…",
       "upperBoundOnMessagesFetchedFromTheRoom": "Upper bound on messages fetched from the room store for compaction consideration. Default: 200.",
       "upToDate": "You're up to date ✓",
-      "useEphemeralTaskWorkerAgents": " Use ephemeral task-worker agents ",
       "warnOnTheBoardWhenTodoWorkExceeds": "Warn on the board when todo work exceeds the threshold and no idle agents are available. Default: disabled.",
       "whenEnabledDefaultFusionSpawnsShortLived": " When enabled (default), Fusion spawns short-lived ",
       "whenEnabledFusionChecksOpenAndClosedIssues": " When enabled, Fusion checks open and closed issues in the target repo for likely duplicates (using File Scope paths and key symptoms) before creating a new tracking issue. Uncheck to always create a new issue. Default: enabled. ",
@@ -6024,7 +6052,9 @@
       "reportDiscussionCategorySelect": "Select a Discussion category",
       "reportDiscussionCategoryUnavailable": "Discussion categories are unavailable for the configured repository.",
       "reportDiscussionCategoryEmpty": "No Discussion categories are available for the configured repository.",
-      "reportTargetByActionHelp": "Optional per-action override of the default report target for bug, feedback, idea, or help. No default — unset actions inherit reportTarget / action defaults."
+      "reportTargetByActionHelp": "Optional per-action override of the default report target for bug, feedback, idea, or help. No default — unset actions inherit reportTarget / action defaults.",
+      "maxRecommendationsPerTask": "Maximum recommendations per task",
+      "maxRecommendationsPerTaskHelp": "Default: 3. Set 0 to disable recommendations; choose a whole number from 1 to 20 to cap each completed task."
     },
     "globalGeneral": {
       "andShowsUpdateNoticesInTheCLIAnd": " and shows update notices in the CLI and dashboard. Cadence is governed by the frequency below. Default: enabled. ",
@@ -6373,7 +6403,11 @@
       "gitRemoteThatMergedResultsArePushedTo": "Git remote that merged results are pushed to. Default: \"origin\".",
       "pushTargetBranch": "Push target branch",
       "sameAsIntegrationBranchDefault": "(same as integration branch — default)",
-      "pushTargetBranchHelp": "Branch on the remote that merged results are pushed to. Leave on the default to push the integration branch to its same-named remote branch; pick a listed remote branch or choose Custom… to type one that doesn't exist on the remote yet (the push creates it)."
+      "pushTargetBranchHelp": "Branch on the remote that merged results are pushed to. Leave on the default to push the integration branch to its same-named remote branch; pick a listed remote branch or choose Custom… to type one that doesn't exist on the remote yet (the push creates it).",
+      "requiredChecks": "Required pull-request checks",
+      "requiredChecksHelp": "No default — unset. Comma-separated check names match GitHub exactly (case-sensitive). Leaving this empty uses GitHub required-status checks only; a named check that never reports blocks the merge.",
+      "githubNativeAutoMerge": "Use GitHub native auto-merge",
+      "githubNativeAutoMergeHelp": "GitHub waits for its full ruleset before merging. The repository must allow auto-merge; Fusion fails closed if it is unavailable. Default: disabled."
     },
     "mergeManually": "Merge Manually",
     "mobileNav": {
@@ -6457,6 +6491,8 @@
       "enable": " Enable ",
       "failureNotificationDelayMs": "Failure notification delay (ms)",
       "failureNotificationMode": "Failure notification mode",
+      "wedgeNotificationSettleMs": "Terminal-wedge settle window (ms)",
+      "wedgeNotificationSettleMsHelp": "How long a terminal failure must persist before an operator alert. 0 = notify immediately. Default: 300000 (5 minutes).",
       "format": "Format",
       "general": " General: ",
       "generic": "Generic",
@@ -8085,7 +8121,8 @@
       "terminal": "Session",
       "worktreeTerminal": "Terminal",
       "workflow": "Workflow",
-      "cost": "Cost"
+      "cost": "Cost",
+      "recommendations": "Recommendations"
     },
     "terminal": {
       "loading": "Loading terminal…"
@@ -8132,6 +8169,15 @@
       "totalCostLabel": "Total",
       "totalTokens": "Total tokens",
       "unknownModel": "(unknown)"
+    },
+    "recommendations": {
+      "title": "Recommendations",
+      "empty": "No recommendations were produced for this task.",
+      "created": "Created {{taskId}}",
+      "creating": "Creating…",
+      "retry": "Retry creating task",
+      "create": "Create task",
+      "error": "Could not create task. Try again."
     }
   },
   "taskDocuments": {
@@ -8336,7 +8382,9 @@
     "showRawText": "Show raw text",
     "startedAtSep": " · Started: {{timestamp}}",
     "updateFailed": "Failed to update {{taskId}}: {{error}}",
-    "upToDate": "Up to date"
+    "upToDate": "Up to date",
+    "fixedInReview": "Fixed in review",
+    "superseded": "Superseded"
   },
   "tasks": {
     "addTaskPlaceholder": "Add a task...",

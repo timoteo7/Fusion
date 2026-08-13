@@ -34,6 +34,7 @@ import {
 } from "../agents/agent-session-helpers.js";
 import { buildSessionSkillContext } from "../cli-runtime/session-skill-context.js";
 import { AgentLogger } from "../agents/agent-logger.js";
+import { attachAgentUsageTelemetry, emitAgentSessionStart } from "../agents/agent-usage-telemetry.js";
 import { reviewerLog } from "../logger.js";
 import { checkSessionError } from "../errors/usage-limit-detector.js";
 import {
@@ -129,8 +130,8 @@ export interface ReviewOptions {
   agentId?: string;
   /** Optional task title for fallback-used notification context. */
   taskTitle?: string;
-  /** Task with optional assignedAgentId for skill selection. */
-  task?: { assignedAgentId?: string | null };
+  /** Task identity used for skill selection and usage telemetry attribution. */
+  task?: { assignedAgentId?: string | null; effectiveNodeId?: string | null; nodeId?: string | null };
   /** User comments on the task (author === "user"). For spec reviews, the reviewer explicitly checks that every comment is addressed. */
   userComments?: TaskComment[];
   /** Agent prompt configuration for resolving custom reviewer prompts. */
@@ -281,7 +282,6 @@ export async function reviewStep(
         persistAgentThinkingLog: resolvePersistAgentThinkingLog(effectiveSettings, { ephemeral: false }),
       })
     : null;
-
   /*
   FNXC:ModelResolution 2026-06-28-17:00:
   Reviewer, spec-review, and workflow review-step sessions are validator-lane sessions. Resolve their primary model through the shared session helper so task reviewer overrides, project/global validator lanes, project/global defaults, and test-mode mock forcing stay identical to core model resolution instead of drifting in a reviewer-local precedence chain.
@@ -309,6 +309,26 @@ export async function reviewStep(
   );
   const validatorProvider = reviewerModel.provider;
   const validatorModelId = reviewerModel.modelId;
+  /*
+  FNXC:CommandCenterActivity 2026-08-09-11:29:
+  A reviewer session exists only after its validator model is resolved. Publish its boundary and
+  attach tool telemetry together with the workflow principal and routing node so durable review
+  work is not counted as a model-less or anonymous session.
+  */
+  if (options.store) {
+    const reviewerAgentId = options.agentId ?? options.task?.assignedAgentId ?? "reviewer";
+    const reviewerNodeId = options.task?.effectiveNodeId ?? options.task?.nodeId ?? null;
+    const telemetryContext = {
+      store: options.store,
+      agentId: reviewerAgentId,
+      taskId: options.taskId ?? null,
+      nodeId: reviewerNodeId,
+      model: validatorModelId ?? null,
+      provider: validatorProvider ?? null,
+      lane: "reviewer" as const,
+    };
+    attachAgentUsageTelemetry(agentLogger, telemetryContext);
+  }
 
   const reviewerFallbackSettings: Partial<Settings> = {
     ...reviewerModelSettings,
@@ -331,6 +351,18 @@ export async function reviewStep(
     : { provider: undefined, modelId: undefined };
   const validatorFallbackProvider = validatorFallback.provider;
   const validatorFallbackModelId = validatorFallback.modelId;
+
+  // Resolve the routed reviewer once so both its instructions and project-memory policy
+  // honor the same per-agent override.
+  const assignedAgentId = options.agentId ?? options.task?.assignedAgentId ?? null;
+  const agentStore = options.agentStore;
+  const memoryAgent =
+    options.rootDir
+    && agentStore
+    && assignedAgentId
+    && typeof (agentStore as { getAgent?: unknown }).getAgent === "function"
+      ? await agentStore.getAgent(assignedAgentId).catch(() => null)
+      : null;
 
   let reviewerInstructions = "";
   if (options.agentStore && options.rootDir) {
@@ -367,8 +399,14 @@ export async function reviewStep(
   // FN-6235: built-in reviewer policy is sourced from the resolved workflow IR review node;
   // explicit reviewer role overrides still win, and the built-in default keeps this fail-soft.
   const reviewerBasePrompt = userReviewerPrompt || workflowReviewerPrompt || resolveAgentPrompt("reviewer");
-  const memorySection = options.rootDir && effectiveSettings?.memoryEnabled !== false
-    ? buildReviewerMemoryInstructions(options.rootDir, effectiveSettings)
+  /*
+  FNXC:MemoryPreSteering 2026-08-11-11:30:
+  FN-8934 requires project-memory guidance to use the routed reviewer's mode as well as
+  its instruction section, so an explicit off override suppresses every memory nudge.
+  */
+  const reviewerMemoryMode = resolveAgentMemoryInclusionMode({ agent: memoryAgent, globalSettings: effectiveSettings }).mode;
+  const memorySection = options.rootDir && effectiveSettings?.memoryEnabled !== false && reviewerMemoryMode !== "off"
+    ? buildReviewerMemoryInstructions(options.rootDir, effectiveSettings, undefined, reviewerMemoryMode)
     : "";
 
   const reviewerPluginContributions = await buildPluginPromptSection(
@@ -403,15 +441,6 @@ export async function reviewStep(
   }
 
   // A routed reviewer principal owns its memory/runtime identity for this session.
-  const assignedAgentId = options.agentId ?? options.task?.assignedAgentId ?? null;
-  const agentStore = options.agentStore;
-  const memoryAgent =
-    options.rootDir
-    && agentStore
-    && assignedAgentId
-    && typeof (agentStore as { getAgent?: unknown }).getAgent === "function"
-      ? await agentStore.getAgent(assignedAgentId).catch(() => null)
-      : null;
   const memoryTools = options.rootDir && effectiveSettings?.memoryEnabled !== false
     ? [
         createMemorySearchTool(options.rootDir, effectiveSettings, memoryAgent ? {
@@ -547,6 +576,21 @@ export async function reviewStep(
         }
       },
     });
+
+    if (options.store) {
+      const telemetryContext = {
+        store: options.store,
+        agentId: options.agentId ?? options.task?.assignedAgentId ?? "reviewer",
+        taskId: options.taskId ?? null,
+        nodeId: options.task?.effectiveNodeId ?? options.task?.nodeId ?? null,
+        model: overrides?.forceModelId ?? validatorModelId ?? null,
+        provider: overrides?.forceProvider ?? validatorProvider ?? null,
+        lane: "reviewer" as const,
+      };
+      // FNXC:CommandCenterActivity 2026-08-09-15:18: Review boundaries are recorded only after a real reviewer runtime exists, including fallback attempts.
+      attachAgentUsageTelemetry(agentLogger, telemetryContext);
+      emitAgentSessionStart(telemetryContext);
+    }
 
     const reviewerModelDesc = describeModel(session);
     const reviewerModelDetails = formatModelMarkerDetails(reviewerModelDesc, options.defaultThinkingLevel);
@@ -1071,13 +1115,25 @@ export function proseSignalsClearApproval(rawOutput: string): boolean {
 
 /*
 FNXC:ReviewLeniency 2026-07-01-23:30:
-Some models emit PROSE followed by a trailing JSON payload — e.g. a paragraph of reasoning, then `{"verdict":"APPROVE","notes":"..."}` at the very end. Extract balanced top-level `{...}` objects in document order, string/escape aware so a brace inside prose or a notes string does not miscount. Callers prefer the LAST candidate as the authoritative trailing verdict. Shared by extractVerdict (reviewer/plan-review) and parseWorkflowStepVerdict (code-review + browser-verification gate).
+Some models emit PROSE followed by a trailing JSON payload — e.g. a paragraph of reasoning, then `{"verdict":"APPROVE","notes":"..."}` at the very end. Extract every balanced `{...}` object in close order, string/escape aware so a brace inside prose or a notes string does not miscount. Callers prefer the LAST candidate as the authoritative trailing verdict. Shared by extractVerdict (reviewer/plan-review) and parseWorkflowStepVerdict (code-review + browser-verification gate).
+
+FNXC:ReviewLeniency 2026-08-11-18:44:
+Balance tracking moved the prose-brace failure mode to unpaired braces or quotes. Emit every balanced object and, only after scanner desync, recover JSON.parse-arbitrated slices. Recovery must use scanner state rather than an empty-candidate or trailing-anchor test: desync can emit bogus candidates and prose after the payload can move its close far from the end. Quote-blind rescans are forbidden because braces inside JSON strings truncate payloads. Generous fair close/open budgets prevent prose closes or multi-finding opens from starving the payload; callers must keep preferring the last candidate.
 */
 export function extractJsonObjectCandidates(text: string): string[] {
-  const out: string[] = [];
+  const MAX_PRIMARY_CANDIDATES = 200;
+  const MAX_TRAILING_LINES = 50;
+  const MAX_RECOVERY_WINDOW = 64_000;
+  const MAX_CLOSE_ANCHORS = 200;
+  const MAX_OPEN_ANCHORS = 500;
+  const MIN_OPENS_PER_ANCHOR = 8;
+  const MAX_RECOVERY_CANDIDATES = 4_000;
+  const primary: string[] = [];
   const starts: number[] = [];
   let inString = false;
   let escaped = false;
+  let ignoredStrayClose = false;
+
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
     if (inString) {
@@ -1090,10 +1146,71 @@ export function extractJsonObjectCandidates(text: string): string[] {
     else if (ch === "{") starts.push(i);
     else if (ch === "}") {
       const start = starts.pop();
-      if (start !== undefined && starts.length === 0) out.push(text.slice(start, i + 1));
+      if (start === undefined) {
+        ignoredStrayClose = true;
+      } else {
+        primary.push(text.slice(start, i + 1));
+        if (primary.length > MAX_PRIMARY_CANDIDATES) primary.shift();
+      }
     }
   }
-  return out;
+
+  if (!inString && starts.length === 0 && !ignoredStrayClose && primary.length > 0) return primary;
+
+  const recoveryPreferred: string[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: string) => {
+    if (candidate.length > MAX_RECOVERY_WINDOW || seen.has(candidate)) return;
+    seen.add(candidate);
+    recoveryPreferred.push(candidate);
+  };
+
+  // A full JSON payload on any recent non-empty line needs no brace interpretation.
+  let nonEmptyLines = 0;
+  for (const line of text.split(/\r?\n/).reverse()) {
+    const candidate = line.trim();
+    if (!candidate) continue;
+    nonEmptyLines += 1;
+    if (candidate.startsWith("{") && candidate.endsWith("}")) add(candidate);
+    if (nonEmptyLines >= MAX_TRAILING_LINES) break;
+  }
+
+  const windowStart = Math.max(0, text.length - MAX_RECOVERY_WINDOW);
+  const closes: number[] = [];
+  for (let i = text.length - 1; i >= windowStart && closes.length < MAX_CLOSE_ANCHORS; i -= 1) {
+    if (text[i] === "}") closes.push(i);
+  }
+  const opensByClose = closes.map((close) => {
+    const opens: number[] = [];
+    const earliest = Math.max(windowStart, close - MAX_RECOVERY_WINDOW);
+    for (let i = close - 1; i >= earliest && opens.length < MAX_OPEN_ANCHORS; i -= 1) {
+      if (text[i] === "{") opens.push(i);
+    }
+    return opens.reverse(); // widest slices first
+  });
+
+  let spans = 0;
+  const addSpan = (open: number, close: number) => {
+    if (spans >= MAX_RECOVERY_CANDIDATES) return;
+    spans += 1;
+    add(text.slice(open, close + 1));
+  };
+  // Phase A gives each close anchor a chance before a bogus one consumes the cap.
+  for (let closeIndex = 0; closeIndex < closes.length && spans < MAX_RECOVERY_CANDIDATES; closeIndex += 1) {
+    for (const open of opensByClose[closeIndex].slice(0, MIN_OPENS_PER_ANCHOR)) addSpan(open, closes[closeIndex]);
+  }
+  // Phase B deepens every anchor in the same newest-first order.
+  for (let closeIndex = 0; closeIndex < closes.length && spans < MAX_RECOVERY_CANDIDATES; closeIndex += 1) {
+    for (const open of opensByClose[closeIndex].slice(MIN_OPENS_PER_ANCHOR)) addSpan(open, closes[closeIndex]);
+  }
+
+  // Callers iterate last→first, so append recovery candidates in reverse preference.
+  return [...primary, ...recoveryPreferred.reverse()];
+}
+
+/** Detects visible JSON verdict intent without treating ordinary prose as structured output. */
+export function textHasStructuredVerdictKey(rawOutput: string): boolean {
+  return /"verdict"\s*:/.test(rawOutput);
 }
 
 /*
@@ -1157,7 +1274,16 @@ function extractVerdict(review: string): ReviewVerdict {
   // (and carries no revise/reject/negated-approval signal). Treat as APPROVE so
   // an imperfectly-structured approval passes instead of collapsing to a
   // synthetic UNAVAILABLE retry/block. See proseSignalsClearApproval.
-  if (proseSignalsClearApproval(review)) {
+  /*
+  FNXC:ReviewLeniency 2026-08-11-18:44:
+  A quoted JSON verdict key that Strategy 3 could not classify must not be laundered
+  into a prose APPROVE. This shared detector also guards workflow-step gates; here
+  suppression deliberately falls through to retryable UNAVAILABLE. Explicit heading
+  and line strategies above remain authoritative, and fail-closed gates are untouched.
+  */
+  if (textHasStructuredVerdictKey(review)) {
+    reviewerLog.warn(`Structured verdict key was present but unparseable (${review.length} chars). Returning UNAVAILABLE.`);
+  } else if (proseSignalsClearApproval(review)) {
     reviewerLog.log(`Verdict extracted via lenient prose approval (${review.length} chars) → APPROVE`);
     return "APPROVE";
   }

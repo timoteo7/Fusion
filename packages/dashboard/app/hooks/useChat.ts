@@ -136,6 +136,9 @@ export interface UseChatReturn {
     input: { agentId: string; title?: string; modelProvider?: string; modelId?: string; thinkingLevel?: string },
   ) => Promise<ChatSessionInfo>;
   archiveSession: (id: string) => Promise<void>;
+  archivedSessions: ChatSessionInfo[];
+  refreshArchivedSessions: () => Promise<void>;
+  unarchiveSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   pinSession: (id: string, pinned: boolean) => Promise<void>;
   pinnedCount: number;
@@ -165,7 +168,7 @@ export interface UseChatReturn {
   sendMessage: (
     content: string,
     attachments?: File[],
-    callbacks?: { onDelivered?: () => void; onFailed?: () => void },
+    callbacks?: { onAccepted?: () => void; onDelivered?: () => void; onFailed?: () => void },
   ) => void;
   /**
    * FNXC:ChatMessageEdit 2026-07-07-09:00:
@@ -434,14 +437,18 @@ export function useChat(
       /*
       FNXC:ChatModal 2026-07-01-00:00:
       Server settings decide whether task-planner sessions belong in the common feed. Do not hydrate cached task chats before that filtered list returns, otherwise a stale cache can briefly expose hidden task-detail conversations and their controls.
+
+      FNXC:MessageArchive 2026-08-12-22:36:
+      Archived sessions must not flash from a cached list before the active-only refresh completes.
       */
-      return cachedSessions.filter((session) => !isTaskPlannerSession(session));
+      return cachedSessions.filter((session) => !isTaskPlannerSession(session) && session.status !== "archived");
     },
     [getChatSessionsCacheKey],
   );
 
   // Session state
   const [sessions, setSessions] = useState<ChatSessionInfo[]>(() => readCachedSessions(projectId));
+  const [archivedSessions, setArchivedSessions] = useState<ChatSessionInfo[]>([]);
   const [activeSession, setActiveSession] = useState<ChatSessionInfo | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(() => readCachedSessions(projectId).length === 0);
   const [tags, setTags] = useState<ChatTag[]>([]);
@@ -536,8 +543,12 @@ export function useChat(
       setSessionsLoading(true);
     }
     try {
-      const data: ChatSessionListResponse = await fetchChatSessions(projectId);
-      const sorted = sortChatSessions(data.sessions);
+      const data: ChatSessionListResponse = await fetchChatSessions(projectId, "active");
+      /*
+      FNXC:MessageArchive 2026-08-12-22:36:
+      The default sidebar excludes archived sessions even when an intermediary ignores status=active.
+      */
+      const sorted = sortChatSessions(data.sessions.filter((session) => session.status !== "archived"));
       setSessions(sorted);
       const cacheKey = getChatSessionsCacheKey(projectId);
       if (cacheKey) {
@@ -1132,6 +1143,21 @@ export function useChat(
     [projectId, resetTransientComposerState, selectSession],
   );
 
+  const refreshArchivedSessions = useCallback(async () => {
+    const data = await fetchChatSessions(projectId, "archived");
+    /*
+    FNXC:MessageArchive 2026-08-12-22:38:
+    The Archived view is a restore surface, so it filters a stale/proxied response locally when status=archived is ignored.
+    */
+    setArchivedSessions(sortChatSessions(data.sessions.filter((session) => session.status === "archived")));
+  }, [projectId]);
+
+  const unarchiveSession = useCallback(async (id: string) => {
+    await updateChatSession(id, { status: "active" }, projectId);
+    setArchivedSessions((previous) => previous.filter((session) => session.id !== id));
+    await refreshSessions();
+  }, [projectId, refreshSessions]);
+
   // Archive a session
   const archiveSession = useCallback(
     async (id: string) => {
@@ -1392,7 +1418,7 @@ export function useChat(
   const sendMessageRef = useRef<(
     content: string,
     attachments?: File[],
-    callbacks?: { onDelivered?: () => void; onFailed?: () => void },
+    callbacks?: { onAccepted?: () => void; onDelivered?: () => void; onFailed?: () => void },
   ) => void>(() => {
     // no-op until sendMessage is defined
   });
@@ -1439,7 +1465,7 @@ export function useChat(
     (
       content: string,
       attachments?: File[],
-      callbacks?: { onDelivered?: () => void; onFailed?: () => void },
+      callbacks?: { onAccepted?: () => void; onDelivered?: () => void; onFailed?: () => void },
     ) => {
       if (!activeSession) {
         callbacks?.onFailed?.();
@@ -1626,7 +1652,10 @@ export function useChat(
         },
       });
 
-      streamRef.current = streamChatResponse(activeSession.id, content, handlers, attachments, projectId);
+      streamRef.current = streamChatResponse(activeSession.id, content, {
+        ...handlers,
+        onAccepted: () => callbacks?.onAccepted?.(),
+      }, attachments, projectId);
     },
     [activeSession, projectId, refreshSessions, addToast, attachIfGenerating, reconnectSessionSilently, flushPendingMessage],
   );
@@ -1710,6 +1739,7 @@ export function useChat(
       void (async () => {
         try {
           const data = await fetchChatSessions(projectId, undefined, {
+            status: "active",
             q: trimmedSearchQuery,
             titleOnly: false,
           });
@@ -1821,7 +1851,7 @@ export function useChat(
       }
 
       try {
-        const data: ChatSessionListResponse = await fetchChatSessions(projectId);
+        const data: ChatSessionListResponse = await fetchChatSessions(projectId, "active");
         const session = data.sessions.find((candidate) => candidate.id === activeSessionRef.current?.id);
         if (!session?.isGenerating) {
           clearInterval(interval);
@@ -2137,6 +2167,9 @@ export function useChat(
     selectSession,
     createSession,
     archiveSession,
+    archivedSessions,
+    refreshArchivedSessions,
+    unarchiveSession,
     renameSession,
     pinSession,
     pinnedCount,

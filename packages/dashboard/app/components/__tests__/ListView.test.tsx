@@ -179,14 +179,19 @@ vi.mock("../TaskDetailModal", () => ({
     task,
     onOpenDetail,
     onRequestClose,
+    onTaskUpdated,
   }: {
     task: Task | TaskDetail;
     onOpenDetail?: (task: Task | TaskDetail) => void;
     onRequestClose?: () => void;
+    onTaskUpdated?: (patch: Partial<TaskDetail>) => void;
   }) => (
     <div data-testid="task-detail-content">
       <span>{task.id}</span>
+      <output data-testid="split-detail-title">{task.title}</output>
       <button type="button" onClick={() => onRequestClose?.()}>Close detail</button>
+      <button type="button" onClick={() => onTaskUpdated?.({ title: "renamed" })}>Patch split without id</button>
+      <button type="button" onClick={() => onTaskUpdated?.({ id: "FN-FOREIGN", title: "foreign" })}>Patch split foreign id</button>
       {(task.dependencies ?? []).map((dependencyId) => (
         <button
           key={dependencyId}
@@ -2212,6 +2217,22 @@ describe("ListView", () => {
     viewportSpy.mockRestore();
   });
 
+  it("applies id-less local split-detail patches and ignores foreign ids", async () => {
+    const viewportSpy = mockDesktopViewport();
+    const tasks = [createMockTask({ id: "FN-001", title: "Original split title" })];
+    renderListView({ tasks });
+
+    fireEvent.click(screen.getByText("FN-001").closest("tr")!);
+    expect(await screen.findByTestId("task-detail-content")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Patch split without id" }));
+    expect(screen.getByTestId("split-detail-title")).toHaveTextContent("renamed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Patch split foreign id" }));
+    expect(screen.getByTestId("split-detail-title")).toHaveTextContent("renamed");
+    viewportSpy.mockRestore();
+  });
+
   it("clears the desktop split-detail shell when embedded detail requests close", async () => {
     const viewportSpy = mockDesktopViewport();
     const tasks = [createMockTask({ id: "FN-001", title: "Task" })];
@@ -2842,6 +2863,67 @@ describe("ListView", () => {
       expect(card.querySelector(".list-status-badge")).toHaveTextContent("Planning");
     } finally {
       matchMediaSpy.mockRestore();
+    }
+  });
+
+  it.each([null, undefined])("renders exactly one WIP lifecycle badge for empty status on desktop and grouped list paths (%s)", (status) => {
+    const task = createMockTask({ id: `FN-8826-${status ?? "null"}`, column: "in-progress", status: status as any });
+
+    const desktopViewport = mockDesktopViewport();
+    try {
+      const { unmount } = renderListView({ tasks: [task] });
+      const row = screen.getByText(task.id).closest("tr") as HTMLElement;
+      expect(row.querySelector(".list-status-badge")).toHaveTextContent(/in progress/i);
+      expect(row.querySelectorAll(".list-status-badge")).toHaveLength(1);
+      unmount();
+    } finally {
+      desktopViewport.mockRestore();
+    }
+
+    const mobileViewport = mockMobileViewport();
+    try {
+      renderListView({ tasks: [task] });
+      const card = screen.getByText(task.id).closest(".list-card") as HTMLElement;
+      expect(card.querySelector(".list-status-badge")).toHaveTextContent(/in progress/i);
+      expect(card.querySelectorAll(".list-status-badge")).toHaveLength(1);
+    } finally {
+      mobileViewport.mockRestore();
+    }
+  });
+
+  it("uses task-specific custom WIP traits and keeps populated status authoritative", () => {
+    const workflowPayload = {
+      ...DEFAULT_LANE_PAYLOAD,
+      defaultWorkflowId: "wf-custom",
+      workflows: [{
+        id: "wf-custom",
+        name: "Custom",
+        columns: [
+          { id: "ideas", name: "Ideas", flags: { intake: true } },
+          { id: "building", name: "Building", flags: { countsTowardWip: true } },
+          { id: "shipped", name: "Shipped", flags: { complete: true } },
+        ],
+      }],
+      taskWorkflowIds: { "FN-8826-custom": "wf-custom" },
+    };
+    vi.mocked(fetchBoardWorkflows).mockResolvedValue(workflowPayload);
+    writeBoardWorkflowsCache(TEST_PROJECT_ID, workflowPayload);
+
+    const desktopViewport = mockDesktopViewport();
+    try {
+      const first = renderListView({
+        tasks: [createMockTask({ id: "FN-8826-custom", column: "building" as any, status: undefined as any })],
+      });
+      const row = screen.getByText("FN-8826-custom").closest("tr") as HTMLElement;
+      expect(row.querySelector(".list-status-badge")).toHaveTextContent("Building");
+      expect(row.querySelectorAll(".list-status-badge")).toHaveLength(1);
+      first.unmount();
+
+      renderListView({ tasks: [createMockTask({ id: "FN-8826-custom", column: "building" as any, status: "executing" })] });
+      const executingRow = screen.getByText("FN-8826-custom").closest("tr") as HTMLElement;
+      expect(executingRow.querySelector(".list-status-badge")).toHaveTextContent("executing");
+    } finally {
+      desktopViewport.mockRestore();
     }
   });
 

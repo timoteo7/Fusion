@@ -257,6 +257,15 @@ describe("Merge gate (.github/workflows/pr-checks.yml)", () => {
     expect(engineVitestConfigContent).toContain('name: "engine-core"');
   });
 
+  /*
+   * FNXC:CliRuntimeContract 2026-08-11-09:30:
+   * The modern Node 24 default must remain above the CLI's 22.4 engine floor;
+   * FN-8954's gap was missing init coverage, not an outdated CI runtime.
+   */
+  it("pins the composite action to the modern Node 24 default", () => {
+    expect(compositeAction.inputs?.["node-version"]?.default).toBe("24");
+  });
+
   it("pins dependency bootstrap to frozen lockfile in every job", () => {
     for (const jobName of ["lint", "typecheck", "build", "gate"]) {
       expect(findCompositeSetupStep(workflow.jobs?.[jobName]?.steps ?? [])).toBeDefined();

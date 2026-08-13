@@ -10,6 +10,12 @@
  *    behavior, and agents under the shipped default `unrestricted` preset stay
  *    friction-free on policy-gated tools (no approval row minted).
  * Expectations are HARDCODED — never derived from the constants under test.
+ *
+ * FNXC:ToolPermissionGates 2026-08-11-04:51:
+ * CLI test resolution now routes dashboard and engine imports through this mock. Spread the real
+ * module so ChatManager retains SessionManager.create/open and their file-backed session methods,
+ * while explicit runtime, credential, extension, and session-creation overrides still prevent real
+ * provider, credential, or CLI process access.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import express from "express";
@@ -40,7 +46,8 @@ const { createPiAgentSessionMock, piFindModelMock } = vi.hoisted(() => ({
   piFindModelMock: vi.fn((provider: string, id: string) => ({ provider, id })),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   LegacyCredentialStorage: { create: () => ({ setFallbackResolver: vi.fn(), getApiKey: vi.fn(), get: vi.fn(), set: vi.fn(), has: vi.fn(), hasAuth: vi.fn(), getAll: vi.fn(() => ({})), list: vi.fn(), logout: vi.fn(), remove: vi.fn(), reload: vi.fn() }) },
   createAgentSession: createPiAgentSessionMock,
   createBashTool: vi.fn(() => ({ name: "bash" })),
@@ -59,7 +66,6 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   getAgentDir: () => "/mock-agent-dir",
   ModelRuntime: { create: async () => ({ getAuth: async () => ({ auth: { headers: {} } }), refresh: async () => {} }) },
   ModelRegistry: class { static create() { return new this(); } find(provider: string, id: string) { return piFindModelMock(provider, id); } getAll() { return []; } registerProvider() {} async refresh() {} async getApiKeyAndHeaders() { return { ok: true }; } },
-  SessionManager: { inMemory: () => ({ getSessionId: () => undefined }) },
   SettingsManager: { create: () => ({}), inMemory: () => ({}) },
 }));
 
@@ -249,6 +255,7 @@ pgDescribe("extension tool permission gates", () => {
     const calls: Array<[string, Record<string, unknown>]> = [
       ["fn_task_bypass_review", { id: "FN-1", reason: "nope" }],
       ["fn_mission_delete", { id: "M-1" }],
+      ["fn_mission_clear_blocked", { id: "M-1" }],
       ["fn_milestone_delete", { milestoneId: "MS-1" }],
       ["fn_slice_delete", { sliceId: "SL-1" }],
       ["fn_feature_delete", { featureId: "F-1" }],
@@ -264,6 +271,31 @@ pgDescribe("extension tool permission gates", () => {
       expect(result.details?.tool, name).toBe(name);
       expect(result.details?.agentId, name).toBe("agent-rogue");
     }
+  });
+
+  it("fn_mission_clear_blocked: denies agent and ambiguous principals before the store, while operators proceed", async () => {
+    const cwd = h.rootDir();
+    const missionStore = h.store().getMissionStore();
+    const mission = await missionStore.createMission({ title: "withheld clear target" });
+    await missionStore.updateMission(mission.id, { status: "blocked" }, { actor: { type: "operator", id: "test", source: "test" } });
+    const clearMissionBlockedStatus = vi.spyOn(missionStore, "clearMissionBlockedStatus");
+    const tool = requireTool(freshApi(), "fn_mission_clear_blocked");
+
+    const explicitAgent = await tool.execute("agent", { id: mission.id }, undefined, undefined, { cwd, agentId: "agent-rogue" });
+    expect(explicitAgent).toMatchObject({ isError: true, details: { deniedFor: "agent-principal" } });
+    expect(clearMissionBlockedStatus).not.toHaveBeenCalled();
+
+    const disposeOne = registerFusionSessionIdentity(cwd, { agentId: "agent-one" });
+    const disposeTwo = registerFusionSessionIdentity(cwd, { agentId: "agent-two" });
+    const ambiguous = await tool.execute("ambiguous", { id: mission.id }, undefined, undefined, { cwd });
+    expect(ambiguous).toMatchObject({ isError: true, details: { deniedFor: "agent-principal" } });
+    expect(clearMissionBlockedStatus).not.toHaveBeenCalled();
+    disposeOne();
+    disposeTwo();
+
+    const operator = await tool.execute("operator", { id: mission.id }, undefined, undefined, { cwd });
+    expect(operator.isError).toBeUndefined();
+    expect(clearMissionBlockedStatus).toHaveBeenCalledTimes(1);
   });
 
   // ── Policy-gated list ────────────────────────────────────────────

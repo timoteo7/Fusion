@@ -33,7 +33,7 @@ import {
   type WorkflowIrResolverStore,
 } from "./workflow-ir-resolver.js";
 import { resolveEffectiveSettingValues, findOrphanedSettingValues } from "./workflow-settings.js";
-import { BUILTIN_WORKFLOW_SETTINGS, PLANNER_HEARTBEAT_PATROL_ENABLED_SETTING_ID } from "./builtin-workflow-settings.js";
+import { BUILTIN_WORKFLOW_SETTINGS, MEMORY_CONSOLIDATION_ENABLED_SETTING_ID, PLANNER_HEARTBEAT_PATROL_ENABLED_SETTING_ID } from "./builtin-workflow-settings.js";
 import type { WorkflowSettingDefinition, WorkflowIr, WorkflowOptionalGroupConfig } from "./workflow-ir-types.js";
 import { PLANNER_OVERSIGHT_LEVELS, DEFAULT_PLANNER_OVERSIGHT_LEVEL, type PlannerOversightLevel } from "../types.js";
 
@@ -389,6 +389,16 @@ export function resolveEffectivePlannerHeartbeatPatrolEnabled(
 ): boolean {
   const value = typeof workflowEffective === "object" && workflowEffective !== null
     ? workflowEffective[PLANNER_HEARTBEAT_PATROL_ENABLED_SETTING_ID]
+    : workflowEffective;
+  return value !== false;
+}
+
+/** Normalize the workflow-native Memory Keeper switch; only explicit false disables upkeep. */
+export function resolveEffectiveMemoryConsolidationEnabled(
+  workflowEffective: Record<string, unknown> | boolean | null | undefined,
+): boolean {
+  const value = typeof workflowEffective === "object" && workflowEffective !== null
+    ? workflowEffective[MEMORY_CONSOLIDATION_ENABLED_SETTING_ID]
     : workflowEffective;
   return value !== false;
 }

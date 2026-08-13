@@ -80,6 +80,7 @@ function createStore(opts: {
   task: Task;
   settings?: Partial<Settings>;
   moveTaskIfResult?: "moved" | "refused" | "absent";
+  specLock?: boolean;
 } ): TaskStore {
   const { task } = opts;
   const store: Record<string, unknown> = {
@@ -112,6 +113,16 @@ function createStore(opts: {
     on: vi.fn(),
     off: vi.fn(),
   };
+  if (opts.specLock) {
+    store.isBackendMode = vi.fn(() => true);
+    store.withPlanningLifecycleLock = vi.fn(async (_id: string, fn: () => Promise<unknown>) => fn());
+    store.captureCurrentPlanEvidence = vi.fn(async () => {
+      throw new Error("planning lifecycle lock was reacquired");
+    });
+    store.captureCurrentPlanEvidenceWhilePlanningLocked = vi.fn().mockResolvedValue(undefined);
+    store.lockCurrentPlanWhilePlanningLocked = vi.fn().mockResolvedValue(undefined);
+    store.reconcileSpecDriftWhilePlanningLocked = vi.fn().mockResolvedValue(undefined);
+  }
   if (opts.moveTaskIfResult !== "absent") {
     store.moveTaskIf = vi.fn(async (_id: string, column: string) => {
       if (opts.moveTaskIfResult === "refused") {
@@ -148,6 +159,19 @@ describe("planning handoff outcome — recoverApprovedTask reports what finalize
 
     expect(recovered).toBe(true);
     expect(store.moveTaskIf).toHaveBeenCalledWith("FN-001", "todo", expect.any(Function));
+  });
+
+  it("captures plan evidence without reacquiring the planning lifecycle lock", async () => {
+    const task = createTask();
+    const store = createStore({ task, moveTaskIfResult: "moved", specLock: true });
+
+    await expect(new TriageProcessor(store, rootDir).recoverApprovedTask(task)).resolves.toBe(true);
+
+    expect(store.captureCurrentPlanEvidenceWhilePlanningLocked).toHaveBeenCalledWith(
+      "FN-001",
+      expect.stringContaining("## Steps"),
+    );
+    expect(store.captureCurrentPlanEvidence).not.toHaveBeenCalled();
   });
 
   it("reports NOT recovered when the planning-stage guard refuses the release move (FN-8361)", async () => {

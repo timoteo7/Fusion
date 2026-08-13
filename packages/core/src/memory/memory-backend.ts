@@ -30,7 +30,7 @@ const QMD_COLLECTION_PREFIX = "fusion-memory";
 type ExecFileAsync = (
   file: string,
   args: readonly string[],
-  options?: { cwd?: string; timeout?: number; maxBuffer?: number },
+  options?: { cwd?: string; timeout?: number; maxBuffer?: number; keepAlive?: boolean },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const qmdRefreshState = new Map<string, { lastStartedAt: number; inFlight?: Promise<void> }>();
@@ -1120,10 +1120,16 @@ async function getDefaultExecFileAsync(): Promise<ExecFileAsync> {
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
-      // FNXC:ProjectMemory 2026-07-08-00:00: unref synchronously right after spawn —
-      // see the doc comment above this function for why this must NOT go through
-      // promisify(execFile).
-      unrefQmdChildProcess(child);
+      /*
+       * FNXC:CliAwaitLiveness 2026-08-11-09:17:
+       * Background QMD refreshes must unref their child, but an awaited availability
+       * probe must retain its child and stdio until close/error settles. Otherwise a
+       * missing `qmd` leaves `fn init`'s top-level await pending with an empty loop,
+       * so Node exits 13 before durable project registration.
+       */
+      if (!options?.keepAlive) {
+        unrefQmdChildProcess(child);
+      }
 
       let stdout = "";
       let stderr = "";
@@ -1305,6 +1311,7 @@ export async function isQmdAvailable(): Promise<boolean> {
     await execFileAsync("qmd", ["--help"], {
       timeout: 3000,
       maxBuffer: 128 * 1024,
+      keepAlive: true,
     });
     return true;
   } catch {

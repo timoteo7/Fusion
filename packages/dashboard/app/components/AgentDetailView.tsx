@@ -13,10 +13,16 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentDetail, AgentState, AgentHeartbeatRun, AgentBudgetStatus, ModelInfo, MemoryFileInfo, AgentCapability, PluginRuntimeInfo, SkillContent, AgentOnboardingSummary, AgentMailboxResponse, AgentPromptSizePoint } from "../api";
-import { fetchAgent, updateAgent, updateAgentState, deleteAgent, isAgentHeartbeatEnabled, withAgentHeartbeatEnabled, fetchAgentLogsWithMeta, fetchAgentRunLogs, fetchAgentChildren, fetchAgentRuns, fetchAgentRunDetail, startAgentRun, stopAgentRun, updateAgentInstructions, updateAgentSoul, updateAgentMemory, fetchAgentMemoryFiles, fetchAgentMemoryFile, saveAgentMemoryFile, fetchAgentTasks, fetchChainOfCommand, fetchAgentBudgetStatus, resetAgentBudget, fetchWorkspaceFileContent, saveWorkspaceFileContent, fetchModels, fetchPluginRuntimes, fetchAgents, fetchSettings, fetchSettingsByScope, upgradeAgentHeartbeatProcedure, fetchSkillContent, uploadAgentAvatar, deleteAgentAvatar, fetchAgentMailbox, markMessageRead, fetchAgentPromptSizes } from "../api";
-import type { Agent } from "../api";
-import type { AgentLogEntry, Task, Message, ParticipantType, AgentPermissionPolicy, AgentPermissionPolicyRules, AgentPermission, ThinkingLevel } from "@fusion/core";
-import { AGENT_PERMISSIONS, getErrorMessage, isEphemeralAgent } from "@fusion/core";
+import { fetchAgent, updateAgent, updateAgentState, deleteAgent, isAgentHeartbeatEnabled, withAgentHeartbeatEnabled, fetchAgentLogsWithMeta, fetchAgentRunLogs, fetchAgentChildren, fetchAgentRuns, fetchAgentRunDetail, startAgentRun, stopAgentRun, updateAgentInstructions, updateAgentSoul, updateAgentMemory, fetchAgentMemoryFiles, fetchAgentMemoryFile, fetchAgentMemoryConsolidations, saveAgentMemoryFile, fetchAgentTasks, fetchChainOfCommand, fetchAgentBudgetStatus, resetAgentBudget, fetchWorkspaceFileContent, saveWorkspaceFileContent, fetchModels, fetchPluginRuntimes, fetchAgents, fetchSettings, fetchSettingsByScope, upgradeAgentHeartbeatProcedure, fetchSkillContent, uploadAgentAvatar, deleteAgentAvatar, fetchAgentMailbox, markMessageRead, fetchAgentPromptSizes } from "../api";
+import type { Agent, MemoryConsolidationEvent } from "../api";
+import type { AgentLogEntry, Task, Message, ParticipantType, AgentPermissionPolicy, AgentPermissionPolicyRules, AgentPermission, ThinkingLevel, Settings as CoreSettings } from "@fusion/core";
+import {
+  AGENT_PERMISSIONS,
+  getErrorMessage,
+  isEphemeralAgent,
+  resolvePermanentAgentEffectiveModel,
+  resolvePermanentAgentEffectiveThinkingLevel,
+} from "@fusion/core";
 import { AgentLogViewer } from "./AgentLogViewer";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { AgentReflectionsTab } from "./AgentReflectionsTab";
@@ -261,6 +267,7 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
   const { t } = useTranslation("app");
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [heartbeatMultiplier, setHeartbeatMultiplier] = useState(1);
+  const [agentModelSettings, setAgentModelSettings] = useState<Partial<CoreSettings>>({});
   const { confirm } = useConfirm();
   const [logs, setLogs] = useState<AgentLogEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -310,7 +317,10 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
     let cancelled = false;
     void fetchSettings(projectId)
       .then((settings) => {
-        if (!cancelled) setHeartbeatMultiplier(settings.heartbeatMultiplier ?? 1);
+        if (!cancelled) {
+          setHeartbeatMultiplier(settings.heartbeatMultiplier ?? 1);
+          setAgentModelSettings(settings);
+        }
       })
       .catch(() => {
         if (!cancelled) setHeartbeatMultiplier(1);
@@ -1187,6 +1197,7 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
               health={health}
               onChildClick={onChildClick}
               projectId={projectId}
+              agentModelSettings={agentModelSettings}
             />
           )}
           
@@ -1288,6 +1299,7 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
               key={agent.id}
               agent={agent}
               projectId={projectId}
+              agentModelSettings={agentModelSettings}
               addToast={addToast}
               onSaved={handleSavedMutation}
               onHasChangesChange={handleConfigChangesState}
@@ -1364,11 +1376,13 @@ function DashboardTab({
   health,
   onChildClick,
   projectId,
+  agentModelSettings,
 }: {
   agent: AgentDetail;
   health: AgentHealthStatus;
   onChildClick?: (childId: string) => void;
   projectId?: string;
+  agentModelSettings: Partial<CoreSettings>;
 }) {
   const { t } = useTranslation("app");
   const stateStyle = STATE_COLORS[agent.state];
@@ -1398,7 +1412,8 @@ function DashboardTab({
       const slashIdx = rc.model.indexOf("/");
       return rc.model.slice(slashIdx + 1);
     }
-    return null;
+    const effective = resolvePermanentAgentEffectiveModel(agent, agentModelSettings);
+    return effective.provider && effective.modelId ? `${effective.provider}/${effective.modelId}` : null;
   })();
 
   // Fetch budget status on mount
@@ -2612,7 +2627,7 @@ function TasksTab({
       .catch((err) => {
         if (!cancelled) {
           setTasks([]);
-          addToast(t("agents.loadTasksFailed", "Failed to load assigned tasks: {{error}}", { error: getErrorMessage(err) }), "error");
+          addToast(t("agents.loadTasksFailed", "Failed to load agent tasks: {{error}}", { error: getErrorMessage(err) }), "error");
         }
       })
       .finally(() => {
@@ -2630,7 +2645,7 @@ function TasksTab({
     return (
       <div className="agent-tasks-empty">
         <Loader2 size={16} className="animate-spin" />
-        <p>{t("agents.loadingTasks", "Loading assigned tasks...")}</p>
+        <p>{t("agents.loadingTasks", "Loading agent tasks...")}</p>
       </div>
     );
   }
@@ -2639,7 +2654,7 @@ function TasksTab({
     return (
       <div className="agent-tasks-empty">
         <ListChecks size={18} />
-        <p>{t("agents.noTasksAssigned", "No tasks assigned to this agent")}</p>
+        <p>{t("agents.noVisibleTasks", "No assigned or active workflow tasks for this agent")}</p>
       </div>
     );
   }
@@ -2941,11 +2956,31 @@ function MemoryTab({
   const [savingSelectedFile, setSavingSelectedFile] = useState(false);
   const [selectedFileJustSaved, setSelectedFileJustSaved] = useState(false);
   const [fileSwitchHint, setFileSwitchHint] = useState("");
+  const [consolidations, setConsolidations] = useState<MemoryConsolidationEvent[]>([]);
+  const [consolidationsLoading, setConsolidationsLoading] = useState(false);
+  const [consolidationsError, setConsolidationsError] = useState("");
   const justSavedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedFileJustSavedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isReadOnly = agent.state === "running";
+  const isMemoryKeeper = agent.metadata?.builtInMemoryAgent === true;
   const hasInlineChanges = memory !== (agent.memory ?? "");
+
+  const loadConsolidations = useCallback(async () => {
+    if (!isMemoryKeeper) return;
+    setConsolidationsLoading(true);
+    setConsolidationsError("");
+    try {
+      const result = await fetchAgentMemoryConsolidations(agent.id, 50, projectId);
+      setConsolidations(result.events);
+    } catch (err) {
+      setConsolidationsError(getErrorMessage(err));
+    } finally {
+      setConsolidationsLoading(false);
+    }
+  }, [agent.id, isMemoryKeeper, projectId]);
+
+  useEffect(() => { void loadConsolidations(); }, [loadConsolidations]);
 
   const selectedMemoryFile = useMemo(
     () => memoryFiles.find((file) => file.path === selectedFilePath),
@@ -3089,6 +3124,38 @@ function MemoryTab({
         <p className="config-description">
           {t("agents.memoryDescription", "Store context that belongs to this agent only. Workspace memory, daily notes, dreams, and qmd search live in project settings under Project Memory.")}
         </p>
+        {isMemoryKeeper && (
+          <section className="memory-consolidation-history" aria-label={t("agents.consolidationHistory", "Consolidation history")}>
+            {/*
+            FNXC:MemoryConsolidationHistory 2026-08-11-11:13:
+            FN-8934 keeps Memory Keeper history in its existing Memory tab and renders
+            only existing audit metadata, never memory content or synthesized audit prose.
+            */}
+            <div className="memory-consolidation-history__heading">
+              <h4>{t("agents.consolidationHistory", "Consolidation history")}</h4>
+              <button className="btn btn-sm" onClick={() => void loadConsolidations()} disabled={consolidationsLoading}>
+                <RefreshCw size={14} />{t("common.refresh", "Refresh")}
+              </button>
+            </div>
+            {consolidationsLoading ? <LoadingSpinner /> : consolidationsError ? (
+              <p className="config-hint">{t("agents.consolidationHistoryError", "Unable to load consolidation history: {{error}}", { error: consolidationsError })}</p>
+            ) : consolidations.length === 0 ? (
+              <p className="config-hint">{t("agents.consolidationHistoryEmpty", "No consolidation activity yet.")}</p>
+            ) : (
+              <ul className="memory-consolidation-history__list">
+                {consolidations.map((event) => {
+                  const outcome = event.mutationType.endsWith("completed") ? t("agents.consolidationCompleted", "Completed") : event.mutationType.endsWith("skipped") ? t("agents.consolidationSkipped", "Skipped") : t("agents.consolidationFailed", "Failed");
+                  const metadata = event.metadata ?? {};
+                  const details = ["graphChanged", "parsedFiles", "recallCreated", "reason", "stage"].flatMap((key) => metadata[key] === undefined ? [] : [`${key}: ${String(metadata[key])}`]);
+                  return <li key={event.id} className={`memory-consolidation-history__row memory-consolidation-history__row--${event.mutationType.split("-").at(-1)}`}>
+                    <span>{relativeTime(event.timestamp, t)}</span><strong>{outcome}</strong>{details.length > 0 && <span>{details.join(" · ")}</span>}
+                  </li>;
+                })}
+              </ul>
+            )}
+          </section>
+        )}
+
         {isReadOnly && (
           <p className="config-hint config-hint--block-spacing">
             {t("agents.memoryReadOnly", "Read-only while this agent is running.")}
@@ -4027,6 +4094,7 @@ function HeartbeatProcedureSection({
 function ConfigTab({
   agent,
   projectId,
+  agentModelSettings,
   addToast,
   onSaved,
   onHasChangesChange,
@@ -4035,6 +4103,7 @@ function ConfigTab({
 }: {
   agent: AgentDetail;
   projectId?: string;
+  agentModelSettings: Partial<CoreSettings>;
   addToast: (message: string, type?: "success" | "error") => void;
   onSaved: () => Promise<void>;
   onHasChangesChange?: (hasChanges: boolean) => void;
@@ -4064,7 +4133,7 @@ function ConfigTab({
         initial[field.key] = String(raw);
       }
     }
-    initial.thinkingLevel = typeof agent.runtimeConfig?.thinkingLevel === "string" ? agent.runtimeConfig.thinkingLevel : "off";
+    initial.thinkingLevel = typeof agent.runtimeConfig?.thinkingLevel === "string" ? agent.runtimeConfig.thinkingLevel : "";
     return initial;
   });
 
@@ -4440,7 +4509,7 @@ function ConfigTab({
     if (runtimeMode !== (initialRuntimeHint ? "runtime" : "model")) return true;
     if (modelValue !== initialModelValue) return true;
     if (selectedRuntimeId !== initialRuntimeHint) return true;
-    if ((formValues.thinkingLevel || "off") !== (typeof rc.thinkingLevel === "string" ? rc.thinkingLevel : "off")) return true;
+    if ((formValues.thinkingLevel ?? "") !== (typeof rc.thinkingLevel === "string" ? rc.thinkingLevel : "")) return true;
 
     return false;
   })();
@@ -4489,7 +4558,7 @@ function ConfigTab({
     setBudgetValues(deriveBudgetValues(agent.runtimeConfig));
     setFormValues((prev) => ({
       ...prev,
-      thinkingLevel: typeof agent.runtimeConfig?.thinkingLevel === "string" ? agent.runtimeConfig.thinkingLevel : "off",
+      thinkingLevel: typeof agent.runtimeConfig?.thinkingLevel === "string" ? agent.runtimeConfig.thinkingLevel : "",
     }));
     setModelValue(initialModelValue);
     setSelectedRuntimeId(initialRuntimeHint);
@@ -4682,8 +4751,11 @@ function ConfigTab({
       newRuntimeConfig.heartbeatPromptTemplate = heartbeatPromptTemplate;
     }
 
-    const selectedThinkingLevel = (formValues.thinkingLevel || "off") as ThinkingLevel;
-    newRuntimeConfig.thinkingLevel = selectedThinkingLevel;
+    if (formValues.thinkingLevel) {
+      newRuntimeConfig.thinkingLevel = formValues.thinkingLevel as ThinkingLevel;
+    } else {
+      delete newRuntimeConfig.thinkingLevel;
+    }
 
     if (runtimeMode === "runtime") {
       if (selectedRuntimeId.trim()) {
@@ -5115,8 +5187,10 @@ function ConfigTab({
           {runtimeMode === "model" ? (
             <div className="config-field">
               {/*
-              FNXC:Settings-ThinkingLevel 2026-07-12-00:00:
-              Agent Detail now lets operators change a built-in agent's persisted runtimeConfig.thinkingLevel after creation through the shared inline model-dropdown control, matching NewAgentDialog's concrete-only agent semantics.
+              FNXC:AgentModelInheritance 2026-08-09-23:10:
+              An empty agent thinking selection remains an inherit marker rather than persisting "off".
+              Display the resolved role/project thinking as the dropdown default so operators can inspect
+              the active value without materializing it onto the permanent agent runtime configuration.
               */}
               <CustomModelDropdown
                 models={availableModels}
@@ -5125,7 +5199,7 @@ function ConfigTab({
                   setModelValue(value);
                   void scheduleAutoSave();
                 }}
-                placeholder={t("agents.useGlobalDefault", "Use global default")}
+                placeholder={t("agents.inheritProjectRoleDefault", "Inherit project/role default")}
                 label={t("agents.agentModelLabel", "Agent Model")}
                 disabled={modelsLoading}
                 favoriteProviders={favoriteProviders}
@@ -5133,6 +5207,9 @@ function ConfigTab({
                 favoriteModels={favoriteModels}
                 onToggleModelFavorite={toggleFavoriteModel}
                 thinkingLevel={formValues.thinkingLevel ?? ""}
+                defaultThinkingLevel={formValues.thinkingLevel
+                  ? undefined
+                  : resolvePermanentAgentEffectiveThinkingLevel(agent, agentModelSettings)}
                 onThinkingLevelChange={(level) => {
                   setFormValues((prev) => ({ ...prev, thinkingLevel: level as ThinkingLevel }));
                   void scheduleAutoSave();

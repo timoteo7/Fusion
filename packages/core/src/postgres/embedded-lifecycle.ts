@@ -1230,11 +1230,19 @@ async function isAlreadyRunning(
  * is tiny. For the zero-config default this is acceptable; callers needing a
  * fixed port can pass `options.port`.
  */
-function findFreePort(): Promise<number> {
+/*
+ * FNXC:CliAwaitLiveness 2026-08-11-09:17:
+ * Keep this temporary listener ref'd until its listen/close promise settles.
+ * An unref'd sole handle lets Node drain the event loop beneath a pending top-level
+ * await, terminating `fn init` with exit 13 before project registration. Exporting
+ * the helper provides the direct test seam for this listener-liveness contract.
+ */
+export function findFreePort(createServerFn: () => Server = createServer): Promise<number> {
   return new Promise((resolve, reject) => {
-    const srv: Server = createServer();
-    srv.unref();
-    srv.on("error", reject);
+    const srv = createServerFn();
+    srv.on("error", (error) => {
+      srv.close(() => reject(error));
+    });
     srv.listen(0, "127.0.0.1", () => {
       const addr = srv.address();
       if (addr && typeof addr === "object") {

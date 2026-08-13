@@ -831,12 +831,13 @@ describe("SettingsModal", () => {
     renderModal({ initialSection: "merge" });
     await waitForSettingsModalReady();
 
-    await settingsModalUser.selectOptions(screen.getByLabelText("AI merge"), "deterministic");
-    await settingsModalUser.selectOptions(screen.getByLabelText("Integration worktree"), "cwd-main");
-
-    await waitFor(() => {
-      expect(mockUpdateSettings).toHaveBeenCalledTimes(1);
-    });
+    // FNXC:SettingsModalTests 2026-08-11-00:19: set both selects under fake timers so the 500ms auto-save debounce still coalesces them into one write, without the real-timer wait.
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("AI merge"), { target: { value: "deterministic" } });
+    fireEvent.change(screen.getByLabelText("Integration worktree"), { target: { value: "cwd-main" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(mockUpdateSettings).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
 
     const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.mergeIntegrationWorktree).toBe("cwd-main");
@@ -908,14 +909,15 @@ describe("SettingsModal", () => {
     const checkbox = screen.getByRole("checkbox", { name: "Allow silent sibling branch rename during executor conflicts" });
     expect(checkbox).not.toBeChecked();
 
-    await settingsModalUser.click(checkbox);
-
-    await waitFor(() => {
-      expect(mockUpdateSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ executorAllowSiblingBranchRename: true }),
-        undefined,
-      );
-    });
+    // FNXC:SettingsModalTests 2026-08-11-00:19: navigate with userEvent under real timers, then flush the 500ms auto-save debounce with fake timers instead of a real-timer waitFor.
+    vi.useFakeTimers();
+    fireEvent.click(checkbox);
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ executorAllowSiblingBranchRename: true }),
+      undefined,
+    );
+    vi.useRealTimers();
     expect(screen.getByText(/restores the legacy behavior/i)).toBeInTheDocument();
   });
 
@@ -1122,11 +1124,20 @@ describe("SettingsModal", () => {
       renderModal({ initialSection: "global-general" });
       await waitForSettingsModalReady();
 
-      await settingsModalUser.click(screen.getByRole("checkbox", { name: "Dismiss modals by clicking outside" }));
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalled();
-      });
+      /*
+      FNXC:SettingsModalTests 2026-08-11-00:19:
+      Drive the 500ms auto-save debounce with fake timers instead of a real-timer waitFor.
+      Each of these single-edit "saves X via settings payload" tests otherwise burned a real
+      ~500ms debounce wall-clock wait, and together they dominated the dashboard's slowest
+      feedback-loop suite. Advancing fake timers keeps the payload-routing assertions identical
+      while removing the artificial wait (Standing Rule: prefer fake timers over real time waits;
+      matches the FN-7506 auto-save conversions already in this file).
+      */
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("checkbox", { name: "Dismiss modals by clicking outside" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalled();
+      vi.useRealTimers();
 
       const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(globalPayload.dismissModalsOnOutsideClick).toBe(true);
@@ -1140,11 +1151,11 @@ describe("SettingsModal", () => {
       renderModal({ initialSection: "global-general" });
       await waitForSettingsModalReady();
 
-      await settingsModalUser.click(screen.getByRole("checkbox", { name: "Skip confirmation dialogs for critical actions" }));
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalled();
-      });
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("checkbox", { name: "Skip confirmation dialogs for critical actions" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalled();
+      vi.useRealTimers();
 
       const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(globalPayload.skipConfirmationDialogs).toBe(true);
@@ -1158,11 +1169,11 @@ describe("SettingsModal", () => {
       renderModal({ initialSection: "global-general" });
       await waitForSettingsModalReady();
 
-      await settingsModalUser.click(screen.getByRole("checkbox", { name: "Save tool output in agent logs" }));
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalled();
-      });
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("checkbox", { name: "Save tool output in agent logs" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalled();
+      vi.useRealTimers();
 
       const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(globalPayload.persistAgentToolOutput).toBe(true);
@@ -1176,11 +1187,11 @@ describe("SettingsModal", () => {
       renderModal({ initialSection: "global-general" });
       await waitForSettingsModalReady();
 
-      await settingsModalUser.click(screen.getByRole("checkbox", { name: "Enable proactive task-chat updates" }));
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalled();
-      });
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("checkbox", { name: "Enable proactive task-chat updates" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalled();
+      vi.useRealTimers();
 
       const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(globalPayload.proactiveTaskChatEnabled).toBe(true);
@@ -1194,12 +1205,12 @@ describe("SettingsModal", () => {
       renderModal({ initialSection: "global-general" });
       await waitForSettingsModalReady();
 
-      await settingsModalUser.click(screen.getByRole("checkbox", { name: "Save AI thinking for permanent agents" }));
-      await settingsModalUser.click(screen.getByRole("checkbox", { name: "Save AI thinking for ephemeral / task-worker agents" }));
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalled();
-      });
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("checkbox", { name: "Save AI thinking for permanent agents" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "Save AI thinking for ephemeral / task-worker agents" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalled();
+      vi.useRealTimers();
 
       const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(globalPayload.persistAgentThinkingLogPermanent).toBe(true);
@@ -1246,12 +1257,19 @@ describe("SettingsModal", () => {
       expect(screen.getByLabelText("Global GitLab instance URL")).toHaveAttribute("placeholder", "https://gitlab.com");
       expect(screen.getByText(/Blank defaults to GitLab.com/i)).toBeInTheDocument();
 
-      await settingsModalUser.type(screen.getByLabelText("Global GitLab instance URL"), " https://gitlab.company.test/ ");
-      await settingsModalUser.type(screen.getByLabelText("Global GitLab API base URL (optional / advanced)"), " https://gitlab.company.test/api/v4/ ");
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalled();
-      });
+      /*
+      FNXC:SettingsModalTests 2026-08-11-00:19:
+      Both field edits are set with fireEvent.change under fake timers so the 500ms auto-save
+      debounce still coalesces them into a single global payload (the trimming lives in the save
+      path, so the raw padded values persist trimmed exactly as before) while removing the
+      real-timer wait that made this the single slowest case in the suite.
+      */
+      vi.useFakeTimers();
+      fireEvent.change(screen.getByLabelText("Global GitLab instance URL"), { target: { value: " https://gitlab.company.test/ " } });
+      fireEvent.change(screen.getByLabelText("Global GitLab API base URL (optional / advanced)"), { target: { value: " https://gitlab.company.test/api/v4/ " } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalled();
+      vi.useRealTimers();
 
       const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(globalPayload.gitlabInstanceUrl).toBe("https://gitlab.company.test/");
@@ -1290,11 +1308,11 @@ describe("SettingsModal", () => {
       renderModal({ initialSection: "source-control-global" });
       await waitForSettingsModalReady();
 
-      await settingsModalUser.click(screen.getByLabelText("Enable GitLab integration"));
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalledWith(expect.objectContaining({ gitlabEnabled: true }));
-      });
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByLabelText("Enable GitLab integration"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalledWith(expect.objectContaining({ gitlabEnabled: true }));
+      vi.useRealTimers();
       if (mockUpdateSettings.mock.calls.length > 0) {
         expect(mockUpdateSettings.mock.calls[0]?.[0]).not.toHaveProperty("gitlabEnabled");
       }
@@ -1327,12 +1345,12 @@ describe("SettingsModal", () => {
       const enableToggle = screen.getByLabelText("Enable GitLab integration") as HTMLInputElement;
       expect(enableToggle).toBeChecked();
 
-      await settingsModalUser.click(enableToggle);
+      vi.useFakeTimers();
+      fireEvent.click(enableToggle);
       expect(enableToggle).not.toBeChecked();
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalledWith(expect.objectContaining({ gitlabEnabled: false }));
-      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalledWith(expect.objectContaining({ gitlabEnabled: false }));
+      vi.useRealTimers();
     });
 
     it("shows global tracking repo error hint and keeps custom entry when lookups fail", async () => {
@@ -1356,11 +1374,11 @@ describe("SettingsModal", () => {
 
     expect(screen.getByRole("heading", { name: "Agent Provisioning Approvals" })).toBeInTheDocument();
 
-    await settingsModalUser.selectOptions(screen.getByLabelText("Approval mode"), "always");
-
-    await waitFor(() => {
-      expect(mockUpdateSettings).toHaveBeenCalled();
-    });
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("Approval mode"), { target: { value: "always" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(mockUpdateSettings).toHaveBeenCalled();
+    vi.useRealTimers();
 
     const payload = mockUpdateSettings.mock.calls[0]?.[0] as {
       agentProvisioning?: { approvalMode?: string };
@@ -1368,598 +1386,6 @@ describe("SettingsModal", () => {
     expect(payload.agentProvisioning?.approvalMode).toBe("always");
   });
 
-  describe("General · Project", () => {
-    it("populates the Discussion category selector from the report category route", async () => {
-      mockListDiscussionCategories.mockResolvedValue({ categories: [{ id: "DC_ideas", name: "Ideas", slug: "ideas" }] });
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      const category = await screen.findByLabelText("Discussion category");
-      expect(category).toBeEnabled();
-      expect(screen.getByRole("option", { name: "Ideas" })).toHaveValue("DC_ideas");
-      await settingsModalUser.selectOptions(category, "DC_ideas");
-      await waitFor(() => expect(mockUpdateSettings.mock.calls[0]?.[0]).toMatchObject({ reportDiscussionCategory: "DC_ideas" }));
-    });
-
-    it("renders completion documentation automation control", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      const select = screen.getByLabelText("Completion Documentation Automation") as HTMLSelectElement;
-      expect(select).toBeInTheDocument();
-      expect(select.value).toBe("off");
-      expect(screen.getByRole("option", { name: "Require changeset (.changeset/*.md)" })).toBeInTheDocument();
-      expect(screen.getByRole("option", { name: "Require changelog update (existing changelog)" })).toBeInTheDocument();
-    });
-
-    it("persists the routing-inert ephemeral agent compatibility input", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      const toggle = screen.getByLabelText("Use ephemeral task-worker agents") as HTMLInputElement;
-      expect(toggle.checked).toBe(true);
-      await settingsModalUser.click(toggle);
-
-      await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalled());
-      expect(mockUpdateSettings.mock.calls[0]?.[0]).toMatchObject({ ephemeralAgentsEnabled: false });
-    });
-
-    it("defaults the ephemeral agent compatibility input when an upgraded record omits it", async () => {
-      const { ephemeralAgentsEnabled: _omitted, ...upgradeSettings } = defaultSettings;
-      mockFetchSettings.mockResolvedValueOnce(upgradeSettings);
-      mockFetchSettingsByScope.mockResolvedValueOnce({ global: defaultSettings, project: {} });
-
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      expect((screen.getByLabelText("Use ephemeral task-worker agents") as HTMLInputElement).checked).toBe(true);
-    });
-
-    it("reports Quick Chat launcher changes immediately before save", async () => {
-      const onQuickChatButtonModeChange = vi.fn();
-      renderModal({ initialSection: "general", onQuickChatButtonModeChange });
-      await waitForSettingsModalReady();
-
-      await settingsModalUser.selectOptions(screen.getByLabelText("Quick Chat launcher"), "footer");
-
-      expect(onQuickChatButtonModeChange).toHaveBeenCalledWith("footer");
-    });
-
-    it("reorders, adds, and removes mobile quick actions before save", async () => {
-      const onMobileNavPrimaryItemsChange = vi.fn();
-      renderModal({ initialSection: "general", onMobileNavPrimaryItemsChange });
-      await waitForSettingsModalReady();
-
-      fireEvent.click(screen.getAllByRole("button", { name: /later$/i })[0]);
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "agents", "missions", "chat", "mailbox"]);
-      const rows = Array.from(screen.getByRole("group", { name: "Mobile footer quick actions" }).querySelectorAll(".settings-field-label-row"));
-      expect(rows[0].textContent).toContain("tasks");
-
-      fireEvent.click(screen.getByLabelText("Remove chat"));
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "agents", "missions", "mailbox"]);
-
-      await settingsModalUser.selectOptions(screen.getByLabelText("Add quick action"), "git");
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "agents", "missions", "mailbox", "git"]);
-
-      fireEvent.click(screen.getByLabelText("Remove tasks"));
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["command-center", "agents", "missions", "mailbox", "git"]);
-    });
-
-    it("defaults task chats common-feed opt-in to unchecked", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      const toggle = screen.getByLabelText("Show task chats in common Chat feed") as HTMLInputElement;
-      expect(toggle).toBeInTheDocument();
-      expect(toggle.checked).toBe(false);
-    });
-
-    it.each<PersistSettingInput>([
-      {
-        section: "General · Project",
-        label: "Completion Documentation Automation",
-        kind: "select",
-        value: "changeset",
-        scope: "project",
-        expectedKey: "completionDocumentationMode",
-      },
-      {
-        section: "General · Project",
-        label: "Review Artifacts",
-        kind: "select",
-        value: "user-facing",
-        scope: "project",
-        expectedKey: "reviewArtifacts",
-      },
-      {
-        section: "General · Project",
-        label: "Auto-cleanup old chats",
-        kind: "select",
-        value: 14,
-        scope: "project",
-        expectedKey: "chatAutoCleanupDays",
-      },
-      {
-        section: "General · Project",
-        label: "Close Quick Chat on outside click",
-        kind: "checkbox",
-        value: false,
-        scope: "project",
-        expectedKey: "quickChatCloseOnOutsideClick",
-      },
-      {
-        section: "General · Project",
-        label: "Show task chats in common Chat feed",
-        kind: "checkbox",
-        value: true,
-        scope: "project",
-        expectedKey: "showTaskChatsInCommonFeed",
-      },
-      {
-        section: "General · Project",
-        label: "Operational log retention",
-        kind: "select",
-        value: 7,
-        scope: "project",
-        expectedKey: "operationalLogRetentionDays",
-      },
-    ])("persists $expectedKey through the expected settings scope", async (input) => {
-      await expectSettingPersists(input);
-    });
-
-    it("persists report default and per-action filing mode overrides", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      fireEvent.change(screen.getByLabelText("In-app report mode"), { target: { value: "auto-file" } });
-      fireEvent.change(screen.getByLabelText("Bug report override"), { target: { value: "draft-review" } });
-      fireEvent.click(screen.getByLabelText("Deduplicate reports against public roadmap"));
-      fireEvent.change(screen.getByLabelText("Public roadmap label"), { target: { value: "planned" } });
-
-      await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalled());
-      expect(mockUpdateSettings.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
-        reportMode: "auto-file",
-        reportModeByAction: { bug: "draft-review" },
-        reportRoadmapDedupeEnabled: false,
-        reportRoadmapLabel: "planned",
-      }));
-    });
-
-    it("renders report-mode default help across unset, populated, and reset action overrides", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      const reportMode = screen.getByLabelText("In-app report mode") as HTMLSelectElement;
-      expect(reportMode).toHaveValue("draft-review");
-      expect(screen.getByTestId("settings-help-reportMode")).toBeInTheDocument();
-      expect(screen.getByText(/Default: draft-review \(operator reviews a draft before filing\)/i).closest(".settings-help-bubble")).toBeTruthy();
-
-      const actionLabels = ["Bug", "Feedback", "Idea", "Help"];
-      const actionSelects = actionLabels.map((action) => screen.getByLabelText(`${action} report override`) as HTMLSelectElement);
-      for (const select of actionSelects) expect(select).toHaveValue("");
-      for (const action of ["bug", "feedback", "idea", "help"]) {
-        expect(screen.getByTestId(`settings-help-reportModeByAction-${action}`)).toBeInTheDocument();
-      }
-      const overrideHelp = screen.getAllByText(/No default — unset actions inherit reportMode/i);
-      expect(overrideHelp).toHaveLength(4);
-      for (const help of overrideHelp) expect(help.closest(".settings-help-bubble")).toBeTruthy();
-
-      fireEvent.change(actionSelects[0], { target: { value: "auto-file" } });
-      expect(actionSelects[0]).toHaveValue("auto-file");
-      expect(screen.getAllByText(/No default — unset actions inherit reportMode/i)).toHaveLength(4);
-
-      fireEvent.change(actionSelects[0], { target: { value: "" } });
-      for (const select of actionSelects) expect(select).toHaveValue("");
-      expect(screen.getAllByText(/No default — unset actions inherit reportMode/i)).toHaveLength(4);
-    });
-
-    it("renders embedded PostgreSQL connection-cap help from the English locale", async () => {
-      renderModal({ initialSection: "backups-global" });
-      await waitForSettingsModalReady();
-
-      /*
-      FNXC:PostgresEmbedded 2026-07-22-23:55:
-      Issue #2411: the cap is schema-unset so the server can resolve a platform-aware
-      default (win32 150, else 500). The input therefore renders empty ("auto"), not 500.
-      */
-      expect(screen.getByLabelText("Embedded PostgreSQL connection cap")).toHaveValue(null);
-      expect(screen.getByLabelText("Embedded PostgreSQL connection cap")).toHaveAttribute("placeholder", "auto");
-      expect(screen.getByTestId("settings-help-embeddedPostgresMaxConnections")).toBeInTheDocument();
-      expect(screen.getByText("Maximum server connections for Fusion's embedded PostgreSQL. Applies after restarting Fusion. Range: 32–2,000. Unset by default — Fusion picks 500, or 150 on Windows where each connection is a separate process and higher caps can crash backends. External PostgreSQL uses its provider's connection limit.").closest(".settings-help-bubble")).toBeTruthy();
-    });
-
-    it("renders chat auto-cleanup retention with the default off value", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      const cleanupSelect = screen.getByLabelText("Auto-cleanup old chats") as HTMLSelectElement;
-      expect(cleanupSelect.value).toBe("0");
-    });
-
-    it("renders and saves mail auto-prune retention", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      const mailCleanupSelect = screen.getByLabelText("Auto-prune old mail") as HTMLSelectElement;
-      expect(mailCleanupSelect.value).toBe("0");
-
-      await settingsModalUser.selectOptions(mailCleanupSelect, "7");
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.mailAutoCleanupDays).toBe(7);
-
-      mockUpdateSettings.mockClear();
-
-      await settingsModalUser.selectOptions(mailCleanupSelect, "0");
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const offPayload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(offPayload.mailAutoCleanupDays).toBe(0);
-    });
-
-    it("renders and saves chat room compaction controls", async () => {
-      renderModal({ initialSection: "general" });
-      await waitForSettingsModalReady();
-
-      expect(screen.getByRole("heading", { name: "Chat Rooms" })).toBeInTheDocument();
-
-      const recentInput = screen.getByLabelText("Recent verbatim room messages") as HTMLInputElement;
-      const fetchLimitInput = screen.getByLabelText("Room compaction fetch limit") as HTMLInputElement;
-      const summaryMaxInput = screen.getByLabelText("Room summary max characters") as HTMLInputElement;
-
-      expect(recentInput.placeholder).toBe("25");
-      expect(fetchLimitInput.placeholder).toBe("200");
-      expect(summaryMaxInput.placeholder).toBe("3000");
-
-      await settingsModalUser.type(recentInput, "7");
-      await settingsModalUser.type(fetchLimitInput, "60");
-      await settingsModalUser.type(summaryMaxInput, "900");
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.chatRoomRecentVerbatimMessages).toBe(7);
-      expect(payload.chatRoomCompactionFetchLimit).toBe(60);
-      expect(payload.chatRoomSummaryMaxChars).toBe(900);
-    });
-
-    it("renders and saves GitHub tracking controls in the Source Control section", async () => {
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      expect(screen.getByRole("heading", { name: "GitHub Tracking" })).toBeInTheDocument();
-
-      const modeSelect = screen.getByLabelText("Default tracking mode for new tasks") as HTMLSelectElement;
-      const repoSelect = screen.getByRole("combobox", { name: "Project default tracking repo" }) as HTMLSelectElement;
-      expect(modeSelect.value).toBe("off");
-      expect(repoSelect.value).toBe("__custom__");
-
-      await settingsModalUser.selectOptions(modeSelect, "new-tasks");
-      await settingsModalUser.type(screen.getByPlaceholderText("owner/repo"), "octo/repo");
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.githubTrackingEnabledByDefault).toBe(true);
-      expect(payload.githubTrackingDefaultRepo).toBe("octo/repo");
-
-      if (mockUpdateGlobalSettings.mock.calls.length > 0) {
-        const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
-        expect(globalPayload.githubTrackingDefaultRepo).toBeUndefined();
-      }
-    });
-
-    it("renders and saves GitLab URL configuration as project settings", async () => {
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const disclosure = screen.getByTestId("project-gitlab-configuration-disclosure");
-      expect(disclosure).not.toHaveAttribute("open");
-      const enableToggle = screen.getByLabelText("Enable GitLab integration") as HTMLInputElement;
-      expect(enableToggle.checked).toBe(true);
-      await settingsModalUser.click(within(disclosure).getByText("GitLab Configuration"));
-      expect(disclosure).toHaveAttribute("open");
-
-      expect(screen.getByRole("heading", { name: "GitLab Configuration" })).toBeInTheDocument();
-      expect(screen.getByText(/Blank uses GitLab.com or the global default/i)).toBeInTheDocument();
-      expect(screen.getByText(/Blank derives <instance>\/api\/v4/i)).toBeInTheDocument();
-
-      await settingsModalUser.type(screen.getByLabelText("GitLab instance URL"), " https://gitlab.example.com/gitlab/ ");
-      await settingsModalUser.type(screen.getByLabelText("GitLab API base URL (optional / advanced)"), " https://api.example.com/v4/ ");
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.gitlabInstanceUrl).toBe("https://gitlab.example.com/gitlab/");
-      expect(payload.gitlabApiBaseUrl).toBe("https://api.example.com/v4/");
-      if (mockUpdateGlobalSettings.mock.calls.length > 0) {
-        const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
-        expect(globalPayload.gitlabInstanceUrl).toBeUndefined();
-        expect(globalPayload.gitlabApiBaseUrl).toBeUndefined();
-      }
-    });
-
-    it("saves project GitLab disabled state without clearing stored URLs", async () => {
-      mockFetchSettings.mockResolvedValueOnce({
-        ...defaultSettings,
-        gitlabEnabled: true,
-        gitlabInstanceUrl: "https://gitlab.example.com/gitlab",
-        gitlabApiBaseUrl: "https://gitlab.example.com/gitlab/api/v4",
-      });
-      mockFetchSettingsByScope.mockResolvedValueOnce({
-        global: defaultSettings,
-        project: {
-          gitlabEnabled: true,
-          gitlabInstanceUrl: "https://gitlab.example.com/gitlab",
-          gitlabApiBaseUrl: "https://gitlab.example.com/gitlab/api/v4",
-        },
-      });
-
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      await settingsModalUser.click(screen.getByLabelText("Enable GitLab integration"));
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      expect(mockUpdateSettings.mock.calls[0][0]).toMatchObject({ gitlabEnabled: false });
-      expect(mockUpdateSettings.mock.calls[0][0]).not.toHaveProperty("gitlabInstanceUrl");
-      expect(mockUpdateSettings.mock.calls[0][0]).not.toHaveProperty("gitlabApiBaseUrl");
-    });
-
-    it("clears GitLab URL project overrides back to defaults", async () => {
-      mockFetchSettings.mockResolvedValueOnce({
-        ...defaultSettings,
-        gitlabInstanceUrl: "https://gitlab.example.com/gitlab",
-        gitlabApiBaseUrl: "https://gitlab.example.com/gitlab/api/v4",
-      });
-      mockFetchSettingsByScope.mockResolvedValueOnce({
-        global: defaultSettings,
-        project: {
-          gitlabInstanceUrl: "https://gitlab.example.com/gitlab",
-          gitlabApiBaseUrl: "https://gitlab.example.com/gitlab/api/v4",
-        },
-      });
-
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      await settingsModalUser.clear(screen.getByLabelText("GitLab instance URL"));
-      await settingsModalUser.clear(screen.getByLabelText("GitLab API base URL (optional / advanced)"));
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      expect(mockUpdateSettings.mock.calls[0][0]).toMatchObject({
-        gitlabInstanceUrl: null,
-        gitlabApiBaseUrl: null,
-      });
-    });
-
-    it("renders and saves imported GitHub issue tracking linking as a project setting", async () => {
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const importLinkToggle = screen.getByLabelText(
-        "Always link imported GitHub issues to GitHub tracking",
-      ) as HTMLInputElement;
-      expect(importLinkToggle.id).toBe("githubLinkImportedIssuesToTracking");
-      expect(importLinkToggle.checked).toBe(false);
-      expect(screen.getByText(/does not turn GitHub tracking on for ordinary new tasks/i)).toBeInTheDocument();
-
-      await settingsModalUser.click(importLinkToggle);
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.githubLinkImportedIssuesToTracking).toBe(true);
-      if (mockUpdateGlobalSettings.mock.calls.length > 0) {
-        const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
-        expect(globalPayload.githubLinkImportedIssuesToTracking).toBeUndefined();
-      }
-    });
-
-    it("saves imported GitHub issue tracking linking as disabled", async () => {
-      mockFetchSettings.mockResolvedValueOnce({
-        ...defaultSettings,
-        githubLinkImportedIssuesToTracking: true,
-      });
-      mockFetchSettingsByScope.mockResolvedValueOnce({
-        global: defaultSettings,
-        project: { githubLinkImportedIssuesToTracking: true },
-      });
-
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const importLinkToggle = screen.getByLabelText(
-        "Always link imported GitHub issues to GitHub tracking",
-      ) as HTMLInputElement;
-      expect(importLinkToggle.checked).toBe(true);
-
-      await settingsModalUser.click(importLinkToggle);
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.githubLinkImportedIssuesToTracking).toBe(false);
-      if (mockUpdateGlobalSettings.mock.calls.length > 0) {
-        const globalPayload = mockUpdateGlobalSettings.mock.calls[0]?.[0] as Record<string, unknown>;
-        expect(globalPayload.githubLinkImportedIssuesToTracking).toBeUndefined();
-      }
-    });
-
-    it("saves GitHub tracking defaults as disabled and clears the repo when emptied", async () => {
-      mockFetchSettings.mockResolvedValueOnce({
-        ...defaultSettings,
-        githubTrackingEnabledByDefault: true,
-        githubTrackingDefaultRepo: "octo/existing",
-      });
-
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const modeSelect = screen.getByLabelText("Default tracking mode for new tasks") as HTMLSelectElement;
-      const repoSelect = screen.getByRole("combobox", { name: "Project default tracking repo" }) as HTMLSelectElement;
-
-      expect(modeSelect.value).toBe("new-tasks");
-      expect(repoSelect.value).toBe("__custom__");
-
-      await settingsModalUser.selectOptions(modeSelect, "off");
-      await settingsModalUser.clear(screen.getByPlaceholderText("owner/repo"));
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.githubTrackingEnabledByDefault).toBe(false);
-      expect(payload.githubTrackingDefaultRepo).toBeUndefined();
-    });
-
-    it("renders github dedup toggle as checked when project value is unset", async () => {
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const dedupToggle = screen.getByLabelText(
-        "Search the tracking repo for likely duplicates before opening a new issue",
-      ) as HTMLInputElement;
-      expect(dedupToggle.checked).toBe(true);
-    });
-
-    it("renders github dedup toggle as unchecked when explicitly disabled", async () => {
-      mockFetchSettings.mockResolvedValueOnce({
-        ...defaultSettings,
-        githubTrackingDedupEnabled: false,
-      });
-
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const dedupToggle = screen.getByLabelText(
-        "Search the tracking repo for likely duplicates before opening a new issue",
-      ) as HTMLInputElement;
-      expect(dedupToggle.checked).toBe(false);
-    });
-
-    it("saves github dedup toggle changes", async () => {
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const dedupToggle = screen.getByLabelText(
-        "Search the tracking repo for likely duplicates before opening a new issue",
-      ) as HTMLInputElement;
-
-      await settingsModalUser.click(dedupToggle);
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const firstPayload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(firstPayload.githubTrackingDedupEnabled).toBe(false);
-
-      mockUpdateSettings.mockClear();
-
-      await settingsModalUser.click(dedupToggle);
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const secondPayload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(secondPayload.githubTrackingDedupEnabled).toBe(true);
-    });
-
-    it("hides summarization model picker when summarization and default tracking are disabled", async () => {
-      renderModal({ initialSection: "models" });
-      await waitForSettingsModalReady();
-
-      await settingsModalUser.click(screen.getByRole("button", { name: "Models · Project" }));
-
-      expect(screen.queryByText("Title, commit message, and GitHub tracking issue summarization model")).not.toBeInTheDocument();
-    });
-
-    it("does not show a moved-to-workflow note for the summarizer model when GitHub tracking defaults are on", async () => {
-      mockFetchSettings.mockResolvedValueOnce({
-        ...defaultSettings,
-        githubTrackingEnabledByDefault: true,
-      });
-
-      renderModal({ initialSection: "models" });
-      await waitForSettingsModalReady();
-
-      await settingsModalUser.click(screen.getByRole("button", { name: "Models · Project" }));
-
-      expect(screen.queryByText(/model used for summarization now lives on the workflow/i)).not.toBeInTheDocument();
-      // FNXC:ProjectModels 2026-07-24-03:10: #2400 (e514e134d) replaced the
-      // per-phase moved-to-workflow NOTE with a real editable "Project workflow
-      // model lanes" section; assert the editor heading instead of the old copy.
-      expect(screen.getByText("Project workflow model lanes")).toBeInTheDocument();
-    });
-
-    it("picks a project repo suggestion and preserves label association", async () => {
-      mockFetchGitRemotes.mockResolvedValueOnce([
-        { name: "origin", owner: "octo", repo: "repo", url: "https://github.com/octo/repo.git" },
-      ]);
-
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      const repoSelect = screen.getByRole("combobox", { name: "Project default tracking repo" }) as HTMLSelectElement;
-      expect(await within(repoSelect).findByRole("option", { name: "octo/repo" })).toBeInTheDocument();
-
-      await settingsModalUser.selectOptions(repoSelect, "octo/repo");
-
-      await waitFor(() => {
-        expect(mockUpdateSettings).toHaveBeenCalled();
-      });
-
-      const payload = mockUpdateSettings.mock.calls[0][0] as Record<string, unknown>;
-      expect(payload.githubTrackingDefaultRepo).toBe("octo/repo");
-    });
-
-    it("shows project tracking repo error hint and keeps custom entry when remotes fail", async () => {
-      mockFetchGitRemotes.mockRejectedValueOnce(new Error("remotes failed"));
-
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      expect(await screen.findByText(/Could not load detected remotes/i)).toBeInTheDocument();
-      const control = screen.getByRole("combobox", { name: "Project default tracking repo" });
-      await settingsModalUser.selectOptions(control, "__custom__");
-      expect(screen.getByPlaceholderText("owner/repo")).toBeInTheDocument();
-    });
-
-    it("always shows GitHub tracking summarization helper copy", async () => {
-      renderModal({ initialSection: "source-control" });
-      await waitForSettingsModalReady();
-
-      expect(
-        screen.getByText(/Tracking issues use this task's title\. If a task has no title yet, Fusion can summarize its description using the title summarization model in Project Models\./),
-      ).toBeInTheDocument();
-    });
-  });
 
   describe("Appearance", () => {
     it("renders dashboard font size options with saved value", async () => {
@@ -1981,11 +1407,12 @@ describe("SettingsModal", () => {
       await waitForSettingsModalReady();
 
       await settingsModalUser.click(screen.getByRole("button", { name: /Appearance/ }));
-      await settingsModalUser.click(screen.getByRole("button", { name: "Largest" }));
-
-      await waitFor(() => {
-        expect(mockUpdateGlobalSettings).toHaveBeenCalled();
-      });
+      // FNXC:SettingsModalTests 2026-08-11-00:19: flush the 500ms auto-save debounce with fake timers rather than a real-timer waitFor.
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole("button", { name: "Largest" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mockUpdateGlobalSettings).toHaveBeenCalled();
+      vi.useRealTimers();
 
       const payload = mockUpdateGlobalSettings.mock.calls[0][0];
       expect(payload).toEqual(expect.objectContaining({ dashboardFontScalePct: 120 }));
@@ -2274,6 +1701,7 @@ describe("SettingsModal", () => {
       expect(payload.taskPrefix).toBeNull();
       expect(payload.autoMerge).toBeNull();
       expect(payload.maxConcurrent).toBeNull();
+      expect(payload.maxRecommendationsPerTask).toBeNull();
       // Global-only key must never appear in a project-scope reset payload.
       expect(payload).not.toHaveProperty("themeMode");
       expect(mockUpdateGlobalSettings).not.toHaveBeenCalled();

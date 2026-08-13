@@ -20,7 +20,7 @@
  */
 import { and, desc, eq, sql } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
-import type { AsyncDataLayer, DbTransaction } from "../postgres/data-layer.js";
+import { projectScopeFor, type AsyncDataLayer, type DbTransaction } from "../postgres/data-layer.js";
 // FNXC:ApprovalLifecycleSecurity 2026-07-26-12:25:
 import { isApprovalRequestExpired } from "../types/agents/agents.js";
 import {
@@ -120,7 +120,7 @@ function rowToAuditEvent(row: ApprovalRequestAuditEventRow): ApprovalRequestAudi
  * Append an audit event row inside the given transaction handle.
  *
  * FNXC:ApprovalAnalyticsIsolation 2026-07-14-01:04:
- * Audit events must carry the bound layer's project ID at write time because request IDs alone do not provide a reliable tenant ownership join for Command Center intervention analytics.
+ * Audit events must carry the bound layer's project ID at write time because request IDs alone do not provide a reliable tenant ownership join for Command Center intervention analytics. The live `(project_id, id)` key also permits deterministic audit IDs to collide safely across partitions; preserve the explicit value so the ownership trigger observes blank writes unchanged.
  */
 async function appendAuditEvent(
   tx: DbTransaction,
@@ -182,6 +182,7 @@ export async function createApprovalRequest(
   };
   await layer.transactionImmediate(async (tx) => {
     await tx.insert(schema.project.approvalRequests).values({
+      ...(layer.projectId?.trim() ? { projectId: layer.projectId } : {}),
       id: request.id,
       status: request.status,
       requesterActorId: request.requester.actorId,
@@ -207,16 +208,19 @@ export async function createApprovalRequest(
 }
 
 /**
- * Get a single approval request by id.
+ * FNXC:ApprovalProjectIsolation 2026-08-12-14:15:
+ * approval_requests now has a composite project/id identity, so id-only reads
+ * and the guarded decision updates must constrain the bound runtime project.
  */
 export async function getApprovalRequest(
   handle: QueryHandle,
   id: string,
+  projectId?: string,
 ): Promise<ApprovalRequest | null> {
   const rows = await handle
     .select()
     .from(schema.project.approvalRequests)
-    .where(eq(schema.project.approvalRequests.id, id));
+    .where(and(eq(schema.project.approvalRequests.id, id), projectScopeFor(schema.project.approvalRequests.projectId, projectId)));
   return rows[0] ? rowToRequest(rows[0] as ApprovalRequestRow) : null;
 }
 
@@ -227,8 +231,9 @@ export async function getApprovalRequest(
 export async function listApprovalRequests(
   handle: QueryHandle,
   input: ApprovalRequestListInput = {},
+  projectId?: string,
 ): Promise<ApprovalRequest[]> {
-  const conditions: ReturnType<typeof eq>[] = [];
+  const conditions = [projectScopeFor(schema.project.approvalRequests.projectId, projectId)];
   if (input.status) conditions.push(eq(schema.project.approvalRequests.status, input.status));
   if (input.requesterActorId) conditions.push(eq(schema.project.approvalRequests.requesterActorId, input.requesterActorId));
   if (input.taskId) conditions.push(eq(schema.project.approvalRequests.taskId, input.taskId));
@@ -266,7 +271,7 @@ export async function decideApprovalRequest(
 ): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
   return layer.transactionImmediate(async (tx) => {
-    const existing = await getApprovalRequest(tx, requestId);
+    const existing = await getApprovalRequest(tx, requestId, layer.projectId);
     if (!existing) throw new Error(`Approval request ${requestId} not found`);
     if (!isValidApprovalRequestTransition(existing.status, status)) {
       throw new Error(`Invalid approval request transition: ${existing.status} -> ${status}`);
@@ -281,17 +286,18 @@ export async function decideApprovalRequest(
         and(
           eq(schema.project.approvalRequests.id, requestId),
           eq(schema.project.approvalRequests.status, existing.status),
+          projectScopeFor(schema.project.approvalRequests.projectId, layer.projectId),
         ),
       )
       .returning({ id: schema.project.approvalRequests.id });
     if (updatedRows.length === 0) {
-      const raced = await getApprovalRequest(tx, requestId);
+      const raced = await getApprovalRequest(tx, requestId, layer.projectId);
       throw new Error(
         `Invalid approval request transition: ${raced?.status ?? existing.status} -> ${status}`,
       );
     }
     await appendAuditEvent(tx, layer.projectId ?? "", requestId, status, input.actor, now, input.note);
-    return (await getApprovalRequest(tx, requestId))!;
+    return (await getApprovalRequest(tx, requestId, layer.projectId))!;
   });
 }
 
@@ -314,7 +320,7 @@ export async function markApprovalRequestCompleted(
 ): Promise<ApprovalRequest> {
   const now = new Date().toISOString();
   return layer.transactionImmediate(async (tx) => {
-    const existing = await getApprovalRequest(tx, requestId);
+    const existing = await getApprovalRequest(tx, requestId, layer.projectId);
     if (!existing) throw new Error(`Approval request ${requestId} not found`);
     if (!isValidApprovalRequestTransition(existing.status, "completed")) {
       throw new Error(`Invalid approval request transition: ${existing.status} -> completed`);
@@ -335,31 +341,36 @@ export async function markApprovalRequestCompleted(
         and(
           eq(schema.project.approvalRequests.id, requestId),
           eq(schema.project.approvalRequests.status, existing.status),
+          projectScopeFor(schema.project.approvalRequests.projectId, layer.projectId),
         ),
       )
       .returning({ id: schema.project.approvalRequests.id });
     if (updatedRows.length === 0) {
-      const raced = await getApprovalRequest(tx, requestId);
+      const raced = await getApprovalRequest(tx, requestId, layer.projectId);
       throw new Error(
         `Invalid approval request transition: ${raced?.status ?? existing.status} -> completed`,
       );
     }
     await appendAuditEvent(tx, layer.projectId ?? "", requestId, "completed", input.actor, now, input.note);
-    return (await getApprovalRequest(tx, requestId))!;
+    return (await getApprovalRequest(tx, requestId, layer.projectId))!;
   });
 }
 
 /**
  * Get the audit history for a request, ordered by createdAt ASC.
+ *
+ * FNXC:ApprovalAuditProjectIsolation 2026-08-12-15:37:
+ * Owner and superuser connections can enable `fusion.project_bypass`, so RLS cannot backstop this bare request-id lookup. Scope in SQL from the public ApprovalRequestStore layer binding; projectScopeFor intentionally treats blank and whitespace-only bindings as unbound even though fusion_assign_project_id preserves whitespace writes literally.
  */
 export async function getApprovalAuditHistory(
   handle: QueryHandle,
   requestId: string,
+  projectId?: string,
 ): Promise<ApprovalRequestAuditEvent[]> {
   const rows = await handle
     .select()
     .from(schema.project.approvalRequestAuditEvents)
-    .where(eq(schema.project.approvalRequestAuditEvents.requestId, requestId))
+    .where(and(eq(schema.project.approvalRequestAuditEvents.requestId, requestId), projectScopeFor(schema.project.approvalRequestAuditEvents.projectId, projectId)))
     .orderBy(
       sql`${schema.project.approvalRequestAuditEvents.createdAt} ASC, ${schema.project.approvalRequestAuditEvents.id} ASC`,
     );

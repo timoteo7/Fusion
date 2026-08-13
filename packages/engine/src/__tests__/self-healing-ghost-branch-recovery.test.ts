@@ -140,6 +140,93 @@ describe("self-healing ghost branch reclaim", () => {
   });
 
   /*
+  FNXC:SelfHealingReclaim 2026-08-11-09:38:
+  Symptom Verification for the misclassified-cleanup-failure park.
+
+  Original symptom: tasks were failed and paused with `pausedReason: "branch-conflict-unrecoverable"` and the error
+  "Task branch conflict: <branch> is not safely reclaimable (...)", where the parenthesised cause was always a
+  filesystem message -- `Command failed: git worktree remove --force ...` or `ENOTEMPTY: directory not empty, rmdir
+  '.../node_modules/.pnpm/...'` -- never a git conflict. 78 such parks in 16 days on this repo.
+
+  Exact reproduction: a `tip-already-merged` verdict (branch tip is already an ancestor of the integration ref, so the
+  branch has nothing unique to lose) whose housekeeping throws.
+  Assertion it is gone: the sweep records no `branch-conflict-unrecoverable` park for that task.
+
+  Surface enumeration -- the invariant is "no cleanup failure on an already-merged tip may be reported as a branch
+  conflict", so every observed failure shape is asserted rather than only the one that was easiest to reproduce:
+    - `git worktree remove --force` failing (FN-8979 / FN-8955 / FN-8932 shape)
+    - `ENOTEMPTY ... rmdir node_modules` from a pnpm write race (FN-8908 shape)
+    - `git branch -D` failing (covered by the half-corrupt-state test above, extended here to the park assertion)
+    - prune runs BEFORE removal, so a stale registration stops causing the failure it would have prevented
+    - negative control: a genuine `live-foreign` verdict still parks (see "keeps genuine live-foreign conflicts parked")
+  */
+  describe("tip-already-merged cleanup failures are not branch conflicts", () => {
+    /* The cleanup body is one try block, so WHICH housekeeping step throws does not change the
+       classification -- only that something threw. These are the real messages observed on parked
+       tasks; they are induced through the `git branch -D` seam because it is the step reachable
+       from this suite's exec mock. */
+    const CLEANUP_FAILURES: { label: string; message: string }[] = [
+      {
+        label: "git worktree remove --force failure",
+        message: 'Command failed: git worktree remove --force "/repo/.worktrees/grand-crane"',
+      },
+      {
+        label: "pnpm node_modules rmdir race",
+        message: "ENOTEMPTY: directory not empty, rmdir '/repo/.worktrees/happy-olive/node_modules/.pnpm/@asamuzakjp+generational-cache@1.0.1'",
+      },
+      {
+        label: "git branch -D failure",
+        message: "Command failed: git branch -D",
+      },
+    ];
+
+    for (const { label, message } of CLEANUP_FAILURES) {
+      it(`does not park the task as branch-conflict-unrecoverable on a ${label}`, async () => {
+        execMock.mockImplementation(async (command: string) => {
+          if (command.includes("git branch -D")) throw new Error(message);
+          return "";
+        });
+        mockSweepTask({ id: "FN-9001", column: "in-review", checkedOutBy: null, branch: "fusion/fn-9001", worktree: "/tmp/live", baseCommitSha: "m0", paused: true, pausedReason: "branch-conflict-unrecoverable", status: "failed" });
+        vi.spyOn(branchConflicts, "inspectBranchConflict").mockResolvedValueOnce({ kind: "tip-already-merged", livePath: "/tmp/live", tipSha: "1234567890abcdef", integrationRef: "main" } as any);
+
+        await manager.reclaimSelfOwnedBranchConflicts();
+
+        // Positive control: proves the sweep actually reached the tip-already-merged
+        // arm and its catch fired. Without this the park assertions below would pass
+        // vacuously whenever the task failed the candidate filter.
+        expect(store.logEntry).toHaveBeenCalledWith("FN-9001", expect.stringContaining("tip-already-merged cleanup failed"));
+
+        const parks = (store.updateTask as any).mock.calls.filter(
+          (c: any[]) => c[1]?.pausedReason === "branch-conflict-unrecoverable",
+        );
+        expect(parks).toHaveLength(0);
+        const failures = (store.updateTask as any).mock.calls.filter((c: any[]) => c[1]?.status === "failed");
+        expect(failures).toHaveLength(0);
+      });
+    }
+
+    it("prunes stale worktree registrations before attempting removal", async () => {
+      const gitCommands: string[] = [];
+      execMock.mockImplementation(async (command: string) => {
+        gitCommands.push(command);
+        return "";
+      });
+      const removeSpy = vi.spyOn(worktreePool, "removeWorktree").mockResolvedValue(undefined as never);
+      mockSweepTask({ id: "FN-9001", column: "in-review", checkedOutBy: null, branch: "fusion/fn-9001", worktree: "/tmp/live", baseCommitSha: "m0", paused: true, pausedReason: "branch-conflict-unrecoverable", status: "failed" });
+      vi.spyOn(branchConflicts, "inspectBranchConflict").mockResolvedValueOnce({ kind: "tip-already-merged", livePath: null, tipSha: "1234567890abcdef", integrationRef: "main" } as any);
+
+      await manager.reclaimSelfOwnedBranchConflicts();
+
+      const pruneIndex = gitCommands.findIndex((c) => c.includes("git worktree prune"));
+      const deleteIndex = gitCommands.findIndex((c) => c.includes("git branch -D"));
+      expect(pruneIndex).toBeGreaterThanOrEqual(0);
+      expect(deleteIndex).toBeGreaterThanOrEqual(0);
+      expect(pruneIndex).toBeLessThan(deleteIndex);
+      expect(removeSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  /*
   FNXC:SelfHealingReclaim 2026-07-25-09:40:
   Regression contract for the inherited-tip invariant (FN-1406): the reclaim sweep's `tip-already-merged` arm must
   classify a foreign `Fusion-Task-Id` trailer with merge-base diff proof, not on the trailer alone, so it shares one

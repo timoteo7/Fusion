@@ -11,7 +11,7 @@
 
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { copyFile, readFile, stat } from "node:fs/promises";
+import { copyFile, readFile, rm, stat } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { EventEmitter } from "node:events";
 import type { TaskStore } from "../store.js";
@@ -647,7 +647,19 @@ export class PluginLoader extends EventEmitter<{
       const baseName = basename(path, ext);
       const reloadedPath = resolve(dirname(path), `.${baseName}.reload-${moduleImportVersion}${ext}`);
       await copyFile(path, reloadedPath);
-      mod = await import(pathToFileURL(reloadedPath).href);
+      /*
+      FNXC:PluginLoader 2026-08-11-09:58:
+      FN-8990 requires the cache-busting copy to exist only for the dynamic ESM import.
+      The module remains resident after import settles, so remove the copy to prevent
+      plugin working trees accumulating and accidentally committing reload scratch files.
+      */
+      try {
+        mod = await import(pathToFileURL(reloadedPath).href);
+      } finally {
+        try {
+          await rm(reloadedPath, { force: true });
+        } catch {}
+      }
     } else {
       mod = await import(moduleUrl);
     }

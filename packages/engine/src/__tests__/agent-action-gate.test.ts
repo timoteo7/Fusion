@@ -29,6 +29,7 @@ const FN_3548_COORDINATION_TOOLS = [
   "fn_memory_get",
   "fn_memory_append",
   "fn_read_evaluations",
+  "fn_agent_read_evaluations",
   "fn_update_identity",
   "fn_reflect_on_performance",
 ] as const;

@@ -18,6 +18,7 @@ import { eq, sql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import type { DbTransaction } from "../../postgres/data-layer.js";
 import type { TaskCreateInput } from "../../types/task/task-core.js";
+import type { MissionEvent } from "../../missions/mission-types.js";
 
 import {
   pgDescribe,
@@ -27,6 +28,8 @@ import {
 import * as schema from "../../postgres/schema/index.js";
 import {
   AsyncMissionStore,
+  MissionBlockedClearConflictError,
+  MissionResumeConflictError,
   createMission as createMissionRow,
   createMilestone as createMilestoneRow,
   deleteMission as deleteMissionRow,
@@ -44,6 +47,8 @@ const pgTest = pgDescribe;
 pgTest("MissionStore (PostgreSQL backend mode)", () => {
   const h: SharedPgTaskStoreHarness = createSharedPgTaskStoreTestHarness({
     prefix: "fusion_mission_store",
+    /* FNXC:MissionStatusWrites 2026-08-10-13:49: Defined-feature bootstrap validates task ownership through a bound project partition. */
+    projectId: "mission-store-pg-test",
   });
 
   beforeAll(h.beforeAll);
@@ -145,15 +150,43 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
       "autopilot_disabled", "mission_status_changed", "autopilot_enabled", "mission_status_changed",
     ]);
     const statusEvents = events.filter((event) => event.eventType === "mission_status_changed");
+    const persistedActor = { type: "operator", id: "user-42", source: "dashboard" };
     expect(statusEvents.map((event) => event.metadata)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ field: "status", from: "planning", to: "active", source: "dashboard", actor }),
-      expect.objectContaining({ field: "status", from: "active", to: "blocked", source: "dashboard", actor }),
+      expect.objectContaining({ field: "status", from: "planning", to: "active", source: "dashboard", actor: persistedActor }),
+      expect.objectContaining({ field: "status", from: "active", to: "blocked", source: "dashboard", actor: persistedActor }),
     ]));
     const autopilotEvents = events.filter((event) => event.eventType.startsWith("autopilot_"));
     expect(autopilotEvents.map((event) => event.metadata)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ field: "autopilotEnabled", from: false, to: true, actor }),
-      expect.objectContaining({ field: "autopilotEnabled", from: true, to: false, actor }),
+      expect.objectContaining({ field: "autopilotEnabled", from: false, to: true, actor: persistedActor }),
+      expect.objectContaining({ field: "autopilotEnabled", from: true, to: false, actor: persistedActor }),
     ]));
+    expect(events.every((event) => !(event.metadata?.actor as Record<string, unknown> | undefined)?.displayName)).toBe(true);
+  });
+
+  it("atomically audits feature status changes from both public status seams", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Feature audit" });
+    const milestone = await m.addMilestone(mission.id, { title: "Milestone" });
+    const slice = await m.addSlice(milestone.id, { title: "Slice" });
+    const first = await m.addFeature(slice.id, { title: "First" });
+    const second = await m.addFeature(slice.id, { title: "Second" });
+    const actor = { type: "agent" as const, id: "agent-42", source: "fn_feature_set_status", displayName: "Not persisted" };
+
+    await m.updateFeatureStatus(first.id, "done", { actor, reason: `Authorization: Bearer sk-live-ABCDEFG1234567890abcdef ${"ordinary prose ".repeat(100)}` });
+    await m.updateFeature(second.id, { status: "done" }, { actor });
+    await m.updateFeature(second.id, { title: "No status event" }, { actor });
+
+    const events = (await m.getMissionEvents(mission.id, { limit: 20 })).events
+      .filter((event) => event.eventType === "feature_status_changed");
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.metadata)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ featureId: first.id, sliceId: slice.id, from: "defined", to: "done", source: "fn_feature_set_status", actor: { type: "agent", id: "agent-42", source: "fn_feature_set_status" }, reasonTruncated: true }),
+      expect.objectContaining({ featureId: second.id, sliceId: slice.id, from: "defined", to: "done" }),
+    ]));
+    const reasonEvent = events.find((event) => (event.metadata as Record<string, unknown>)?.featureId === first.id)!;
+    expect(JSON.stringify(reasonEvent.metadata)).toContain("[REDACTED]");
+    expect(JSON.stringify(reasonEvent.metadata)).not.toContain("displayName");
+    expect((await m.getSlice(slice.id))?.status).toBe("complete");
   });
 
   it("createMission → addMilestone → addSlice → addFeature assembles getMissionWithHierarchy tree", async () => {
@@ -274,14 +307,57 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     const slice = await m.addSlice(milestone.id, { title: "SL" });
     const feature = await m.addFeature(slice.id, { title: "F" });
     const task = await h.store().createTask({ description: "delivery task" });
+    const observedEvents: MissionEvent[] = [];
+    m.on("mission:event", (event) => observedEvents.push(event));
 
     const linked = await m.linkFeatureToTask(feature.id, task.id);
     expect(linked.taskId).toBe(task.id);
     expect(linked.status).toBe("triaged");
+    expect(observedEvents).toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "feature_status_changed", metadata: expect.objectContaining({ source: "mission-link" }) })]));
+    expect((await m.getMissionEvents(mission.id, { limit: 10 })).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "feature_status_changed",
+        metadata: expect.objectContaining({ featureId: feature.id, from: "defined", to: "triaged", source: "mission-link" }),
+      }),
+    ]));
 
     const unlinked = await m.unlinkFeatureFromTask(feature.id);
     expect(unlinked.taskId).toBeUndefined();
     expect(unlinked.status).toBe("defined");
+    expect((await m.getMissionEvents(mission.id, { limit: 10 })).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "feature_status_changed",
+        metadata: expect.objectContaining({ featureId: feature.id, from: "triaged", to: "defined", source: "mission-store" }),
+      }),
+    ]));
+  });
+
+  it("audits defined-feature bootstrap claims inside their task transaction", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Claim audit" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "Claimed feature" });
+
+    const task = await h.store().createTask({
+      description: "bootstrap claim",
+      missionId: mission.id,
+      sliceId: slice.id,
+      afterTaskInsert: (tx: DbTransaction, inserted: { id: string }) => m.claimDefinedFeatureTaskInTransaction(tx, {
+        featureId: feature.id,
+        taskId: inserted.id,
+        missionId: mission.id,
+        sliceId: slice.id,
+      }),
+    } as TaskCreateInput & { afterTaskInsert: (tx: DbTransaction, task: { id: string }) => Promise<void> });
+
+    expect(await m.getFeature(feature.id)).toMatchObject({ taskId: task.id, status: "triaged" });
+    expect((await m.getMissionEvents(mission.id, { limit: 10 })).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "feature_status_changed",
+        metadata: expect.objectContaining({ featureId: feature.id, from: "defined", to: "triaged", source: "defined-feature-claim" }),
+      }),
+    ]));
   });
 
   it("does not overwrite an existing task directory on a creation collision", async () => {
@@ -600,11 +676,27 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     expect(await m.getMission(mission.id)).toMatchObject({ status: "planning", autopilotEnabled: false, autoAdvance: false });
     expect(await h.store().getTask(task.id)).toMatchObject({ missionId: mission.id, sliceId: slice.id, column: "done" });
     expect((await h.store().listTasks()).length).toBe(taskCount);
+    const statusEvents = (await m.getMissionEvents(mission.id, { limit: 10 })).events
+      .filter((event) => event.eventType === "feature_status_changed");
+    expect(statusEvents).toEqual([expect.objectContaining({
+      metadata: expect.objectContaining({ featureId: feature.id, from: "defined", to: "done", source: "terminal-task-reconcile" }),
+    })]);
 
     const firstUpdatedAt = reconciled.updatedAt;
     const idempotent = await m.reconcileFeatureDoneWithTerminalTask(feature.id, task.id);
     expect(idempotent.updatedAt).toBe(firstUpdatedAt);
     expect(idempotent).toEqual(reconciled);
+    expect((await m.getMissionEvents(mission.id, { limit: 10 })).events
+      .filter((event) => event.eventType === "feature_status_changed")).toHaveLength(1);
+
+    // A link-only repair has featureChanged=true but no status delta, so it stays silent.
+    const linkOnly = await m.addFeature(slice.id, { title: "Already done" });
+    await m.updateFeature(linkOnly.id, { status: "done" });
+    const linkOnlyTask = await h.store().createTask({ description: "done", column: "done" });
+    await m.reconcileFeatureDoneWithTerminalTask(linkOnly.id, linkOnlyTask.id);
+    expect((await m.getMissionEvents(mission.id, { limit: 20 })).events
+      .filter((event) => event.eventType === "feature_status_changed" && (event.metadata as Record<string, unknown>)?.featureId === linkOnly.id))
+      .toHaveLength(1);
 
     const duplicate = await m.addFeature(slice.id, { title: "Corrupt duplicate" });
     await m.updateFeature(duplicate.id, { taskId: task.id });
@@ -682,6 +774,8 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     expect(await m.getSlice(slice.id)).toMatchObject({ status: "pending" });
     expect(await m.getMilestone(milestone.id)).toMatchObject({ status: "planning" });
     expect(await h.store().getTask(task.id)).toMatchObject({ missionId: undefined, sliceId: undefined });
+    expect((await m.getMissionEvents(mission.id, { limit: 10 })).events
+      .filter((event) => event.eventType === "feature_status_changed")).toHaveLength(0);
   });
 
   it("addContractAssertion appears in listContractAssertions", async () => {
@@ -771,6 +865,318 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     expect(fetched?.inputFingerprint).toBe("fingerprint-round-trip");
   });
 
+  it("atomically admits one fresh manual validator run and preserves rejected feature state", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Manual admission" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+
+    const [first, second] = await Promise.all([
+      m.startManualValidatorRun(feature.id),
+      m.startManualValidatorRun(feature.id),
+    ]);
+    const started = first.outcome === "started" ? first : second;
+    const blocked = first.outcome === "already-running" ? first : second;
+    expect(started).toMatchObject({ outcome: "started" });
+    expect(blocked).toMatchObject({ outcome: "already-running", run: { id: started.run.id } });
+    expect((await m.getValidatorRunsByFeature(feature.id)).filter((run) => run.status === "running")).toHaveLength(1);
+    const beforeRejected = await m.getFeature(feature.id);
+    await expect(m.startManualValidatorRun(feature.id)).resolves.toMatchObject({ outcome: "already-running", run: { id: started.run.id } });
+    expect(await m.getFeature(feature.id)).toEqual(beforeRejected);
+
+    await m.completeValidatorRun(started.run.id, "passed");
+    await expect(m.startManualValidatorRun(feature.id)).resolves.toMatchObject({ outcome: "started" });
+  });
+
+  it("serializes a manual trigger with the engine fallback validator creator", async () => {
+    /*
+    FNXC:MissionValidation 2026-08-11-04:27:
+    FN-8963's feature lock must cover the production non-memo engine fallback as well as the
+    manual route. Either contender may acquire it first, but their concurrent creation attempts
+    must leave exactly one live validator run.
+    */
+    const m = missions();
+    const mission = await m.createMission({ title: "Manual and fallback serialization" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+
+    const [manual, fallback] = await Promise.allSettled([
+      m.startManualValidatorRun(feature.id),
+      m.startValidatorRun(feature.id, "task_completion"),
+    ]);
+
+    expect((await m.getValidatorRunsByFeature(feature.id)).filter((run) => run.status === "running")).toHaveLength(1);
+    expect(
+      (manual.status === "fulfilled" && manual.value.outcome === "started") || fallback.status === "fulfilled",
+    ).toBe(true);
+    if (manual.status === "fulfilled" && manual.value.outcome === "started") {
+      expect(fallback).toMatchObject({ status: "rejected" });
+    } else {
+      expect(manual).toMatchObject({ status: "fulfilled", value: { outcome: "already-running" } });
+    }
+  });
+
+  it("reports the newest fresh run when legacy data has multiple running rows", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Legacy concurrent validation rows" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+    const older = await m.startValidatorRun(feature.id, "task_completion");
+    await h.layer().transactionImmediate(async (tx) => {
+      await tx.update(schema.project.missionValidatorRuns)
+        .set({ startedAt: new Date(Date.now() - 60_000).toISOString() })
+        .where(eq(schema.project.missionValidatorRuns.id, older.id));
+    });
+    const newest = await m.startValidatorRun(feature.id, "task_completion");
+
+    await expect(m.startManualValidatorRun(feature.id))
+      .resolves.toMatchObject({ outcome: "already-running", run: { id: newest.id } });
+    expect((await m.getValidatorRunsByFeature(feature.id)).filter((run) => run.status === "running")).toHaveLength(2);
+  });
+
+  it("manual admission blocks fresh automatic runs but ignores stale runs", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Cross surface admission" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+    const automatic = await m.admitValidatorRun(feature.id, { inputFingerprint: "fp-a", failureBudget: 3, reusePass: false });
+    expect(automatic).toMatchObject({ outcome: "start" });
+    await expect(m.startManualValidatorRun(feature.id)).resolves.toMatchObject({ outcome: "already-running", run: { id: automatic.run!.id } });
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "fp-a", failureBudget: 3, reusePass: false }))
+      .resolves.toMatchObject({ outcome: "running", run: { id: automatic.run!.id } });
+
+    await m.completeValidatorRun(automatic.run!.id, "error");
+    const stale = await m.startValidatorRun(feature.id, "task_completion");
+    await h.layer().transactionImmediate(async (tx) => {
+      await tx.update(schema.project.missionValidatorRuns)
+        .set({ startedAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() })
+        .where(eq(schema.project.missionValidatorRuns.id, stale.id));
+    });
+    await expect(m.startManualValidatorRun(feature.id)).resolves.toMatchObject({ outcome: "started" });
+  });
+
+  /*
+  FNXC:MissionValidation 2026-08-11-05:26:
+  A replacement validator owns feature state across every stale-run terminal surface: manual admission after an old engine run, engine fallback after an old manual run, and the stale reaper. Historical runs still become terminal records but cannot overwrite the replacement's validating state.
+  */
+  it("keeps replacement validator ownership when superseded runs complete or are reaped", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Superseded validator ownership" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const staleAt = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
+    const ageRun = async (runId: string) => {
+      await h.layer().transactionImmediate(async (tx) => {
+        await tx.update(schema.project.missionValidatorRuns)
+          .set({ startedAt: staleAt })
+          .where(eq(schema.project.missionValidatorRuns.id, runId));
+      });
+    };
+
+    const manualReplacementFeature = await m.addFeature(slice.id, { title: "Manual replacement" });
+    const oldEngineRun = await m.startValidatorRun(manualReplacementFeature.id, "task_completion");
+    await ageRun(oldEngineRun.id);
+    const manualReplacement = await m.startManualValidatorRun(manualReplacementFeature.id);
+    expect(manualReplacement).toMatchObject({ outcome: "started" });
+    await m.completeValidatorRun(oldEngineRun.id, "failed");
+    expect(await m.getValidatorRun(oldEngineRun.id)).toMatchObject({
+      status: "failed",
+      completedAt: expect.any(String),
+    });
+    expect(await m.getFeature(manualReplacementFeature.id)).toMatchObject({
+      lastValidatorRunId: manualReplacement.run.id,
+      loopState: "validating",
+    });
+
+    const fallbackReplacementFeature = await m.addFeature(slice.id, { title: "Fallback replacement" });
+    const oldManual = await m.startManualValidatorRun(fallbackReplacementFeature.id);
+    expect(oldManual).toMatchObject({ outcome: "started" });
+    await ageRun(oldManual.run.id);
+    const fallbackReplacement = await m.startValidatorRun(fallbackReplacementFeature.id, "task_completion");
+    await m.completeValidatorRun(oldManual.run.id, "passed");
+    expect(await m.getValidatorRun(oldManual.run.id)).toMatchObject({
+      status: "passed",
+      completedAt: expect.any(String),
+    });
+    expect(await m.getFeature(fallbackReplacementFeature.id)).toMatchObject({
+      lastValidatorRunId: fallbackReplacement.id,
+      loopState: "validating",
+    });
+
+    const reaperReplacementFeature = await m.addFeature(slice.id, { title: "Reaper replacement" });
+    const oldReapTarget = await m.startValidatorRun(reaperReplacementFeature.id, "task_completion");
+    await ageRun(oldReapTarget.id);
+    const reaperReplacement = await m.startManualValidatorRun(reaperReplacementFeature.id);
+    expect(reaperReplacement).toMatchObject({ outcome: "started" });
+    await m.reapValidatorRun(oldReapTarget.id, "stale owner");
+    expect(await m.getValidatorRun(oldReapTarget.id)).toMatchObject({
+      status: "error",
+      completedAt: expect.any(String),
+    });
+    expect(await m.getFeature(reaperReplacementFeature.id)).toMatchObject({
+      lastValidatorRunId: reaperReplacement.run.id,
+      loopState: "validating",
+    });
+
+    const terminalMissionFeature = await m.addFeature(slice.id, { title: "Terminal mission guard" });
+    const terminalMissionRun = await m.startValidatorRun(terminalMissionFeature.id, "task_completion");
+    const layer = h.layer();
+    const originalTransaction = layer.transactionImmediate.bind(layer);
+    let archiveBeforeReapTransaction = true;
+    const transaction = vi.spyOn(layer, "transactionImmediate").mockImplementation(async (callback) => {
+      if (archiveBeforeReapTransaction) {
+        archiveBeforeReapTransaction = false;
+        await m.updateMission(mission.id, { status: "archived" });
+      }
+      return originalTransaction(callback);
+    });
+    try {
+      await m.reapValidatorRun(terminalMissionRun.id, "mission became terminal");
+    } finally {
+      transaction.mockRestore();
+    }
+    expect(await m.getMission(mission.id)).toMatchObject({ status: "archived" });
+    expect(await m.getFeature(terminalMissionFeature.id)).toMatchObject({
+      lastValidatorRunId: terminalMissionRun.id,
+      loopState: "validating",
+    });
+  });
+
+  it("refuses automatic-after-manual admission across the fingerprint-less boundary", async () => {
+    /*
+    FNXC:MissionValidation 2026-08-11-05:38:
+    FN-8976 reconciles the former automatic-after-manual gap. A live fingerprint-less manual run
+    blocks automatic admission without mutating feature state; content-addressed terminal decisions
+    remain fingerprint-scoped after this feature-liveness refusal.
+    */
+    const m = missions();
+    const mission = await m.createMission({ title: "Fingerprint boundary" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+    const manual = await m.startManualValidatorRun(feature.id);
+    expect(manual).toMatchObject({ outcome: "started", run: { inputFingerprint: undefined, status: "running" } });
+    const before = await m.getFeature(feature.id);
+    const beforeEvents = (await m.getMissionEvents(mission.id, { limit: 100 })).events.length;
+
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "c".repeat(64), failureBudget: 3, reusePass: true }))
+      .resolves.toMatchObject({ outcome: "running", run: { id: manual.run.id }, blockingScope: "feature" });
+    expect((await m.getValidatorRunsByFeature(feature.id)).filter((run) => run.status === "running")).toHaveLength(1);
+    const after = await m.getFeature(feature.id);
+    expect(after).toMatchObject({
+      validatorAttemptCount: before?.validatorAttemptCount,
+      lastValidatorRunId: before?.lastValidatorRunId,
+      loopState: before?.loopState,
+      validationBudgetFingerprint: before?.validationBudgetFingerprint,
+      validationBudgetRunId: before?.validationBudgetRunId,
+      validationBudgetBlockedAt: before?.validationBudgetBlockedAt,
+    });
+    const warnings = (await m.getMissionEvents(mission.id, { limit: 100 })).events
+      .filter((event) => event.description === "validation memoized");
+    expect(warnings).toHaveLength(1);
+    expect((await m.getMissionEvents(mission.id, { limit: 100 })).events).toHaveLength(beforeEvents + 1);
+    expect(warnings[0]?.metadata).toMatchObject({ outcome: "running", featureId: feature.id, runId: manual.run.id, blockingScope: "feature" });
+    expect((await m.getMissionEvents(mission.id, { limit: 100 })).events.some((event) => event.description === "validation-stuck")).toBe(false);
+  });
+
+  it("blocks every fresh feature-scoped running run but ignores a stale run", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Feature scoped automatic admission" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+    const different = await m.startValidatorRun(feature.id, "task_completion", undefined, "different");
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "requested", failureBudget: 3, reusePass: false }))
+      .resolves.toMatchObject({ outcome: "running", run: { id: different.id }, blockingScope: "feature" });
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "different", failureBudget: 3, reusePass: false }))
+      .resolves.toMatchObject({ outcome: "running", run: { id: different.id }, blockingScope: "feature" });
+    await m.completeValidatorRun(different.id, "error");
+    const fallback = await m.startValidatorRun(feature.id, "task_completion");
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "requested", failureBudget: 3, reusePass: false }))
+      .resolves.toMatchObject({ outcome: "running", run: { id: fallback.id }, blockingScope: "feature" });
+    await m.completeValidatorRun(fallback.id, "error");
+
+    const stale = await m.startValidatorRun(feature.id, "task_completion");
+    await h.layer().transactionImmediate(async (tx) => {
+      await tx.update(schema.project.missionValidatorRuns)
+        .set({ startedAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() })
+        .where(eq(schema.project.missionValidatorRuns.id, stale.id));
+    });
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "requested", failureBudget: 3, reusePass: false }))
+      .resolves.toMatchObject({ outcome: "start" });
+  });
+
+  it("reports the newest fresh run when legacy data has multiple running rows", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Automatic legacy concurrent validation rows" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+    const older = await m.startValidatorRun(feature.id, "task_completion");
+    await h.layer().transactionImmediate(async (tx) => {
+      await tx.update(schema.project.missionValidatorRuns)
+        .set({ startedAt: new Date(Date.now() - 60_000).toISOString() })
+        .where(eq(schema.project.missionValidatorRuns.id, older.id));
+    });
+    const newest = await m.startValidatorRun(feature.id, "task_completion");
+
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "requested", failureBudget: 3, reusePass: false }))
+      .resolves.toMatchObject({ outcome: "running", run: { id: newest.id }, blockingScope: "feature" });
+  });
+
+  it("keeps reuse-pass behind a live fingerprint-less run", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Live run precedes reuse" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+    const passed = await m.startValidatorRun(feature.id, "task_completion", undefined, "reuse");
+    await m.completeValidatorRun(passed.id, "passed");
+    const manual = await m.startManualValidatorRun(feature.id);
+
+    await expect(m.admitValidatorRun(feature.id, { inputFingerprint: "reuse", failureBudget: 3, reusePass: true }))
+      .resolves.toMatchObject({ outcome: "running", run: { id: manual.run.id }, blockingScope: "feature" });
+    expect((await m.getFeature(feature.id))?.status).not.toBe("done");
+  });
+
+  it("serializes concurrent manual and automatic admission", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Concurrent cross-surface admission" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "F" });
+
+    const [manual, automatic] = await Promise.all([
+      m.startManualValidatorRun(feature.id),
+      m.admitValidatorRun(feature.id, { inputFingerprint: "concurrent", failureBudget: 3, reusePass: false }),
+    ]);
+    expect((await m.getValidatorRunsByFeature(feature.id)).filter((run) => run.status === "running")).toHaveLength(1);
+    expect([manual.outcome, automatic.outcome].filter((outcome) => outcome === "started" || outcome === "start")).toHaveLength(1);
+    expect([manual.outcome, automatic.outcome].filter((outcome) => outcome === "already-running" || outcome === "running")).toHaveLength(1);
+  });
+
+  it("does not let reuse-pass or budget exhaustion block a manual validator run", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Terminal automatic outcomes" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const reuseFeature = await m.addFeature(slice.id, { title: "Reuse" });
+    const passed = await m.startValidatorRun(reuseFeature.id, "task_completion", undefined, "reuse");
+    await m.completeValidatorRun(passed.id, "passed");
+    await expect(m.admitValidatorRun(reuseFeature.id, { inputFingerprint: "reuse", failureBudget: 3, reusePass: true })).resolves.toMatchObject({ outcome: "reuse-pass" });
+    await expect(m.startManualValidatorRun(reuseFeature.id)).resolves.toMatchObject({ outcome: "started" });
+
+    const budgetFeature = await m.addFeature(slice.id, { title: "Budget" });
+    const failed = await m.startValidatorRun(budgetFeature.id, "task_completion", undefined, "budget");
+    await m.completeValidatorRun(failed.id, "failed");
+    await expect(m.admitValidatorRun(budgetFeature.id, { inputFingerprint: "budget", failureBudget: 1, reusePass: false })).resolves.toMatchObject({ outcome: "budget-exhausted" });
+    await expect(m.startManualValidatorRun(budgetFeature.id)).resolves.toMatchObject({ outcome: "started" });
+  });
+
   it("clears all validation-budget provenance when a changed fingerprint is admitted", async () => {
     const m = missions();
     const mission = await m.createMission({ title: "Changed validation input" });
@@ -805,6 +1211,66 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
       validationBudgetRunId: undefined,
       validationBudgetBlockedAt: undefined,
     });
+  });
+
+  it("audits validator reuse-pass status promotion and skips repeat admission", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Reuse pass audit" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const feature = await m.addFeature(slice.id, { title: "Validated feature" });
+    const fingerprint = "reuse-pass-fingerprint";
+    const run = await m.startValidatorRun(feature.id, "scheduled", undefined, fingerprint);
+    await m.completeValidatorRun(run.id, "passed", "passed");
+
+    await expect(m.admitValidatorRun(feature.id, {
+      inputFingerprint: fingerprint,
+      failureBudget: 1,
+      reusePass: true,
+    })).resolves.toMatchObject({ outcome: "reuse-pass", run: { id: run.id } });
+    expect((await m.getMissionEvents(mission.id, { limit: 10 })).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "feature_status_changed",
+        metadata: expect.objectContaining({ featureId: feature.id, from: "defined", to: "done", source: "validator-reuse-pass" }),
+      }),
+    ]));
+
+    await m.admitValidatorRun(feature.id, { inputFingerprint: fingerprint, failureBudget: 1, reusePass: true });
+    expect((await m.getMissionEvents(mission.id, { limit: 20 })).events
+      .filter((event) => event.eventType === "feature_status_changed" && (event.metadata as Record<string, unknown>)?.featureId === feature.id))
+      .toHaveLength(1);
+  });
+
+  it("audits each changed superseded generated fix without expanding the bulk write", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Superseded fix audit" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const root = await m.addFeature(slice.id, { title: "Root" });
+    const failedRun = await m.startValidatorRun(root.id, "scheduled");
+    await m.completeValidatorRun(failedRun.id, "failed", "needs fix");
+    const firstFix = await m.createGeneratedFixFeature(root.id, failedRun.id, [], "repair");
+    const secondRoot = await m.addFeature(slice.id, { title: "Second root" });
+    const secondRun = await m.startValidatorRun(secondRoot.id, "scheduled");
+    await m.completeValidatorRun(secondRun.id, "failed", "needs fix");
+    const secondFix = await m.createGeneratedFixFeature(secondRoot.id, secondRun.id, [], "repair");
+    await m.updateFeature(root.id, { lastValidatorStatus: "passed", loopState: "passed" });
+    await m.updateFeature(secondRoot.id, { lastValidatorStatus: "passed", loopState: "passed" });
+
+    await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toMatchObject({
+      supersededCount: 2,
+      featureIds: expect.arrayContaining([firstFix.id, secondFix.id]),
+    });
+    const audited = (await m.getMissionEvents(mission.id, { limit: 20 })).events
+      .filter((event) => event.eventType === "feature_status_changed" && (event.metadata as Record<string, unknown>)?.source === "superseded-fix-reconcile");
+    expect(audited).toHaveLength(2);
+    expect(audited.map((event) => (event.metadata as Record<string, unknown>)?.featureId))
+      .toEqual(expect.arrayContaining([firstFix.id, secondFix.id]));
+
+    await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toMatchObject({ supersededCount: 0, featureIds: [] });
+    expect((await m.getMissionEvents(mission.id, { limit: 20 })).events
+      .filter((event) => event.eventType === "feature_status_changed" && (event.metadata as Record<string, unknown>)?.source === "superseded-fix-reconcile"))
+      .toHaveLength(2);
   });
 
   it("runs the validator/fix lifecycle and reaps stale runs in PostgreSQL", async () => {
@@ -898,6 +1364,80 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     const stops = await h.layer().db.select().from(schema.project.missionLineageStops)
       .where(sql`${schema.project.missionLineageStops.rootFeatureId} = ${root.id}`);
     expect(stops).toMatchObject([{ reason: "operator-intervention", origin: "task-archive" }]);
+  });
+
+  it("clears only a stale blocked mission badge with one attributed audit event", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Clear stale blocked badge" });
+    await m.updateMission(mission.id, { status: "blocked" });
+    const before = (await m.getMissionEvents(mission.id, { limit: 20 })).events.length;
+    const cleared = await m.clearMissionBlockedStatus(mission.id, { actor: { type: "operator", id: "operator", source: "dashboard" }, reason: "resolved" });
+    expect(cleared.mission.status).toBe("planning");
+    expect(cleared.blockers).toEqual([]);
+    const events = (await m.getMissionEvents(mission.id, { limit: 20 })).events;
+    expect(events).toHaveLength(before + 1);
+    expect(events[0]).toMatchObject({ eventType: "mission_status_changed", metadata: expect.objectContaining({ from: "blocked", to: "planning", repairAction: "clear-blocked", reason: "resolved", actor: { type: "operator", id: "operator", source: "dashboard" } }) });
+    await expect(m.clearMissionBlockedStatus(mission.id, { actor: { type: "operator", id: "operator", source: "dashboard" } })).rejects.toBeInstanceOf(MissionBlockedClearConflictError);
+  });
+
+  /*
+  FNXC:MissionBlockedRepair 2026-08-11-03:24:
+  Clearing a stale mission badge is deliberately non-destructive. Exercise the persisted
+  feature-stop and lineage-stop fixture so this transaction cannot accidentally launder the
+  records that still make Resume unsafe, while the legacy conflict wire remains duplicated.
+  */
+  it("clears a blocked badge without laundering persisted stop records", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Persisted blocked repair" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const root = await m.addFeature(slice.id, { title: "Budget-exhausted root" });
+    const stoppedAt = "2026-08-11T03:24:00.000Z";
+
+    await h.layer().db.update(schema.project.missionFeatures)
+      .set({
+        loopState: "blocked",
+        implementationStopReason: "budget-exhausted",
+        implementationStoppedAt: stoppedAt,
+        implementationStopOrigin: "validator-budget",
+      })
+      .where(sql`${schema.project.missionFeatures.id} = ${root.id}`);
+    await h.layer().db.insert(schema.project.missionLineageStops).values({
+      projectId: "mission-store-pg-test",
+      rootFeatureId: root.id,
+      missionId: mission.id,
+      reason: "budget-exhausted",
+      stoppedAt,
+      origin: "validator-budget",
+    });
+    await m.updateMission(mission.id, { status: "blocked" });
+
+    const featureBefore = await m.getFeature(root.id);
+    const stopsBefore = await h.layer().db.select().from(schema.project.missionLineageStops)
+      .where(sql`${schema.project.missionLineageStops.rootFeatureId} = ${root.id}`);
+    const cleared = await m.clearMissionBlockedStatus(mission.id, {
+      actor: { type: "operator", id: "operator", source: "dashboard" },
+      reason: "badge is stale",
+    });
+
+    expect(cleared.mission.status).toBe(await m.computeMissionStatus(mission.id));
+    expect(cleared.blockers).toEqual([
+      expect.objectContaining({ schemaVersion: 1, kind: "mission-resume-conflict", rootFeatureId: root.id, reason: "budget-exhausted", source: "feature-row", missionId: mission.id, stoppedAt, origin: "validator-budget" }),
+      expect.objectContaining({ schemaVersion: 1, kind: "mission-resume-conflict", rootFeatureId: root.id, reason: "budget-exhausted", source: "lineage-stop", missionId: mission.id, stoppedAt, origin: "validator-budget" }),
+    ]);
+    expect(await m.getFeature(root.id)).toEqual(featureBefore);
+    expect(await h.layer().db.select().from(schema.project.missionLineageStops)
+      .where(sql`${schema.project.missionLineageStops.rootFeatureId} = ${root.id}`)).toEqual(stopsBefore);
+    const resumeError = await m.resumeMission(mission.id).then(
+      () => undefined,
+      (error) => error as MissionResumeConflictError,
+    );
+    expect(resumeError).toBeInstanceOf(MissionResumeConflictError);
+    expect(resumeError?.descriptors).toEqual([
+      expect.objectContaining({ schemaVersion: 1, kind: "mission-resume-conflict", rootFeatureId: root.id, source: "feature-row", reason: "budget-exhausted" }),
+      expect.objectContaining({ schemaVersion: 1, kind: "mission-resume-conflict", rootFeatureId: root.id, source: "lineage-stop", reason: "budget-exhausted", stoppedAt, origin: "validator-budget" }),
+    ]);
+    expect((resumeError as unknown as Record<string, unknown>).blockers).toBeUndefined();
   });
 
   it("records generated-feature deletion as a durable root stop and resumes only explicitly", async () => {
@@ -1147,6 +1687,111 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     const triaged = await m.triageFeature(feature.id);
     expect(triaged.taskId).toBeTruthy();
     expect(triaged.taskId).toMatch(/^ERR-\d+$/);
+  });
+
+
+  describe("automatic status rollup ownership", () => {
+    it("preserves blocked and archived missions through hierarchy churn", async () => {
+      const m = missions();
+      const createProtectedHierarchy = async (status: "blocked" | "archived") => {
+        const mission = await m.createMission({ title: `Protected ${status}` });
+        const milestone = await m.addMilestone(mission.id, { title: "MS" });
+        const slice = await m.addSlice(milestone.id, { title: "SL" });
+        await m.updateMission(mission.id, { status });
+        return { mission, milestone, slice };
+      };
+      const renamed = await createProtectedHierarchy("blocked");
+      const eventCount = (await m.getMissionEvents(renamed.mission.id)).events.length;
+      await m.updateMilestone(renamed.milestone.id, { title: "renamed" });
+      expect(await m.getMission(renamed.mission.id)).toMatchObject({ status: "blocked" });
+      expect((await m.getMissionEvents(renamed.mission.id)).events).toHaveLength(eventCount);
+      const sliced = await createProtectedHierarchy("blocked");
+      await m.updateSlice(sliced.slice.id, { title: "edited" });
+      await m.deleteSlice(sliced.slice.id);
+      expect(await m.getMission(sliced.mission.id)).toMatchObject({ status: "blocked" });
+      const deleted = await createProtectedHierarchy("blocked");
+      await m.deleteMilestone(deleted.milestone.id);
+      expect(await m.getMission(deleted.mission.id)).toMatchObject({ status: "blocked" });
+      const archived = await createProtectedHierarchy("archived");
+      await m.updateMilestone(archived.milestone.id, { title: "churn" });
+      expect(await m.getMission(archived.mission.id)).toMatchObject({ status: "archived" });
+    });
+
+    /*
+    FNXC:MissionStatusRollup 2026-08-11-04:41:
+    The recompute transaction locks the mission before calculating its derived status. Hold that
+    calculation while an explicit blocked write queues behind the row lock; releasing the rollup
+    must leave the later operator write intact instead of replaying a stale derived status.
+    */
+    it("does not overwrite an explicit blocked mission queued during a rollup", async () => {
+      const m = missions();
+      const mission = await m.createMission({ title: "Concurrent protected mission" });
+      const milestone = await m.addMilestone(mission.id, { title: "MS" });
+      const originalCompute = (m as any).computeMissionStatusWithHandle.bind(m);
+      let enteredCompute!: () => void;
+      let releaseCompute!: () => void;
+      const computeEntered = new Promise<void>((resolve) => { enteredCompute = resolve; });
+      const computeRelease = new Promise<void>((resolve) => { releaseCompute = resolve; });
+      (m as any).computeMissionStatusWithHandle = async (...args: unknown[]) => {
+        enteredCompute();
+        await computeRelease;
+        return originalCompute(...args);
+      };
+      try {
+        const rollup = m.updateMilestone(milestone.id, { title: "churn" });
+        await computeEntered;
+        const explicitBlock = m.updateMission(mission.id, { status: "blocked" });
+        releaseCompute();
+        await Promise.all([rollup, explicitBlock]);
+      } finally {
+        (m as any).computeMissionStatusWithHandle = originalCompute;
+      }
+      expect(await m.getMission(mission.id)).toMatchObject({ status: "blocked" });
+    });
+
+    it("does not overwrite an explicit blocked milestone queued during a rollup", async () => {
+      const m = missions();
+      const mission = await m.createMission({ title: "Concurrent protected milestone" });
+      const milestone = await m.addMilestone(mission.id, { title: "MS" });
+      const slice = await m.addSlice(milestone.id, { title: "SL" });
+      const originalCompute = (m as any).computeMilestoneStatusWithHandle.bind(m);
+      let enteredCompute!: () => void;
+      let releaseCompute!: () => void;
+      const computeEntered = new Promise<void>((resolve) => { enteredCompute = resolve; });
+      const computeRelease = new Promise<void>((resolve) => { releaseCompute = resolve; });
+      (m as any).computeMilestoneStatusWithHandle = async (...args: unknown[]) => {
+        enteredCompute();
+        await computeRelease;
+        return originalCompute(...args);
+      };
+      try {
+        const rollup = m.updateSlice(slice.id, { title: "churn" });
+        await computeEntered;
+        const explicitBlock = m.updateMilestone(milestone.id, { status: "blocked" });
+        releaseCompute();
+        await Promise.all([rollup, explicitBlock]);
+      } finally {
+        (m as any).computeMilestoneStatusWithHandle = originalCompute;
+      }
+      expect(await m.getMilestone(milestone.id)).toMatchObject({ status: "blocked" });
+    });
+
+    it("preserves blocked milestones during terminal-task reconcile", async () => {
+      const m = missions();
+      const mission = await m.createMission({ title: "Protected reconcile" });
+      const milestone = await m.addMilestone(mission.id, { title: "MS" });
+      const slice = await m.addSlice(milestone.id, { title: "SL" });
+      const feature = await m.addFeature(slice.id, { title: "Delivered" });
+      const task = await h.store().createTask({ description: "done", column: "done" });
+      await m.updateMilestone(milestone.id, { status: "blocked" });
+      const milestoneUpdated = vi.fn();
+      m.on("milestone:updated", milestoneUpdated);
+      await m.reconcileFeatureDoneWithTerminalTask(feature.id, task.id);
+      expect(await m.getFeature(feature.id)).toMatchObject({ status: "done", taskId: task.id });
+      expect(await m.getSlice(slice.id)).toMatchObject({ status: "complete" });
+      expect(await m.getMilestone(milestone.id)).toMatchObject({ status: "blocked" });
+      expect(milestoneUpdated).not.toHaveBeenCalled();
+    });
   });
 
 });

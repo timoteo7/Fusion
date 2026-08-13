@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferWorkflowStepVerdictFromProse, parseWorkflowStepVerdict } from "../executor.js";
+import { inferWorkflowStepVerdictFromProse, parseWorkflowStepOutput, parseWorkflowStepVerdict } from "../executor.js";
 import { proseSignalsClearApproval, extractJsonObjectCandidates, classifyReviewVerdictToken } from "../execution/reviewer.js";
 
 describe("parseWorkflowStepVerdict", () => {
@@ -19,6 +19,38 @@ describe("parseWorkflowStepVerdict", () => {
     expect(parseWorkflowStepVerdict('{"verdict":"PASS"}')).toBeNull();
   });
 
+  it("preserves normalized supersession claims with resolved finding receipts", () => {
+    const parsed = parseWorkflowStepOutput('{"verdict":"REVISE","notes":"reviewed","findings":[{"id":"r1","title":"Receipt","body":"Fixed in this review","resolution":"resolved-in-review"},{"id":"o1","title":"Open","body":"Still needs work"}],"supersededFindingSourceWorkflowStepId":"cleanup-review","supersededFindingIds":[" c1 ",42,"c1","c2"]}');
+    expect(parsed).toMatchObject({
+      verdict: "REVISE",
+      supersededFindingSourceWorkflowStepId: "cleanup-review",
+      supersededFindingIds: ["c1", "c2"],
+      findings: [
+        { id: "r1", resolution: "resolved-in-review" },
+        { id: "o1" },
+      ],
+    });
+    expect(parsed.findings?.[1]).not.toHaveProperty("resolution");
+  });
+
+  it("recognizes CLOSE_NO_OP only for the Plan Review optional group", () => {
+    const response = '{"verdict":"CLOSE_NO_OP","notes":"DUPLICATE: FN-1234 already covered"}';
+    expect(parseWorkflowStepVerdict(response, { optionalGroupId: "plan-review" })).toMatchObject({
+      verdict: "CLOSE_NO_OP",
+      notes: "DUPLICATE: FN-1234 already covered",
+    });
+    expect(parseWorkflowStepVerdict(response, { optionalGroupId: "code-review" })).toBeNull();
+    expect(parseWorkflowStepVerdict(response)).toBeNull();
+  });
+
+  it("prefers a trailing Plan Review close JSON payload", () => {
+    const response = 'Example: {"verdict":"REVISE"}\n{"verdict":"CLOSE_NO_OP","notes":"PREMISE STALE: already shipped"}';
+    expect(parseWorkflowStepVerdict(response, { optionalGroupId: "plan-review" })).toEqual({
+      verdict: "CLOSE_NO_OP",
+      notes: "PREMISE STALE: already shipped",
+    });
+  });
+
   /*
   FNXC:ReviewLeniency 2026-07-01-23:30:
   Models often emit reasoning PROSE (sometimes containing braces) then a trailing
@@ -36,10 +68,42 @@ describe("parseWorkflowStepVerdict", () => {
     expect(parseWorkflowStepVerdict(out)).toEqual({ verdict: "REVISE", notes: "tighten the type" });
   });
 
-  it("prefers the LAST JSON object when several appear", () => {
-    const out = 'Example format: {"verdict":"REVISE"}. My actual verdict follows.\n' +
+  it("prefers the LAST JSON object when several appear despite an unpaired prose brace", () => {
+    const out = 'Example format: {"verdict":"REVISE"}. IndexOfAny(\'{\',\'[\') actual verdict follows.\n' +
       '{"verdict":"APPROVE","notes":"ok"}';
     expect(parseWorkflowStepVerdict(out)).toEqual({ verdict: "APPROVE", notes: "ok" });
+  });
+
+  it("preserves the reported APPROVE_WITH_NOTES verdict, notes, and findings after unpaired prose", () => {
+    const out = "prose with IndexOfAny('{','[') in it\n\n" +
+      '{"verdict":"APPROVE_WITH_NOTES","notes":"n","findings":[{"id":"x","title":"t","body":"b","severity":"low"}]}';
+    const expected = { verdict: "APPROVE_WITH_NOTES", notes: "n", findings: [{ id: "x", title: "t", body: "b", severity: "low" }] };
+    expect(parseWorkflowStepVerdict(out)).toEqual(expected);
+    expect(parseWorkflowStepOutput(out)).toEqual({ output: "n", ...expected });
+  });
+
+  it.each([
+    ["a stray closing prose brace", 'stray } in prose\n{"verdict":"REVISE","notes":"n"}'],
+    ["an odd prose quote with no primary candidate", 'odd quote "\n{"verdict":"REVISE","notes":"n"}'],
+  ])("recovers a REVISE payload after %s", (_scenario, output) => {
+    expect(parseWorkflowStepVerdict(output)).toEqual({ verdict: "REVISE", notes: "n" });
+  });
+
+  it("recovers a REVISE payload from quote desync, dense findings, and brace-bearing trailing prose", () => {
+    const findings = Array.from({ length: 12 }, (_, index) => ({ id: `finding-${index}`, title: "t", body: "b" }));
+    /* FNXC:ReviewLeniency 2026-08-11-18:57: Keep the payload multi-line so no
+     * trailing-line fast path can rescue it; recovery must reach its outer opening after many inner objects. */
+    const payload = JSON.stringify({
+      verdict: "REVISE",
+      notes: 'full { note } with "quotes"',
+      findings,
+    }, null, 2);
+    const out = `{"example":true}\nodd quote "\n${payload}\nuse } to close\n} } } } } }\n{"example":1}`;
+    expect(parseWorkflowStepVerdict(out)).toEqual({
+      verdict: "REVISE",
+      notes: 'full { note } with "quotes"',
+      findings,
+    });
   });
 
   // "Any approved" — approval-family verdict tokens all map to an approve pass.
@@ -153,7 +217,7 @@ describe("proseSignalsClearApproval", () => {
 });
 
 describe("extractJsonObjectCandidates", () => {
-  it("returns balanced top-level objects in document order", () => {
+  it("returns balanced objects in document order", () => {
     expect(extractJsonObjectCandidates('a {"x":1} b {"y":2} c')).toEqual(['{"x":1}', '{"y":2}']);
   });
 
@@ -163,8 +227,52 @@ describe("extractJsonObjectCandidates", () => {
     ]);
   });
 
-  it("captures a nested object as one top-level candidate", () => {
-    expect(extractJsonObjectCandidates('prose {"a":{"b":2}} tail')).toEqual(['{"a":{"b":2}}']);
+  /* FNXC:ReviewLeniency 2026-08-11-18:44: Nested candidates are intentional so a
+   * poisoned outer prose span cannot hide a later valid payload; the parent closes last. */
+  it("emits nested objects followed by their parent", () => {
+    expect(extractJsonObjectCandidates('prose {"a":{"b":2}} tail')).toEqual(['{"b":2}', '{"a":{"b":2}}']);
+  });
+
+  it("keeps a trailing payload after unpaired prose braces of either direction", () => {
+    const payload = '{"verdict":"APPROVE","notes":"n"}';
+    expect(extractJsonObjectCandidates(`IndexOfAny('{','[')\n${payload}`).at(-1)).toBe(payload);
+    expect(extractJsonObjectCandidates(`stray } in prose\n${payload}`).at(-1)).toBe(payload);
+  });
+
+  it("recovers a payload after quote desync with no primary candidate", () => {
+    const payload = '{"verdict":"REVISE","notes":"full"}';
+    const candidates = extractJsonObjectCandidates(`odd quote "\n${payload}`);
+    expect(candidates.at(-1)).toBe(payload);
+  });
+
+  it("recovers a payload after quote desync even when a bogus primary candidate exists", () => {
+    const payload = '{"verdict":"REVISE","notes":"full"}';
+    const candidates = extractJsonObjectCandidates(`{"example":true}\nodd quote "\n${payload}`);
+    expect(candidates).toContain('{"example":true}');
+    expect(candidates.at(-1)).toBe(payload);
+  });
+
+  it("recovers a brace- and quote-bearing multi-finding payload beneath brace-dense trailing prose", () => {
+    const payload = JSON.stringify({
+      verdict: "APPROVE_WITH_NOTES",
+      notes: 'has { and } plus "quoted" text',
+      findings: Array.from({ length: 12 }, (_, index) => ({ id: `f-${index}`, title: "t", body: "{ body }" })),
+    }, null, 2);
+    const trailing = ["use } to close", "} } }", "example {\"x\":1}", "} } }"].join("\n");
+    const candidates = extractJsonObjectCandidates(`{"example":true}\nodd quote "\n${payload}\n${trailing}`);
+    expect(candidates).toContain(payload);
+    expect(JSON.parse(candidates.find((candidate) => candidate === payload)!)).toEqual(JSON.parse(payload));
+  });
+
+  /* FNXC:ReviewLeniency 2026-08-11-21:39: Primary candidate retention is capped
+   * so brace-dense reviewer prose cannot grow memory without bound; retain the tail
+   * because callers prefer the final authoritative verdict. */
+  it("bounds brace-dense primary candidates while retaining the trailing verdict", () => {
+    const noise = Array.from({ length: 500 }, (_, index) => `{"example":${index}}`).join(" ");
+    const payload = '{"verdict":"APPROVE_WITH_NOTES","notes":"tail"}';
+    const candidates = extractJsonObjectCandidates(`${noise}\n${payload}`);
+    expect(candidates).toHaveLength(200);
+    expect(candidates.at(-1)).toBe(payload);
   });
 });
 

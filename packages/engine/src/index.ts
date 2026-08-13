@@ -10,7 +10,10 @@ export type { AgentActionGateContext, AgentActionGateDecision } from "./agents/a
 export { createFusionAuthStorage, createFusionModelRegistry } from "./auth/auth-storage.js";
 export {
   DEFAULT_MODEL_REGISTRY_REFRESH_TIMEOUT_MS,
+  boundExistingModelRegistryRefresh,
   refreshFusionModelRegistry,
+  startFusionModelRegistryRefresh,
+  type BoundExistingModelRegistryRefreshOptions,
   type ModelRegistryRefreshOutcome,
   type RefreshableModelRegistry,
   type RefreshFusionModelRegistryOptions,
@@ -338,6 +341,13 @@ export {
 export { MeshLeaseManager, type MeshLeaseManagerOptions, type LeaseRecoveryContext } from "./project/mesh-lease-manager.js";
 export { MissionAutopilot, type MissionAutopilotOptions } from "./missions/mission-autopilot.js";
 export { MissionExecutionLoop, type MissionExecutionLoopOptions, type ValidationResult, loopLog } from "./missions/mission-execution-loop.js";
+export { resolveFeatureRepairTargets } from "./missions/mission-feature-sync.js";
+export {
+  reconcileMissionState,
+  hasTerminalReconcileCapability,
+  type MissionReconcileSource,
+  type MissionReconcilePassResult,
+} from "./missions/mission-state-reconcile.js";
 // FNXC:MergerUnification 2026-06-22-00:00: @deprecated must sit on aiMergeTask's own
 // export so IDE/type-aware tooling flags only aiMergeTask, not the helpers it shares with
 // runAiMerge (those are NOT deprecated). A single @deprecated on the multi-member block
@@ -482,6 +492,12 @@ export {
   type SquashAuditRecentMainCommit,
 } from "./merge/merger-squash-audit.js";
 export { reviewStep, type ReviewType, type ReviewVerdict, type ReviewResult, type ReviewOptions } from "./execution/reviewer.js";
+export {
+  inspectExternalGitCheckout,
+  resolveExternalExecutionCheckoutRoute,
+  type ExternalExecutionCheckoutResolution,
+  type ExternalGitCheckoutInspection,
+} from "./execution/external-execution-checkout.js";
 export { createFnAgent, promptWithFallback, describeModel, setHostExtensionPaths, getHostExtensionPaths, wrapToolsWithActionGate, type AgentOptions, type AgentResult } from "./pi.js";
 export { resolveMcpServersForRuntime, resolveMcpServersForStore, type ResolvedMcpServersForRuntime } from "./mcp/mcp-resolution.js";
 export { discoverMcpServers, type DiscoverMcpServersOptions, type DiscoverMcpServersResult } from "./mcp/mcp-discovery-service.js";
@@ -1037,6 +1053,9 @@ export { RemoteNodeRuntime, type RemoteNodeRuntimeConfig } from "./runtimes/remo
 // promote endpoint can release a manually-held card via the same authority.
 export {
   promoteHeldTask,
+  evaluateTaskReleaseGate,
+  evaluateUnplannedForExecution,
+  isUnplannedForExecution,
   releaseHeldTaskByEvent,
   runHoldReleaseSweep,
   type HoldReleaseDeps,
@@ -1181,6 +1200,7 @@ export {
   type CliAdapterDescriptor,
 } from "./cli-agent/adapters/index.js";
 export { installBaselineArchiveWorktreeDisposer } from "./healing/archive-worktree-disposer-install.js";
+export { MemoryConsolidationService, resolveMemoryConsolidationPorts } from "./memory/index.js";
 
 // CLI Agent Executor — task ↔ session orchestration (U7).
 export {

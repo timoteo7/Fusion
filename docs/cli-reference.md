@@ -4,6 +4,27 @@
 
 Fusion’s command-line interface is exposed through the `fn` command.
 
+## `fn computer` — local desktop automation
+
+`fn computer` discovers and operates local desktop application windows through a **snapshot → act → snapshot** loop. It is supported on macOS only; other platforms report an honest unsupported capability. Every command supports `--json` and returns the versioned computer-use envelope. See the full [Computer Use reference](./computer-use.md) for setup, permissions, output shapes, snapshot safety, and error handling.
+
+```bash
+fn computer capabilities --json
+fn computer permissions --json
+fn computer list-apps --json
+fn computer list-windows --app <app> --json
+fn computer get-app-state --app <app> [--window-id <id> | --window-index <n>] [--no-screenshot] [--restore-window] --json
+fn computer click --app <app> --element-index <n> [--snapshot-id <id>] [--window-id <id> | --window-index <n>] --json
+fn computer set-value --app <app> --element-index <n> (--value <text> | --value-stdin) [--snapshot-id <id>] --json
+fn computer type-text --app <app> (--text <text> | --text-stdin) [--element-index <n>] [--snapshot-id <id>] --json
+fn computer press-key --app <app> --key <name> [--element-index <n>] [--snapshot-id <id>] --json
+fn computer hotkey --app <app> --keys <combo> --json
+fn computer scroll --app <app> --direction <up|down|left|right> [--amount <n>] [--element-index <n>] [--snapshot-id <id>] --json
+fn computer drag --app <app> (--from-x <n> --from-y <n> --to-x <n> --to-y <n> | --from-element-index <n> --to-element-index <n>) [--snapshot-id <id>] --json
+```
+
+Element actions use the latest persisted app snapshot unless `--snapshot-id` supplies a current-snapshot concurrency fence. Element indexes are sparse and snapshot-scoped; read `snapshot.elements[].index`, then re-snapshot after UI changes. Use `--value-stdin` and `--text-stdin` for secrets. Screenshots return a filesystem path, never image bytes.
+
 <!--
 FNXC:AgentTools 2026-06-29-22:31:
 The published CLI/pi extension must document its agent-facing workflow authoring surface so operators know agents can inspect, create, update, configure, and delete custom workflows without using the dashboard editor.
@@ -337,7 +358,7 @@ fn dashboard --lang zh-TW                   # force a UI locale for this run
 ```
 
 The terminal UI is localized. `--lang <code>` (one of `en`, `zh-CN`, `zh-TW`,
-`fr`, `es`, `ko`) takes precedence over the saved dashboard language setting and the
+`fr`, `es`, `ko`, `pt-BR`) takes precedence over the saved dashboard language setting and the
 `LC_ALL`/`LC_MESSAGES`/`LANG`/`LANGUAGE` environment. See
 [Localization contributor guide](./i18n-contributing.md).
 
@@ -1332,9 +1353,13 @@ Browse and install agent skills from [skills.sh](https://skills.sh).
 ```bash
 fn skills search <query> [--limit <n>]
 fn skills install <owner/repo> [--skill <name>]
+fn skills get <skill-name>
 ```
 
-Subcommands: `search`, `install`.
+`fn skills get computer-use` prints Fusion's in-process, version-matched computer-use guide. Unknown or missing names exit non-zero and list known built-in skills.
+
+
+Subcommands: `search`, `install`, `get`.
 
 | Option | Description |
 |---|---|
@@ -1385,3 +1410,11 @@ For configuration details used by these commands, see [Settings Reference](./set
   collision mode defaults to `skip` and `suffix` creates deterministically named copies.
 
 Agent create/update payloads accept `roles` (a non-empty role-tag array) and optional `runtimeConfig.maxWorkflowSessions`. The legacy singular `role` input remains accepted for migration compatibility.
+
+## MCP memory transport
+
+`fn mcp serve-memory --project-root <path>` is an internal stdio transport command used by Fusion's built-in `fusion-memory` MCP server. It is not intended for direct interactive use. The built-in name is reserved; configure it through MCP enable/disable controls rather than add, edit, or remove commands. Disabling writes an `enabled: false` tombstone; normal re-enable deletes that tombstone, while a project enable may write a marker only to cancel a global tombstone.
+
+## Knowledge graph
+
+`fn knowledge-graph build [--force] [--dir <path>] [--json]` refreshes the deterministic, committable structure graph. `--force` bypasses incremental reuse; `--dir` overrides the project `knowledgeGraphDir`; `--json` prints build statistics as JSON.

@@ -13,6 +13,7 @@ import {
 /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage B): mutation-context constructors for this lane. */
 import { mutationContextForAgent } from "@fusion/core";
 import { createRunAuditor, generateSyntheticRunId, type DatabaseMutationType, type RunAuditor } from "../util/run-audit.js";
+import type { MergeWriteFence } from "./merge-write-fence.js";
 
 /*
 FNXC:WorkflowMergeFinalization 2026-07-19-07:20 (U7 / R2/R3/KTD-1):
@@ -84,6 +85,7 @@ export interface FinalizeProvenAutoMergeTaskOptions {
   auditPhase?: string;
   source: "direct-ai-merge" | "merge-confirmed-fast-path" | "self-healing" | "workflow-graph-merge-finalize";
   log?: (message: string) => void | Promise<void>;
+  fence?: MergeWriteFence;
 }
 
 export type WorkflowDoneMergeProofVerdict =
@@ -234,6 +236,7 @@ export async function finalizeProvenAutoMergeTask({
   auditPhase,
   source,
   log,
+  fence,
 }: FinalizeProvenAutoMergeTaskOptions): Promise<AutoMergeFinalizationResult> {
   const latest = await store.getTask(taskId).catch(() => null);
   if (!latest) {
@@ -300,6 +303,9 @@ export async function finalizeProvenAutoMergeTask({
     error: undefined,
   });
   if (hardBlocker) {
+    // FNXC:MergeReliability 2026-08-11-21:39: A blocker discovered before finalization
+    // still writes task lifecycle state, so an orphan must reject rather than return a blocked result.
+    fence?.assertOwned("finalization");
     await store.updateTask(taskId, {
       status: "failed",
       error: `Merge confirmed but finalization blocked: ${hardBlocker}`,
@@ -335,6 +341,7 @@ export async function finalizeProvenAutoMergeTask({
     return { outcome: "blocked", task: latest, previousColumn: latest.column, reason: proofVerdict.reason };
   }
 
+  fence?.assertOwned("finalization");
   await store.updateTask(taskId, {
     paused: false,
     status: null,
@@ -353,6 +360,7 @@ export async function finalizeProvenAutoMergeTask({
   }
 
   try {
+    fence?.assertOwned("finalization");
     const moved = await store.moveTask(taskId, completeColumn, shouldRecoveryRehome
       ? { moveSource: "engine", recoveryRehome: true, preserveProgress: true }
       : { moveSource: "engine", preserveProgress: true }, mutationContextForAgent(auditAgentId ?? "merger"));
@@ -367,6 +375,7 @@ export async function finalizeProvenAutoMergeTask({
         auditAgentId,
         auditPhase,
       });
+      fence?.assertOwned("finalization");
       await store.logEntry(
         taskId,
         `Auto-merge finalization repaired column mismatch: ${latest.column} → ${completeColumn} after proven merge; cleared stale status/blockers`, undefined, mutationContextForAgent(auditAgentId ?? "merger"),

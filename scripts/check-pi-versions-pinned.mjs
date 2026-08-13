@@ -22,11 +22,19 @@ The legacy desktop deploy resolves pi-coding-agent's transitive pi-mono ranges
 without the workspace lockfile. Keep every Pi package in that staged runtime
 closure on one exact override so a new agent-core or tui patch cannot be hoisted
 beside older direct ai/coding-agent dependencies.
+
+FNXC:DesktopPackaging 2026-08-12-20:46:
+pi-coding-agent@0.84.1 transitively adds pi-client and pi-protocol while pi-ai
+adds pi-telemetry. Guard these siblings too so electron-builder's lockfile-free
+production walk cannot hoist them into a split Pi runtime closure.
 */
 export const PI_RUNTIME_PACKAGES = [
   "@earendil-works/pi-agent-core",
   "@earendil-works/pi-ai",
+  "@earendil-works/pi-client",
   "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-protocol",
+  "@earendil-works/pi-telemetry",
   "@earendil-works/pi-tui",
 ];
 

@@ -67,12 +67,34 @@ const DELETED_SYMBOLS: Array<{ symbol: string; why: string }> = [
   { symbol: "graphCompletionInterceptors", why: "shared per-task mutable state replaced by an explicit graphCompletion callback" },
   // Out-of-graph Plan Review gate (R4) — the graph owns Plan Review exclusively.
   { symbol: "runPlanReviewBeforeExecution", why: "triage and the graph raced on Plan Review; the graph owns it" },
+  /*
+  FNXC:PlanReviewReplan 2026-08-10-18:32:
+  The deleted triage gate's replan ceiling. It outlived the gate as an unread constant whose companion
+  column (`planReviewReplanCount`) was persisted and reset but never incremented or compared — a
+  ceiling that enforced nothing while reading as live safety. The graph re-owns the cap in
+  `requestPreMergeOptionalStepFix` -> `parkPlanReviewReplanCapExhausted`, budgeted off persisted
+  workflow-step results. Re-adding this name would recreate the second, silent authority.
+  */
+  { symbol: "PLAN_REVIEW_GATE_REPLAN_CAP", why: "an unread ceiling for a deleted gate; the graph's parkPlanReviewReplanCapExhausted owns the cap" },
   // In-session step reviewer (U10 pt2) — a second review authority inside the implementation session.
   { symbol: "createReviewStepTool", why: "review gates are graph nodes; an in-session reviewer duplicated Plan Review" },
   { symbol: "fn_review_step", why: "the deleted in-session review tool's name must not be re-injected" },
   { symbol: "reviewStepParams", why: "parameter schema for the deleted review tool" },
   { symbol: "throwDeferredReviewerFatal", why: "deferred provider-error channel that only existed because a tool handler cannot throw" },
   { symbol: "MAX_CODE_REVIEW_UNAVAILABLE_RETRIES", why: "UNAVAILABLE budget for the deleted in-session code review" },
+  /*
+  FNXC:WorkflowAgentRouting 2026-08-07-23:50:
+  The hand-rolled continuation handover. A durable continuation write that reacts to a FAILED
+  write by terminalizing other rows is the shape being tombstoned, not any particular name: it
+  cannot tell an index conflict from a transient database error, so it destroys legitimate holds;
+  it runs read-then-write across separate transactions, so a concurrent engine can lose its claim;
+  and it leaves a window with zero active rows, which strands the task silently. The repository
+  already has the correct primitive — `replaceActiveTaskWorkflowContinuation` retires
+  non-matching active rows and installs the successor under the task advisory lock in ONE
+  transaction. Reintroducing the recovery-shaped version reads as "handle the conflict", which is
+  exactly how it arrived the first time.
+  */
+  { symbol: "supersedeStaleActiveWorkItems", why: "a non-atomic, ownership-blind handover; replaceActiveTaskWorkflowContinuation does it in one locked transaction" },
   /*
   FNXC:WorkflowCutover 2026-07-19-18:10 (U10b / R9):
   The legacy EXECUTE fallback. `maybeExecuteWorkflowGraph` returned a boolean meaning "did the

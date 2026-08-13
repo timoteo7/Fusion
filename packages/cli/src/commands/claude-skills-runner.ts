@@ -6,11 +6,13 @@
 
 import { getPackageManagerAgentDir } from "./auth-paths.js";
 import {
-  ensureFusionSkillForProjects,
-  installFusionSkillIntoProject,
+  ensureShippedSkillsForProjects,
+  installShippedSkillsIntoProject,
+  SHIPPED_SKILL_NAMES,
   isPiClaudeCliConfigured,
-  resolveFusionSkillSource,
+  resolveShippedSkillSource,
   type InstallResult,
+  type ShippedSkillName,
 } from "./claude-skills.js";
 import { createReadOnlyProviderSettingsView } from "./provider-settings.js";
 
@@ -33,18 +35,20 @@ export function detectPiClaudeCli(projectPath: string): boolean {
 }
 
 /**
- * Install the fusion skill into a single newly-created project, logging the
+ * Install every shipped skill into a single newly-created project, logging the
  * outcome to the console. Intended for CLI entry points (`fn init`,
  * `fn project add`) where the user is watching the output.
  *
  * No-op (and silent) when pi-claude-cli is not configured so the file layout
  * stays clean for users who only use direct Anthropic API.
  */
-export function maybeInstallClaudeSkillForNewProject(projectPath: string): InstallResult {
+export function maybeInstallClaudeSkillForNewProject(projectPath: string): InstallResult[] {
+  /* FNXC:ComputerUseSkill 2026-08-11-07:32: Every shipped skill must retain its own outcome and
+   * log label so a computer-use failure cannot be misreported as a fusion-skill failure. */
   const enabled = detectPiClaudeCli(projectPath);
-  const result = installFusionSkillIntoProject(projectPath, { enabled });
-  logInstallResult(result, { verbose: enabled });
-  return result;
+  const results = installShippedSkillsIntoProject(projectPath, { enabled });
+  for (const [index, result] of results.entries()) logInstallResult(result, SHIPPED_SKILL_NAMES[index]!, { verbose: enabled });
+  return results;
 }
 
 /**
@@ -55,50 +59,51 @@ export function maybeInstallClaudeSkillForNewProject(projectPath: string): Insta
  */
 export function ensureClaudeSkillsForAllProjectsOnStartup(
   projects: Array<{ id: string; name: string; path: string }>,
+  options: {
+    /** Test seam; production callers retain global pi-claude-cli detection. */
+    enabled?: boolean;
+    /** Test seam for isolated packaged-skill sources. */
+    sources?: Partial<Record<ShippedSkillName, string | null>>;
+  } = {},
 ): InstallResult[] {
   if (projects.length === 0) return [];
   // Detect using the first project; all share the same user-level settings.
-  const enabled = detectPiClaudeCli(projects[0]!.path);
-  if (!enabled) {
-    return projects.map((p) => ({
-      outcome: "skipped" as const,
-      target: `${p.path}/.claude/skills/fusion`,
-      reason: "pi-claude-cli not configured",
-    }));
-  }
-  const source = resolveFusionSkillSource();
-  const results = ensureFusionSkillForProjects(projects, { enabled, source });
+  const enabled = options.enabled ?? detectPiClaudeCli(projects[0]!.path);
+  const sources = enabled
+    ? options.sources ?? Object.fromEntries(SHIPPED_SKILL_NAMES.map((name) => [name, resolveShippedSkillSource(name)]))
+    : undefined;
+  const results = ensureShippedSkillsForProjects(projects, { enabled, sources });
   for (let i = 0; i < results.length; i++) {
     const result = results[i]!;
     if (result.outcome === "installed" || result.outcome === "replaced") {
       console.log(
-        `[fusion] Installed Claude skill for project '${projects[i]!.name}' (${result.outcome}): ${result.target}`,
+        `[fusion] Installed ${SHIPPED_SKILL_NAMES[i % SHIPPED_SKILL_NAMES.length]} Claude skill for project '${projects[Math.floor(i / SHIPPED_SKILL_NAMES.length)]!.name}' (${result.outcome}): ${result.target}`,
       );
     } else if (result.outcome === "failed") {
       console.warn(
-        `[fusion] Could not install Claude skill for project '${projects[i]!.name}': ${result.reason ?? "unknown error"}`,
+        `[fusion] Could not install ${SHIPPED_SKILL_NAMES[i % SHIPPED_SKILL_NAMES.length]} Claude skill for project '${projects[Math.floor(i / SHIPPED_SKILL_NAMES.length)]!.name}': ${result.reason ?? "unknown error"}`,
       );
     }
   }
   return results;
 }
 
-function logInstallResult(result: InstallResult, options: { verbose: boolean }): void {
+function logInstallResult(result: InstallResult, skillName: string, options: { verbose: boolean }): void {
   switch (result.outcome) {
     case "installed":
-      console.log(`  ✓ Installed fusion skill at ${result.target}`);
+      console.log(`  ✓ Installed ${skillName} skill at ${result.target}`);
       break;
     case "replaced":
-      console.log(`  ✓ Refreshed fusion skill at ${result.target}`);
+      console.log(`  ✓ Refreshed ${skillName} skill at ${result.target}`);
       break;
     case "already-installed":
       if (options.verbose) {
-        console.log(`  ✓ Fusion skill already present at ${result.target}`);
+        console.log(`  ✓ ${skillName} skill already present at ${result.target}`);
       }
       break;
     case "failed":
       console.warn(
-        `  ⚠ Could not install fusion skill: ${result.reason ?? "unknown error"}`,
+        `  ⚠ Could not install ${skillName} skill: ${result.reason ?? "unknown error"}`,
       );
       break;
     case "skipped":

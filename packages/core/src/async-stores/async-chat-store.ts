@@ -17,9 +17,9 @@
  *   consume.
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, gt, ilike, inArray, isNull, lte, ne, or as orFn, sql as drizzleSql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, ilike, inArray, isNull, lte, ne, or as orFn, sql as drizzleSql } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
-import type { AsyncDataLayer, DbTransaction } from "../postgres/data-layer.js";
+import { projectScopeFor, type AsyncDataLayer, type DbTransaction } from "../postgres/data-layer.js";
 import { sanitizeTextValue, sanitizeJsonbValue } from "../postgres/nul-sanitize.js";
 import type {
   ChatAttachment,
@@ -79,6 +79,27 @@ function rowToMessage(row: Record<string, unknown>): ChatMessage {
     attachments: (row.attachments as ChatAttachment[] | null) ?? undefined,
     createdAt: row.createdAt as string,
   };
+}
+
+/*
+FNXC:ChatProjectIsolation 2026-08-12-14:16:
+Messages and their parent sessions must resolve within the same bound partition.
+A message-only predicate is insufficient when session IDs collide across projects;
+unbound handles deliberately keep their existing cross-project behavior.
+*/
+function chatMessageProjectConditions(handle: QueryHandle, projectId?: string) {
+  const messageScope = projectScopeFor(schema.project.chatMessages.projectId, projectId);
+  const sessionScope = projectScopeFor(schema.project.chatSessions.projectId, projectId);
+  if (!messageScope || !sessionScope) return [];
+  return [
+    messageScope,
+    exists(handle.select({ id: schema.project.chatSessions.id })
+      .from(schema.project.chatSessions)
+      .where(and(
+        eq(schema.project.chatSessions.id, schema.project.chatMessages.sessionId),
+        sessionScope,
+      ))),
+  ];
 }
 
 function rowToRoom(row: Record<string, unknown>): ChatRoom {
@@ -311,6 +332,7 @@ export async function replaceChatSessionTags(layer: AsyncDataLayer, sessionId: s
 export async function addChatMessage(
   handle: QueryHandle,
   message: ChatMessage,
+  projectId?: string,
 ): Promise<ChatMessage> {
   // FNXC:PostgresMigrationNulSanitize 2026-07-20: agent/tool output persisted
   // here can contain a raw NUL byte (e.g. piped-through Windows CLI dumps),
@@ -341,18 +363,28 @@ export async function addChatMessage(
   await handle
     .update(schema.project.chatSessions)
     .set({ updatedAt: sanitized.createdAt })
-    .where(eq(schema.project.chatSessions.id, sanitized.sessionId));
+    .where(and(
+      eq(schema.project.chatSessions.id, sanitized.sessionId),
+      projectScopeFor(schema.project.chatSessions.projectId, projectId),
+    ));
   return sanitized;
 }
 
 /**
  * Get a chat message by id.
  */
-export async function getChatMessage(handle: QueryHandle, id: string): Promise<ChatMessage | undefined> {
+export async function getChatMessage(
+  handle: QueryHandle,
+  id: string,
+  projectId?: string,
+): Promise<ChatMessage | undefined> {
   const rows = await handle
     .select()
     .from(schema.project.chatMessages)
-    .where(eq(schema.project.chatMessages.id, id));
+    .where(and(
+      eq(schema.project.chatMessages.id, id),
+      ...chatMessageProjectConditions(handle, projectId),
+    ));
   return rows[0] ? rowToMessage(rows[0]) : undefined;
 }
 
@@ -363,8 +395,12 @@ export async function getChatMessages(
   handle: QueryHandle,
   sessionId: string,
   filter?: { limit?: number; offset?: number; before?: string; order?: "asc" | "desc" },
+  projectId?: string,
 ): Promise<ChatMessage[]> {
-  const conditions: ReturnType<typeof eq>[] = [eq(schema.project.chatMessages.sessionId, sessionId)];
+  const conditions = [
+    eq(schema.project.chatMessages.sessionId, sessionId),
+    ...chatMessageProjectConditions(handle, projectId),
+  ];
   if (filter?.before) {
     conditions.push(lte(schema.project.chatMessages.createdAt, filter.before));
   }
@@ -388,12 +424,16 @@ export async function getChatMessages(
 export async function getLastMessageForSessions(
   handle: QueryHandle,
   sessionIds: string[],
+  projectId?: string,
 ): Promise<Map<string, ChatMessage>> {
   if (sessionIds.length === 0) return new Map();
   const rows = await handle
     .select()
     .from(schema.project.chatMessages)
-    .where(inArray(schema.project.chatMessages.sessionId, sessionIds))
+    .where(and(
+      inArray(schema.project.chatMessages.sessionId, sessionIds),
+      ...chatMessageProjectConditions(handle, projectId),
+    ))
     .orderBy(
       desc(schema.project.chatMessages.createdAt),
       desc(schema.project.chatMessages.id),
@@ -422,6 +462,7 @@ export async function createChatRoom(
   const now = room.createdAt;
   await layer.transactionImmediate(async (tx) => {
     await tx.insert(schema.project.chatRooms).values({
+      projectId: layer.projectId?.trim() ?? "",
       id: room.id,
       name: room.name,
       slug: room.slug,
@@ -436,6 +477,7 @@ export async function createChatRoom(
     for (const agentId of memberAgentIds) {
       const role: RoomMemberRole = room.createdBy !== null && agentId === room.createdBy ? "owner" : "member";
       await tx.insert(schema.project.chatRoomMembers).values({
+        projectId: layer.projectId?.trim() ?? "",
         roomId: room.id,
         agentId,
         role,
@@ -443,18 +485,19 @@ export async function createChatRoom(
       });
     }
   });
-  const members = await listChatRoomMembers(layer.db, room.id);
+  const members = await listChatRoomMembers(layer.db, room.id, layer.projectId);
   return { room, members };
 }
 
 /**
  * Get a chat room by id.
  */
-export async function getChatRoom(handle: QueryHandle, id: string): Promise<ChatRoom | undefined> {
+export async function getChatRoom(handle: QueryHandle, id: string,
+  projectId?: string): Promise<ChatRoom | undefined> {
   const rows = await handle
     .select()
     .from(schema.project.chatRooms)
-    .where(eq(schema.project.chatRooms.id, id));
+    .where(and(eq(schema.project.chatRooms.id, id), projectScopeFor(schema.project.chatRooms.projectId, projectId)));
   return rows[0] ? rowToRoom(rows[0]) : undefined;
 }
 
@@ -463,12 +506,12 @@ export async function getChatRoom(handle: QueryHandle, id: string): Promise<Chat
  */
 export async function getChatRoomBySlug(
   handle: QueryHandle,
-  projectId: string | null,
+  ownerProjectId: string | null,
   slug: string,
-): Promise<ChatRoom | undefined> {
-  const conditions = [eq(schema.project.chatRooms.slug, slug)];
-  if (projectId !== null) {
-    conditions.push(eq(schema.project.chatRooms.ownerProjectId, projectId));
+  projectId?: string): Promise<ChatRoom | undefined> {
+  const conditions = [eq(schema.project.chatRooms.slug, slug), projectScopeFor(schema.project.chatRooms.projectId, projectId)];
+  if (ownerProjectId !== null) {
+    conditions.push(eq(schema.project.chatRooms.ownerProjectId, ownerProjectId));
   } else {
     conditions.push(isNull(schema.project.chatRooms.ownerProjectId));
   }
@@ -485,8 +528,9 @@ export async function getChatRoomBySlug(
 export async function listChatRooms(
   handle: QueryHandle,
   options?: { projectId?: string; status?: ChatRoomStatus },
+  projectId?: string,
 ): Promise<ChatRoom[]> {
-  const conditions: ReturnType<typeof eq>[] = [];
+  const conditions = [projectScopeFor(schema.project.chatRooms.projectId, projectId)];
   if (options?.projectId) conditions.push(eq(schema.project.chatRooms.ownerProjectId, options.projectId));
   if (options?.status) conditions.push(eq(schema.project.chatRooms.status, options.status));
   const query = handle
@@ -500,10 +544,11 @@ export async function listChatRooms(
 /**
  * Delete a chat room by id. Returns true if a row was deleted.
  */
-export async function deleteChatRoom(handle: QueryHandle, id: string): Promise<boolean> {
+export async function deleteChatRoom(handle: QueryHandle, id: string,
+  projectId?: string): Promise<boolean> {
   const result = await handle
     .delete(schema.project.chatRooms)
-    .where(eq(schema.project.chatRooms.id, id))
+    .where(and(eq(schema.project.chatRooms.id, id), projectScopeFor(schema.project.chatRooms.projectId, projectId)))
     .returning({ id: schema.project.chatRooms.id });
   return result.length > 0;
 }
@@ -521,10 +566,10 @@ export async function addChatRoomMember(
   agentId: string,
   role: RoomMemberRole,
   addedAt: string,
-): Promise<void> {
+  projectId?: string): Promise<void> {
   await handle
     .insert(schema.project.chatRoomMembers)
-    .values({ roomId, agentId, role, addedAt })
+    .values({ projectId: projectId?.trim() ?? "", roomId, agentId, role, addedAt })
     .onConflictDoNothing();
 }
 
@@ -535,13 +580,14 @@ export async function removeChatRoomMember(
   handle: QueryHandle,
   roomId: string,
   agentId: string,
-): Promise<boolean> {
+  projectId?: string): Promise<boolean> {
   const result = await handle
     .delete(schema.project.chatRoomMembers)
     .where(
       and(
         eq(schema.project.chatRoomMembers.roomId, roomId),
         eq(schema.project.chatRoomMembers.agentId, agentId),
+        projectScopeFor(schema.project.chatRoomMembers.projectId, projectId),
       ),
     )
     .returning({ roomId: schema.project.chatRoomMembers.roomId });
@@ -551,11 +597,12 @@ export async function removeChatRoomMember(
 /**
  * List room members ordered by addedAt ASC.
  */
-export async function listChatRoomMembers(handle: QueryHandle, roomId: string): Promise<ChatRoomMember[]> {
+export async function listChatRoomMembers(handle: QueryHandle, roomId: string,
+  projectId?: string): Promise<ChatRoomMember[]> {
   const rows = await handle
     .select()
     .from(schema.project.chatRoomMembers)
-    .where(eq(schema.project.chatRoomMembers.roomId, roomId))
+    .where(and(eq(schema.project.chatRoomMembers.roomId, roomId), projectScopeFor(schema.project.chatRoomMembers.projectId, projectId)))
     .orderBy(asc(schema.project.chatRoomMembers.addedAt));
   return rows.map(rowToRoomMember);
 }
@@ -569,7 +616,7 @@ export async function listChatRoomMembers(handle: QueryHandle, roomId: string): 
 export async function addChatRoomMessage(
   handle: QueryHandle,
   message: ChatRoomMessage,
-): Promise<ChatRoomMessage> {
+  projectId?: string): Promise<ChatRoomMessage> {
   // FNXC:PostgresMigrationNulSanitize 2026-07-20: same NUL-byte hazard as
   // addChatMessage above — sanitize before insert, and return the sanitized
   // value so the in-memory result matches what was persisted.
@@ -584,6 +631,7 @@ export async function addChatRoomMessage(
     attachments: sanitizedAttachments,
   };
   await handle.insert(schema.project.chatRoomMessages).values({
+    projectId: projectId?.trim() ?? "",
     id: sanitized.id,
     roomId: sanitized.roomId,
     role: sanitized.role,
@@ -598,18 +646,19 @@ export async function addChatRoomMessage(
   await handle
     .update(schema.project.chatRooms)
     .set({ updatedAt: sanitized.createdAt })
-    .where(eq(schema.project.chatRooms.id, sanitized.roomId));
+    .where(and(eq(schema.project.chatRooms.id, sanitized.roomId), projectScopeFor(schema.project.chatRooms.projectId, projectId)));
   return sanitized;
 }
 
 /**
  * Get a room message by id.
  */
-export async function getChatRoomMessage(handle: QueryHandle, id: string): Promise<ChatRoomMessage | undefined> {
+export async function getChatRoomMessage(handle: QueryHandle, id: string,
+  projectId?: string): Promise<ChatRoomMessage | undefined> {
   const rows = await handle
     .select()
     .from(schema.project.chatRoomMessages)
-    .where(eq(schema.project.chatRoomMessages.id, id));
+    .where(and(eq(schema.project.chatRoomMessages.id, id), projectScopeFor(schema.project.chatRoomMessages.projectId, projectId)));
   return rows[0] ? rowToRoomMessage(rows[0]) : undefined;
 }
 
@@ -620,8 +669,8 @@ export async function getChatRoomMessages(
   handle: QueryHandle,
   roomId: string,
   filter?: { limit?: number; offset?: number; before?: string; order?: "asc" | "desc" },
-): Promise<ChatRoomMessage[]> {
-  const conditions: ReturnType<typeof eq>[] = [eq(schema.project.chatRoomMessages.roomId, roomId)];
+  projectId?: string): Promise<ChatRoomMessage[]> {
+  const conditions = [eq(schema.project.chatRoomMessages.roomId, roomId), projectScopeFor(schema.project.chatRoomMessages.projectId, projectId)];
   if (filter?.before) {
     conditions.push(lte(schema.project.chatRoomMessages.createdAt, filter.before));
   }
@@ -642,10 +691,11 @@ export async function getChatRoomMessages(
  * FNXC:ChatStore 2026-06-24-09:35:
  * Clear all room messages. Returns the count of deleted messages.
  */
-export async function clearChatRoomMessages(handle: QueryHandle, roomId: string): Promise<number> {
+export async function clearChatRoomMessages(handle: QueryHandle, roomId: string,
+  projectId?: string): Promise<number> {
   const result = await handle
     .delete(schema.project.chatRoomMessages)
-    .where(eq(schema.project.chatRoomMessages.roomId, roomId))
+    .where(and(eq(schema.project.chatRoomMessages.roomId, roomId), projectScopeFor(schema.project.chatRoomMessages.projectId, projectId)))
     .returning({ id: schema.project.chatRoomMessages.id });
   return result.length;
 }
@@ -802,8 +852,9 @@ export async function addChatMessageAttachment(
   sessionId: string,
   messageId: string,
   attachment: ChatAttachment,
+  projectId?: string,
 ): Promise<ChatMessage> {
-  const message = await getChatMessage(handle, messageId);
+  const message = await getChatMessage(handle, messageId, projectId);
   if (!message || message.sessionId !== sessionId) {
     throw new Error(`Message ${messageId} not found in session ${sessionId}`);
   }
@@ -814,8 +865,11 @@ export async function addChatMessageAttachment(
   await handle
     .update(schema.project.chatMessages)
     .set({ attachments: updatedAttachments })
-    .where(eq(schema.project.chatMessages.id, messageId));
-  const updated = await getChatMessage(handle, messageId);
+    .where(and(
+      eq(schema.project.chatMessages.id, messageId),
+      ...chatMessageProjectConditions(handle, projectId),
+    ));
+  const updated = await getChatMessage(handle, messageId, projectId);
   if (!updated) throw new Error(`Failed to update message ${messageId}`);
   return updated;
 }
@@ -828,14 +882,21 @@ export async function addChatMessageAttachment(
 export async function deleteChatMessage(
   handle: QueryHandle,
   id: string,
+  projectId?: string,
 ): Promise<boolean> {
-  const existing = await getChatMessage(handle, id);
+  const existing = await getChatMessage(handle, id, projectId);
   if (!existing) return false;
-  await handle.delete(schema.project.chatMessages).where(eq(schema.project.chatMessages.id, id));
+  await handle.delete(schema.project.chatMessages).where(and(
+    eq(schema.project.chatMessages.id, id),
+    ...chatMessageProjectConditions(handle, projectId),
+  ));
   await handle
     .update(schema.project.chatSessions)
     .set({ updatedAt: new Date().toISOString() })
-    .where(eq(schema.project.chatSessions.id, existing.sessionId));
+    .where(and(
+      eq(schema.project.chatSessions.id, existing.sessionId),
+      projectScopeFor(schema.project.chatSessions.projectId, projectId),
+    ));
   return true;
 }
 
@@ -851,6 +912,7 @@ export async function searchChatSessionsByMessageContent(
   handle: QueryHandle,
   query: string,
   sessionIds: string[],
+  projectId?: string,
 ): Promise<Map<string, string>> {
   const trimmed = query.trim();
   if (!trimmed || sessionIds.length === 0) return new Map();
@@ -861,6 +923,7 @@ export async function searchChatSessionsByMessageContent(
     .where(and(
       inArray(schema.project.chatMessages.sessionId, sessionIds),
       ilike(schema.project.chatMessages.content, `%${escaped}%`),
+      ...chatMessageProjectConditions(handle, projectId),
     ))
     .orderBy(
       desc(schema.project.chatMessages.createdAt),
@@ -888,18 +951,22 @@ export async function deleteChatMessagesFrom(
   handle: QueryHandle,
   sessionId: string,
   fromMessageId: string,
+  projectId?: string,
 ): Promise<{ deletedIds: string[]; retained: ChatMessage[] }> {
   const orderedRows = await handle
     .select()
     .from(schema.project.chatMessages)
-    .where(eq(schema.project.chatMessages.sessionId, sessionId))
+    .where(and(
+      eq(schema.project.chatMessages.sessionId, sessionId),
+      ...chatMessageProjectConditions(handle, projectId),
+    ))
     .orderBy(
       asc(schema.project.chatMessages.createdAt),
       asc(schema.project.chatMessages.id),
     );
   const ordered = orderedRows.map(rowToMessage);
 
-  const target = await getChatMessage(handle, fromMessageId);
+  const target = await getChatMessage(handle, fromMessageId, projectId);
   if (!target || target.sessionId !== sessionId) {
     return { deletedIds: [], retained: ordered };
   }
@@ -917,11 +984,17 @@ export async function deleteChatMessagesFrom(
 
   await handle
     .delete(schema.project.chatMessages)
-    .where(inArray(schema.project.chatMessages.id, deletedIds));
+    .where(and(
+      inArray(schema.project.chatMessages.id, deletedIds),
+      ...chatMessageProjectConditions(handle, projectId),
+    ));
   await handle
     .update(schema.project.chatSessions)
     .set({ updatedAt: new Date().toISOString() })
-    .where(eq(schema.project.chatSessions.id, sessionId));
+    .where(and(
+      eq(schema.project.chatSessions.id, sessionId),
+      projectScopeFor(schema.project.chatSessions.projectId, projectId),
+    ));
 
   return { deletedIds, retained };
 }
@@ -937,8 +1010,9 @@ export async function updateChatMessageMetadata(
   messageId: string,
   metadata: Record<string, unknown> | null,
   options?: { merge?: boolean },
+  projectId?: string,
 ): Promise<ChatMessage> {
-  const existing = await getChatMessage(handle, messageId);
+  const existing = await getChatMessage(handle, messageId, projectId);
   if (!existing) {
     throw new Error(`Message ${messageId} not found`);
   }
@@ -951,9 +1025,12 @@ export async function updateChatMessageMetadata(
   await handle
     .update(schema.project.chatMessages)
     .set({ metadata: sanitizeJsonbValue(nextMetadata) ?? null })
-    .where(eq(schema.project.chatMessages.id, messageId));
+    .where(and(
+      eq(schema.project.chatMessages.id, messageId),
+      ...chatMessageProjectConditions(handle, projectId),
+    ));
 
-  const updated = await getChatMessage(handle, messageId);
+  const updated = await getChatMessage(handle, messageId, projectId);
   if (!updated) {
     throw new Error(`Failed to update message ${messageId}`);
   }
@@ -976,8 +1053,8 @@ export async function updateChatRoom(
     status?: ChatRoomStatus;
     thinkingLevel?: ChatRoom["thinkingLevel"] | null;
   },
-): Promise<ChatRoom | undefined> {
-  const existing = await getChatRoom(handle, id);
+  projectId?: string): Promise<ChatRoom | undefined> {
+  const existing = await getChatRoom(handle, id, projectId);
   if (!existing) return undefined;
 
   const setValues: Record<string, unknown> = { updatedAt: new Date().toISOString() };
@@ -990,9 +1067,9 @@ export async function updateChatRoom(
   await handle
     .update(schema.project.chatRooms)
     .set(setValues)
-    .where(eq(schema.project.chatRooms.id, id));
+    .where(and(eq(schema.project.chatRooms.id, id), projectScopeFor(schema.project.chatRooms.projectId, projectId)));
 
-  return getChatRoom(handle, id);
+  return getChatRoom(handle, id, projectId);
 }
 
 /**
@@ -1004,7 +1081,7 @@ export async function updateChatRoom(
 export async function cleanupOldChats(
   handle: QueryHandle,
   maxAgeMs: number,
-): Promise<{ sessionsDeleted: number; roomsDeleted: number; deletedSessionIds: string[]; deletedRoomIds: string[] }> {
+  projectId?: string): Promise<{ sessionsDeleted: number; roomsDeleted: number; deletedSessionIds: string[]; deletedRoomIds: string[] }> {
   if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
     return { sessionsDeleted: 0, roomsDeleted: 0, deletedSessionIds: [], deletedRoomIds: [] };
   }
@@ -1017,7 +1094,7 @@ export async function cleanupOldChats(
 
   const staleRooms = await handle
     .delete(schema.project.chatRooms)
-    .where(lte(schema.project.chatRooms.updatedAt, cutoff))
+    .where(and(lte(schema.project.chatRooms.updatedAt, cutoff), projectScopeFor(schema.project.chatRooms.projectId, projectId)))
     .returning({ id: schema.project.chatRooms.id });
 
   return {
@@ -1038,15 +1115,16 @@ export async function listChatRoomsForAgent(
   handle: QueryHandle,
   agentId: string,
   options?: { projectId?: string; status?: ChatRoomStatus },
+  projectId?: string,
 ): Promise<ChatRoom[]> {
   // Use a subquery to find room IDs where the agent is a member, then select
   // those rooms. This avoids the Drizzle join result-shape complexity.
   const memberRoomIds = handle
     .select({ roomId: schema.project.chatRoomMembers.roomId })
     .from(schema.project.chatRoomMembers)
-    .where(eq(schema.project.chatRoomMembers.agentId, agentId));
+    .where(and(eq(schema.project.chatRoomMembers.agentId, agentId), projectScopeFor(schema.project.chatRoomMembers.projectId, projectId)));
 
-  const conditions: ReturnType<typeof eq>[] = [inArray(schema.project.chatRooms.id, memberRoomIds)];
+  const conditions = [inArray(schema.project.chatRooms.id, memberRoomIds), projectScopeFor(schema.project.chatRooms.projectId, projectId)];
   if (options?.status) conditions.push(eq(schema.project.chatRooms.status, options.status));
   if (options?.projectId) conditions.push(eq(schema.project.chatRooms.ownerProjectId, options.projectId));
 
@@ -1069,9 +1147,10 @@ export async function listChatRoomMessagesSince(
   roomId: string,
   sinceIso: string,
   options?: { excludeSenderAgentId?: string; limit?: number },
-): Promise<ChatRoomMessage[]> {
-  const conditions: ReturnType<typeof eq>[] = [
+  projectId?: string): Promise<ChatRoomMessage[]> {
+  const conditions = [
     eq(schema.project.chatRoomMessages.roomId, roomId),
+    projectScopeFor(schema.project.chatRoomMessages.projectId, projectId),
     gt(schema.project.chatRoomMessages.createdAt, sinceIso),
   ];
   if (options?.excludeSenderAgentId) {
@@ -1101,14 +1180,14 @@ export async function listChatRoomMessagesSince(
 export async function deleteChatRoomMessage(
   handle: QueryHandle,
   id: string,
-): Promise<boolean> {
-  const existing = await getChatRoomMessage(handle, id);
+  projectId?: string): Promise<boolean> {
+  const existing = await getChatRoomMessage(handle, id, projectId);
   if (!existing) return false;
-  await handle.delete(schema.project.chatRoomMessages).where(eq(schema.project.chatRoomMessages.id, id));
+  await handle.delete(schema.project.chatRoomMessages).where(and(eq(schema.project.chatRoomMessages.id, id), projectScopeFor(schema.project.chatRoomMessages.projectId, projectId)));
   await handle
     .update(schema.project.chatRooms)
     .set({ updatedAt: new Date().toISOString() })
-    .where(eq(schema.project.chatRooms.id, existing.roomId));
+    .where(and(eq(schema.project.chatRooms.id, existing.roomId), projectScopeFor(schema.project.chatRooms.projectId, projectId)));
   return true;
 }
 
@@ -1124,8 +1203,8 @@ export async function addChatRoomMessageAttachment(
   roomId: string,
   messageId: string,
   attachment: ChatAttachment,
-): Promise<ChatRoomMessage> {
-  const message = await getChatRoomMessage(handle, messageId);
+  projectId?: string): Promise<ChatRoomMessage> {
+  const message = await getChatRoomMessage(handle, messageId, projectId);
   if (!message || message.roomId !== roomId) {
     throw new Error(`Message ${messageId} not found in room ${roomId}`);
   }
@@ -1136,12 +1215,12 @@ export async function addChatRoomMessageAttachment(
   await handle
     .update(schema.project.chatRoomMessages)
     .set({ attachments: updatedAttachments })
-    .where(eq(schema.project.chatRoomMessages.id, messageId));
+    .where(and(eq(schema.project.chatRoomMessages.id, messageId), projectScopeFor(schema.project.chatRoomMessages.projectId, projectId)));
   await handle
     .update(schema.project.chatRooms)
     .set({ updatedAt: new Date().toISOString() })
-    .where(eq(schema.project.chatRooms.id, roomId));
-  const updated = await getChatRoomMessage(handle, messageId);
+    .where(and(eq(schema.project.chatRooms.id, roomId), projectScopeFor(schema.project.chatRooms.projectId, projectId)));
+  const updated = await getChatRoomMessage(handle, messageId, projectId);
   if (!updated) throw new Error(`Failed to update room message ${messageId}`);
   return updated;
 }

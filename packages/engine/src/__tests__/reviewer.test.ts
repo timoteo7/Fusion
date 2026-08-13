@@ -40,7 +40,7 @@ vi.mock("../pi.js", () => ({
   wrapToolsWithActionGate: vi.fn((tools) => tools),
 }));
 
-import { resolveAgentPrompt } from "@fusion/core";
+import { resolveAgentPrompt, type TaskStore } from "@fusion/core";
 import { reviewStep, ReviewerProviderError } from "../execution/reviewer.js";
 import { createFnAgent, promptWithFallback } from "../pi.js";
 
@@ -104,6 +104,62 @@ describe("reviewStep — model settings threading", () => {
     const opts = mockedCreateFnAgent.mock.calls[0][0];
     expect(opts.defaultProvider).toBe("anthropic");
     expect(opts.defaultModelId).toBe("claude-sonnet-4-5");
+  });
+
+  it("emits resolved durable reviewer session and tool telemetry through the live lane callbacks", async () => {
+    mockedCreateFnAgent.mockImplementation(async (options) => {
+      options.onToolStart?.("Read", { path: "private-review-input" });
+      options.onToolEnd?.("Read", false, "private-review-output");
+      return createMockSession("### Verdict: APPROVE\n### Summary\nLooks good.");
+    });
+    const store = {
+      emitUsageEvent: vi.fn().mockResolvedValue(undefined),
+      appendAgentLog: vi.fn().mockResolvedValue(undefined),
+      logEntry: vi.fn().mockResolvedValue(undefined),
+    } as unknown as TaskStore & { emitUsageEvent: ReturnType<typeof vi.fn> };
+
+    await reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt", undefined, {
+      store,
+      taskId: "FN-100",
+      agentId: "durable-reviewer",
+      task: { assignedAgentId: "fallback-agent", effectiveNodeId: "mesh-node", nodeId: "legacy-node" },
+      taskValidatorProvider: "validator-provider",
+      taskValidatorModelId: "validator-model",
+    });
+
+    expect(store.emitUsageEvent).toHaveBeenCalledTimes(3);
+    const events = store.emitUsageEvent.mock.calls.map(([event]) => event);
+    const sessionStart = events.find((event) => event.kind === "session_start");
+    const toolCall = events.find((event) => event.kind === "tool_call");
+    const toolResult = events.find((event) => event.kind === "tool_result");
+    expect(sessionStart).toMatchObject({
+      kind: "session_start", category: "agent-session", taskId: "FN-100", agentId: "durable-reviewer",
+      nodeId: "mesh-node", model: "validator-model", provider: "validator-provider", meta: { lane: "reviewer" },
+    });
+    expect(toolCall).toMatchObject({
+      kind: "tool_call", taskId: "FN-100", agentId: "durable-reviewer", nodeId: "mesh-node",
+      model: "validator-model", provider: "validator-provider", toolName: "Read",
+    });
+    expect(toolResult).toMatchObject({
+      kind: "tool_result", taskId: "FN-100", agentId: "durable-reviewer", nodeId: "mesh-node",
+      model: "validator-model", provider: "validator-provider", toolName: "Read",
+    });
+  });
+
+  it("does not count a reviewer session when runtime construction fails", async () => {
+    mockedCreateFnAgent.mockRejectedValue(new Error("provider unavailable"));
+    const store = {
+      emitUsageEvent: vi.fn().mockResolvedValue(undefined),
+      appendAgentLog: vi.fn().mockResolvedValue(undefined),
+      logEntry: vi.fn().mockResolvedValue(undefined),
+    } as unknown as TaskStore & { emitUsageEvent: ReturnType<typeof vi.fn> };
+
+    await expect(reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt", undefined, {
+      store, taskId: "FN-100", agentId: "durable-reviewer",
+      taskValidatorProvider: "validator-provider", taskValidatorModelId: "validator-model",
+    })).rejects.toThrow("provider unavailable");
+
+    expect(store.emitUsageEvent).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "session_start" }));
   });
 
   it("does not set model fields when ReviewOptions omits them", async () => {
@@ -320,6 +376,71 @@ describe("reviewStep — model settings threading", () => {
 
     expect(result.verdict).toBe("APPROVE");
   });
+
+  it("extracts a trailing REVISE payload after unpaired prose braces", async () => {
+    mockedCreateFnAgent.mockResolvedValue(createMockSession(
+      "Implementation looks solid overall. IndexOfAny('{','[') needs one change.\n" +
+      '{"verdict":"REVISE","notes":"fix the parser"}',
+    ));
+
+    const result = await reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt");
+
+    expect(result.verdict).toBe("REVISE");
+  });
+
+  it("recovers a quote-desynced multi-finding payload beneath brace-bearing trailing prose", async () => {
+    const payload = JSON.stringify({
+      verdict: "REVISE",
+      notes: 'full { note } with "quotes"',
+      findings: Array.from({ length: 12 }, (_, index) => ({ id: `finding-${index}`, title: "t", body: "b" })),
+    }, null, 2);
+    mockedCreateFnAgent.mockResolvedValue(createMockSession(
+      `{"example":true}\nodd quote "\n${payload}\nuse } to close\n} } } } } }\n{"example":1}`,
+    ));
+
+    const result = await reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt");
+
+    expect(result.verdict).toBe("REVISE");
+  });
+
+  it("lets an explicit verdict heading beat a JSON example", async () => {
+    mockedCreateFnAgent.mockResolvedValue(createMockSession(
+      '## Verdict: REVISE\nExample: {"verdict":"APPROVE"}',
+    ));
+
+    const result = await reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt");
+
+    expect(result.verdict).toBe("REVISE");
+  });
+
+  it.each([
+    'looks good\n{"verdict":"REVISE","notes":"truncated',
+    'looks good\n{"verdict":"PASS"}',
+  ])("returns UNAVAILABLE rather than laundering unreadable structured verdict intent", async (review) => {
+    mockedCreateFnAgent.mockResolvedValue(createMockSession(review));
+    const result = await reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt");
+    expect(result.verdict).toBe("UNAVAILABLE");
+  });
+
+  /*
+   * FNXC:ReviewLeniency 2026-08-11-19:37:
+   * A real explicit verdict heading remains authoritative even when an unrelated
+   * truncated JSON payload exposes a quoted verdict key. The anti-laundering
+   * guard applies only to Strategy 4 prose approval, never Strategies 1–2.
+   */
+  it("keeps an explicit APPROVE heading authoritative over truncated JSON verdict intent", async () => {
+    mockedCreateFnAgent.mockResolvedValue(createMockSession(
+      '## Verdict: APPROVE\nlooks good\n{"verdict":"REVISE","notes":"truncated',
+    ));
+    const result = await reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt");
+    expect(result.verdict).toBe("APPROVE");
+  });
+
+  it("preserves lenient prose approval without a structured verdict key", async () => {
+    mockedCreateFnAgent.mockResolvedValue(createMockSession("looks good"));
+    const result = await reviewStep("/tmp/worktree", "FN-100", 1, "Test Step", "plan", "# prompt");
+    expect(result.verdict).toBe("APPROVE");
+  });
 });
 
 describe("reviewStep — spec review type", () => {
@@ -477,6 +598,24 @@ describe("reviewStep — spec review type", () => {
     expect(opts.systemPrompt).toContain("## Project Memory");
     expect(opts.systemPrompt).toContain("Do not update memory during review");
     expect(opts.customTools?.map((tool: any) => tool.name)).toEqual(["fn_web_fetch", "fn_memory_search", "fn_memory_get"]);
+  });
+
+  it.each(["off", "index", "full"] as const)("uses assigned reviewer %s memory inclusion mode", async (mode) => {
+    mockedCreateFnAgent.mockResolvedValue(createMockSession("### Verdict: APPROVE\n### Summary\nGood spec."));
+    await reviewStep(
+      "/tmp/worktree", "FN-050", 0, "Spec Review", "spec", "# Task: KB-050",
+      undefined,
+      {
+        rootDir: "/tmp/project",
+        agentId: "reviewer-1",
+        agentStore: { getAgent: vi.fn().mockResolvedValue({ id: "reviewer-1", runtimeConfig: { agentMemoryInclusionMode: mode } }) } as any,
+        settings: { memoryBackendType: "qmd" } as any,
+      },
+    );
+
+    const prompt = mockedCreateFnAgent.mock.calls[0][0].systemPrompt;
+    expect(prompt.includes("query memory before re-reading")).toBe(mode !== "off");
+    if (mode === "index") expect(prompt).toContain("fn_memory_search");
   });
 
   it("omits reviewer memory tools and instructions when memory is disabled", async () => {

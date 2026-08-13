@@ -7,6 +7,7 @@ import { mkdtempSync, existsSync, rmSync, writeFileSync, mkdirSync, readFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInit } from "../init.js";
+import { installShippedSkillsIntoProject, SHIPPED_SKILL_NAMES, type ShippedSkillName } from "../claude-skills.js";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { GitRepositoryInitializationError } from "@fusion/core";
@@ -34,8 +35,14 @@ const mockGetProjectByPath = vi.fn();
 const mockRegisterProject = vi.fn();
 const mockEnsureProjectForPath = vi.fn();
 const mockUpdateProject = vi.fn().mockResolvedValue({});
-const { mockIsValidSqliteDatabaseFile } = vi.hoisted(() => ({
+const { mockIsValidSqliteDatabaseFile, mockInstallSkillsForProject } = vi.hoisted(() => ({
   mockIsValidSqliteDatabaseFile: vi.fn(),
+  mockInstallSkillsForProject: vi.fn(() => []),
+}));
+
+vi.mock("../claude-skills-runner.js", () => ({
+  maybeInstallClaudeSkillForNewProject: mockInstallSkillsForProject,
+  ensureClaudeSkillsForAllProjectsOnStartup: vi.fn(() => []),
 }));
 
 vi.mock("@fusion/core", async () => {
@@ -90,6 +97,7 @@ describe("init command", () => {
     tempHomeDir = tempDir("fn-init-home-");
     process.env.HOME = tempHomeDir;
     process.env.USERPROFILE = tempHomeDir;
+    mockInstallSkillsForProject.mockClear();
     mockCentralInit.mockResolvedValue(undefined);
     mockCentralClose.mockResolvedValue(undefined);
     mockGetProjectByPath.mockResolvedValue(undefined);
@@ -305,20 +313,38 @@ describe("init command", () => {
     }
   });
 
-  it("installs the bundled Fusion skill into Claude, Codex, and Gemini homes", async () => {
+  it("C1: fn init reconciles every shipped skill for its new project", async () => {
+    /* FNXC:ComputerUseSkill 2026-08-11-14:30: The init call-site contract is
+     * outcomes, not just delegation: both shipped skills must reconcile. */
+    const sources = Object.fromEntries(SHIPPED_SKILL_NAMES.map((skillName) => {
+      const source = join(tempProjectDir, "sources", skillName);
+      mkdirSync(source, { recursive: true });
+      writeFileSync(join(source, "SKILL.md"), `name: ${skillName}`);
+      return [skillName, source];
+    })) as Record<ShippedSkillName, string>;
+    mockInstallSkillsForProject.mockImplementationOnce((path: string) =>
+      installShippedSkillsIntoProject(path, { enabled: true, sources }));
+
     await runInit({ path: tempProjectDir });
 
-    const skillTargets = [
-      join(tempHomeDir, ".claude", "skills", "fusion"),
-      join(tempHomeDir, ".codex", "skills", "fusion"),
-      join(tempHomeDir, ".gemini", "skills", "fusion"),
-    ];
-
-    for (const target of skillTargets) {
-      expect(existsSync(join(target, "SKILL.md"))).toBe(true);
-      expect(existsSync(join(target, "references", "extension-tools.md"))).toBe(true);
-      expect(existsSync(join(target, "workflows", "task-management.md"))).toBe(true);
+    expect(mockInstallSkillsForProject).toHaveBeenCalledWith(tempProjectDir);
+    expect(mockInstallSkillsForProject.mock.results[0]?.value.map((result: { outcome: string }) => result.outcome)).toEqual(["installed", "installed"]);
+    for (const skillName of SHIPPED_SKILL_NAMES) {
+      expect(existsSync(join(tempProjectDir, ".claude", "skills", skillName, "SKILL.md"))).toBe(true);
     }
+  });
+
+  it("installs both bundled skills into Claude, Codex, and Gemini homes", async () => {
+    await runInit({ path: tempProjectDir });
+
+    for (const client of [".claude", ".codex", ".gemini"]) {
+      for (const skillName of ["fusion", "computer-use"]) {
+        expect(existsSync(join(tempHomeDir, client, "skills", skillName, "SKILL.md"))).toBe(true);
+      }
+    }
+    const fusionTarget = join(tempHomeDir, ".claude", "skills", "fusion");
+    expect(existsSync(join(fusionTarget, "references", "extension-tools.md"))).toBe(true);
+    expect(existsSync(join(fusionTarget, "workflows", "task-management.md"))).toBe(true);
   });
 
   it("preserves existing Fusion skill directories instead of overwriting", async () => {

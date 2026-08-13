@@ -28,7 +28,7 @@
 import { and, desc, eq, ilike, isNull, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import * as schema from "../../postgres/schema/index.js";
-import { recordRunAuditEventWithinTransaction, type AsyncDataLayer, type DbTransaction } from "../../postgres/data-layer.js";
+import { projectScopeFor, recordRunAuditEventWithinTransaction, type AsyncDataLayer, type DbTransaction } from "../../postgres/data-layer.js";
 import { ACTIVE_TASK_FILTER } from "./async-persistence.js";
 import { projectPartition } from "./async-lifecycle.js";
 import {
@@ -685,7 +685,10 @@ export async function insertArtifactRow(
     const rows = await tx
       .select()
       .from(schema.project.artifacts)
-      .where(eq(schema.project.artifacts.id, id))
+      .where(and(
+        eq(schema.project.artifacts.id, id),
+        projectScopeFor(schema.project.artifacts.projectId, layer.projectId),
+      ))
       .limit(1);
     const row = rows[0] as ArtifactRow | undefined;
     if (!row) throw new Error(`Failed to register artifact ${id}`);
@@ -707,7 +710,7 @@ export async function updateArtifactRow(
 
   archivedColumns?: ReadonlySet<string>,): Promise<Artifact> {
   return layer.transactionImmediate(async (tx) => {
-    const existing = await getArtifact(tx, id);
+    const existing = await getArtifact(tx, id, layer.projectId);
     if (!existing) {
       throw new Error(`Artifact ${id} not found`);
     }
@@ -744,9 +747,12 @@ export async function updateArtifactRow(
         content: updates.content !== undefined ? updates.content : existing.content ?? null,
         updatedAt: now,
       })
-      .where(eq(schema.project.artifacts.id, id));
+      .where(and(
+        eq(schema.project.artifacts.id, id),
+        projectScopeFor(schema.project.artifacts.projectId, layer.projectId),
+      ));
 
-    const updated = await getArtifact(tx, id);
+    const updated = await getArtifact(tx, id, layer.projectId);
     if (!updated) {
       throw new Error(`Failed to update artifact ${id}`);
     }
@@ -761,11 +767,15 @@ export async function updateArtifactRow(
 export async function getArtifact(
   db: AsyncDataLayer["db"] | DbTransaction,
   id: string,
+  projectId?: string,
 ): Promise<Artifact | null> {
   const rows = await db
     .select()
     .from(schema.project.artifacts)
-    .where(eq(schema.project.artifacts.id, id))
+    .where(and(
+      eq(schema.project.artifacts.id, id),
+      projectScopeFor(schema.project.artifacts.projectId, projectId),
+    ))
     .limit(1);
   const row = rows[0] as ArtifactRow | undefined;
   return row ? rowToArtifact(row) : null;
@@ -803,7 +813,10 @@ export async function getArtifacts(
   const rows = await db
     .select()
     .from(schema.project.artifacts)
-    .where(eq(schema.project.artifacts.taskId, taskId))
+    .where(and(
+      eq(schema.project.artifacts.taskId, taskId),
+      projectScopeFor(schema.project.artifacts.projectId, projectId),
+    ))
     .orderBy(desc(schema.project.artifacts.createdAt));
   return (rows as ArtifactRow[]).map((row) => rowToArtifact(row));
 }
@@ -838,11 +851,12 @@ export async function listArtifacts(
     offset?: number;
     search?: string;
   },
+  projectId?: string,
 ): Promise<ArtifactWithTask[]> {
   const limit = Math.min(Math.max(1, options?.limit ?? 200), 1000);
   const offset = Math.max(0, options?.offset ?? 0);
 
-  const conditions = [];
+  const conditions = [projectScopeFor(schema.project.artifacts.projectId, projectId)];
   if (options?.type) {
     conditions.push(eq(schema.project.artifacts.type, options.type));
   }
@@ -888,7 +902,10 @@ export async function listArtifacts(
     .from(schema.project.artifacts)
     .leftJoin(
       schema.project.tasks,
-      eq(schema.project.artifacts.taskId, schema.project.tasks.id),
+      and(
+        eq(schema.project.artifacts.taskId, schema.project.tasks.id),
+        eq(schema.project.artifacts.projectId, schema.project.tasks.projectId),
+      ),
     )
     .where(and(...conditions))
     .orderBy(desc(schema.project.artifacts.createdAt))

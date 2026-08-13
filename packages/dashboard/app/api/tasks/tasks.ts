@@ -12,6 +12,9 @@ import type {
   TaskGitLabTracking,
   TaskGitLabTrackedItem,
   GithubIssueAction,
+  CurrentPlanEvidence,
+  DriftReport,
+  SpecLock,
 } from "@fusion/core";
 import { withTokenHeader } from "../../auth";
 import { api, ApiRequestError, buildApiUrl, proxyApi } from "../client/client.js";
@@ -69,6 +72,25 @@ export function fetchArchivedTasks(
 export interface TaskPromptResponse {
   id: string;
   prompt?: string;
+}
+
+/** Persisted structural plan evidence; the browser renders it but never recomputes drift. */
+export interface SpecLockResponse {
+  latestLock: SpecLock | null;
+  activeLock: SpecLock | null;
+  currentPlan: CurrentPlanEvidence | null;
+  /** Current-only report; stale immutable reports remain in history. */
+  report: DriftReport | null;
+  latestReport: DriftReport | null;
+  history: {
+    locks: SpecLock[];
+    currentPlans: CurrentPlanEvidence[];
+    reports: DriftReport[];
+  };
+}
+
+export function fetchSpecLock(id: string, projectId?: string): Promise<SpecLockResponse> {
+  return api<SpecLockResponse>(withProjectId(`/tasks/${encodeURIComponent(id)}/spec-lock`, projectId));
 }
 
 /*
@@ -202,6 +224,30 @@ export async function checkDuplicateTasks(
     body: JSON.stringify(input),
   });
   return response.matches ?? [];
+}
+
+/** The recommendation-create route returns both child and authoritative parent link state. */
+export interface CreateTaskFromRecommendationResponse {
+  task: Task;
+  parent: Task;
+}
+
+/** Create one guarded, idempotent task from a completed task recommendation. */
+export function createTaskFromRecommendation(
+  taskId: string,
+  recommendationId: string,
+  projectId?: string,
+): Promise<CreateTaskFromRecommendationResponse> {
+  /*
+  FNXC:TaskRecommendations 2026-08-08-07:46:
+  Recommendation ids are stable opaque strings, not task ids. Encode each path segment so an
+  otherwise valid id containing a slash, query delimiter, or fragment marker still reaches the
+  server-owned recommendation action rather than changing the route being requested.
+  */
+  return api<CreateTaskFromRecommendationResponse>(withProjectId(`/tasks/${encodeURIComponent(taskId)}/recommendations/${encodeURIComponent(recommendationId)}/create`, projectId), {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export async function createTask(

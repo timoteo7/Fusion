@@ -2,6 +2,158 @@
 
 User-facing release notes aggregated across all packages. This file is auto-synced from each `packages/*/CHANGELOG.md` by `scripts/release.mjs` — do not edit by hand.
 
+## 0.76.0-beta.2
+
+### Highlights
+
+- Verification cache, approval audit, and GitHub check state now stay scoped per project
+- Grok 4.6 available in every model picker, on bundled Pi runtime 0.84.1
+- Quick Add model dropdown: typing filters, collapse toggle works, merger row labeled Merger
+- Mission reconciliation no longer fails every cycle with a scheduler error
+- Archive and restore mailbox messages and chat conversations from the dashboard
+
+### New
+
+- Grok 4.6 is registered in the built-in Grok catalog and appears in every model picker.
+- Mailbox messages and chat conversations can be archived and restored from dedicated views.
+- Managers can review and coach evaluation results for agents in their reporting tree.
+
+### Fixed
+
+- Verification-cache results and project records are isolated per project instead of shared across them.
+- Approval audit history is scoped to the active project.
+- PostgreSQL GitHub check-state ownership defaults are reconciled during upgrades.
+- Typing in the Quick Add model dropdown filter box narrows the model list again.
+- The collapse/expand toggle in model selection dropdowns no longer closes the dropdown.
+- The Quick Add model menu labels the merger row "Merger" with spacing matching the other roles.
+- The task Recommendations tab appears only when a completed task actually has recommendations.
+- Mission reconciliation no longer fails every cycle with an internal scheduler error.
+
+### Internal
+
+- The bundled Pi runtime moves from 0.82.1 to 0.84.1 for updated provider and model support.
+- Eight project-owned storage tables are modeled with their partition identities.
+
+## 0.76.0-beta.1
+
+### Highlights
+
+- Breaking: the retired ephemeralAgentsEnabled setting and v0 mission resume blockers are gone
+- Fixes the deadlock that left every task stuck: built-in workflow agents were unroutable
+- Fusion no longer hangs on startup when a project has 1,000+ tasks
+- Reviews block only on high-priority findings, cutting repeat plan and code review rounds
+- Durable project memory: recall, Memory Keeper consolidation, and MCP memory tools
+
+### Breaking
+
+- Removed the retired ephemeral-agent compatibility setting and its control; stale values are discarded on settings read and update.
+- Removed the deprecated v0 mission resume blockers in favor of canonical blocker descriptors, which now deduplicate per root feature, source, and reason.
+
+### New
+
+- Durable project recall for decisions, preferences, and solutions, plus the Memory Keeper agent that consolidates the knowledge graph on a schedule and shows its consolidation history in Agent Detail.
+- Fusion memory tools exposed through the built-in MCP server, with provenance-tagged memory semantics and automatic recall capture from task, research, and insight sources.
+- Every agent lane is steered to search memory before starting work.
+- Live agent activity: a durable org-wide history and stream, a live activity and handoff view in Agents, and a Command Center timeline you can scroll back through.
+- Reviews now block only on high-priority findings. New per-workflow settings control the blocking threshold (plan review defaults to high, code review to critical); set either to "any" to restore blocking on every REVISE. Non-blocking findings land in the spec as review advisory notes.
+- Plan Review can close stale or duplicate work before implementation starts, and approved plans are locked with deterministic execution drift reporting.
+- Opt-in GitHub-native pull request auto-merge, required named GitHub checks before Fusion merges, and signed GitHub CI signal ingestion so verified check results update merge gates without waiting for polling.
+- Route task execution and review through one validated external Git checkout that Fusion never modifies or deletes.
+- macOS computer use: `fn computer` for desktop app discovery, snapshots, actions, and permission reporting, a version-matched computer-use agent skill, and automatic skill discovery in macOS runtime sessions.
+- Mission management gains a "Reconcile now" control with dry-run preview, automatic reconciliation from delivery task ground truth, agent tools to set mission and feature status with attributed audit events, and operator controls to clear stale blocked badges and re-run repairable validations.
+- Planning a GitHub issue creates a task linked to that issue as a tracked source, and Planning Mode can import issue and comment screenshots.
+- Agent mail gains structural reports, inline approvals, chat-to-report handoff, roadmap items you can drag in and open in Roadmaps, and approvals raised during planning.
+- `fn knowledge-graph build` generates a committable code knowledge graph.
+- Português (Brasil) is available as a dashboard, terminal UI, and translation target language.
+
+### Fixed
+
+- Tasks no longer spin against unroutable built-in workflow agents; a principal hold now backs off from 15s to 5m instead of re-dispatching about 3.5 times a second and writing roughly 19k audit rows an hour with nothing executing.
+- Queued tasks start again after the board fills up: continuations parked by capacity are picked up by the drain instead of sitting runnable with no state change.
+- Four other long stalls fixed, covering principal routing, dependency auto-unblock clearing a needs-replan signal, stranded planning holds, and unbounded workflow run ids.
+- Stranded workflow continuations left running or held are re-queued automatically, and workflow principal session caps are removed.
+- Startup no longer wedges on "starting": spec-drift reconciliation is bounded to 4 concurrent reconciles with backoff, so a 1,082-task project opens 3-10 database connections during boot instead of saturating the cluster.
+- Planning failures retry with 60s/120s/300s backoff and park after 3 attempts instead of looping forever, and a new planning turn timeout (default 90 minutes) bounds hung sessions.
+- Provider request timeouts are treated as transient and retried with backoff instead of re-admitting the card every poll.
+- The Plan Review replan cap setting is now actually read; lowering it takes effect, with a default of 15 and 0 parking on the first REVISE.
+- A stale worktree base no longer fails a task: a declined refresh holds the task instead of blocking execution, and reacquired worktrees are refreshed against the current integration branch.
+- Reacquired and fresh worktrees rebase onto the configured integration branch, task-pinned worktrees recover when an incomplete directory occupies their path, and worktree conflict cleanup no longer crashes before its active-session safety check.
+- Tasks are no longer failed as branch conflicts when their branch was already merged, and "Failed to create chat session" on model chats is fixed.
+- Auto-merge no longer attempts branch-protected, behind, conflicting, or unknown pull requests; branch-protection blocks are reported honestly and pause for operator action instead of surfacing as merge conflicts.
+- Automated pull request heads are refreshed before creation and merge, timed-out merges recover without stale status blocking retries, and canceled AI merge bodies cannot overwrite successor merge state.
+- "Needs operator action" alerts no longer fire for tasks that are running normally or intentionally held; terminal failures retry automatically first and alerts wait out a settle window.
+- Promote appears only on cards the server would actually release: hidden while a task is still being planned or blocked on plan review and approval holds.
+- Completed tasks always show a Recommendations tab, including an empty state, and executors are prompted to produce those recommendations again after a refactor dropped the request.
+- Activity Log records every settings change rather than four keys, with redaction, honest provenance for API and system writes, engine heartbeat noise excluded, and paging on the revision API.
+- Durable agent data, agent ratings, custom workflows, and project-bound workflow and chat data stay isolated per project on shared PostgreSQL.
+- Grok ACP starts again with released Grok CLI v1.0.0 by making --no-auto-update opt-in.
+- CLI commands no longer abort mid-command on Node 22.4+, so `fn init` completes; Node >=22.4.0 is now declared.
+- Tunnels restart automatically with backoff after a crash instead of staying failed until manually restarted.
+- Reviewer verdicts and findings survive review prose containing stray braces, and resolved findings stay visible without allowing no-op revision requests.
+- The engine log stops repeating dispatch-blocked and symbol-lock-loss lines every poll for a stuck task.
+- The model list no longer hangs when a provider catalog stalls.
+- Chat attachment thumbnails clear as soon as the message is accepted.
+- Task cards distinguish the assigned agent from the agent that created the task.
+- The Agents Overview active agents list scrolls on mobile instead of clipping.
+- Newly created tasks get an eligible executor owner automatically, and explicit engineer and operator-override assignment works again in CLI tools.
+- Mission fixes: planned follow-ups resume after their source task completes, paused missions stay paused through status roll-up, duplicate manual validation runs are prevented, and automatic validation waits for an in-flight manual run.
+- Pull request and review updates stay visible in open task details.
+- Plan writes no longer fail permanently after a plan-evidence version collision, and approved plans stay accurate when parent lineage is removed.
+- Duplicate redirects are recognized in task titles and with custom task prefixes, and duplicate conflict responses are restored for ordinary intake.
+- Plan-review replan and review fix handoffs work again in projects with auto-merge off, including shared-branch tasks.
+- Direct DATABASE_URL connections can finalize planning lifecycle locks.
+- Required pull-request check settings labels are available in every dashboard locale.
+
+### Performance
+
+- Scheduler hold-release sweeps and health probes stay responsive under PostgreSQL load through batched workflow-selection reads, a per-project sweep guard, and sweep and probe deadlines.
+
+### Internal
+
+- Plugin hot reload no longer leaves scratch files behind in plugin folders.
+- The published CLI manifest declares TypeScript once, as a runtime dependency.
+
+## 0.76.0-beta.0
+
+### Highlights
+
+- Workflow stages now run on durable multi-role agents instead of ephemeral workers
+- Dashboard no longer freezes on a startup connection-pool deadlock
+- Tasks no longer stall in progress with no session after the role-agent rollout
+- Completed tasks can suggest follow-ups with guarded one-click creation
+- New fn_workflow_step_resume unsticks merge review steps stuck pending forever
+
+### New
+
+- Workflow stages are routed through durable multi-role agents rather than ephemeral workflow workers. Existing single-role configuration keeps working.
+- Completed tasks now produce recommendations you can turn into new tasks in one click. The project setting `maxRecommendationsPerTask` caps how many you can accept.
+- `fn_workflow_step_resume` is a new operator-only CLI and pi-extension tool that moves a permanently-pending pre-merge review step to failed, so `fn_task_bypass_review` can clear the merge blocker. Every resume is audit-logged.
+
+### Fixed
+
+- The dashboard could stop answering every request at startup because built-in role-agent provisioning held a lock while waiting on a second connection from a three-connection pool. It now runs on the locking transaction.
+- Tasks could sit in progress forever with no session after the role-agent rollout, caused by two silent deadlocks in role routing and durable continuation writes. Suspended runs are now recorded in the run audit instead of vanishing.
+- Extension-host task stores are warmed for every registered project at dashboard startup, so `fn_task_*` tools no longer risk a timeout booting a second connection pool.
+- Pausing or unpausing a task now propagates to every open dashboard.
+- Stale Planning badges clear once refreshed task state shows execution has moved on, without erasing newer planner activity.
+- The In progress badge is back on active tasks that have no transient status, across board and list views.
+- An empty task Activity Feed now refetches when you open it after execution has already started.
+- Partially completed tasks resume after a restart instead of reporting a false failure.
+- Verified no-op tasks no longer bounce repeatedly between lifecycle states.
+- Execution retries once after the first terminal tool-call failure by default; the project threshold stays configurable and existing overrides are preserved.
+- Planning Mode keeps working when browser storage is unavailable, evicting only its own key and retrying once.
+- Planning Mode shows four distinct responses plus a write-your-own choice, and prompts now guide 3-5 alternatives without truncating larger valid option sets.
+- Messages structure selection stays inside narrow mobile composers in both full-page and modal Messages.
+- Inactive retained worktrees no longer eat live task capacity; worktree admission is shared across execution, planning, merge, and workflow continuation lanes.
+- Shared branch-group members honor project auto-merge consent, and review advisories appear before promotion.
+- Mission autopilot slice progression stays serial and milestone ordered even with duplicate completion or recovery signals.
+- Mission detail explains merge behavior and shows read-only shared branch status, validating branch-group ownership before displaying branch, member, and PR data.
+- Secrets environment fingerprint records stay out of task worktrees.
+- The legacy agent setting no longer influences mission or workflow routing.
+- Built-in workflow agents get detailed identities backfilled non-destructively, with duplicate provenance reconciled.
+- Settings now states the enabled default for the ephemeral-agent compatibility setting.
+- The Todo Lists and Roadmaps plugins appear in dashboard navigation once enabled.
+
 ## 0.75.1
 
 ### Highlights

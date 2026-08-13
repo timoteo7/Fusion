@@ -181,6 +181,11 @@ const DISPLAY: Record<string, WorkflowSettingDisplay> = {
    * workflow's stored value here is the effective oversight level for every task
    * under it that does not set a per-task override (FN-7515, TaskForm selector).
    */
+  memoryConsolidationEnabled: {
+    group: "oversight",
+    label: "Memory consolidation enabled",
+    description: "Enable the Memory Keeper's deterministic knowledge-graph and recall consolidation tick.",
+  },
   plannerOversightLevel: {
     group: "oversight",
     label: "Planner oversight level",

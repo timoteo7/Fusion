@@ -35,9 +35,9 @@ type MissionReader = Pick<
   "getMission" | "getMilestone" | "getSlice" | "getFeature" | "getFeatureByTaskId"
 >;
 
-type PersistedMissionLineage = { missionId: string; sliceId: string; featureId: string };
+export type PersistedMissionLineage = { missionId: string; sliceId: string; featureId: string };
 
-function parsePersistedMissionLineage(task: Task): PersistedMissionLineage | undefined {
+export function parsePersistedMissionLineage(task: Task): PersistedMissionLineage | undefined {
   const candidate = task.sourceMetadata?.missionLineage;
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
   const { missionId, sliceId, featureId } = candidate as Record<string, unknown>;
@@ -47,16 +47,26 @@ function parsePersistedMissionLineage(task: Task): PersistedMissionLineage | und
 }
 
 /**
- * FNXC:MissionSymbolAdmission 2026-08-01-00:00:
- * Decision-A follow-up tasks retain the source feature's scalar taskId and carry
- * a separately validated sourceMetadata.missionLineage reference. Resolve that
- * reference before the canonical link so scheduler admission and reconciliation
- * preserve source ownership without treating a metadata-shaped value as proof.
+ * FNXC:MissionSymbolAdmission 2026-08-12-00:20:
+ * Decision-A follow-up tasks retain a separately validated
+ * sourceMetadata.missionLineage reference. Prefer a current canonical task link;
+ * use the persisted lineage only for genuinely unlinked follow-ups.
  */
 export async function resolveMissionFeatureForTask(
   store: MissionReader,
   task: Task,
 ): Promise<MissionFeature | undefined> {
+  /*
+  FNXC:MissionFollowupAdmission 2026-08-12-00:20:
+  A task can begin as a Decision-A follow-up and later become the canonical task for a
+  different Feature. The canonical taskId link is then the current ownership record;
+  inherited metadata is historical provenance and must not shadow it. Keep the
+  persisted-lineage fallback fail-closed for genuine unlinked follow-ups.
+  */
+  const canonical = await store.getFeatureByTaskId(task.id);
+  if (canonical) {
+    return !task.sliceId || canonical.sliceId === task.sliceId ? canonical : undefined;
+  }
   const persisted = parsePersistedMissionLineage(task);
   if (persisted) {
     const feature = await store.getFeature(persisted.featureId);
@@ -65,7 +75,7 @@ export async function resolveMissionFeatureForTask(
     }
     return undefined;
   }
-  return await store.getFeatureByTaskId(task.id);
+  return undefined;
 }
 
 /**

@@ -88,6 +88,8 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     column: "in-progress",
     status: "executing" as Task["status"],
     steps: [],
+    // FNXC:TaskCardPromote 2026-08-11-09:13: Promote-visible footer fixtures explicitly clear the default-on plan-review gate.
+    enabledWorkflowSteps: [],
     dependencies: [],
     sourceType: "dashboard_ui",
     githubTracking: {
@@ -174,7 +176,7 @@ describe("TaskCard footer wrapping (FN-5210)", () => {
   it("places workflow badges after footer and action rows in DOM order", () => {
     const { container } = render(
       <TaskCard
-        task={makeTask()}
+        task={makeTask({ awaitingPlanning: false, steps: [{ name: "Implement", status: "pending" }] as any })}
         onOpenDetail={noop}
         addToast={noop}
         onOpenDetailWithTab={noop}

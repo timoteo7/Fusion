@@ -14,7 +14,7 @@ function task(overrides: Partial<Task> = {}): Task {
 function store(overrides: Partial<{ mission: Mission | undefined; milestone: Milestone | undefined; slice: Slice | undefined; feature: MissionFeature | undefined }> = {}) {
   const values = { mission, milestone, slice, feature, ...overrides };
   return {
-    getFeatureByTaskId: async () => values.feature,
+    getFeatureByTaskId: async (taskId: string) => values.feature?.taskId === taskId ? values.feature : undefined,
     getFeature: async (id: string) => id === feature.id ? values.feature : undefined,
     getSlice: async () => values.slice,
     getMilestone: async () => values.milestone,
@@ -50,6 +50,28 @@ describe("decideMissionSymbolAdmission", () => {
 
     await expect(decideMissionSymbolAdmission(followUp, store())).resolves.toEqual({
       kind: "lineage-blocked", reason: "missing-feature",
+    });
+  });
+
+  it("prefers a canonical feature link after a Decision-A follow-up is rehomed", async () => {
+    const currentSlice = { ...slice, id: "SL-2" };
+    const currentFeature = { ...feature, id: "F-2", sliceId: currentSlice.id, taskId: "FN-2" };
+    const rehomed = task({
+      id: "FN-2",
+      sliceId: currentSlice.id,
+      declaredSymbols: ["pkg/a.ts#A"],
+      sourceMetadata: { missionLineage: { missionId: mission.id, sliceId: slice.id, featureId: feature.id } },
+    });
+    const missionStore = {
+      getFeatureByTaskId: async (taskId: string) => taskId === rehomed.id ? currentFeature : undefined,
+      getFeature: async (id: string) => id === feature.id ? feature : id === currentFeature.id ? currentFeature : undefined,
+      getSlice: async (id: string) => id === currentSlice.id ? currentSlice : id === slice.id ? slice : undefined,
+      getMilestone: async () => milestone,
+      getMission: async () => mission,
+    };
+
+    await expect(decideMissionSymbolAdmission(rehomed, missionStore as never)).resolves.toMatchObject({
+      kind: "symbol-lock", feature: { id: currentFeature.id, taskId: rehomed.id },
     });
   });
 

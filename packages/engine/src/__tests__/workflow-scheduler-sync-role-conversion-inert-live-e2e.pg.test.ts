@@ -76,7 +76,7 @@ import {
   type SharedPgTaskStoreHarness,
 } from "../../../core/src/__test-utils__/pg-test-harness.js";
 
-import { resolveLifecycleColumns } from "../../../core/src/workflow-lifecycle-traits.js";
+import { resolveLifecycleColumns } from "../../../core/src/workflows/workflow-lifecycle-traits.js";
 import { DEFAULT_VOCAB, RENAMED_VOCAB, lifecycleIr, type Vocabulary } from "./_workflow-vocabulary-fixture.js";
 
 pgDescribe("sync workflow-role resolution remains inert without scheduler consumers", () => {

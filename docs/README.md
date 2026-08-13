@@ -22,6 +22,7 @@ For a full walkthrough (installation, onboarding, first task, and daily workflow
 | [Getting Started](./getting-started.md) | Installation, first-run, first task, and daily workflow basics |
 | [Dashboard Guide](./dashboard-guide.md) | Board/list views, left/right sidebar navigation, Artifacts, Import Tasks, chat, workflow selection/editor, terminal, git manager, files, planning, and UI tools |
 | [CLI Reference](./cli-reference.md) | Complete `fn` command reference with subcommands, flags, and examples |
+| [Computer Use](./computer-use.md) | `fn computer` desktop-app discovery, snapshots, actions, permissions, and JSON contract |
 | [Remote Access](./remote-access.md) | Operator runbook for Tailscale/Cloudflare setup, tokenized login links, security caveats, and troubleshooting |
 | [Native Shell Connection Guide](./native-shell.md) | Canonical mobile/desktop shell onboarding, profile management, QR/manual setup, and remote handoff behavior |
 
@@ -58,6 +59,7 @@ Planner oversight (FN-7508 → FN-7583) is fully documented in Settings Referenc
 | [Architecture](./architecture.md) | System architecture, package layout, storage model, and engine execution flow |
 | [Secrets Store (`SecretsStore`)](./architecture.md#secrets-store-secretsstore) | Core encrypted secret subsystem overview: scopes, AES-256-GCM at-rest model, policy semantics, and public store API surface |
 | [Dashboard Real-Time](./dashboard-realtime.md) | Canonical event-stream architecture contract (shared `/api/events` bus + dedicated stream boundaries), with project/node scoping, reconnect/cleanup behavior, and realtime pitfalls |
+| [Agent Activity Contract](./agent-activity-contract.md) | Canonical wire, cursor, and retention contract for the project-scoped `GET /api/agent-activity` durable activity-history API |
 | [Storage](./storage.md) | PostgreSQL runtime storage, archive, migration compatibility, and file-backed payloads |
 | [DAG Architecture Deliverables](./dag/) | Milestone A DAG architecture documents plus Milestone B prototype scaffold docs (schema migration plan, DagCoordinator design, implementation checklist) |
 | [Dev Server Module Audit](./dev-server-modules.md) | Analysis of parallel dashboard dev-server module families, production wiring, and consolidation guidance |
@@ -68,6 +70,7 @@ Planner oversight (FN-7508 → FN-7583) is fully documented in Settings Referenc
 | [Docker](./docker.md) | Container builds, deployment, and persistence configuration |
 | [Code Signing](./CODE_SIGNING.md) | macOS and Windows code signing configuration for release binaries |
 | [Diagnostics](./diagnostics.md) | Engine diagnostic logging subsystems, structured log keys, and key diagnostic points catalog |
+| [Run-Audit Catalogue](./run-audit.md) | Durable reference catalogue of delivery-pipeline run-audit events (finalization, self-healing reconciliation, durable-agent error-state) — the S4 reliability/durability/observability observability surface |
 | [Sandbox Backends](./sandbox.md) | Pluggable sandbox backends for executor command isolation (bubblewrap, spawn-based) |
 | [Secrets](./secrets.md) | Encrypted secrets storage, per-secret access policies, scopes, and agent tool wiring |
 | [Testing](./testing.md) | Full testing lanes, worker fanout guidance, test taxonomy, and file organization |
@@ -161,3 +164,5 @@ FN-7088 links previously-unlinked first-class testing and baseline docs here so 
 - **Workflow author:** Dashboard Guide → Workflow Editor → Workflow Steps → Settings Reference
 - **Power user / automation owner:** Settings Reference → Workflow Steps → Agents → Planner Oversight (Settings Reference § Workflow Settings)
 - **Maintainer / contributor:** Architecture → Multi-Project → Contributing
+
+- [Knowledge graph](knowledge-graph.md) — deterministic committable codebase structure graph.

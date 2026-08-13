@@ -20,7 +20,7 @@ import realEnApp from "../../../../../../i18n/locales/en/app.json";
  *    reason each, so a genuinely new setting cannot silently skip documentation.
  *
  * Source of truth for canonical default values: `DEFAULT_GLOBAL_SETTINGS` /
- * `DEFAULT_PROJECT_SETTINGS` / `DEFAULT_SETTINGS` in `packages/core/src/settings-schema.ts`.
+ * `DEFAULT_PROJECT_SETTINGS` / `DEFAULT_SETTINGS` in `packages/core/src/config/settings-schema.ts`.
  * See task document "plan" on FN-7505 for the full field \u2192 default \u2192 i18n-key table.
  */
 
@@ -44,7 +44,7 @@ const DEFAULT_INDICATOR_RE = /default|inherits|unset/i;
  * FN-7505 code review caught GlobalGeneralSection/GeneralSection/MergeSection stating
  * `gitlabEnabled` defaults to "enabled" and GlobalModelsSection stating
  * `openrouterAppAttribution` defaults to a literal URL/title, when both are actually
- * `undefined` in DEFAULT_GLOBAL_SETTINGS/DEFAULT_PROJECT_SETTINGS (settings-schema.ts).
+ * `undefined` in DEFAULT_GLOBAL_SETTINGS/DEFAULT_PROJECT_SETTINGS (`packages/core/src/config/settings-schema.ts`).
  * A generic "mentions the word default" check cannot catch a WRONG default value, only
  * a missing one. `resolveCanonicalDefault` + the checks in the third `it()` below assert
  * the description's stated default agrees with the actual schema default for every mapped
@@ -67,6 +67,8 @@ function resolveCanonicalDefault(settingKey: string): unknown {
  * English description states that setting's default value.
  */
 const SETTING_DESCRIPTION_KEYS: Record<string, string> = {
+  githubNativeAutoMerge: "merge.githubNativeAutoMergeHelp",
+  requiredChecks: "merge.requiredChecksHelp",
   // AuthenticationSection — Anthropic dual-credential precedence (default api-key)
   anthropicAuthPreference: "auth.anthropicPreferenceHint",
   // GlobalGeneralSection
@@ -139,6 +141,7 @@ const SETTING_DESCRIPTION_KEYS: Record<string, string> = {
    */
   agentClarificationEnabled: "notifications.agentClarificationHint",
   failureNotificationDelayMs: "notifications.howLongAFailureMustPersistBeforeA",
+  wedgeNotificationSettleMs: "notifications.wedgeNotificationSettleMsHelp",
   failureNotificationMode: "notifications.stickyFailuresOnlyDefault",
   ntfyEnabled: "notifications.ntfyEnabledHint",
   ntfyTopic: "notifications.yourNtfyShTopicName164Alphanumeric",
@@ -290,6 +293,7 @@ const SETTING_DESCRIPTION_KEYS: Record<string, string> = {
   quickChatCloseOnOutsideClick: "general.quickChatCloseOnOutsideClickHint",
   showTaskChatsInCommonFeed: "general.showTaskChatsInCommonFeedHint",
   taskPrefix: "general.prefixForNewTaskIDsEGKB",
+  maxRecommendationsPerTask: "general.maxRecommendationsPerTaskHelp",
   workspaceMode: "general.workspaceModeHint",
   defaultWorkflowId: "general.newTasksInheritThisCustomWorkflowsStepsOverridable",
   enabledBuiltinWorkflowIds: "general.disabledFusionWorkflowsAreHiddenFromWorkflow",
@@ -336,7 +340,7 @@ const NOT_SURFACED_ALLOWLIST: Record<string, string> = {
   nested enabled flag rather than a top-level plain description field.
   */
   voiceInput: "nested Voice Input section object; enable toggle owns Default: off for voiceInput.enabled",
-  // Moved to workflow settings (U4) — see MOVED_SETTINGS_KEYS in settings-schema.ts.
+  // Moved to workflow settings (U4) — see MOVED_SETTINGS_KEYS in `packages/core/src/config/settings-schema.ts`.
   workflowStepTimeoutMs: "moved to workflow settings (U4)",
   workflowStepScopeEnforcement: "moved to workflow settings (U4)",
   planOnlyScopeLeakEnforcement: "moved to workflow settings (U4)",
@@ -382,6 +386,15 @@ const NOT_SURFACED_ALLOWLIST: Record<string, string> = {
   importTranslateCredentialInstanceId: "inline companion for the project import-translate model picker; unset inherits the provider default",
   mergerCredentialInstanceId: "inline companion for the project merger model picker; unset inherits the provider default",
   mergerFallbackCredentialInstanceId: "inline companion for the project merger fallback model picker; unset inherits the provider default",
+
+  /*
+  FNXC:SettingsDefaults 2026-08-12-01:00:
+  FN-8993 classifies this CLI/engine-owned graph output path as not surfaced: it has
+  zero dashboard render sites and i18n keys, while only `fn knowledge-graph build`
+  and the memory-consolidation tick consume it. Operators can find its default in
+  docs/settings-reference.md and docs/knowledge-graph.md rather than a Settings field.
+  */
+  knowledgeGraphDir: "CLI/engine-owned knowledge-graph output directory (fn knowledge-graph build --dir); no Settings UI field renders it",
 
   // Internal/engine bookkeeping, session state, or reliability telemetry — not
   // rendered as a plain user-facing description field anywhere in Settings.
@@ -653,6 +666,30 @@ describe("FN-7505 settings default-value description guard", () => {
       unaccounted,
       `Settings keys with no default-value description mapping and no allowlist reason:\n${unaccounted.join("\n")}`,
     ).toEqual([]);
+  });
+
+  /*
+  FNXC:SettingsDefaults 2026-08-12-01:00:
+  FN-8993 prevents knowledgeGraphDir from silently returning to the unaccounted-default
+  census failure. The CLI/engine-owned path belongs only in the not-surfaced allowlist.
+  */
+  it("pins FN-8993 knowledgeGraphDir as an allowlisted, non-Settings field", () => {
+    expect(
+      DEFAULT_SETTINGS,
+      "FN-8993 requires knowledgeGraphDir to remain a DEFAULT_SETTINGS key",
+    ).toHaveProperty("knowledgeGraphDir");
+    expect(
+      NOT_SURFACED_ALLOWLIST.knowledgeGraphDir,
+      "FN-8993 requires knowledgeGraphDir's non-empty not-surfaced allowlist reason",
+    ).toEqual(expect.any(String));
+    expect(
+      NOT_SURFACED_ALLOWLIST.knowledgeGraphDir,
+      "FN-8993 requires a non-empty knowledgeGraphDir allowlist reason",
+    ).not.toBe("");
+    expect(
+      SETTING_DESCRIPTION_KEYS,
+      "FN-8993 requires knowledgeGraphDir to stay out of SETTING_DESCRIPTION_KEYS",
+    ).not.toHaveProperty("knowledgeGraphDir");
   });
 
   it("does not allowlist a key that is also mapped to a description (would mask real coverage gaps)", () => {

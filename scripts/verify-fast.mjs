@@ -31,6 +31,7 @@ would, instead of reinventing git-diff. Each step is bounded by the existing
 of blocking forever, and we exit nonzero on the first failing step.
 */
 
+import os from "node:os";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -92,6 +93,34 @@ policy and skips them with a note rather than failing on an unbuildable filter.
 export const VERIFY_EXCLUDED_PACKAGES = new Set(["@fusion/desktop", "@fusion/mobile"]);
 export const BOOT_SMOKE_REQUIRED_BUILD_PACKAGES = ["@runfusion/fusion"];
 
+/*
+FNXC:TestInfrastructure 2026-08-11-09:38:
+verify:fast ran every step strictly serially, so its wall clock was the SUM of steps
+that have no ordering relationship. Two groups are independent and now run
+concurrently, bounded per group:
+
+  - static checks: ~10 read-only validators, each dominated by node startup rather
+    than work (~5.4s serial on this repo, ~1.6s grouped).
+  - typechecks: one per changed package, `--noEmit` or the package's own script, so
+    no two can collide on an output. This is the dominant cost of a multi-package
+    run — dashboard + engine alone were ~65s of a 96.6s run.
+
+Ordering that MATTERS is preserved: bootstrap, builds, and boot smoke stay serial and
+in plan order (builds consume bootstrap output; the smoke must run against freshly
+built artifacts). Only steps sharing a `parallelGroup` overlap, and a group is a
+barrier — the next step never starts before every member settles.
+
+Limits are conservative on purpose: typechecks are memory-hungry (tsc over this
+workspace), so oversubscribing trades wall clock for swap. Set FUSION_VERIFY_FAST_SERIAL=1
+to force the old fully-serial behavior when interleaved child output makes a failure
+hard to read.
+*/
+const cpuCount = (() => {
+  try { return Math.max(1, os.cpus()?.length ?? 1); } catch { return 1; }
+})();
+export const STATIC_CHECK_PARALLEL_LIMIT = Math.max(2, Math.min(8, cpuCount - 1));
+export const TYPECHECK_PARALLEL_LIMIT = Math.max(1, Math.min(4, Math.floor(cpuCount / 2)));
+
 /**
  * Build the scoped typecheck step for a package. Prefers the package's own
  * `typecheck` script (e.g. dashboard runs two tsc passes); falls back to a plain
@@ -105,7 +134,11 @@ export function buildTypecheckStep(pkg, meta = {}) {
   const args = meta.hasTypecheck
     ? ["--filter", pkg, "typecheck"]
     : ["--filter", pkg, "exec", "tsc", "--noEmit", "-p", "."];
-  return { id: `typecheck:${pkg}`, kind: "typecheck", pkg, label: `typecheck ${pkg}`, command: "pnpm", args, klass: "changed" };
+  /* Typechecks are per-package and emit nothing (`--noEmit`, or the package's own
+     script writing only its own tsbuildinfo), so sibling packages cannot collide.
+     They are the dominant cost of a multi-package run — grouping them lets the wall
+     clock be the slowest package rather than their sum. */
+  return { id: `typecheck:${pkg}`, kind: "typecheck", pkg, label: `typecheck ${pkg}`, command: "pnpm", args, klass: "changed", parallelGroup: "typecheck", parallelLimit: TYPECHECK_PARALLEL_LIMIT };
 }
 
 /**
@@ -174,6 +207,11 @@ export function buildStaticCheckStep(checkScript, root = repoRoot, nodeBin = pro
     command: nodeBin,
     args: [path.join(root, checkScript)],
     klass: "changed",
+    /* Canonical static checks are read-only repo validators with no shared writable
+       state, so they are safe to run concurrently. Each costs more in node startup
+       than in work, which is exactly the shape that wastes wall clock run serially. */
+    parallelGroup: "static-checks",
+    parallelLimit: STATIC_CHECK_PARALLEL_LIMIT,
   };
 }
 
@@ -332,10 +370,69 @@ export async function runStep(step, { spawnFn = spawn, log = console.log, errLog
   log(`[verify:fast]    OK ${step.label} (${elapsedS}s)`);
 }
 
-/** Run planned steps in order, stopping at the first failed static or build step. */
-export async function runVerifyPlan(steps, { run = runStep } = {}) {
+/**
+ * Split a plan into consecutive runs of steps sharing a `parallelGroup`. Steps with
+ * no group (or when serial mode is forced) each become their own single-step batch,
+ * which is what keeps bootstrap → build → boot-smoke ordering intact.
+ *
+ * Grouping is CONSECUTIVE-only: two separated blocks with the same group name stay
+ * separate batches, so a planner reordering can never silently hoist a step across
+ * an intervening serial dependency.
+ *
+ * @param {object[]} steps
+ * @param {boolean} [serial]
+ * @returns {{ group: string|null, limit: number, steps: object[] }[]}
+ */
+export function batchVerifySteps(steps, serial = false) {
+  const batches = [];
   for (const step of steps) {
-    await run(step);
+    const group = serial ? null : step.parallelGroup ?? null;
+    const previous = batches[batches.length - 1];
+    if (group && previous && previous.group === group) {
+      previous.steps.push(step);
+      previous.limit = Math.min(previous.limit, step.parallelLimit ?? previous.limit);
+      continue;
+    }
+    batches.push({ group, limit: group ? step.parallelLimit ?? 1 : 1, steps: [step] });
+  }
+  return batches;
+}
+
+/**
+ * Run planned steps, stopping at the first failure. Steps sharing a `parallelGroup`
+ * run concurrently under that group's limit; every other step runs alone and in order.
+ *
+ * A failing group still awaits its in-flight siblings before throwing — killing them
+ * mid-flight would leave partial tsbuildinfo/dist state behind — and reports the
+ * FIRST failure in plan order so the message is stable regardless of which sibling
+ * happened to lose the race.
+ */
+export async function runVerifyPlan(steps, { run = runStep, serial = process.env.FUSION_VERIFY_FAST_SERIAL === "1" } = {}) {
+  for (const batch of batchVerifySteps(steps, serial)) {
+    if (batch.steps.length === 1) {
+      await run(batch.steps[0]);
+      continue;
+    }
+
+    const failures = new Array(batch.steps.length).fill(null);
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const index = next++;
+        if (index >= batch.steps.length) return;
+        try {
+          await run(batch.steps[index]);
+        } catch (error) {
+          failures[index] = error;
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.max(1, Math.min(batch.limit, batch.steps.length)) }, worker),
+    );
+
+    const firstFailure = failures.find(Boolean);
+    if (firstFailure) throw firstFailure;
   }
 }
 

@@ -18,6 +18,22 @@ function getMissionMobileSection(css: string): string {
 }
 
 describe("MissionManager mobile styles", () => {
+  it("keeps repair controls touch-sized on feature and generated-fix surfaces", () => {
+    const section = getMissionMobileSection(loadAllAppCss());
+    expect(section).toContain(".mission-feature__actions .mission-icon-btn,");
+    expect(section).toContain(".mission-fix-feature__actions .mission-icon-btn");
+    expect(section).toContain("min-width: 36px;");
+    expect(section).toContain("min-height: 36px;");
+  });
+
+  it("keeps reconcile preview controls touch-sized", () => {
+    const section = getMissionMobileSection(loadAllAppCss());
+    expect(section).toContain('.mission-detail__run-controls > [data-testid="mission-reconcile-now"]');
+    expect(section).toContain(".mission-detail__reconcile-actions .mission-btn");
+    expect(section).toContain("min-width: 36px;");
+    expect(section).toContain("min-height: 36px;");
+  });
+
   it("adds responsive tab and activity layout rules", () => {
     const css = loadAllAppCss();
     const section = getMissionMobileSection(css);
@@ -242,5 +258,13 @@ describe("Mission view overscroll containment", () => {
 
     expect(bodyRule).toContain("-webkit-overflow-scrolling: touch;");
     expect(eventsRule).toContain("-webkit-overflow-scrolling: touch;");
+  });
+});
+
+describe("MissionManager blocked repair mobile styles", () => {
+  it("keeps the blocked diagnostics usable in stacked layout", () => {
+    const css = loadAllAppCss();
+    expect(css).toContain(".mission-manager__body--stacked .mission-blocked-repair");
+    expect(css).toContain("inline-size: 100%;");
   });
 });

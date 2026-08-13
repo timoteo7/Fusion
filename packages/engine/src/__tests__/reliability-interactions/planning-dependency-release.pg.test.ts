@@ -23,6 +23,7 @@ import {
 import { getPromptPath } from "../../execution/spec-staleness.js";
 import { promoteHeldTask, runHoldReleaseSweep } from "../../execution/hold-release.js";
 import { SelfHealingManager } from "../../self-healing.js";
+import { TriageProcessor } from "../../triage.js";
 
 const h: SharedPgTaskStoreHarness = createSharedPgTaskStoreTestHarness({
   prefix: "fusion_planning_dependency_release",
@@ -77,6 +78,58 @@ pgDescribe("FN-8768 planning dependency release interactions", () => {
     store.taskCache.delete(id);
     return store.getTask(id);
   }
+
+  it("finalizes a persisted plan without reacquiring its PostgreSQL lifecycle lock", async () => {
+    const store = h.store();
+    const taskId = "FN-8998-PG";
+    const prompt = [
+      `# ${taskId}: Planning lifecycle lock regression`,
+      "",
+      "## Mission",
+      "",
+      "Finalize a persisted plan while the task planning lifecycle lock is held.",
+      "",
+      "## Steps",
+      "",
+      "### Step 1: Implement",
+      "- [ ] Preserve the single-lock finalization invariant.",
+      "",
+    ].join("\n");
+
+    await store.updateSettings({ planApprovalMode: "auto-approve-all" });
+    await store.createTaskWithReservedId(
+      { description: "Planning lifecycle lock regression", column: "todo" },
+      { taskId, applyDefaultWorkflowSteps: true },
+    );
+    const promptPath = getPromptPath(store.getTasksDir(), taskId);
+    mkdirSync(dirname(promptPath), { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+    await store.updateTask(taskId, { status: "planning", steps: [] });
+    store.taskCache.delete(taskId);
+
+    const task = await store.getTask(taskId);
+    await expect(
+      new TriageProcessor(store, h.rootDir()).recoverApprovedTask(task),
+    ).resolves.toBe(true);
+
+    store.taskCache.delete(taskId);
+    const released = await store.getTask(taskId);
+    const currentPlan = await store.getLatestCurrentPlanEvidence(taskId);
+    const latestLock = await store.getLatestSpecLock(taskId);
+
+    expect(released.column).toBe("todo");
+    expect(released.status).toBeUndefined();
+    expect(released.approvedPlanFingerprint).toEqual(expect.any(String));
+    expect(currentPlan).toMatchObject({
+      plan: { status: "available", contentHash: expect.any(String) },
+    });
+    expect(latestLock).toMatchObject({
+      approvalFingerprint: released.approvedPlanFingerprint,
+      currentPlanVersion: currentPlan?.version,
+      currentPlanHash: currentPlan?.plan.contentHash,
+    });
+    await expect(store.getActiveSpecLock(taskId)).resolves.toEqual(latestLock);
+  });
 
   it.each([
     {

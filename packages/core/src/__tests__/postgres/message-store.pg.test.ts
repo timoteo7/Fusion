@@ -74,6 +74,40 @@ pgTest("MessageStore send (PostgreSQL backend mode)", () => {
     expect((await store.getMessage(msg.id))?.content).toBe("hi user");
   });
 
+  it("archives correspondence by default and restores it on unarchive", async () => {
+    const { MessageStore } = await import("../../stores/message-store.js");
+    const store = new MessageStore(null, { asyncLayer: h.layer() });
+    const message = await store.sendMessage({
+      fromId: "agent-a",
+      fromType: "agent",
+      toId: "agent-b",
+      toType: "agent",
+      content: "retain this correspondence",
+      type: "agent-to-agent",
+    });
+
+    await expect(store.archiveMessage(message.id)).resolves.toMatchObject({ id: message.id, archived: true });
+    expect((await store.getInbox("agent-b", "agent")).map(({ id }) => id)).not.toContain(message.id);
+    expect((await store.getOutbox("agent-a", "agent")).map(({ id }) => id)).not.toContain(message.id);
+    expect((await store.getConversation({ id: "agent-a", type: "agent" }, { id: "agent-b", type: "agent" })).map(({ id }) => id)).not.toContain(message.id);
+    expect((await store.getAllAgentToAgentMessages()).map(({ id }) => id)).not.toContain(message.id);
+    expect((await store.getMailbox("agent-b", "agent")).unreadCount).toBe(0);
+    expect((await store.getInbox("agent-b", "agent", { archived: true })).map(({ id }) => id)).toContain(message.id);
+
+    await expect(store.unarchiveMessage(message.id)).resolves.toMatchObject({ id: message.id, archived: false });
+    expect((await store.getInbox("agent-b", "agent")).map(({ id }) => id)).toContain(message.id);
+    await expect(store.archiveMessage("missing-message")).rejects.toThrow("Message missing-message not found");
+  });
+
+  it("treats legacy NULL archive values as active correspondence", async () => {
+    const { MessageStore } = await import("../../stores/message-store.js");
+    const store = new MessageStore(null, { asyncLayer: h.layer() });
+    const id = "legacy-null-archive";
+    await h.adminSql()`INSERT INTO project.messages (project_id, id, from_id, from_type, to_id, to_type, content, type, read, archived, created_at, updated_at)
+      VALUES ('', ${id}, 'agent-a', 'agent', 'agent-b', 'agent', 'legacy', 'agent-to-agent', 0, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
+    expect((await store.getInbox("agent-b", "agent")).map(({ id: messageId }) => messageId)).toContain(id);
+  });
+
   it("round-trips native structure embeds through mailbox metadata", async () => {
     const { MessageStore } = await import("../../stores/message-store.js");
     const store = new MessageStore(null, { asyncLayer: h.layer() });

@@ -19,7 +19,8 @@ import {randomUUID} from "node:crypto";
 import {mkdir, readFile, writeFile, rename, unlink} from "node:fs/promises";
 import {join} from "node:path";
 import {existsSync} from "node:fs";
-import type {Task, TaskCreateInput, TaskAttachment, BoardConfig, ActivityLogEntry, ActivityEventType, Artifact, ArtifactCreateInput, RunMutationContext, MergeQueueEntry, BranchGroup, BranchGroupUpdate, CompletionHandoffMarker, WorkflowWorkItem, WorkflowWorkItemKind, PrEntity, PrEntityUpdate} from "../types.js";
+import type {Task, TaskCreateInput, TaskAttachment, BoardConfig, ActivityLogEntry, ActivityEventType, Artifact, ArtifactCreateInput, RunMutationContext, MergeQueueEntry, BranchGroup, BranchGroupUpdate, CompletionHandoffMarker, WorkflowWorkItem, WorkflowWorkItemKind, PrEntity, PrEntityUpdate, TaskRecommendation} from "../types.js";
+import { CONFIG_CHANGED_BY_SYSTEM } from "../types.js";
 import {validateSettingValuePatch, WorkflowSettingRejectionError} from "../workflows/workflow-settings.js";
 import "../builtin-traits.js";
 import {toJson} from "../db/db.js";
@@ -31,18 +32,21 @@ import {readTaskRow as readTaskRowAsync, readTaskRowInTransaction, resolveActive
 import {upsertArchivedTaskEntry} from "./async/async-archive-lineage.js";
 import {purgeTaskWorkflowSelectionRowsAsyncImpl} from "./workflow-definitions.js";
 import * as schema from "../postgres/schema/index.js";
-import {and, asc, eq, isNotNull, isNull, sql} from "drizzle-orm";
+import {and, asc, eq, inArray, isNotNull, isNull, sql} from "drizzle-orm";
 import {recoverExpiredMergeQueueLeases as recoverExpiredMergeQueueLeasesAsync} from "../task-store/async/async-merge-coordination.js";
 import {updateBranchGroup as updateBranchGroupAsync, updatePrEntity as updatePrEntityAsync} from "../task-store/async/async-branch-groups.js";
 import {recordCompletionHandoff as recordCompletionHandoffAsync, getCompletionHandoffMarker as getCompletionHandoffMarkerAsync} from "../task-store/async/async-workflow-workitems.js";
-import { taskProjectScope } from "../postgres/data-layer.js";
+import { projectScopeFor, taskProjectScope } from "../postgres/data-layer.js";
+import type { AsyncDataLayer, DbTransaction } from "../postgres/data-layer.js";
 import {getActivityLog as getActivityLogAsync} from "../task-store/async/async-audit.js";
 import {insertArtifactRow as insertArtifactRowAsync} from "../task-store/async/async-comments-attachments.js";
 import {appendConfigurationRevision, createConfigurationRevision, getConfigurationRevision, rollbackConfiguration} from "../async-stores/async-configuration-revision-store.js";
 import {readProjectConfig, writeProjectConfig} from "./async/async-settings.js";
 import {publishSettingsUpdated} from "./settings-ops.js";
+import { mergeRestoredProjectSettings } from "../config/settings-schema.js";
 import type {ConfigChangedBy, ConfigurationRevision} from "../types.js";
 import { resolveArchivedLanes } from "../project-lane-vocabulary.js";
+import { acquireTaskAdvisoryXactLock } from "./task-advisory-lock.js";
 
 export function getTaskSelectClauseWithActivityLogLimitImpl(store: TaskStore, limit: number): string {
     const columns = [
@@ -193,7 +197,7 @@ export async function _maybeAutoArchiveSameAgentDuplicateBackendImpl(store: Task
 
 export async function updateBranchGroupImpl(store: TaskStore, id: string, patch: BranchGroupUpdate): Promise<BranchGroup> {
         const layer = store.asyncLayer!;
-    return updateBranchGroupAsync(layer.db, id, patch);
+    return updateBranchGroupAsync(layer.db, id, patch, layer.projectId);
 }
 
 export async function updatePrEntityImpl(store: TaskStore, id: string, patch: PrEntityUpdate): Promise<PrEntity> {
@@ -374,6 +378,79 @@ export async function updateTaskAtomicImpl(store: TaskStore, id: string, updater
     });
   }
 
+/**
+ * FNXC:TaskRecommendations 2026-08-08-06:52:
+ * A recommendation link is a read-modify-write of one JSONB parent field. Dashboard processes
+ * share PostgreSQL, not an in-memory route mutex, so acquire the task advisory transaction lock
+ * before re-reading and changing the row. This makes distinct recommendation links converge
+ * without losing a sibling link, while the proposal claim unique index remains the child
+ * creation at-most-once authority.
+ *
+ * FNXC:TaskRecommendations 2026-08-08-07:06:
+ * A parent can reopen after route intake creates its child. Recheck the route-resolved complete
+ * columns under this same advisory lock before writing the link, so an obsolete completion cannot
+ * make an active parent display a Created recommendation.
+ */
+export async function linkTaskRecommendationImpl(
+  store: TaskStore,
+  id: string,
+  recommendationId: string,
+  createdTaskId: string,
+  completeColumns?: ReadonlySet<string>,
+): Promise<Task> {
+  return store.withTaskLock(id, async () => {
+    const layer = store.asyncLayer!;
+    const updated = await layer.transactionImmediate(async (tx) => {
+      await acquireTaskAdvisoryXactLock(tx, layer.projectId, id);
+      const row = await readTaskRowInTransaction(tx, id, { includeDeleted: true }, layer.projectId);
+      if (!row) throw new TaskNotFoundError(id);
+      if (row.deletedAt) throw new TaskDeletedError(id, row.deletedAt as string);
+
+      const current = store.rowToTask(store.pgRowToTaskRow(row));
+      if (completeColumns && !completeColumns.has(current.column)) {
+        throw new Error("Recommendations are available only on completed tasks");
+      }
+      const index = current.recommendations?.findIndex((item) => item.id === recommendationId) ?? -1;
+      if (index < 0) throw new Error("Recommendation no longer exists");
+      const recommendation = current.recommendations![index]!;
+      if (recommendation.createdTaskId && recommendation.createdTaskId !== createdTaskId) {
+        throw new Error("Recommendation is already linked to another task");
+      }
+      if (recommendation.createdTaskId === createdTaskId) return current;
+
+      const recommendations: TaskRecommendation[] = current.recommendations!.map((item) =>
+        item.id === recommendationId ? { ...item, createdTaskId } : item,
+      );
+      const updatedAt = new Date().toISOString();
+      /*
+      FNXC:TaskRecommendations 2026-08-08-07:15:
+      Lifecycle moves do not share this recommendation advisory lock. Keep the completed-lane
+      predicate in the UPDATE itself so PostgreSQL's row-level CAS rejects a parent reopened after
+      our read but before this JSONB link write.
+      */
+      const [updatedRow] = await tx
+        .update(schema.project.tasks)
+        .set({ recommendations, updatedAt })
+        .where(and(
+          eq(schema.project.tasks.id, id),
+          taskProjectScope(layer),
+          ...(completeColumns ? [inArray(schema.project.tasks.column, [...completeColumns])] : []),
+        ))
+        .returning();
+      if (!updatedRow) {
+        if (completeColumns) throw new Error("Recommendations are available only on completed tasks");
+        throw new TaskNotFoundError(id);
+      }
+      return store.rowToTask(store.pgRowToTaskRow(updatedRow));
+    });
+
+    await store.writeTaskJsonFile(store.taskDir(id), updated);
+    if (store.isWatching) store.taskCache.set(id, { ...updated });
+    store.emitTaskLifecycleEventSafely("task:updated", [updated]);
+    return updated;
+  });
+}
+
 /*
 FNXC:TaskWedgeNotifications 2026-08-01-15:35:
 Resolution changes only the active episode status. The PostgreSQL compare-and-set
@@ -449,7 +526,7 @@ export function getWorkflowPromptOverridesImpl(_store: TaskStore, _workflowId: s
         return {};
 }
 
-export async function updateWorkflowSettingValuesImpl(store: TaskStore, workflowId: string, projectId: string, patch: Record<string, unknown>, changedBy: ConfigChangedBy = { kind: "human", id: "local-user" },): Promise<Record<string, unknown>> {
+export async function updateWorkflowSettingValuesImpl(store: TaskStore, workflowId: string, projectId: string, patch: Record<string, unknown>, changedBy: ConfigChangedBy = CONFIG_CHANGED_BY_SYSTEM,): Promise<Record<string, unknown>> {
     /*
     FNXC:ConfigVersioning 2026-07-18-19:10:
     Workflow values are rollbackable only with the PostgreSQL target mutation
@@ -543,7 +620,21 @@ export async function updateWorkflowSettingValuesImpl(store: TaskStore, workflow
     return committed.next;
 }
 
-export async function rollbackConfigurationImpl(store: TaskStore, revisionId: string, changedBy: ConfigChangedBy = {kind: "human", id: "local-user"}): Promise<ConfigurationRevision> {
+/*
+FNXC:ConfigVersioning 2026-08-09-04:09:
+Exact project restores must retain the live heartbeat: new snapshots omit it while legacy snapshots can carry stale values that fabricate downtime. Extraction makes the same-transaction restore contract directly testable.
+*/
+export function createProjectSettingsRollbackSnapshotOps(layer: AsyncDataLayer, tx: DbTransaction) {
+  return {
+    readCurrent: async () => (await readProjectConfig(layer, tx)).settings ?? {},
+    replace: async (snapshot: unknown) => {
+      const live = (await readProjectConfig(layer, tx)).settings ?? {};
+      await writeProjectConfig(layer, mergeRestoredProjectSettings(snapshot as Record<string, unknown>, live), undefined, tx);
+    },
+  };
+}
+
+export async function rollbackConfigurationImpl(store: TaskStore, revisionId: string, changedBy: ConfigChangedBy = CONFIG_CHANGED_BY_SYSTEM): Promise<ConfigurationRevision> {
   if (!store.backendMode) throw new Error("Configuration rollback requires the PostgreSQL revision store");
   const layer = store.asyncLayer!;
   // First resolve project ownership without a bypass. The selected snapshot and
@@ -562,9 +653,11 @@ export async function rollbackConfigurationImpl(store: TaskStore, revisionId: st
     /* FNXC:ConfigVersioning 2026-07-18-02:00: read both the selected revision and current config via tx so rollback's forward `before` snapshot cannot race a concurrent settings write. */
     const revision = await getConfigurationRevision(tx, layer.projectId ?? "", revisionId);
     if (!revision) throw new Error(`Configuration revision ${revisionId} was not found`);
+    if (revision.configKind === "project-settings") {
+      return rollbackConfiguration(tx, layer.projectId ?? "", revisionId, changedBy, createProjectSettingsRollbackSnapshotOps(layer, tx));
+    }
     return rollbackConfiguration(tx, layer.projectId ?? "", revisionId, changedBy, {
     readCurrent: async () => {
-      if (revision.configKind === "project-settings") return (await readProjectConfig(layer, tx)).settings ?? {};
       if (revision.configKind === "workflow-settings") {
         const workflowId = String(revision.configTarget.workflowId);
         const projectId = String(revision.configTarget.projectId);
@@ -574,10 +667,6 @@ export async function rollbackConfigurationImpl(store: TaskStore, revisionId: st
       throw new Error(`Configuration revision ${revisionId} belongs to ${revision.configKind}; use its resource store rollback API`);
     },
     replace: async (snapshot) => {
-      if (revision.configKind === "project-settings") {
-        await writeProjectConfig(layer, snapshot as Record<string, unknown>, undefined, tx);
-        return;
-      }
       if (revision.configKind === "workflow-settings") {
         const workflowId = String(revision.configTarget.workflowId);
         const projectId = String(revision.configTarget.projectId);
@@ -893,7 +982,10 @@ async function deleteAttachmentArtifactRows(store: TaskStore, taskId: string, fi
       .map((artifact) => artifact.id);
     if (linkedArtifactIds.length === 0) return;
     for (const artifactId of linkedArtifactIds) {
-      await layer.db.delete(schema.project.artifacts).where(eq(schema.project.artifacts.id, artifactId));
+      await layer.db.delete(schema.project.artifacts).where(and(
+        eq(schema.project.artifacts.id, artifactId),
+        projectScopeFor(schema.project.artifacts.projectId, layer.projectId),
+      ));
     }
     return;
 }
@@ -905,7 +997,10 @@ async function getArtifactsForAttachmentCleanup(store: TaskStore, taskId: string
     const rows = await layer.db
       .select()
       .from(schema.project.artifacts)
-      .where(eq(schema.project.artifacts.taskId, taskId));
+      .where(and(
+        eq(schema.project.artifacts.taskId, taskId),
+        projectScopeFor(schema.project.artifacts.projectId, layer.projectId),
+      ));
     return rows as unknown as Artifact[];
 }
 

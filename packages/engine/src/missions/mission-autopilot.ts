@@ -22,6 +22,7 @@
 import { AsyncMissionStore, resolveTaskLifecycleColumns } from "@fusion/core";
 /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage B): mutation-context constructors for this lane. */
 import { mutationContextForAgent } from "@fusion/core";
+import { reconcileMissionState } from "./mission-state-reconcile.js";
 import type {
   TaskStore,
   MissionStore,
@@ -51,9 +52,7 @@ import type {
  */
 type AutopilotMissionStore = MissionStore | AsyncMissionStore;
 import { autopilotLog } from "../logger.js";
-import { reconcileMissionFeatureState } from "./mission-feature-sync.js";
 import { isOperatorActionableAgentError } from "../errors/transient-error-detector.js";
-import { resolvePlannerLanesForTask } from "../planner-lane-resolution.js";
 
 /** Maximum retry attempts for slice activation failures. */
 const MAX_RETRY_ATTEMPTS = 3;
@@ -712,26 +711,22 @@ export class MissionAutopilot {
       const activeSlices = refreshedMission.milestones.flatMap((milestone) => milestone.slices)
         .filter((slice) => slice.status === "active");
 
+      // The scheduler admission boundary treats every active slice as a lease.
+      // Recovery may reconcile completed leases, but one completed-looking lease
+      // must never bypass another active slice.
+      const allActiveSlicesComplete = activeSlices.length > 0 && activeSlices.every((slice) =>
+        slice.features.length > 0 && slice.features.every((feature) => feature.status === "done"),
+      );
+      if (allActiveSlicesComplete) {
+        await Promise.all(activeSlices.map((slice) => this.missionStore.updateSlice(slice.id, { status: "complete" })));
+      }
+      // A stale snapshot may still show the slices as active after the status
+      // reconciliation above; only the all-complete case releases that lease.
+      const hasActiveSlice = activeSlices.length > 0 && !allActiveSlicesComplete;
       let advanced = false;
-
-      if (activeSlices.length > 0) {
-        const hasCompletedActiveSlice = activeSlices.some((slice) =>
-          slice.features.length > 0 && slice.features.every((feature) => feature.status === "done"),
-        );
-
-        if (hasCompletedActiveSlice) {
-          await this.advanceToNextSlice(missionId);
-          advanced = true;
-        }
-      } else {
-        const hasPendingSlice = refreshedMission.milestones.some((milestone) =>
-          milestone.slices.some((slice) => slice.status === "pending"),
-        );
-
-        if (hasPendingSlice) {
-          await this.advanceToNextSlice(missionId);
-          advanced = true;
-        }
+      if (!hasActiveSlice) {
+        await this.advanceToNextSlice(missionId);
+        advanced = true;
       }
 
       await this.logMissionEventSafe(
@@ -852,12 +847,18 @@ export class MissionAutopilot {
           continue;
         }
 
-        const hasCompletedActiveSlice = refreshedHierarchy.milestones
+        const activeSlices = refreshedHierarchy.milestones
           .flatMap((milestone) => milestone.slices)
-          .filter((slice) => slice.status === "active")
-          .some((slice) => slice.features.length > 0 && slice.features.every((feature) => feature.status === "done"));
-
-        if (hasCompletedActiveSlice) {
+          .filter((slice) => slice.status === "active");
+        const allActiveSlicesComplete = activeSlices.length > 0 && activeSlices.every((slice) =>
+          slice.features.length > 0 && slice.features.every((feature) => feature.status === "done"),
+        );
+        if (allActiveSlicesComplete) {
+          // Reconcile every finished lease before asking the shared admission
+          // boundary for the next serial slice.
+          await Promise.all(activeSlices.map((slice) => this.missionStore.updateSlice(slice.id, { status: "complete" })));
+        }
+        if (activeSlices.length === 0 || allActiveSlicesComplete) {
           await this.advanceToNextSlice(mission.id);
         }
       }
@@ -910,90 +911,22 @@ export class MissionAutopilot {
   private async reconcileMissionConsistency(
     mission: MissionWithHierarchy,
   ): Promise<number> {
-    if (!mission) {
-      return 0;
+    if (!mission) return 0;
+    const completeSlices = mission.milestones.flatMap((milestone) => milestone.slices).filter((slice) => slice.status === "complete");
+    if (completeSlices.some((slice) => slice.features.some((feature) => feature.status !== "done"))) {
+      await this.recomputeMissionStatusChain(mission.id);
+      return 1;
     }
-
-    const activeSlices = mission.milestones
-      .flatMap((milestone) => milestone.slices)
-      .filter((slice) => slice.status === "active");
-
-    const completeSlices = mission.milestones
-      .flatMap((milestone) => milestone.slices)
-      .filter((slice) => slice.status === "complete");
-
-    // Process complete slices: check for stale "defined" features.
-    // Features with status "defined" should never exist in a "complete" slice.
-    // If found, recompute the status chain to fix the stale state.
-    if (completeSlices.length > 0) {
-      for (const slice of completeSlices) {
-        const definedFeatures = slice.features.filter((f) => f.status !== "done");
-        if (definedFeatures.length > 0) {
-          autopilotLog.warn(
-            `Slice ${slice.id} is marked complete but has ${definedFeatures.length} feature(s) not done; recomputing status chain`,
-            {
-              missionId: mission.id,
-              sliceId: slice.id,
-              definedFeatureIds: definedFeatures.map((f) => f.id),
-            },
-          );
-          await this.logMissionEventSafe(
-            mission.id,
-            "error",
-            `Slice ${slice.id} has stale "complete" status (${definedFeatures.length} feature(s) not done); recomputing status chain`,
-            { source: "reconcileMissionConsistency" },
-          );
-          await this.recomputeMissionStatusChain(mission.id);
-          // One recompute is sufficient for all complete slices; break after first hit
-          return 1;
-        }
-      }
+    const result = await reconcileMissionState({ taskStore: this.taskStore, missionStore: this.missionStore }, {
+      missionId: mission.id,
+      source: "autopilot",
+    });
+    for (const feature of mission.milestones.flatMap((milestone) => milestone.slices).flatMap((slice) => slice.features)) {
+      if (!feature.taskId) continue;
+      const task = await this.taskStore.getTask(feature.taskId);
+      if (task?.status === "failed" || task?.error) await this.handleTaskFailure(feature.taskId);
     }
-
-    if (activeSlices.length === 0) {
-      return 0;
-    }
-
-    let fixedCount = 0;
-
-    for (const slice of activeSlices) {
-      for (const feature of slice.features) {
-        if (!feature.taskId) {
-          continue;
-        }
-
-        const task = await this.taskStore.getTask(feature.taskId);
-        if (!task) {
-          continue;
-        }
-
-        const hasLinkedAssertions = typeof this.missionStore.listAssertionsForFeature === "function"
-          ? (await this.missionStore.listAssertionsForFeature(feature.id)).length > 0
-          : false;
-        const reconciliation = await reconcileMissionFeatureState(this.taskStore, task, feature, {
-          hasLinkedAssertions,
-          plannerColumns: await resolvePlannerLanesForTask(this.taskStore as never, task.id),
-        });
-
-        if (reconciliation.kind === "failure") {
-          await this.handleTaskFailure(feature.taskId);
-          fixedCount++;
-          continue;
-        }
-
-        if (reconciliation.kind === "blocked") {
-          autopilotLog.warn(`Skipping feature ${feature.id} reconciliation — ${reconciliation.reason}`);
-          continue;
-        }
-
-        if (reconciliation.kind === "update") {
-          await this.missionStore.updateFeatureStatus(feature.id, reconciliation.status);
-          fixedCount++;
-        }
-      }
-    }
-
-    return fixedCount;
+    return result.statusUpdates + result.badgeRepairs + result.terminalRepairs;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

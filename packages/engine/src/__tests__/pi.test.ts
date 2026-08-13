@@ -892,9 +892,12 @@ describe("session failure diagnostics", () => {
 
   it("forwards materialized MCP servers into session creation and prompt options for supported providers", async () => {
     const createAgentSessionMock = vi.mocked(createAgentSession);
+    // FNXC:SessionIdentity 2026-08-12-20:46: createFnAgent wraps session.prompt to bind the
+    // request principal, so retain the original spy when asserting the prompt reaches Pi.
+    const prompt = vi.fn();
     const session = {
       model: { provider: "test", id: "primary-model" },
-      prompt: vi.fn(),
+      prompt,
       subscribe: vi.fn(),
       dispose: vi.fn(),
       sessionFile: undefined,
@@ -916,14 +919,15 @@ describe("session failure diagnostics", () => {
     await (created.session as any).promptWithFallback("Use docs");
 
     expect(createAgentSessionMock.mock.calls[0]?.[0]).not.toHaveProperty("mcpServers");
-    expect(session.prompt).toHaveBeenCalledWith("Use docs", expect.objectContaining({ mcpServers }));
+    expect(prompt).toHaveBeenCalledWith("Use docs", expect.objectContaining({ mcpServers }));
   });
 
   it("skips MCP forwarding for unsupported mock provider and emits a content-free skip log", async () => {
     const createAgentSessionMock = vi.mocked(createAgentSession);
+    const prompt = vi.fn();
     const session = {
       model: { provider: "test", id: "primary-model" },
-      prompt: vi.fn(),
+      prompt,
       subscribe: vi.fn(),
       dispose: vi.fn(),
       sessionFile: undefined,
@@ -944,7 +948,7 @@ describe("session failure diagnostics", () => {
       await (created.session as any).promptWithFallback("Use docs");
 
       expect(createAgentSessionMock.mock.calls[0]?.[0]).not.toHaveProperty("mcpServers");
-      expect(session.prompt).toHaveBeenCalledWith("Use docs");
+      expect(prompt).toHaveBeenCalledWith("Use docs");
       const skipLog = consoleErrorSpy.mock.calls.find(([message]) => String(message).includes("mcp.forwarding.skipped"));
       expect(skipLog?.[0]).toContain('"skippedCount":1');
       expect(skipLog?.[0]).toContain('"provider":"mock"');
@@ -1169,10 +1173,13 @@ describe("piLog structured diagnostics", () => {
   it("throws a bounded fallback exhaustion error when prompt-time fallback also fails", async () => {
     const createAgentSessionMock = vi.mocked(createAgentSession);
     const onFallbackModelUsed = vi.fn();
+    const primaryPrompt = vi.fn().mockRejectedValue(new Error("429 Too Many Requests"));
+    const fallbackPrompt = vi.fn().mockRejectedValue(new Error("401 invalid api key for fallback"));
+    const primaryRetryPrompt = vi.fn().mockRejectedValue(new Error("429 Too Many Requests"));
 
     const primarySession = {
       model: { provider: "openai", id: "gpt-4o" },
-      prompt: vi.fn().mockRejectedValue(new Error("429 Too Many Requests")),
+      prompt: primaryPrompt,
       subscribe: vi.fn(),
       dispose: vi.fn(),
       setThinkingLevel: vi.fn(),
@@ -1181,7 +1188,7 @@ describe("piLog structured diagnostics", () => {
 
     const fallbackSession = {
       model: { provider: "anthropic", id: "claude-3-5-haiku-20241022" },
-      prompt: vi.fn().mockRejectedValue(new Error("401 invalid api key for fallback")),
+      prompt: fallbackPrompt,
       state: { errorMessage: "", messages: [] },
       subscribe: vi.fn(),
       dispose: vi.fn(),
@@ -1192,7 +1199,7 @@ describe("piLog structured diagnostics", () => {
     createAgentSessionMock.mockReset();
     const primaryRetrySession = {
       model: { provider: "openai", id: "gpt-4o" },
-      prompt: vi.fn().mockRejectedValue(new Error("429 Too Many Requests")),
+      prompt: primaryRetryPrompt,
       subscribe: vi.fn(), dispose: vi.fn(), setThinkingLevel: vi.fn(), sessionFile: undefined,
     } as unknown as AgentSession;
     createAgentSessionMock
@@ -1220,9 +1227,9 @@ describe("piLog structured diagnostics", () => {
     });
 
     expect(createAgentSessionMock).toHaveBeenCalledTimes(3);
-    expect(primarySession.prompt).toHaveBeenCalledTimes(1);
-    expect(fallbackSession.prompt).toHaveBeenCalledTimes(1);
-    expect(primaryRetrySession.prompt).toHaveBeenCalledTimes(1);
+    expect(primaryPrompt).toHaveBeenCalledTimes(1);
+    expect(fallbackPrompt).toHaveBeenCalledTimes(1);
+    expect(primaryRetryPrompt).toHaveBeenCalledTimes(1);
     expect((createAgentSessionMock.mock.calls[2]?.[0] as any).model.id).toBe("gpt-4o");
     expect(onFallbackModelUsed).toHaveBeenCalledTimes(1);
     expect(onFallbackModelUsed).toHaveBeenCalledWith(expect.objectContaining({
@@ -1272,6 +1279,7 @@ describe("piLog structured diagnostics", () => {
     const createAgentSessionMock = vi.mocked(createAgentSession);
     const onFallbackModelUsed = vi.fn();
     const primaryState = { errorMessage: "", messages: [] };
+    const fallbackPrompt = vi.fn().mockResolvedValue(undefined);
     const modelAuthTierError =
       "Codex error: 400 invalid_request_error — \"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.\"";
 
@@ -1289,7 +1297,7 @@ describe("piLog structured diagnostics", () => {
 
     const fallbackSession = {
       model: { provider: "test", id: "fallback-model" },
-      prompt: vi.fn().mockResolvedValue(undefined),
+      prompt: fallbackPrompt,
       state: { errorMessage: "", messages: [] },
       subscribe: vi.fn(),
       dispose: vi.fn(),
@@ -1315,7 +1323,7 @@ describe("piLog structured diagnostics", () => {
 
     await (session as any).promptWithFallback("prompt text");
 
-    expect(fallbackSession.prompt).toHaveBeenCalledWith("prompt text");
+    expect(fallbackPrompt).toHaveBeenCalledWith("prompt text");
     expect(createAgentSessionMock).toHaveBeenCalledTimes(2);
     expect(onFallbackModelUsed).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1330,6 +1338,10 @@ describe("piLog structured diagnostics", () => {
     const onFallbackModelUsed = vi.fn();
     const sonnet5NotFoundError =
       'Error: 404 {"type":"error","error":{"type":"not_found_error","message":"Not found"},"request_id":"req_011CcawcZ3Ra9CennJXM8oWC"}';
+    const sonnetPrompt = vi.fn(async () => {
+      throw new Error(sonnet5NotFoundError);
+    });
+    const fallbackPrompt = vi.fn(async (_prompt: string, _options?: unknown) => undefined);
 
     createAgentSessionMock.mockReset();
     createAgentSessionMock.mockImplementation(async (options: any) => {
@@ -1337,9 +1349,7 @@ describe("piLog structured diagnostics", () => {
         return {
           session: {
             model: { provider: "anthropic", id: "claude-sonnet-5" },
-            prompt: vi.fn(async () => {
-              throw new Error(sonnet5NotFoundError);
-            }),
+            prompt: sonnetPrompt,
             state: { errorMessage: "", messages: [] },
             subscribe: vi.fn(),
             dispose: vi.fn(),
@@ -1351,7 +1361,7 @@ describe("piLog structured diagnostics", () => {
       return {
         session: {
           model: { provider: "zai", id: "glm-5.1" },
-          prompt: vi.fn(async (_prompt: string, _options?: unknown) => undefined),
+          prompt: fallbackPrompt,
           state: { errorMessage: "", messages: [{ role: "assistant", content: "Fallback reply" }] },
           subscribe: vi.fn(),
           dispose: vi.fn(),
@@ -1374,9 +1384,8 @@ describe("piLog structured diagnostics", () => {
 
     await expect((session as any).promptWithFallback("prompt text", { temperature: 0 })).resolves.toBeUndefined();
 
-    const fallbackPrompt = vi.mocked((session as any).prompt).mock;
     expect(createAgentSessionMock).toHaveBeenCalledTimes(2);
-    expect(fallbackPrompt.calls).toEqual([["prompt text", { temperature: 0 }]]);
+    expect(fallbackPrompt).toHaveBeenCalledWith("prompt text", { temperature: 0 });
     expect((session as any).state.errorMessage ?? "").toBe("");
     expect(onFallbackModelUsed).toHaveBeenCalledWith(expect.objectContaining({
       triggerPoint: "prompt-time",

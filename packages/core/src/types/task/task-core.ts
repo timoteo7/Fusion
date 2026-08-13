@@ -574,6 +574,14 @@ engine's no-store fallback aligned across restarts.
 */
 export const WEDGE_RENOTIFY_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
 
+/*
+FNXC:TaskWedgeNotifications 2026-08-10-18:54:
+`recoveryRetryCount` is a display mirror that executor, triage, and scheduler clear while
+creating terminal parks, so it cannot bound generic terminal-failure recovery. The durable
+budget instead lives in the existing wedge JSON and is revisioned because stale full-row writes
+can otherwise erase it. `applyToken` is a rotating fence consumed by the single clear/requeue
+transition; `lastApplyStartedAt` only detects abandonment and is never a lock.
+*/
 export interface TaskWedgeNotificationState {
   reasonKey: string;
   episodeId: string;
@@ -586,6 +594,66 @@ export interface TaskWedgeNotificationState {
   would let X -> Y -> X re-notify X while its own cooldown is still active.
   */
   lastNotifiedAtByReason?: Record<string, string>;
+  /** Monotonic durable-state version used to reject stale whole-object writes. */
+  budgetRevision?: number;
+  /*
+  FNXC:TaskWedgeNotifications 2026-08-11-18:28:
+  A parked row may emit no later task update, so a settle hold must survive an engine restart
+  rather than relying solely on an in-memory timer. Supplied self-healing descriptors include
+  stage-derived prose unavailable on the task row, so preserve that operator-facing content here.
+  `since` moves only when the reason changes or stale evidence is deliberately re-stamped.
+  */
+  pending?: {
+    since: string;
+    reasonKey: string;
+    source: "auto" | "supplied";
+    reason: string;
+    action: string;
+    gate?: string;
+  };
+  /** Sweep-owned generic terminal-failure recovery state. */
+  autoRecovery?: {
+    attempts: number;
+    lastAttemptAt: string;
+    budgetStartedAt?: string;
+    retryAppliedAt?: string;
+    resumeCount?: number;
+    lastApplyStartedAt?: string;
+    applyToken?: string;
+    lastBudgetWriteAt?: string;
+    exhaustedAt?: string;
+    escalationNotifiedAt?: string;
+    escalationReason?: "budget-exhausted" | "auto-recovery-disabled";
+  };
+}
+
+export type TaskRecommendationCategory = "improvement" | "feature" | "bug" | "other";
+
+/**
+ * FNXC:TaskRecommendations 2026-08-08-05:02:
+ * Completion suggestions are deliberately short, task-ready records rather than
+ * execution reasoning. Their stable id is also the idempotency identity used when
+ * an operator turns a recommendation into a normal guarded-intake task.
+ */
+export interface TaskRecommendation {
+  id: string;
+  title: string;
+  description: string;
+  category: TaskRecommendationCategory;
+  createdTaskId?: string;
+}
+
+export interface TaskReleaseGateVerdict {
+  promoteBlocked: boolean;
+  unplannedForExecution: boolean;
+  blockedOnApproval: boolean;
+  reason: "plan-review-pending" | "planning-status" | "needs-replan" | "duplicate-prompt" | "seed-prompt" | "awaiting-approval" | null;
+  readyAtCapacityBoundary: boolean;
+  planReview?: { nodeId: string; column: string; defaultOn: boolean; enabled: boolean; appliesToColumn: boolean; satisfied: boolean };
+  releaseTargetColumn?: string;
+  targetCountsTowardWip?: boolean;
+  evaluatedAt: string;
+  evaluatedForUpdatedAt?: string;
 }
 
 export interface Task {
@@ -922,15 +990,21 @@ export interface Task {
    *  Review defaults to unbounded recovery so ordinary REVISE feedback does not
    *  terminal-fail the task. */
   postReviewFixCount?: number;
-  /** Number of consecutive triage pre-execution Plan Review REVISE replans this task
-   *  has consumed. Incremented by the triage Plan Review gate
-   *  (packages/engine/src/triage.ts runPlanReviewBeforeExecution) each time it blocks
-   *  execution with a REVISE verdict and routes the task back to `needs-replan`. When it
-   *  reaches `PLAN_REVIEW_GATE_REPLAN_CAP` the task is escalated to `awaiting-approval`
-   *  (awaitingApprovalReason `plan-review-replan-cap`) instead of replanning again, so a
-   *  planner/reviewer disagreement can never loop forever. Reset when the gate passes
-   *  (APPROVE) or on a manual retry. Distinct from `postReviewFixCount`, which bounds the
-   *  executor graph's post-merge/advisory optional-step REVISE budget. */
+  /** LEGACY — persisted but NEVER WRITTEN. Do not read it as a live signal.
+   *
+   *  FNXC:PlanReviewReplan 2026-08-10-18:32:
+   *  This counted consecutive Plan Review REVISE replans for the out-of-graph triage gate
+   *  (`runPlanReviewBeforeExecution`), which U10/R4 deleted along with its `PLAN_REVIEW_GATE_REPLAN_CAP`
+   *  ceiling. The column survived the deletion; its writer did not. It is still serialized and still
+   *  cleared by the operator Retry reset (harmless, and dropping it would need a schema migration for
+   *  no behavioral gain), but it is permanently 0 and must not be used to decide anything.
+   *
+   *  The live owner is the graph: `requestPreMergeOptionalStepFix` budgets Plan Review replans off the
+   *  PERSISTED workflow-step results (`countPlanReviewRevisionAttempts`) rather than a task column, and
+   *  parks via `parkPlanReviewReplanCapExhausted` at either an explicit `planReviewMaxRevisions` /
+   *  node `maxRevisions` budget or, for the unbounded default, `PLAN_REVIEW_FEEDBACK_HISTORY_LIMIT`.
+   *  Distinct from `postReviewFixCount`, which is the aggregate observability counter for the same
+   *  graph remediation loop. */
   planReviewReplanCount?: number;
   /** Number of bounded recovery retry attempts for transient executor/triage failures.
    *  Distinct from `mergeRetries` (merge-conflict-specific). Incremented by the
@@ -1047,14 +1121,23 @@ export interface Task {
    * that legacy value as an ordinary manual plan-approval hold (Approve/Reject Plan render
    * normally).
 
-   * FNXC:PlanReviewReplan 2026-07-15-11:09:
-   * Live writer: triage Plan Review REVISE replan-cap escalation stamps
-   * `plan-review-replan-cap` when automatic REVISE replans hit PLAN_REVIEW_GATE_REPLAN_CAP.
-   * Dashboard badge/detail banner/notifications must surface that reason so operators know
-   * approval is required because Plan Review did not converge — not a generic require-all gate.
+   * FNXC:PlanReviewReplan 2026-08-10-18:32:
+   * Live writer: `parkPlanReviewReplanCapExhausted` (packages/engine/src/executor/), called from
+   * `requestPreMergeOptionalStepFix` when the graph's Plan Review replan budget is exhausted —
+   * either an explicit `planReviewMaxRevisions` / node `maxRevisions` value, or
+   * `PLAN_REVIEW_FEEDBACK_HISTORY_LIMIT` backstopping the unbounded default. (Supersedes the
+   * pre-U10 triage gate and its deleted `PLAN_REVIEW_GATE_REPLAN_CAP`; the reason string is
+   * unchanged so no dashboard/notification surface moved.) Dashboard badge/detail banner/
+   * notifications must surface that reason so operators know approval is required because Plan
+   * Review did not converge — not a generic require-all gate.
+   *
+   * FNXC:PullRequestMerge 2026-08-09-05:07:
+   * The PR merge queue stamps `merge-blocked-by-policy` for branch-protection holds.
+   * Its notification must ask for policy remediation and a manual merge retry, never
+   * mislabel a completed implementation as a plan awaiting approval.
    * Undefined means either no hold or a routine manual plan-approval hold.
    */
-  awaitingApprovalReason?: "release-authorization" | "plan-review-replan-cap";
+  awaitingApprovalReason?: "release-authorization" | "plan-review-replan-cap" | "merge-blocked-by-policy";
   /*
    * FNXC:PlanApproval 2026-07-04-22:41:
    * FN-7569 — records the computePlanApprovalFingerprint (packages/core/src/plan-approval.ts)
@@ -1118,6 +1201,13 @@ export interface Task {
    * step-count heuristic when the field is absent.
    */
   awaitingPlanning?: boolean;
+  /**
+   * FNXC:PromoteVisibility 2026-08-11-20:38:
+   * GET /api/tasks attaches this best-effort hold-lane verdict only. It is transient: never store it
+   * in task.json or emit it over SSE; consumers must fall back when absent and must expire carried
+   * values under useTasks' evidence fingerprint, row-clock, and TTL contract.
+   */
+  releaseGate?: TaskReleaseGateVerdict;
   /** Explicitly assigned agent ID for task-agent linking. Distinct from Agent.taskId active execution state. */
   assignedAgentId?: string;
   /** Per-task node override. When set, this task routes to the specified node instead of the project's default node. Undefined means use the project default. Use empty string to explicitly clear. */
@@ -1160,6 +1250,8 @@ export interface Task {
   error?: string;
   /** Optional summary of what was changed/fixed when task is completed */
   summary?: string;
+  /** Bounded out-of-scope suggestions accepted with successful completion only. */
+  recommendations?: TaskRecommendation[];
   /** ISO-8601 timestamp of when the task last entered its current column.
    *  Used to sort cards within a column so that recently-moved cards appear at the top. */
   columnMovedAt?: string;

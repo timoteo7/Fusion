@@ -22,7 +22,7 @@ import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
 import * as schema from "../postgres/schema/index.js";
 import {readProjectConfig, writeProjectConfig} from "../task-store/async/async-settings.js";
 import {and, eq, inArray} from "drizzle-orm";
-import type {AsyncDataLayer} from "../postgres/data-layer.js";
+import {projectScopeFor, type AsyncDataLayer} from "../postgres/data-layer.js";
 
 export async function createWorkflowStepImpl(store: TaskStore, input: import("../types.js").WorkflowStepInput): Promise<import("../types.js").WorkflowStep> {
     return store.withConfigLock(async () => {
@@ -73,6 +73,7 @@ export async function createWorkflowStepImpl(store: TaskStore, input: import("..
       };
 
       await layer.db.insert(schema.project.workflowSteps).values({
+        projectId: layer.projectId?.trim() ?? "",
         id: step.id,
         templateId: step.templateId ?? null,
         name: step.name,
@@ -105,7 +106,7 @@ export async function updateWorkflowStepImpl(store: TaskStore, id: string, updat
     // FNXC:PostgresCutover 2026-06-28-10:00:
     // Backend-mode branch: read the step row via Drizzle, apply updates, write back.
         const layer = store.asyncLayer!;
-    const rows = await layer.db.select().from(schema.project.workflowSteps).where(eq(schema.project.workflowSteps.id, id)).limit(1);
+    const rows = await layer.db.select().from(schema.project.workflowSteps).where(and(eq(schema.project.workflowSteps.id, id), projectScopeFor(schema.project.workflowSteps.projectId, layer.projectId))).limit(1);
     const pgRow = rows[0];
     if (!pgRow) throw new Error(`Workflow step '${id}' not found`);
 
@@ -168,7 +169,7 @@ export async function updateWorkflowStepImpl(store: TaskStore, id: string, updat
       modelId: step.modelId ?? null,
       migratedFragmentId: step.migratedFragmentId ?? null,
       updatedAt: step.updatedAt,
-    }).where(eq(schema.project.workflowSteps.id, id));
+    }).where(and(eq(schema.project.workflowSteps.id, id), projectScopeFor(schema.project.workflowSteps.projectId, layer.projectId)));
 
     store.workflowStepsCache = null;
     return step;
@@ -321,7 +322,10 @@ export async function updateWorkflowDefinitionImpl(store: TaskStore, id: string,
         ir: downgradeIrToV1IfPure(next.ir),
         layout: next.layout,
         updatedAt: next.updatedAt,
-      }).where(eq(schema.project.workflows.id, id));
+      }).where(and(
+        eq(schema.project.workflows.id, id),
+        projectScopeFor(schema.project.workflows.projectId, layer.projectId),
+      ));
     
       store.workflowDefinitionsCache = null;
       return next;
@@ -381,12 +385,26 @@ export async function deleteWorkflowDefinitionImpl(store: TaskStore, id: string)
     const occupantTaskIds = await store.listWorkflowOccupantTaskIds(id, false);
 
     
-    // FNXC:PostgresCutover 2026-06-28: async deletes for backend mode
-    const deleted = await layer.db.delete(schema.project.workflows).where(eq(schema.project.workflows.id, id)).returning();
+    /*
+    FNXC:WorkflowDefinitionProjectPartition 2026-08-12-03:02:
+    Before project ownership predicates, deleting a colliding workflow ID removed a foreign
+    workflow and its settings/prompt overrides under owner connections that bypass RLS. Keep
+    every delete in this transaction on the same bound partition.
+    */
+    const deleted = await layer.db.delete(schema.project.workflows).where(and(
+      eq(schema.project.workflows.id, id),
+      projectScopeFor(schema.project.workflows.projectId, layer.projectId),
+    )).returning();
     if (deleted.length === 0) throw new Error(`Workflow '${id}' not found`);
     store.workflowDefinitionsCache = null;
-    await layer.db.delete(schema.project.workflowSettings).where(eq(schema.project.workflowSettings.workflowId, id));
-    await layer.db.delete(schema.project.workflowPromptOverrides).where(eq(schema.project.workflowPromptOverrides.workflowId, id));
+    await layer.db.delete(schema.project.workflowSettings).where(and(
+      eq(schema.project.workflowSettings.workflowId, id),
+      projectScopeFor(schema.project.workflowSettings.projectId, layer.projectId),
+    ));
+    await layer.db.delete(schema.project.workflowPromptOverrides).where(and(
+      eq(schema.project.workflowPromptOverrides.workflowId, id),
+      projectScopeFor(schema.project.workflowPromptOverrides.projectId, layer.projectId),
+    ));
   
 
     // Cascade: clear the project default when it pointed at this workflow.
@@ -409,7 +427,7 @@ export async function deleteWorkflowDefinitionImpl(store: TaskStore, id: string)
         if (Array.isArray(stepIds)) {
           for (const stepId of stepIds) {
             if (typeof stepId === "string") {
-               await layer.db.delete(schema.project.workflowSteps).where(eq(schema.project.workflowSteps.id, stepId)); 
+               await layer.db.delete(schema.project.workflowSteps).where(and(eq(schema.project.workflowSteps.id, stepId), projectScopeFor(schema.project.workflowSteps.projectId, layer.projectId)));
             }
           }
         }
@@ -520,7 +538,7 @@ export async function selectTaskWorkflowImpl(store: TaskStore, taskId: string, w
         // Delete them before propagating; the prior selection is left untouched.
         for (const stepId of ids) {
           try {
-             await layer.db.delete(schema.project.workflowSteps).where(eq(schema.project.workflowSteps.id, stepId)); 
+             await layer.db.delete(schema.project.workflowSteps).where(and(eq(schema.project.workflowSteps.id, stepId), projectScopeFor(schema.project.workflowSteps.projectId, layer.projectId)));
           } catch {
             // Best-effort cleanup; surface the original error below.
           }
@@ -531,7 +549,7 @@ export async function selectTaskWorkflowImpl(store: TaskStore, taskId: string, w
 
       if (priorSelection) {
         for (const stepId of priorSelection.stepIds) {
-           await layer.db.delete(schema.project.workflowSteps).where(eq(schema.project.workflowSteps.id, stepId)); 
+           await layer.db.delete(schema.project.workflowSteps).where(and(eq(schema.project.workflowSteps.id, stepId), projectScopeFor(schema.project.workflowSteps.projectId, layer.projectId)));
         }
         store.workflowStepsCache = null;
       }

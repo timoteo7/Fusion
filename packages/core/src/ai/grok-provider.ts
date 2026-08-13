@@ -62,6 +62,27 @@ export const GROK_PROVIDER_REGISTRATION: GrokProviderRegistration = {
   apiKey: "$GROK_API_KEY",
   api: "openai-completions",
   models: [
+    /*
+    FNXC:ModelRegistry 2026-08-12-20:17:
+    FN-9008 requires Grok 4.6 to be selectable in every model area. Keep it in this shared
+    catalog because pi's registerProvider() replaces provider model lists wholesale, while every
+    Fusion host seeds and re-merges this export. xAI's model docs verify grok-4.6, its 500k-token
+    context window, and configurable reasoning; max output and per-model image input remain
+    upstream-pending-verification, so retain the conservative text-only and 65536-token defaults.
+    Source: https://docs.x.ai/developers/models
+    */
+    {
+      id: "grok-4.6",
+      name: "Grok 4.6",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 500000,
+      maxTokens: 65536,
+      compat: {
+        supportsDeveloperRole: false,
+      },
+    },
     {
       id: "grok-4.5",
       name: "Grok 4.5",

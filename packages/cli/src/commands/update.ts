@@ -1,9 +1,7 @@
 import { exec } from "node:child_process";
+import { readOwnCliVersion } from "../cli-version.js";
 import { result } from "../output.js";
-import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { isVersionNewer, resolveUpdateTargetVersion } from "@fusion/core";
 import type { UpdateChannel } from "@fusion/core";
 import { getCachedUpdateStatus, getConfiguredUpdateChannel, persistUpdateChannel } from "../update-cache.js";
@@ -128,37 +126,6 @@ type UpdateStatus = {
   updated: boolean;
   channel: UpdateChannel;
 };
-
-function readOwnCliVersion(): string | undefined {
-  let currentDir: string;
-  try {
-    currentDir = dirname(fileURLToPath(import.meta.url));
-  } catch {
-    return undefined;
-  }
-
-  for (let i = 0; i < 8; i += 1) {
-    const pkgPath = resolve(currentDir, "package.json");
-    if (existsSync(pkgPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync(pkgPath, "utf-8")) as { name?: string; version?: string };
-        if (parsed.name === "@runfusion/fusion" && typeof parsed.version === "string") {
-          return parsed.version;
-        }
-      } catch {
-        // Ignore parse errors and keep walking.
-      }
-    }
-
-    const parentDir = resolve(currentDir, "..");
-    if (parentDir === currentDir) {
-      break;
-    }
-    currentDir = parentDir;
-  }
-
-  return undefined;
-}
 
 type UpdateDistTags = {
   latest?: string;
@@ -406,7 +373,7 @@ export async function runUpdate(options: RunUpdateOptions = {}): Promise<void> {
     channel = await getConfiguredUpdateChannel();
   }
 
-  const currentVersion = readOwnCliVersion();
+  const currentVersion = readOwnCliVersion(import.meta.url);
   if (!currentVersion) {
     console.error("Error: Could not determine current Fusion CLI version.");
     process.exit(1);

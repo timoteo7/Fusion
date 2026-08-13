@@ -1,11 +1,58 @@
-import type { MissionFeature, Task, TaskStore } from "@fusion/core";
+import type { DriftAlignment, DriftReport, MissionFeature, Task, TaskStore } from "@fusion/core";
 import { getTaskCompletionBlockerForStore } from "../execution/task-completion.js";
 import { resolveLifecycleColumns, resolveTaskLifecycleColumns, resolveWorkflowIrForTask } from "@fusion/core";
 
 export type MissionFeatureSyncTargetStatus = "done" | "in-progress" | "triaged";
 
+/**
+ * FNXC:SpecLockMissionAlignment 2026-08-09-07:36:
+ * Drift alignment is an orthogonal mission projection. It intentionally does not participate in
+ * delivery-status transitions: a diverged task may still be in progress, complete, or failed.
+ */
+export function projectMissionFeatureAlignment(report: { alignment: DriftAlignment } | undefined): DriftAlignment {
+  return report?.alignment ?? "unavailable";
+}
+
+/**
+ * FNXC:SpecLockMissionAlignment 2026-08-10-16:40:
+ * Report persistence, rather than a later task move, is the authoritative alignment event. Update
+ * only the linked feature's orthogonal field here; delivery status remains owned by the existing
+ * scheduler and autopilot reconciliation paths.
+ */
+export async function publishPersistedMissionFeatureAlignment(
+  taskStore: Pick<TaskStore, "getMissionStore">,
+  taskId: string,
+  report: Pick<DriftReport, "alignment">,
+): Promise<boolean> {
+  const missionStore = taskStore.getMissionStore();
+  const feature = await missionStore.getFeatureByTaskId(taskId);
+  if (!feature || feature.specAlignment === report.alignment) return false;
+  await missionStore.updateFeature(feature.id, { specAlignment: report.alignment });
+  return true;
+}
+
+/**
+ * FNXC:SpecLockMissionAlignment 2026-08-09-19:51:
+ * Mission delivery reconciliation consumes the retained report instead of deriving scope state
+ * from a task column. An absent report is unavailable, never an implicit on-plan projection.
+ */
+export async function resolveMissionFeatureAlignment(
+  taskStore: Pick<TaskStore, "getLatestSpecDriftReport">,
+  taskId: string | undefined,
+): Promise<DriftAlignment> {
+  if (!taskId) return "unavailable";
+  try {
+    if (typeof taskStore.getLatestSpecDriftReport !== "function") return "unavailable";
+    return projectMissionFeatureAlignment(await taskStore.getLatestSpecDriftReport(taskId));
+  } catch {
+    return "unavailable";
+  }
+}
+
 export interface MissionFeatureSyncContext {
   hasLinkedAssertions?: boolean;
+  /** FNXC:MissionFollowupLifecycle 2026-08-12-00:20: Live Decision-A follow-ups keep their source feature active until the whole delivery boundary is terminal. */
+  hasLiveLineageDescendants?: boolean;
   /*
   FNXC:WorkflowLifecycleColumns 2026-07-30-11:20 (U11):
   The task's resolved planner lanes (intake + hold). Supplied by the CALLER, which
@@ -32,20 +79,128 @@ on its own, while every workflow that still declares both keeps both.
 */
 export const LEGACY_PLANNER_COLUMNS: readonly string[] = ["triage", "todo"];
 
+type MissionFeatureLifecycleLanes = {
+  lane: { intake?: string; hold?: string; wip?: string; review?: string; complete?: string; archived?: string };
+  declared: Set<string>;
+};
+
+/** Resolve the task workflow once so every mission feature projection uses the same role snapshot. */
+async function resolveMissionFeatureLifecycleLanes(
+  taskStore: Parameters<typeof resolveTaskLifecycleColumns>[0],
+  taskId: string,
+): Promise<MissionFeatureLifecycleLanes> {
+  const ir = await resolveWorkflowIrForTask(taskStore, taskId).catch(() => undefined);
+  const roles = ir ? resolveLifecycleColumns(ir) : undefined;
+  const declaredColumnIds = new Set(
+    ((ir as { columns?: Array<{ id?: unknown }> } | undefined)?.columns ?? [])
+      .map((column) => column?.id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  const declared = new Set([
+    ...Object.values(roles ?? {}).filter((value): value is string => typeof value === "string"),
+    ...declaredColumnIds,
+  ]);
+  const laneOr = (resolved: string | undefined, legacy: string): string | undefined =>
+    resolved ?? (declared.has(legacy) ? undefined : legacy);
+  return {
+    declared,
+    lane: {
+      intake: laneOr(roles?.intake, "triage"), hold: laneOr(roles?.hold, "todo"),
+      wip: laneOr(roles?.wip, "in-progress"), review: laneOr(roles?.review, "in-review"),
+      complete: laneOr(roles?.complete, "done"), archived: laneOr(roles?.archived, "archived"),
+    },
+  };
+}
+
+/*
+FNXC:MissionValidationRepair 2026-08-10-17:20:
+Classification and its fence must come from one task read and one workflow snapshot. A dangling
+or archived link is intentionally fenced as absent with its non-null id, allowing the store to
+prove it remains absent instead of making the validation badge permanently unrepairable.
+*/
+export async function resolveFeatureRepairTargets(
+  taskStore: Pick<TaskStore, "getTask"> & Parameters<typeof resolveTaskLifecycleColumns>[0],
+  feature: Pick<MissionFeature, "id" | "taskId">,
+): Promise<{ status: "defined" | "triaged" | "in-progress"; resumeImplementation: boolean; groundTruth: import("@fusion/core").MissionFeatureRepairGroundTruth }> {
+  const resolvedAt = new Date().toISOString();
+  const absent = (taskId: string | null): { status: "defined"; resumeImplementation: false; groundTruth: import("@fusion/core").MissionFeatureRepairGroundTruth } => ({
+    status: "defined", resumeImplementation: false,
+    groundTruth: { featureId: feature.id, taskId, taskLiveness: "absent", taskColumn: null, taskUpdatedAt: null, laneRole: "none", resolvedAt },
+  });
+  if (!feature.taskId) return absent(null);
+  const task = await taskStore.getTask(feature.taskId).catch(() => null);
+  /*
+  FNXC:MissionValidationRepair 2026-08-11-02:05:
+  DELIBERATE-LITERAL: this fence describes the physical legacy row that the locked core
+  verifier can inspect, not the task's workflow-resolved archive lane.
+  The repair fence may call a link absent only for physical states the core transaction can verify
+  without resolving a workflow: a missing/soft-deleted task or the legacy literal archived row.
+  A renamed archived lifecycle lane remains a live row until archival soft-deletes it; classifying
+  it as absent here would produce a fence the locked verifier must reject.
+  */
+  if (!task || task.deletedAt || task.column === "archived") return absent(feature.taskId);
+
+  const { lane, declared } = await resolveMissionFeatureLifecycleLanes(taskStore, task.id);
+  const planner = task.column === lane.intake || task.column === lane.hold
+    || (LEGACY_PLANNER_COLUMNS.includes(task.column) && !declared.has(task.column));
+  const wip = task.column === lane.wip || task.column === lane.review;
+  const laneRole = planner ? "planner" : wip ? "wip" : "none";
+  /*
+  FNXC:MissionValidationRepair 2026-08-11-01:46:
+  A live task outside planner and WIP/review roles has no repair target. `defined` is reserved
+  for an absent link, so accepting a live completed or custom lane would replace a blocked
+  roadmap state with a false no-work state. Callers surface this actionable refusal rather than
+  persisting a laneRole:none fence the store cannot truthfully apply.
+  */
+  if (laneRole === "none") {
+    throw new Error(`Linked task ${task.id} is in '${task.column}', which is not a planner or active-work lifecycle lane; move it to a supported lane before repairing validation.`);
+  }
+  return {
+    status: planner ? "triaged" : "in-progress", resumeImplementation: wip,
+    groundTruth: { featureId: feature.id, taskId: task.id, taskLiveness: "live", taskColumn: task.column, taskUpdatedAt: task.updatedAt, laneRole, resolvedAt },
+  };
+}
 
 
 export type MissionFeatureSyncDecision =
-  | { kind: "failure"; reason: string }
-  | { kind: "blocked"; reason: string }
-  | { kind: "update"; status: MissionFeatureSyncTargetStatus; reason: string }
-  | { kind: "noop" };
+  | { kind: "failure"; reason: string; alignment: DriftAlignment }
+  | { kind: "blocked"; reason: string; alignment: DriftAlignment }
+  | { kind: "update"; status: MissionFeatureSyncTargetStatus; reason: string; alignment: DriftAlignment }
+  | { kind: "noop"; alignment: DriftAlignment };
+
+/**
+ * FNXC:SpecLockMissionAlignment 2026-08-10-16:17:
+ * Every production mission reconciler must publish the evaluated alignment even when the delivery
+ * state is unchanged. Centralizing this write prevents event-driven and periodic consumers from
+ * silently calculating a report and then dropping the roadmap projection.
+ */
+export async function persistMissionFeatureReconciliation(
+  missionStore: Pick<{ updateFeature(id: string, updates: Partial<MissionFeature>): unknown }, "updateFeature">,
+  feature: Pick<MissionFeature, "id" | "specAlignment">,
+  decision: MissionFeatureSyncDecision,
+): Promise<boolean> {
+  if (decision.kind === "update") {
+    await missionStore.updateFeature(feature.id, {
+      status: decision.status,
+      specAlignment: decision.alignment,
+    });
+    return true;
+  }
+  if (feature.specAlignment !== decision.alignment) {
+    await missionStore.updateFeature(feature.id, { specAlignment: decision.alignment });
+    return true;
+  }
+  return false;
+}
 
 export async function reconcileMissionFeatureState(
-  taskStore: Pick<TaskStore, "getTask"> & Parameters<typeof resolveTaskLifecycleColumns>[0],
+  taskStore: Pick<TaskStore, "getTask" | "getLatestSpecDriftReport"> & Parameters<typeof resolveTaskLifecycleColumns>[0],
   task: Task,
-  feature: Pick<MissionFeature, "id" | "status" | "lastValidatorStatus">,
+  feature: Pick<MissionFeature, "id" | "status" | "lastValidatorStatus" | "specAlignment">,
   context: MissionFeatureSyncContext = {},
 ): Promise<MissionFeatureSyncDecision> {
+  const alignment = await resolveMissionFeatureAlignment(taskStore, task.id);
+
   /*
   FNXC:MissionReconciliation 2026-07-30-00:00:
   FN-8307 makes failure a provenance-preserving withheld outcome regardless of
@@ -56,6 +211,7 @@ export async function reconcileMissionFeatureState(
     return {
       kind: "failure",
       reason: `task ${task.id} failed; feature ${feature.id} remains ${feature.status}`,
+      alignment,
     };
   }
 
@@ -139,18 +295,24 @@ export async function reconcileMissionFeatureState(
   if ((lane.complete !== undefined && task.column === lane.complete)) {
     const blocker = await getTaskCompletionBlockerForStore(taskStore, task);
     if (blocker) {
-      return { kind: "blocked", reason: blocker };
+      return { kind: "blocked", reason: blocker, alignment };
     }
 
-    if (hasUnvalidatedAssertions) {
+    const pendingCompletionReason = context.hasLiveLineageDescendants === true
+      ? "lineage follow-ups"
+      : hasUnvalidatedAssertions
+        ? "assertion validation"
+        : undefined;
+    if (pendingCompletionReason) {
       if (feature.status !== "in-progress") {
         return {
           kind: "update",
           status: "in-progress",
-          reason: `task ${task.id} completed; awaiting assertion validation`,
+          reason: `task ${task.id} completed; awaiting ${pendingCompletionReason}`,
+          alignment,
         };
       }
-      return { kind: "noop" };
+      return { kind: "noop", alignment };
     }
 
     if (feature.status !== "done") {
@@ -158,10 +320,11 @@ export async function reconcileMissionFeatureState(
         kind: "update",
         status: "done",
         reason: `task ${task.id} completed`,
+        alignment,
       };
     }
 
-    return { kind: "noop" };
+    return { kind: "noop", alignment };
   }
 
   /*
@@ -170,7 +333,7 @@ export async function reconcileMissionFeatureState(
   status untouched so a terminal/duplicate archive cannot fabricate roadmap
   progress; callers may still recompute hierarchy idempotently.
   */
-  if ((lane.archived !== undefined && task.column === lane.archived)) return { kind: "noop" };
+  if ((lane.archived !== undefined && task.column === lane.archived)) return { kind: "noop", alignment };
 
   if (
     ((lane.wip !== undefined && task.column === lane.wip) || (lane.review !== undefined && task.column === lane.review))
@@ -182,6 +345,7 @@ export async function reconcileMissionFeatureState(
       reason: (lane.review !== undefined && task.column === lane.review)
         ? `task ${task.id} is in review`
         : `task ${task.id} started`,
+      alignment,
     };
   }
 
@@ -226,8 +390,9 @@ export async function reconcileMissionFeatureState(
       kind: "update",
       status: "triaged",
       reason: `task ${task.id} returned to triage`,
+      alignment,
     };
   }
 
-  return { kind: "noop" };
+  return { kind: "noop", alignment };
 }

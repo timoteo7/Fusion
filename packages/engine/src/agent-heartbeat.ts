@@ -22,6 +22,7 @@ import { AutoClaimSnapshotManager, resolveFreshAutoClaimCandidates, type AutoCla
 import {
   ApprovalRequestStore,
   buildExecutionMemoryInstructions,
+  buildMemoryPreSteeringNudge,
   isEphemeralAgent,
   hasAgentIdentity,
   resolveEffectiveAgentPermissionPolicy,
@@ -29,11 +30,13 @@ import {
   evaluateImplementationTaskBind,
   resolvePersistAgentThinkingLog,
   resolveAgentMemoryInclusionMode,
+  resolvePermanentAgentEffectiveThinkingLevel,
   AWAITING_APPROVAL_PAUSE_REASON,
   rankAssignedTasksForWakeDelta,
   formatAssignedTasksWakeDeltaSection,
   resolveEffectiveSettingsById,
   resolveEffectivePlannerHeartbeatPatrolEnabled,
+  resolveEffectiveMemoryConsolidationEnabled,
   resolveReboundTarget,
   resolveWorkflowIrForTask,
   columnsWithFlag,
@@ -47,10 +50,13 @@ import { Type, type Static } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
 import { createTaskCreateTool, createTaskLogToolWithContext, createTaskLogsReadTool, createTaskDocumentWriteTool, createTaskDocumentReadTool, createTaskReadTools, createArtifactRegisterTool, createArtifactListTool, createArtifactViewTool, createListAgentsTool, createDelegateTaskTool, createTaskAssignTool, createGetAgentConfigTool, createUpdateAgentConfigTool, createAgentCreateTool, createAgentDeleteTool, createSendMessageTool, createReadMessagesTool, createPostRoomMessageTool, createMemoryTools, createGoalRetrievalTools, createMissionTools, createIdeationTools, createReadEvaluationsTool, createUpdateIdentityTool, createReflectOnPerformanceTool, createWebFetchTool, createWorkflowListTool, createWorkflowGetTool, createWorkflowValidateTool, createWorkflowSelectTool, createTaskPromoteTool, createWorkflowCreateTool, createWorkflowUpdateTool, createWorkflowDeleteTool, createWorkflowSettingsTool, createTraitListTool, createAskQuestionTool, createResearchTools, readAgentMemoryWorkspaceLongTerm, taskCreateParams } from "./agent-tools.js";
 import { AgentLogger } from "./agents/agent-logger.js";
+import { attachAgentUsageTelemetry, emitAgentSessionStart } from "./agents/agent-usage-telemetry.js";
+import { emitApprovalMail } from "./agents/approval-mail.js";
 import {
   resolveAgentInstructionsWithRatings,
   buildPluginPromptSection,
   resolveAgentHeartbeatProcedure,
+  ensureDefaultHeartbeatProcedureFile,
 } from "./agents/agent-instructions.js";
 import { resolveHeartbeatPromptTemplate, resolveHeartbeatScopeDisciplineMode, selectHeartbeatProcedure } from "./agents/heartbeat-procedure-resolver.js";
 import { buildPromptLayers, collapsePromptLayers } from "./execution/prompt-layers.js";
@@ -107,6 +113,7 @@ import { trimPromptMd, trimTaskDescription, trimTriggeringComments } from "./age
 import { detectDeicticReference, extractAntecedentCandidates, renderAmbiguityPromptBlock, scoreReferentConfidence } from "./triage-domain/room-ambiguity.js";
 import { countActiveAgentMembers, decideRoomCoordination, detectTaskFilingIntent, renderRoomCoordinationPromptBlock } from "./triage-domain/room-coordination.js";
 import { evaluateParkedAgentTaskLink, isParkedTaskColumn, type AgentTaskLinkExecutionProof } from "./agents/task-agent-sync.js";
+import { MemoryConsolidationError, MemoryConsolidationService, resolveMemoryConsolidationPorts } from "./memory/index.js";
 
 /*
 FNXC:WorkflowLifecycleColumns 2026-07-28-09:25 (U11 conversion):
@@ -134,13 +141,18 @@ import { accumulateSessionTokenUsage, captureSessionTokenBaseline } from "./exec
 
 const promptSizeLog = createLogger("prompt-size");
 
+/*
+FNXC:MemoryPreSteering 2026-08-11-11:13:
+FN-8934 treats the heartbeat primer as an injection surface: off removes both
+memory boundaries and their nudge, while index replaces them with the bounded terse form.
+*/
 function adjustHeartbeatMemoryPrimer(basePrompt: string, mode: AgentMemoryInclusionMode): string {
   if (mode === "full") return basePrompt;
-  const memoryPrimer = /\nYou may receive an Agent Memory section and a Project Memory section\.[\s\S]*?- Project Memory examples:[^\n]*\n/;
+  const memoryPrimer = /\nYou may receive an Agent Memory section and a Project Memory section\.[\s\S]*?- Project Memory examples:[^\n]*\n(?:- Memory-first: query memory before re-reading raw sources; search with fn_memory_search, then open relevant excerpts with fn_memory_get\n)?/;
   if (mode === "off") return basePrompt.replace(memoryPrimer, "\n");
   return basePrompt.replace(
     memoryPrimer,
-    "\nWhen an Agent Memory Index is provided instead of full memory, call fn_memory_search first for task-relevant context. Use fn_memory_get to open only relevant snippets.\n",
+    `\n${buildMemoryPreSteeringNudge("index")}\n`,
   );
 }
 
@@ -163,6 +175,14 @@ async function resolveNoTaskHeartbeatPatrolEnabled(
     heartbeatLog.warn(`Failed to resolve no-task heartbeat patrol setting: ${error instanceof Error ? error.message : String(error)} — defaulting enabled`);
     return true;
   }
+}
+
+async function resolveMemoryConsolidationEnabledForHeartbeat(taskStore: TaskStore, settings: Settings | undefined): Promise<boolean> {
+  try {
+    const projectId = typeof taskStore.getWorkflowSettingsProjectId === "function" ? taskStore.getWorkflowSettingsProjectId() : "default";
+    const effective = await resolveEffectiveSettingsById(taskStore, settings?.defaultWorkflowId || "builtin:coding", projectId);
+    return resolveEffectiveMemoryConsolidationEnabled(effective);
+  } catch { return resolveEffectiveMemoryConsolidationEnabled(undefined); }
 }
 
 interface SelfImproveServiceLike {
@@ -1104,6 +1124,7 @@ export class HeartbeatMonitor {
             `Approval required for ${decision.toolName}. Request ${approvalRequestId} created; task and agent paused awaiting decision.`, undefined, mutationContextForAgent(agent.id, runId),
           );
         }
+        void emitApprovalMail({ messageStore: this.messageStore, approvalRequestId, toolName: decision.toolName, taskId, agentId: agent.id, agentName: agent.name });
         await this.store.updateAgentState(agent.id, "paused");
         await this.store.updateAgent(agent.id, { pauseReason: "awaiting-approval" });
       },
@@ -1176,6 +1197,7 @@ export class HeartbeatMonitor {
         }
         await this.store.updateAgentState(agent.id, "paused");
         await this.store.updateAgent(agent.id, { pauseReason: "awaiting-approval" });
+        void emitApprovalMail({ messageStore: this.messageStore, approvalRequestId, toolName, taskId, agentId: agent.id, agentName: agent.name });
       },
     };
   }
@@ -2374,6 +2396,54 @@ export class HeartbeatMonitor {
           }
         }
 
+        /*
+        FNXC:MemoryAgent 2026-08-11-09:41:
+        Memory Keeper runs before task/session assembly so 4a consumes no model quota. Provenance,
+        not its name, identifies fallback-named owners. Disabled or unavailable environments are
+        successful skips; runtime errors remain failed runs so completeRun owns shared recovery.
+        */
+        if (agent.metadata?.builtInMemoryAgent === true) {
+          const emit = async (type: "memory:consolidation-completed" | "memory:consolidation-skipped" | "memory:consolidation-failed" | "memory:semantics-inferred" | "memory:semantics-skipped", metadata: Record<string, unknown>) => {
+            try { await audit.database({ type, target: agentId, metadata }); } catch { /* audit is best effort */ }
+          };
+          /* FNXC:MemoryAgent 2026-08-11-10:17: Procedure seeding preserves operator edits and is best-effort, so a filesystem failure cannot prevent deterministic upkeep. */
+          try {
+            await ensureDefaultHeartbeatProcedureFile(rootDir, agent.heartbeatProcedurePath ?? `.fusion/agents/${agentId}/HEARTBEAT.md`, "# Memory Keeper\n\nRun deterministic graph refresh, recall consolidation, and graph-reference merging. Merge graph references without dropping existing ids. Do not use an LLM. Unchanged inputs write nothing.");
+          } catch (error) {
+            heartbeatLog.warn(`Unable to seed Memory Keeper heartbeat procedure: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          if (!await resolveMemoryConsolidationEnabledForHeartbeat(taskStore, heartbeatModelSettings)) {
+            await emit("memory:consolidation-skipped", { agentId, reason: "disabled" });
+            await this.completeRun(agentId, run.id, { status: "completed", resultJson: { reason: "memory_consolidation_disabled" }, skipStateTransition: true });
+            return (await this.store.getRunDetail(agentId, run.id))!;
+          }
+          const resolution = await resolveMemoryConsolidationPorts({ taskStore, rootDir, agentId, settings: heartbeatModelSettings });
+          if (resolution.status === "unavailable") {
+            await emit("memory:consolidation-skipped", { agentId, reason: "unavailable", unavailableReason: resolution.reason });
+            await this.completeRun(agentId, run.id, { status: "completed", resultJson: { reason: "memory_consolidation_unavailable", unavailableReason: resolution.reason }, skipStateTransition: true });
+            return (await this.store.getRunDetail(agentId, run.id))!;
+          }
+          try {
+            const outcome = await new MemoryConsolidationService(resolution.ports).runConsolidationTick({ agentId, projectId: resolution.projectId });
+            if (outcome.skipped) await emit("memory:consolidation-skipped", { agentId, reason: outcome.skipped });
+            else {
+              if (outcome.semanticsWritten > 0) await emit("memory:semantics-inferred", { agentId, edgesWritten: outcome.semanticsWritten, edgesDeduped: outcome.semanticsDeduped, edgesDroppedUnresolved: outcome.semanticsDroppedUnresolved });
+              if (outcome.semanticsSkipped) await emit("memory:semantics-skipped", { agentId, reason: outcome.semanticsSkipped });
+              if (outcome.changed) {
+                // `changed` drives emission but is not part of the published audit metadata contract.
+                const { changed: _changed, skipped: _skipped, ...metadata } = outcome;
+                await emit("memory:consolidation-completed", { agentId, ...metadata });
+              }
+            }
+            await this.completeRun(agentId, run.id, { status: "completed", resultJson: { reason: "memory_consolidation", ...outcome }, skipStateTransition: true });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await emit("memory:consolidation-failed", { agentId, stage: error instanceof MemoryConsolidationError ? error.stage : "unknown", recoverable: isHeartbeatErrorRecoverable({ lastError: message }), priorRetryCount: readHeartbeatErrorRetryCount(agent), retryLimit: resolveErrorRecoveryLimit(heartbeatModelSettings) });
+            await this.completeRun(agentId, run.id, { status: "failed", stderrExcerpt: message, errorMessage: message });
+          }
+          return (await this.store.getRunDetail(agentId, run.id))!;
+        }
+
         // Check if agent has identity (used later for no-task run decisions)
         const agentHasIdentity = hasAgentIdentity(agent);
         const isAgentEphemeral = isEphemeralAgent(agent);
@@ -2787,8 +2857,8 @@ export class HeartbeatMonitor {
         if (resolvedMemoryMode.mode !== "off" && memorySettings?.memoryEnabled !== false) {
           try {
             memoryInstructions = resolvedMemoryMode.mode === "index"
-              ? "## Project Memory (Index Only)\n\nProject memory is available via fn_memory_search and fn_memory_get. Search first, then fetch only relevant excerpts."
-              : buildExecutionMemoryInstructions(rootDir, memorySettings);
+              ? `## Project Memory (Index Only)\n\n${buildMemoryPreSteeringNudge("index")}`
+              : buildExecutionMemoryInstructions(rootDir, memorySettings, undefined, resolvedMemoryMode.mode);
           } catch (memoryInstructionErr) {
             const message = memoryInstructionErr instanceof Error ? memoryInstructionErr.message : String(memoryInstructionErr);
             heartbeatLog.warn(`Failed to resolve project memory instructions for heartbeat ${agentId}: ${message}`);
@@ -2872,6 +2942,7 @@ export class HeartbeatMonitor {
             persistAgentToolOutput: memorySettings?.persistAgentToolOutput,
             persistAgentThinkingLog: resolvePersistAgentThinkingLog(memorySettings, { ephemeral: isAgentEphemeral }),
           });
+          attachAgentUsageTelemetry(agentLogger, { store: taskStore, agentId, taskId: null, nodeId: null, lane: "heartbeat" });
         } else if (taskId) {
           agentLogger = new AgentLogger({
             store: taskStore,
@@ -2881,6 +2952,7 @@ export class HeartbeatMonitor {
             persistAgentToolOutput: memorySettings?.persistAgentToolOutput,
             persistAgentThinkingLog: resolvePersistAgentThinkingLog(memorySettings, { ephemeral: isAgentEphemeral }),
           });
+          attachAgentUsageTelemetry(agentLogger, { store: taskStore, agentId, taskId, nodeId: taskDetail?.effectiveNodeId ?? taskDetail?.nodeId ?? null, lane: "heartbeat" });
         }
 
         const isModelUnavailableError = (errorMessage: string): boolean => {
@@ -3067,7 +3139,26 @@ export class HeartbeatMonitor {
         heartbeatModelSettings = taskDetail
           ? await mergeEffectiveSettings(taskStore, taskDetail, heartbeatBaseSettings)
           : await mergeProjectWorkflowModelLaneBaseline(taskStore, heartbeatBaseSettings);
-        const heartbeatSessionModels = resolveHeartbeatSessionModels(heartbeatModelSettings, agent.runtimeConfig);
+        /*
+        FNXC:AgentModelInheritance 2026-08-09-22:38:
+        A model-less durable workflow role agent inherits its own role lane rather than always
+        taking the execution lane; complete runtime models remain authoritative in the helper.
+        */
+        const heartbeatSessionModels = resolveHeartbeatSessionModels(heartbeatModelSettings, agent.runtimeConfig, agent);
+        const effectiveHeartbeatThinkingLevel = resolvePermanentAgentEffectiveThinkingLevel(agent, heartbeatModelSettings);
+        // FNXC:CommandCenterActivity 2026-08-09-11:12: Heartbeat model selection happens after
+        // logger construction, so refresh telemetry before the session boundary and tool callbacks.
+        attachAgentUsageTelemetry(agentLogger, {
+          store: taskStore,
+          agentId,
+          taskId: taskId ?? null,
+          nodeId: taskDetail?.effectiveNodeId ?? taskDetail?.nodeId ?? null,
+          model: heartbeatSessionModels.defaultModelId ?? null,
+          provider: heartbeatSessionModels.defaultProvider ?? null,
+          lane: "heartbeat",
+          ephemeral: isAgentEphemeral,
+          runId: run.id,
+        });
         /*
          * FNXC:McpConfig 2026-06-26-00:00:
          * Heartbeat runs are coding-capable agent-work sessions, so configured MCP servers must be resolved with the waking agent identity and forwarded like executor/chat lanes. Log only server counts and resolution error counts; resolved env/header contents may contain materialized secrets.
@@ -3094,6 +3185,7 @@ export class HeartbeatMonitor {
           fallbackProvider: heartbeatSessionModels.fallbackProvider,
           fallbackModelId: heartbeatSessionModels.fallbackModelId,
           fallbackThinkingLevel: resolveExecutorFallbackThinkingLevel(undefined, heartbeatModelSettings),
+          ...(effectiveHeartbeatThinkingLevel ? { defaultThinkingLevel: effectiveHeartbeatThinkingLevel } : {}),
           runAuditor: audit,
           settings: heartbeatModelSettings,
           mcpServers: heartbeatMcp.servers,
@@ -3117,6 +3209,17 @@ export class HeartbeatMonitor {
           ...(skillContext.additionalSkillPaths.length > 0 ? { additionalSkillPaths: skillContext.additionalSkillPaths } : {}),
           actionGateContext: this.buildActionGateContext(agent, taskId, run.id, heartbeatModelSettings?.defaultAgentPermissionPolicy),
           permanentAgentGating: this.buildPermanentAgentGatingContext(agent, taskId, run.id, heartbeatModelSettings?.defaultAgentPermissionPolicy),
+        });
+        emitAgentSessionStart({
+          store: taskStore,
+          agentId,
+          taskId: taskId ?? null,
+          nodeId: taskDetail?.effectiveNodeId ?? taskDetail?.nodeId ?? null,
+          model: heartbeatSessionModels.defaultModelId ?? null,
+          provider: heartbeatSessionModels.defaultProvider ?? null,
+          lane: "heartbeat",
+          ephemeral: isAgentEphemeral,
+          runId: run.id,
         });
 
         /*
@@ -3647,6 +3750,22 @@ export class HeartbeatMonitor {
                   permanentAgentGating: this.buildPermanentAgentGatingContext(agent, taskId, run.id, heartbeatModelSettings?.defaultAgentPermissionPolicy),
                 });
                 session = created.session;
+                /*
+                FNXC:CommandCenterActivity 2026-08-09-15:06:
+                Credential rotation constructs a replacement AgentSession, so it owns a new
+                boundary event rather than reusing the initial session's accounting.
+                */
+                emitAgentSessionStart({
+                  store: taskStore,
+                  agentId,
+                  taskId: taskId ?? null,
+                  nodeId: taskDetail?.effectiveNodeId ?? taskDetail?.nodeId ?? null,
+                  model: heartbeatSessionModels.defaultModelId ?? null,
+                  provider: heartbeatSessionModels.defaultProvider ?? null,
+                  lane: "heartbeat",
+                  ephemeral: isAgentEphemeral,
+                  runId: run.id,
+                });
                 return next;
               },
             } : undefined,

@@ -50,6 +50,20 @@ describe("workflow malformed-verdict gate", () => {
     expect(parseWorkflowStepOutput("native skill output", { requireVerdict: false })).toEqual({ output: "native skill output" });
   });
 
+  /* FNXC:ReviewLeniency 2026-08-11-18:44: Visible but unreadable structured
+   * verdict intent is malformed, never a lenient prose approval. */
+  it("does not launder unreadable structured verdicts into prose approval", () => {
+    for (const output of [
+      'looks good\n{"verdict":"REVISE","notes":"truncated',
+      'looks good\n{"verdict":"PASS"}',
+    ]) {
+      expect(parseWorkflowStepOutput(output)).toEqual({ output, malformed: true });
+      expect(parseWorkflowStepOutput(output, { requireVerdict: false })).toEqual({ output });
+    }
+    expect(parseWorkflowStepOutput("looks good")).toMatchObject({ verdict: "APPROVE" });
+    expect(parseWorkflowStepOutput("my verdict: looks good")).toMatchObject({ verdict: "APPROVE" });
+  });
+
   it("extracts only validated findings from the selected trailing verdict JSON", () => {
     expect(parseWorkflowStepOutput('prose {"verdict":"REVISE","notes":"old"}\n{"verdict":"REVISE","notes":"new","findings":[{"id":"a","title":"Issue","body":"Fix it","line":3,"severity":"high"},{"id":"a","title":"Second","body":"Also fix"},{"title":"bad","body":""}]}')).toMatchObject({
       verdict: "REVISE",

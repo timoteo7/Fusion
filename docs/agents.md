@@ -120,6 +120,12 @@ The legacy `fn_agent_set_instructions` extension tool remains available for back
 
 At least one instruction field must be provided. The legacy tool uses the same direct/indirect-report authorization model for agent callers and persists changes through `AgentStore.updateAgent`, so instruction edits are captured as normal agent config revisions.
 
+### Manager evaluation tools
+
+`fn_agent_read_evaluations` lets a manager read a named direct or indirect report's rating summary, commented ratings, reflection history, latest reflection, and performance summary. `fn_agent_evaluation_followup` records a 1–5 coaching rating for that same scoped report; the report reads the rating through its existing self-improvement loop. Agent callers may not target themselves, peers, ancestors, or unrelated agents. CLI/user calls without `ctx.agentId` are privileged operator calls and may read or record a follow-up for any durable agent. The follow-up remains subject to the normal agent action policy gate.
+
+These tools complement, but do not replace, the existing self-only `fn_read_evaluations`: an agent's self-improvement cycle still reads only its own data. Use `fn_task_create` or `fn_delegate_task` to route implementation work discovered from feedback.
+
 ## Agent Field Parity Matrix
 
 Every first-class editable agent field has a defined create/edit/import/template behavior. This ensures consistent round-tripping across all surfaces.
@@ -266,7 +272,9 @@ Separation of concerns:
 
 ### Task wedge operator notifications
 
-When a task is terminally blocked (for example, by a merge gate, exhausted execution retries, or a completion blocker), Fusion posts a system message to the dashboard mailbox and sends a `task-wedged` notification through configured providers. The message identifies the task, bounded reason/gate when known, and a recovery action. The active/resolved episode is persisted with the task, so it is sent once per active reason across service restarts; retrying or otherwise restoring progress clears the episode, so a later recurrence is visible again.
+When a task is terminally blocked (for example, by a merge gate, exhausted execution retries, or a completion blocker), Fusion posts a system message to the dashboard mailbox and sends a `task-wedged` notification through configured providers. Self-healing declines alert only when their proof shows no live session, no recent activity, and no intentional pause or auto-merge-off hold. Before delivery, Fusion revalidates the live row: progressing (including `reviewing`), paused, auto-merge-off, deleted, archived, and complete-lane rows do not alert. The message identifies the task, bounded reason/gate when known, and a recovery action. The active/resolved episode is persisted with the task, so it is sent once per active reason across service restarts; retrying or otherwise restoring progress clears the episode, so a later recurrence is visible again.
+
+For an unclassified generic `terminal-failed` park, Fusion first uses a small durable automatic-recovery budget rather than immediately paging an operator. While retries are owed, all failure-alert channels are withheld. Budget exhaustion produces one confirmed terminal-failure escalation; turning automatic recovery off emits a reason-tagged drain alert without discarding remaining retries, so turning it back on resumes recovery. An operator Retry starts a fresh budget; success, archive, and deletion clear it automatically. Agent-initiated retry intentionally does not mint a fresh budget. A spent budget can also expire after its age bound only when a later foreign row write proves the episode moved on.
 
 ### CLI agent permission prompts and notifications
 
@@ -366,14 +374,13 @@ Executor precedence for task runs:
 
 If the assigned agent runtime model is missing or incomplete, Fusion continues to automatic provider/model resolution without mixing partial runtime fields into the selected pair.
 
-### Durable-agent heartbeat model precedence and unavailable-provider behavior
+### Permanent role-agent identity, chat, and heartbeat model inheritance
 
-Heartbeat sessions for durable agents resolve models with the same fresh-settings-first rule:
+For permanent role agents, the Agents page, Agent Detail, Chat session creation, direct chat, room responders, and model-less heartbeats share one identity resolution chain. Explicit session or room thinking wins, then an agent's explicit thinking, then its role lane, project default override, and global default. A complete per-agent runtime model (`runtimeConfig.model` or `modelProvider` + `modelId`) wins for agent-bound interactive sessions and heartbeats; incomplete pairs are ignored.
 
-1. Execution-lane settings fallback (`executionProvider`/`executionModelId` → `executionGlobalProvider`/`executionGlobalModelId` → project/global defaults)
-2. Agent runtime model (`runtimeConfig.model` or `runtimeConfig.modelProvider` + `runtimeConfig.modelId`) only when both provider and model ID are present and no execution/default pair is configured
+Built-in workflow roles select their own lanes: Planner uses planning, Reviewer uses validator, Merger uses merger, and Executor/other permanent agents use execution. Thus an unset role lane inherits `defaultProviderOverride`/`defaultModelIdOverride` before global defaults. The Agent Detail picker labels an empty stored model as **Inherit project/role default**; saving inherit leaves the agent row empty rather than materialising the selected project model.
 
-Heartbeat no longer passes a stale runtime model ahead of a saved execution lane or project default override.
+Model-less durable-agent heartbeats use the same role-lane chain. Calling the low-level heartbeat resolver without role context deliberately retains its historical execution-lane behavior for compatibility. Task execution remains settings-first as described above and is not changed by identity inheritance.
 
 Task-scoped heartbeat runs for durable agents execute inside the task's git worktree (same as ephemeral task execution), while no-task heartbeat runs continue to execute from the project root.
 Heartbeat and executor system prompts share the same active-goal context injector (`buildGoalContextSection`), so both lanes receive identical goal preambles when active goals exist.
@@ -693,7 +700,7 @@ Operators can disable this per agent in **Agent Detail → Settings → Heartbea
 
 When `selfImproveEnabled !== false`, heartbeat runs periodically enter a self-improvement phase once `selfImproveIntervalMs` has elapsed since `lastSelfImproveAt` (or first run with available ratings). During that phase the agent is prompted to:
 
-1. Call `fn_read_evaluations` to inspect ratings/reflections
+1. Call the self-only `fn_read_evaluations` to inspect its own ratings/reflections (managers use `fn_agent_read_evaluations` for scoped report visibility and `fn_agent_evaluation_followup` for coaching)
 2. Identify recurring quality issues and trends
 3. Call `fn_update_identity` to adjust its own `soul`, `instructionsText`, or `memory`
 4. Record concise improvement decisions
@@ -946,6 +953,8 @@ Messaging is available in dashboard mailbox UI and CLI. In dashboard Mailbox →
 
 Agent-backed dashboard chat sessions (including plugin-runtime agents such as Hermes/OpenClaw/Paperclip) also expose mailbox tools (`fn_send_message`, `fn_read_messages`) when a `MessageStore` is wired for that project. Model-only chats without an attached agent do not expose these tools.
 
+Mail has an optional structural metadata contract: `mailKind` distinguishes ordinary messages, reports, and approvals; reports carry a small serializable title/section writeup, while `approvalRequestId` is a reference to live approval state rather than a copied snapshot. `fn_send_message` can send reports with `mail_kind: "report"` and `report`; use Chat for quick back-and-forth. Approval items are engine-emitted only.
+
 ### Dashboard Chat workspace tools
 
 Dashboard Chat, Chat Room responders, and task-detail Planner Chat run at the interactive project checkout with coding workspace tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`. Use them for user-directed file changes and shell investigation. When a durable agent is bound, its permanent-agent permission policy still governs file writes/deletes and command execution; unbound model Chat has no durable-principal policy gate. Chat must keep the checkout branch sticky: inspect Git freely, but do not use `git checkout` or `git switch` unless the operator explicitly requests it.
@@ -968,6 +977,16 @@ fn agent mailbox AGENT-001
 ## Permanent agent playbooks
 
 Worked manager/IC/message/blocked/no-task scenarios live in [Permanent Agent Heartbeat Playbooks](./agents-playbooks.md). Prefer those examples over re-deriving tick behavior from engine source.
+
+## Built-in workflow owner identities
+
+At startup, Fusion provisions one provenance-marked durable owner for each built-in workflow role: **Workflow Planner** (`triage`), **Workflow Executor**, **Workflow Reviewer**, and **Workflow Merger**. Each receives role-specific inline `instructionsText` and `soul` values. Those persisted fields are the runtime authority used when the engine builds an agent prompt.
+
+Fusion also creates a managed setup mirror under each owner’s agent directory: `AGENTS.md` mirrors the default instruction text and `soul.md` mirrors the default soul. The files are intentionally not assigned to `instructionsPath`, so the same default identity is not composed twice at runtime. They are safe operator editing starting points, not an additional runtime source.
+
+Provisioning is idempotent and non-destructive. A trimmed non-empty inline instruction, `instructionsPath`, external bundle, non-canonical managed bundle, non-empty soul, or non-empty managed mirror is operator-owned and is preserved. Sparse canonical owners receive only missing default fields/files; an incomplete default bundle is repaired without overwriting non-empty files. Files are materialized after the database transaction commits, so a filesystem failure is retryable on the next startup without duplicating owners.
+
+If legacy data contains several provenance-marked owners for a supported role, Fusion retains the earliest valid `createdAt` row (then lexicographically smallest ID as a tie-breaker). It removes only the built-in provenance keys from the other rows, preserving them as ordinary durable agents with their names, roles, identity, policies, settings, metadata, and files intact. Agents with missing or unsupported provenance roles, and same-role agents without built-in provenance, are never adopted or changed by this repair.
 
 ## Heartbeat Prompt Composition and Autonomous Run Behavior
 
@@ -1717,8 +1736,22 @@ Per-agent overrides via `runtimeConfig`:
 - **Budgets**: per-agent token budget tracking; `HeartbeatMonitor.executeHeartbeat()` skips when `isOverBudget` or `isOverThreshold` (timer triggers). Hard caps pause the agent.
 - **Performance ratings**: 1–5 scale with trend analysis, injected into system prompts.
 
+## Memory Keeper (FN-8932)
+
+Each project provisions a durable **Memory Keeper** custom agent for deterministic, hourly memory upkeep. It is heartbeat-enabled and has task auto-claim disabled, so it cannot claim board work or make product decisions. Provisioning identifies the owner by its provenance marker, not its display name: if an operator already owns `Memory Keeper`, Fusion creates `Memory Keeper (built-in)` instead; if both names are occupied, startup continues without a memory agent rather than renaming/adopting the operator agent or failing initialization.
+
+When enabled, a heartbeat refreshes the knowledge graph incrementally, appends deterministic FNXC rationale decisions through recall deduplication, then merges rationale/file node identifiers into each resulting recall record. Cross-references only grow: the per-record PostgreSQL advisory lock reads, unions, and writes in one transaction, and equal unions perform no update. Pruning is intentionally out of scope. A fingerprint-stable graph, duplicate recall results, and equal cross-reference unions yield a no-write tick; an in-process `(agentId, projectId)` guard skips re-entry. The guard is defense-in-depth for manual callers and does not fence another process or CLI graph build.
+
+Graph files are atomically replaced **per file**, not as an atomic three-file set. Concurrent builders can leave a transient mismatched set, but the manifest is written last and strict consistency validation reports `inconsistent-artifact` and triggers a full rebuild on the next load. This accepted residual risk can create temporary committable-tree artifact noise; `graphRecoveryReason` makes repeated recovery visible. The adapter alone imports graph filesystem/configuration APIs; the tick and material transformer may use only graph types and pure ID helpers so they remain fixture-testable. Missing data-layer/project/root-directory or invalid graph-directory environments are successful skips, while runtime failures use the existing shared heartbeat recovery budget.
+
+The workflow-native `memoryConsolidationEnabled` setting defaults to `true` and is resolved from the project default workflow for no-task heartbeats. Disabling it stops the tick without deleting the agent or memory. The tick makes no LLM calls.
+
 ## Workflow role principals
 
 Permanent agents carry one or more normalized role tags: `triage`, `executor`, `reviewer`, `merger`, `scheduler`, `engineer`, and `custom`. Upgrades preserve legacy singular roles, and every project receives four distinct heartbeat-disabled built-ins for planning, execution, review, and merge. Heartbeat enablement and `maxConcurrentRuns` are independent from `runtimeConfig.maxWorkflowSessions`.
 
 Workflow routing never changes `assignedAgentId`. An explicit task owner runs classified stages regardless of its tags, except for an exact reviewer-node override. Otherwise a column binding is considered, then an available role-tag pool is selected by fewest active workflow sessions, oldest creation time, and ID. A named unavailable principal holds work rather than falling back.
+
+### Memory-first steering and consolidation history
+
+Agent instruction assembly uses the resolved `agentMemoryInclusionMode` across triage, execution, review, heartbeat, and chat lanes. `full` asks agents to query memory before re-reading raw sources, `index` keeps that direction terse, and `off` omits it. Operators can inspect the built-in Memory Keeper's compact consolidation audit history in **Agent Detail → Agent Memory**; it shows only completion outcomes and existing audit counts/reasons, never memory content.

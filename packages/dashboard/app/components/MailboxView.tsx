@@ -8,6 +8,7 @@ import {
   Inbox as InboxIcon,
   Bot,
   Trash2,
+  Archive,
   CheckCheck,
   Loader2,
   RefreshCw,
@@ -23,6 +24,8 @@ import {
   fetchAllAgentMailbox,
   markMessageRead,
   markAllMessagesRead,
+  archiveMessage,
+  unarchiveMessage,
   deleteMessage,
   fetchConversation,
   fetchAgents,
@@ -42,6 +45,8 @@ import { MailboxArtifactAttachment } from "./MailboxArtifactAttachment";
 import { MailboxRelatedWorkLink, hasRelatedTaskLink } from "./MailboxRelatedWorkLink";
 import { MailboxNativeStructureEmbeds } from "./MailboxNativeStructureEmbeds";
 import { MailboxTaskProposal } from "./MailboxTaskProposal";
+import { MailboxKindBadge, MailboxStructuralItem, isStructuralMail } from "./MailboxStructuralItem";
+import type { ChatReportHandoff } from "./chatReportHandoff";
 import { MessageComposer, type NativeStructureCandidate } from "./MessageComposer";
 import { ViewHeader } from "./ViewHeader";
 import { WorktrunkInstallApprovalDetails } from "./WorktrunkInstallApprovalDetails";
@@ -55,7 +60,7 @@ import { getRelativeTimeBucket } from "../utils/relativeTimeAgo";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-type MailboxTab = "inbox" | "outbox" | "agents" | "approvals";
+type MailboxTab = "inbox" | "outbox" | "archived" | "agents" | "approvals";
 
 interface MailboxViewProps {
   projectId?: string;
@@ -67,6 +72,7 @@ interface MailboxViewProps {
   nativeStructureCandidates: NativeStructureCandidate[];
   /** Callback when unread count changes (for header badge updates) */
   onUnreadCountChange?: (count: number) => void;
+  composePrefill?: ChatReportHandoff & { nonce: number };
 }
 
 const ALL_AGENTS_MAILBOX_ID = "__all_agents__";
@@ -227,14 +233,21 @@ export function MailboxView({
   onOpenNativeStructure,
   nativeStructureCandidates,
   onUnreadCountChange,
+  composePrefill,
 }: MailboxViewProps) {
   const { t } = useTranslation("app");
   const [activeTab, setActiveTab] = useState<MailboxTab>("inbox");
   const [inbox, setInbox] = useState<InboxResponse | null>(null);
+  // FNXC:StructuralMail 2026-08-09-10:27: A consumed handoff must not leak into a later manually opened Quick composer.
+  const [activeComposePrefill, setActiveComposePrefill] = useState<(ChatReportHandoff & { nonce: number }) | null>(null);
+  const consumedComposePrefillNonceRef = useRef<number | null>(null);
+  const [structuralFilter, setStructuralFilter] = useState<"all" | "structural">("all");
   const [outbox, setOutbox] = useState<OutboxResponse | null>(null);
+  const [archivedInbox, setArchivedInbox] = useState<InboxResponse | null>(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
+  const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [conversationMessages, setConversationMessages] = useState<Message[]>([]);
   const [showComposer, setShowComposer] = useState(false);
   const [composeRecipient, setComposeRecipient] = useState<{ id: string; type: ParticipantType } | null>(null);
@@ -448,6 +461,28 @@ export function MailboxView({
     }
   }, [projectId, onUnreadCountChange, captureMailboxScroll]);
 
+  const loadArchivedInbox = useCallback(async () => {
+    captureMailboxScroll();
+    setIsLoading(true);
+    try {
+      /*
+      FNXC:MessageArchive 2026-08-12-22:38:
+      The archive is a restore surface for every mailbox source, including sent and agent mail.
+      Combine the source-specific archive queries and deduplicate IDs so archiving never strands a message outside its restore view.
+      */
+      const [inbox, outbox, agentMailbox] = await Promise.all([
+        fetchInbox({ limit: 50, archived: true }, projectId),
+        fetchOutbox({ limit: 50, archived: true }, projectId),
+        fetchAllAgentMailbox(projectId, { archived: true }),
+      ]);
+      const messages = [...inbox.messages, ...outbox.messages, ...agentMailbox.messages]
+        .filter((message, index, all) => all.findIndex(({ id }) => id === message.id) === index);
+      setArchivedInbox({ messages, total: messages.length, unreadCount: 0 });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [projectId, captureMailboxScroll]);
+
   const loadOutbox = useCallback(async () => {
     captureMailboxScroll();
     setIsLoading(true);
@@ -538,11 +573,12 @@ export function MailboxView({
   useEffect(() => {
     if (activeTab === "inbox") loadInbox();
     else if (activeTab === "outbox") loadOutbox();
+    else if (activeTab === "archived") loadArchivedInbox();
     else if (activeTab === "agents") loadAgents();
     else if (activeTab === "approvals") {
       void loadApprovals(approvalSubTab);
     }
-  }, [activeTab, loadInbox, loadOutbox, loadAgents, loadApprovals, approvalSubTab]);
+  }, [activeTab, loadInbox, loadOutbox, loadArchivedInbox, loadAgents, loadApprovals, approvalSubTab]);
 
   // Load agent mailbox when selected
   useEffect(() => {
@@ -617,6 +653,14 @@ export function MailboxView({
   const handleOpenMessage = useCallback(async (message: Message, source: "deep-link" | "user" = "user") => {
     if (source === "user") {
       consumeCurrentDeepLink();
+    }
+    /*
+    FNXC:StructuralMail 2026-08-09-09:57:
+    A deep link resolves against the unfiltered inbox. Reset a structural-only filter when its target
+    is ordinary mail so the selected message always retains a visible list context.
+    */
+    if (source === "deep-link" && activeTab === "inbox" && !isStructuralMail(message.metadata)) {
+      setStructuralFilter("all");
     }
     setSelectedMessage(message);
     // Only auto-mark as read when viewing the dashboard user's own inbox.
@@ -730,14 +774,45 @@ export function MailboxView({
     }
   }, [projectId, addToast, onUnreadCountChange]);
 
+  /*
+  FNXC:MessageArchive 2026-08-12-22:14:
+  Archive is the default mailbox removal action. Delete remains an explicit destructive choice.
+  */
+  const handleArchiveMessage = useCallback(async (id: string) => {
+    consumeCurrentDeepLink();
+    try {
+      await archiveMessage(id, projectId);
+      dismissMessage();
+      if (activeTab === "archived") loadArchivedInbox();
+      else if (activeTab === "outbox") loadOutbox();
+      else if (activeTab === "inbox") loadInbox();
+      else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
+      else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
+      refreshUnreadCount();
+      addToast?.("Message archived", "success");
+    } catch { addToast?.("Failed to archive message", "error"); }
+  }, [projectId, activeTab, selectedAgentId, loadArchivedInbox, loadInbox, loadOutbox, loadAgentMailbox, loadAllAgentsMailbox, refreshUnreadCount, addToast, consumeCurrentDeepLink, dismissMessage]);
+
+  const handleUnarchiveMessage = useCallback(async (id: string) => {
+    try {
+      await unarchiveMessage(id, projectId);
+      dismissMessage();
+      loadArchivedInbox();
+      refreshUnreadCount();
+      addToast?.("Message restored", "success");
+    } catch { addToast?.("Failed to restore message", "error"); }
+  }, [projectId, loadArchivedInbox, refreshUnreadCount, addToast, dismissMessage]);
+
   const handleDeleteMessage = useCallback(async (id: string) => {
     consumeCurrentDeepLink();
+    setPendingDeleteMessageId(null);
     try {
       await deleteMessage(id, projectId);
       dismissMessage();
       // Refresh current tab
       if (activeTab === "inbox") loadInbox();
       else if (activeTab === "outbox") loadOutbox();
+    else if (activeTab === "archived") loadArchivedInbox();
       else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
       else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
       addToast?.("Message deleted", "success");
@@ -759,6 +834,7 @@ export function MailboxView({
   const handleCloseComposer = useCallback(() => {
     consumeCurrentDeepLink();
     setShowComposer(false);
+    setActiveComposePrefill(null);
     setComposeRecipient(null);
     setComposeReplyContext(null);
   }, [consumeCurrentDeepLink]);
@@ -792,6 +868,13 @@ export function MailboxView({
     setComposeReplyContext(null);
     setShowComposer(true);
   }, [activeTab, selectedAgentId, consumeCurrentDeepLink, dismissMessage, isMobile, selectedMessage]);
+
+  useEffect(() => {
+    if (!composePrefill || composePrefill.nonce === consumedComposePrefillNonceRef.current) return;
+    consumedComposePrefillNonceRef.current = composePrefill.nonce;
+    setActiveComposePrefill(composePrefill);
+    handleOpenCompose();
+  }, [composePrefill, handleOpenCompose]);
 
   const handleComposeCancel = dismissComposer;
 
@@ -881,6 +964,8 @@ export function MailboxView({
     setAgentSubTab(tab);
   }, [consumeCurrentDeepLink, dismissMessage]);
 
+  const filteredInboxMessages = useMemo(() => structuralFilter === "structural" ? (inbox?.messages.filter((message) => isStructuralMail(message.metadata)) ?? []) : (inbox?.messages ?? []), [inbox, structuralFilter]);
+
   // ── Render ────────────────────────────────────────────────────────────
 
   const renderMessageDetail = () => {
@@ -902,6 +987,7 @@ export function MailboxView({
           )}
           <div className="mailbox-message-detail-meta">
             <span className="mailbox-message-type">{messageTypeLabel(selectedMessage.type)}</span>
+            <MailboxKindBadge metadata={selectedMessage.metadata} />
             <span className="mailbox-message-time">{formatTimestamp(selectedMessage.createdAt, t)}</span>
           </div>
           <div className="mailbox-message-detail-actions">
@@ -915,14 +1001,30 @@ export function MailboxView({
                 <span>{t("mailbox.reply", "Reply")}</span>
               </button>
             )}
-            <button
-              className="btn btn-sm btn-secondary"
-              onClick={() => handleDeleteMessage(selectedMessage.id)}
-              data-testid="mailbox-delete"
-            >
-              <Trash2 size={14} />
-              <span>{t("mailbox.delete", "Delete")}</span>
-            </button>
+            {selectedMessage.archived ? (
+              <button className="btn btn-sm btn-secondary" onClick={() => handleUnarchiveMessage(selectedMessage.id)} data-testid="mailbox-unarchive">
+                <Archive size={14} /><span>Restore</span>
+              </button>
+            ) : (
+              <button className="btn btn-sm btn-secondary" onClick={() => handleArchiveMessage(selectedMessage.id)} data-testid="mailbox-archive">
+                <Archive size={14} /><span>Archive</span>
+              </button>
+            )}
+            {pendingDeleteMessageId === selectedMessage.id ? (
+              <>
+                {/* FNXC:MessageArchive 2026-08-12-22:51: Hard deletion needs a second deliberate click because archive is the default safe removal action. */}
+                <button className="btn btn-sm btn-secondary" onClick={() => void handleDeleteMessage(selectedMessage.id)} data-testid="mailbox-delete-confirm">
+                  <Trash2 size={14} /><span>{t("mailbox.confirmDelete", "Confirm delete")}</span>
+                </button>
+                <button className="btn btn-sm btn-secondary" onClick={() => setPendingDeleteMessageId(null)} data-testid="mailbox-delete-cancel">
+                  <span>{t("common.cancel", "Cancel")}</span>
+                </button>
+              </>
+            ) : (
+              <button className="btn btn-sm btn-secondary" onClick={() => setPendingDeleteMessageId(selectedMessage.id)} data-testid="mailbox-delete">
+                <Trash2 size={14} /><span>{t("mailbox.delete", "Delete")}</span>
+              </button>
+            )}
           </div>
         </div>
         <div className="mailbox-message-participants">
@@ -970,6 +1072,7 @@ export function MailboxView({
                     className="mailbox-conversation-msg-body"
                     onOpenTask={onOpenTask}
                   />
+                  <MailboxStructuralItem metadata={msg.metadata} projectId={projectId} onOpenTask={onOpenTask} addToast={addToast} onDecided={() => { void loadInbox(); void loadApprovals(approvalSubTab); }} />
                   <MailboxRelatedWorkLink
                     metadata={msg.metadata}
                     onOpenTask={onOpenTask}
@@ -1005,6 +1108,7 @@ export function MailboxView({
               testId="mailbox-message-body"
               onOpenTask={onOpenTask}
             />
+            <MailboxStructuralItem metadata={selectedMessage.metadata} projectId={projectId} onOpenTask={onOpenTask} addToast={addToast} onDecided={() => { void loadInbox(); void loadApprovals(approvalSubTab); }} />
             <MailboxRelatedWorkLink
               metadata={selectedMessage.metadata}
               onOpenTask={onOpenTask}
@@ -1030,8 +1134,23 @@ export function MailboxView({
 
   const renderListPane = () => (
     <>
+      {activeTab === "archived" && (
+        <div className="mailbox-list" data-testid="mailbox-archived-list">
+          {isLoading && !archivedInbox && <MailboxSkeleton />}
+          {archivedInbox?.messages.length === 0 && <div className="mailbox-empty" data-testid="mailbox-archived-empty">No archived messages</div>}
+          {archivedInbox?.messages.map((message) => (
+            <button type="button" className="mailbox-item" key={message.id} onClick={() => void handleOpenMessage(message)} data-testid={`mailbox-item-${message.id}`}>
+              <span className="mailbox-item-preview">{message.content}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {activeTab === "inbox" && (
         <div className="mailbox-list" data-testid="mailbox-inbox-list">
+          <div className="mailbox-structural-filter" role="group" aria-label="Inbox filter">
+            <button type="button" className="btn btn-sm btn-secondary" aria-pressed={structuralFilter === "all"} data-testid="mailbox-structural-filter-all" onClick={() => setStructuralFilter("all")}>All</button>
+            <button type="button" className="btn btn-sm btn-secondary" aria-pressed={structuralFilter === "structural"} data-testid="mailbox-structural-filter-structural" onClick={() => setStructuralFilter("structural")}>Reports & approvals</button>
+          </div>
           {isLoading && !inbox && <MailboxSkeleton />}
           {inbox && inbox.messages.length === 0 && (
             <div className="mailbox-empty" data-testid="mailbox-inbox-empty">
@@ -1039,7 +1158,13 @@ export function MailboxView({
               <p>{t("mailbox.noMessagesInbox", "No messages in your inbox")}</p>
             </div>
           )}
-          {inbox?.messages.map((msg) => (
+          {inbox && inbox.messages.length > 0 && filteredInboxMessages.length === 0 && (
+            <div className="mailbox-empty" data-testid="mailbox-structural-filter-empty">
+              <InboxIcon size={32} />
+              <p>{t("mailbox.noStructuralMessages", "No reports or approvals in your inbox")}</p>
+            </div>
+          )}
+          {filteredInboxMessages.map((msg) => (
             <div
               key={msg.id}
               id={listMessageAnchorId(msg.id)}
@@ -1055,6 +1180,7 @@ export function MailboxView({
                   <span className="mailbox-item-from">
                     {getParticipantLabel(msg.fromId, msg.fromType)}
                   </span>
+                  <MailboxKindBadge metadata={msg.metadata} />
                   <span className="mailbox-item-time">{formatTimestamp(msg.createdAt, t)}</span>
                 </div>
                 <div className="mailbox-item-preview">{msg.content.slice(0, 80)}{msg.content.length > 80 ? "…" : ""}</div>
@@ -1310,6 +1436,10 @@ export function MailboxView({
           agents={agents}
           projectId={projectId}
           nativeStructureCandidates={nativeStructureCandidates}
+          initialMode={activeComposePrefill ? "report" : undefined}
+          initialContent={activeComposePrefill?.body}
+          initialReportTitle={activeComposePrefill?.title}
+          prefillNonce={activeComposePrefill?.nonce}
           onSend={handleMessageSent}
           onCancel={handleComposeCancel}
           addToast={addToast}
@@ -1446,6 +1576,7 @@ export function MailboxView({
               onClick={() => {
                 if (activeTab === "inbox") loadInbox();
                 else if (activeTab === "outbox") loadOutbox();
+    else if (activeTab === "archived") loadArchivedInbox();
                 else if (activeTab === "approvals") loadApprovals(approvalSubTab);
                 else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
                 else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
@@ -1479,6 +1610,7 @@ export function MailboxView({
           <Send size={14} />
           <span>{t("mailbox.outbox", "Outbox")}</span>
         </button>
+        <button className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "archived" ? "active" : ""}`} onClick={() => handleSelectTab("archived")} data-testid="mailbox-tab-archived">Archived</button>
         <button
           className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "agents" ? "active" : ""}`}
           onClick={() => handleSelectTab("agents")}
@@ -1536,6 +1668,10 @@ export function MailboxView({
                 agents={agents}
                 projectId={projectId}
                 nativeStructureCandidates={nativeStructureCandidates}
+                initialMode={activeComposePrefill ? "report" : undefined}
+                initialContent={activeComposePrefill?.body}
+                initialReportTitle={activeComposePrefill?.title}
+                prefillNonce={activeComposePrefill?.nonce}
                 onSend={handleMessageSent}
                 onCancel={handleComposeCancel}
                 addToast={addToast}

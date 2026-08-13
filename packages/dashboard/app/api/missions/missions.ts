@@ -3,9 +3,17 @@
  * Mission hierarchy, contract assertions, validation loop, and autopilot client API peeled from legacy.ts.
  * Mission interview SSE streams remain in legacy until createResilientEventSource is shared.
  */
-import type { MissionEvent, MissionHealth, MissionEventType, CommitAssociationDiffBackfillReport } from "@fusion/core";
+import {
+  MISSION_BLOCKER_DESCRIPTOR_SCHEMA_VERSION,
+  isMissionBlockerDescriptor,
+  type MissionBlockerDescriptor,
+  type MissionEvent,
+  type MissionHealth,
+  type MissionEventType,
+  type CommitAssociationDiffBackfillReport,
+} from "@fusion/core";
 import type { MilestoneValidationTelemetry } from "../../components/mission-types";
-import { api } from "../client/client.js";
+import { api, ApiRequestError } from "../client/client.js";
 import { withProjectId } from "../client/health.js";
 
 // ── Mission API ───────────────────────────────────────────────────────────
@@ -119,6 +127,8 @@ export interface MissionFeature {
   description?: string;
   acceptanceCriteria?: string;
   status: FeatureStatus;
+  /** Deterministic spec-lock projection persisted by mission reconciliation. */
+  specAlignment?: "on-plan" | "diverged-needs-review" | "diverged-relocked-approved" | "unavailable";
   createdAt: string;
   updatedAt: string;
 }
@@ -582,10 +592,63 @@ export interface MissionValidatorRun {
   updatedAt: string;
 }
 
-/** Trigger validation for a feature */
+/** API conflict detail returned when a fresh validator run already owns a feature. */
+export const VALIDATION_ALREADY_RUNNING = "VALIDATION_ALREADY_RUNNING" as const;
+export interface ValidationAlreadyRunningDetail {
+  code: typeof VALIDATION_ALREADY_RUNNING;
+  runId: string;
+  featureId: string;
+  startedAt: string;
+}
+
+/** Trigger validation for a feature; may reject with ApiRequestError 409 and ValidationAlreadyRunningDetail. */
 export function triggerValidation(featureId: string, projectId?: string): Promise<{ runId: string; featureId: string; status: string; triggerType: string; implementationAttempt: number; validatorAttempt: number; startedAt: string }> {
   return api(withProjectId(`/missions/features/${encodeURIComponent(featureId)}/validate`, projectId), {
     method: "POST",
+  });
+}
+
+/*
+FNXC:MissionReconcileControl 2026-08-11-06:49:
+The dashboard is a thin client over the single server reconcile authority. It renders the
+returned plan verbatim and must never re-derive reconcile decisions in browser code.
+*/
+export interface MissionReconcilePassResult {
+  missionsScanned: number;
+  featuresScanned: number;
+  statusUpdates: number;
+  badgeRepairs: number;
+  badgeRepairsSkipped: number;
+  terminalRepairs: number;
+  terminalSkipped: number;
+  conflicts: number;
+  failures: number;
+  skippedReason?: "archived";
+  planned?: Array<{ featureId: string; action: "status" | "terminal-done" | "badge-clear" }>;
+}
+
+/** Preview or apply the server-owned mission reconciliation pass. */
+export function reconcileMission(
+  missionId: string,
+  options: { dryRun?: boolean } | undefined,
+  projectId?: string,
+): Promise<MissionReconcilePassResult> {
+  return api<MissionReconcilePassResult>(withProjectId(`/missions/${encodeURIComponent(missionId)}/reconcile`, projectId), {
+    method: "POST",
+    body: JSON.stringify({ dryRun: options?.dryRun === true }),
+  });
+}
+
+/** Repair a stale feature validation state using server-resolved ground truth. */
+export function repairFeatureValidation(
+  featureId: string,
+  action: "clear" | "re_run",
+  reason?: string,
+  projectId?: string,
+): Promise<MissionFeature | { runId: string; featureId: string; status: string; triggerType: string; implementationAttempt: number; validatorAttempt: number; startedAt: string }> {
+  return api(withProjectId(`/missions/features/${encodeURIComponent(featureId)}/repair-validation`, projectId), {
+    method: "POST",
+    body: JSON.stringify({ action, ...(reason ? { reason } : {}) }),
   });
 }
 
@@ -615,6 +678,28 @@ export function fetchValidationRuns(featureId: string, options?: { limit?: numbe
 /** Get a single validator run */
 export function fetchValidationRun(runId: string, projectId?: string): Promise<MissionValidatorRun & { failures?: Array<{ id: string; assertionId: string; message?: string; expected?: string; actual?: string }> }> {
   return api(withProjectId(`/missions/validation-runs/${encodeURIComponent(runId)}`, projectId));
+}
+
+/** Normalize only server-issued canonical descriptors; ordering and dedupe remain server-owned. */
+export function normalizeMissionBlockers(input: unknown): MissionBlockerDescriptor[] {
+  return Array.isArray(input) ? input.filter(isMissionBlockerDescriptor) : [];
+}
+
+/** Parse only recognized versioned resume conflicts and fail closed for every other version. */
+export function parseMissionResumeConflict(err: unknown): { blockers: MissionBlockerDescriptor[] } | undefined {
+  if (!(err instanceof ApiRequestError) || (err.details as { code?: unknown } | undefined)?.code !== "MISSION_RESUME_CONFLICT") return undefined;
+  const details = err.details as { blockerSchemaVersion?: unknown; blockers?: unknown };
+  return details.blockerSchemaVersion === MISSION_BLOCKER_DESCRIPTOR_SCHEMA_VERSION
+    ? { blockers: normalizeMissionBlockers(details.blockers) }
+    : { blockers: [] };
+}
+
+export function fetchMissionBlockedDiagnostics(missionId: string, projectId?: string): Promise<{ missionId: string; status: MissionStatus; recomputedStatus: MissionStatus; clearable: boolean; resumable: boolean; blockers: MissionBlockerDescriptor[] }> {
+  return api(withProjectId(`/missions/${encodeURIComponent(missionId)}/blocked-diagnostics`, projectId));
+}
+
+export function clearMissionBlockedStatus(missionId: string, options: { reason?: string } = {}, projectId?: string): Promise<{ mission: Mission; blockers: MissionBlockerDescriptor[] }> {
+  return api(withProjectId(`/missions/${encodeURIComponent(missionId)}/clear-blocked`, projectId), { method: "POST", body: JSON.stringify(options.reason ? { reason: options.reason } : {}) });
 }
 
 /** Pause a mission (sets status to "blocked", in-flight tasks continue) */

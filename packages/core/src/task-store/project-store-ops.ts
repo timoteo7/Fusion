@@ -25,7 +25,7 @@ import "../builtin-traits.js";
 import {normalizeWorkflowIcon, type WorkflowDefinition, type WorkflowDefinitionInput} from "../workflows/workflow-definition-types.js";
 import {normalizeTaskPriority} from "../tasks/task-priority.js";
 import type {AsyncDataLayer, DbTransaction} from "../postgres/data-layer.js";
-import {recordRunAuditEventWithinTransaction} from "../postgres/data-layer.js";
+import {projectScopeFor, recordRunAuditEventWithinTransaction} from "../postgres/data-layer.js";
 import {EvalStore} from "../eval/eval-store.js";
 import {AsyncEvalStore} from "../async-stores/async-eval-store.js";
 import {BackwardCompat, ProjectRequiredError} from "../central/migration.js";
@@ -33,7 +33,7 @@ import {CentralCore} from "../central/central-core.js";
 import {extractTaskIdTokens, normalizeTitleForTaskId} from "../tasks/task-title-id-drift.js";
 import {generateTaskLineageId} from "../tasks/task-lineage.js";
 import {sanitizeFileScopeInPromptContent} from "../task-store/file-scope.js";
-import {preserveResolvedTaskWedgeEpisode, type TaskRow} from "../task-store/persistence.js";
+import {preserveDurableTaskWedgeInvariants, type TaskRow} from "../task-store/persistence.js";
 import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
 import {isWorkflowDefinitionIdPrimaryKeyCollision, nextWorkflowDefinitionIdAsyncImpl} from "../task-store/workflow-definitions.js";
 import {upsertTaskRowInTransaction, buildTaskInsertValues} from "./async/async-persistence.js";
@@ -42,6 +42,8 @@ import {withTaskWorkflowSerialization} from "./async/async-workflow-workitems.js
 import {recordActivityLogEntry as recordActivityLogEntryAsync} from "./async/async-audit.js";
 import {applyOriginalDescription} from "../tasks/original-description-policy.js";
 import {isPlanReviewSatisfied} from "../planner/plan-approval.js";
+import {createCurrentPlanEvidence} from "../planner/spec-lock.js";
+import {appendPlanEvidenceInTransaction} from "./plan-evidence.js";
 import {recordRunAuditEvent as recordRunAuditEventAsync} from "../postgres/data-layer.js";
 import {listGoalCitations as listGoalCitationsAsync} from "./async/async-events.js";
 import type {RunAuditEventRow} from "../task-store/row-types.js";
@@ -114,7 +116,7 @@ function sameDependencySet(actual: readonly string[], expected: readonly string[
     && actual.every((dependency, index) => dependency === expected[index]);
 }
 
-export async function atomicWriteTaskJsonWithAuditImpl(store: TaskStore, dir: string, task: Task, auditInput?: RunAuditEventInput, planningInvalidation?: PlanningDependencyInvalidation,): Promise<void> {
+export async function atomicWriteTaskJsonWithAuditImpl(store: TaskStore, dir: string, task: Task, auditInput?: RunAuditEventInput, planningInvalidation?: PlanningDependencyInvalidation, specPlanPrompt?: string,): Promise<void> {
     const id = store.getTaskIdFromDir(dir);
     // FNXC:RuntimeTaskOrchestrationAsync 2026-06-24-14:10:
     // Backend mode: upsert the task row + audit event in one async Drizzle
@@ -135,6 +137,31 @@ export async function atomicWriteTaskJsonWithAuditImpl(store: TaskStore, dir: st
     const existingRow = await layer.transactionImmediate(async (tx) => {
       const persist = async () => {
       const row = await readTaskRowInTransaction(tx, id, { includeDeleted: true }, layer.projectId);
+      /*
+      FNXC:SpecLock 2026-08-11-02:04:
+      A full PROMPT.md rewrite publishes evidence and clears approval in this task-row transaction,
+      so rollback cannot expose either half alone. FN-8969 requires the shared append path here:
+      it reads the durable version column with unbound-safe scope, retries PK races, and dedupes by
+      sourceHash rather than trusting a snapshot version that can be stale.
+      */
+      if (specPlanPrompt !== undefined) {
+        await appendPlanEvidenceInTransaction(tx, {
+          projectId: layer.projectId,
+          taskId: id,
+          buildEvidence: (version) => createCurrentPlanEvidence({
+            version,
+            sourceRevision: Date.now(),
+            capturedAt: new Date().toISOString(),
+            prompt: specPlanPrompt,
+            bindings: {
+              dependencies: task.dependencies ?? [],
+              missionId: task.missionId,
+              sliceId: task.sliceId,
+              sourceParentTaskId: task.sourceParentTaskId,
+            },
+          }),
+        });
+      }
       if (row && row.deletedAt != null) {
         return { deletedAt: row.deletedAt as string };
       }
@@ -154,7 +181,7 @@ export async function atomicWriteTaskJsonWithAuditImpl(store: TaskStore, dir: st
         )) {
           throw new Error(`Planning dependency invalidation conflict for ${id}: dependencies changed before the lifecycle mutation committed`);
         }
-        preserveResolvedTaskWedgeEpisode(existing, task);
+        preserveDurableTaskWedgeInvariants(existing, task);
         const changedColumns = store.getChangedTaskColumns(existing, task);
         if (changedColumns.size > 0) {
           const context = store.createTaskPersistSerializationContext(task, existing);
@@ -685,6 +712,7 @@ export async function listWorkflowStepsImpl(store: TaskStore): Promise<import(".
     const pgRows = await store.asyncLayer!.db
       .select()
       .from(table)
+      .where(projectScopeFor(table.projectId, store.asyncLayer!.projectId))
       .orderBy(table.createdAt);
     const storedPgSteps = pgRows
       .map((row) => store.applyLegacyWorkflowStepOverrides(store.toStoredWorkflowStep({
@@ -724,13 +752,13 @@ export async function getWorkflowStepImpl(store: TaskStore, id: string): Promise
     const byIdRows = await store.asyncLayer!.db
       .select()
       .from(table)
-      .where(eq(table.id, id))
+      .where(and(eq(table.id, id), projectScopeFor(table.projectId, store.asyncLayer!.projectId)))
       .limit(1);
     if (byIdRows[0]) return mapRow(byIdRows[0]);
     const byTemplateRows = await store.asyncLayer!.db
       .select()
       .from(table)
-      .where(eq(table.templateId, id))
+      .where(and(eq(table.templateId, id), projectScopeFor(table.projectId, store.asyncLayer!.projectId)))
       .orderBy(table.createdAt)
       .limit(1);
     if (byTemplateRows[0]) return mapRow(byTemplateRows[0]);

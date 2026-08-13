@@ -29,7 +29,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -188,6 +188,50 @@ async function bootAndVerify(attempt, registerCleanup) {
   const isolatedHome = mkdtempSync(path.join(tmpdir(), "fusion-boot-smoke-home-"));
   const isolatedProject = mkdtempSync(path.join(tmpdir(), "fusion-boot-smoke-project-"));
   let stderrBuf = "";
+  const childEnv = {
+    ...process.env,
+    HOME: isolatedHome,
+    FUSION_SKIP_ONBOARDING: "1",
+    // FNXC:BackendFlip 2026-06-26-14:55:
+    // Force the smoke to exercise the embedded PostgreSQL backend. Unset
+    // DATABASE_URL so a developer's external DB connection never leaks in
+    // (the smoke must prove the zero-config embedded path boots). Unset
+    // FUSION_NO_EMBEDDED_PG so the smoke cannot be opted out by an
+    // inherited env var — the embedded default is what the gate must prove.
+    DATABASE_URL: undefined,
+    FUSION_NO_EMBEDDED_PG: undefined,
+    // Make sure nothing inherits a PORT that fights the explicit flag.
+    PORT: undefined,
+  };
+
+  registerCleanup(() => {
+    removeTempDir(isolatedHome);
+    removeTempDir(isolatedProject);
+  });
+
+  /*
+   * FNXC:CliAwaitLiveness 2026-08-11-09:30:
+   * CI already uses Node 24; it missed FN-8954 because help-only smoke never
+   * ran `fn init`. Share this attempt's isolated HOME with serve so cold initdb
+   * is paid once while the check detects exit 13 before project registration.
+   */
+  const init = spawnSync(process.execPath, [cliBin, "init", "--name", "boot-smoke", "--path", isolatedProject], {
+    cwd: isolatedProject,
+    env: childEnv,
+    encoding: "utf8",
+    timeout: HEALTH_TIMEOUT_MS,
+  });
+  const initOutput = `${init.stdout ?? ""}${init.stderr ?? ""}`;
+  if (init.error || init.status !== 0 || /Detected unsettled top-level await/.test(initOutput)) {
+    fail(
+      `\`fn init\` exited ${init.status ?? `signal ${init.signal ?? "timeout"}`}`,
+      `${init.error?.message ? `${init.error.message}\n` : ""}${initOutput}`,
+    );
+  }
+  if (!existsSync(path.join(isolatedProject, ".fusion", "project.json"))) {
+    fail("`fn init` did not write .fusion/project.json", initOutput);
+  }
+  console.log("boot-smoke: `fn init` OK");
 
   const child = spawn(
     process.execPath,
@@ -203,21 +247,7 @@ async function bootAndVerify(attempt, registerCleanup) {
     ],
     {
       cwd: isolatedProject,
-      env: {
-        ...process.env,
-        HOME: isolatedHome,
-        FUSION_SKIP_ONBOARDING: "1",
-        // FNXC:BackendFlip 2026-06-26-14:55:
-        // Force the smoke to exercise the embedded PostgreSQL backend. Unset
-        // DATABASE_URL so a developer's external DB connection never leaks in
-        // (the smoke must prove the zero-config embedded path boots). Unset
-        // FUSION_NO_EMBEDDED_PG so the smoke cannot be opted out by an
-        // inherited env var — the embedded default is what the gate must prove.
-        DATABASE_URL: undefined,
-        FUSION_NO_EMBEDDED_PG: undefined,
-        // Make sure nothing inherits a PORT that fights the explicit flag.
-        PORT: undefined,
-      },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     },
   );

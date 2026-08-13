@@ -43,6 +43,8 @@ describe("workflow-step readonly allowlist policy", () => {
       "fn_mission_create",
       "fn_mission_delete",
       "fn_mission_update",
+      "fn_mission_set_status",
+      "fn_mission_clear_blocked",
       "fn_mission_backfill_assertions",
       "fn_milestone_add",
       "fn_slice_add",
@@ -53,6 +55,8 @@ describe("workflow-step readonly allowlist policy", () => {
       "fn_slice_activate",
       "fn_feature_link_task",
       "fn_feature_update",
+      "fn_feature_repair_validation",
+      "fn_feature_set_status",
       "fn_milestone_update",
       "fn_agent_stop",
       "fn_agent_start",
@@ -63,10 +67,12 @@ describe("workflow-step readonly allowlist policy", () => {
       { name: "fn_task_list" } as any,
       { name: "edit" } as any,
       { name: "fn_task_update" } as any,
+      { name: "fn_mission_clear_blocked" } as any,
     ]);
 
     expect(filtered.allowed.map((tool) => tool.name)).toEqual(["read", "fn_task_list"]);
-    expect(filtered.denied).toEqual(["edit", "fn_task_update"]);
+    expect(filtered.denied).toEqual(["edit", "fn_task_update", "fn_mission_clear_blocked"]);
+    expect(isReadonlyAllowed("fn_mission_clear_blocked")).toBe(false);
   });
 
   it("allows explicitly approved tool objects without blanket-allowing mcp names", () => {

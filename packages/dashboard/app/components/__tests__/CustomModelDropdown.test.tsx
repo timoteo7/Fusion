@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { useEffect, useRef, useState } from "react";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { loadAllAppCss } from "../../test/cssFixture";
@@ -21,6 +22,26 @@ const COLLAPSIBLE_MODELS = [
   { provider: "openai", id: "gpt-4o", name: "GPT-4o", reasoning: false, contextWindow: 128000 },
   { provider: "openai", id: "gpt-4o-mini", name: "GPT-4o mini", reasoning: false, contextWindow: 128000 },
 ];
+
+/** Mirrors dashboard hosts that mistake the document.body portal for an outside click. */
+function UnGuardedOutsideCloseHost() {
+  const [isMounted, setIsMounted] = useState(true);
+  const hostRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const closeOnOutsideMouseDown = (event: MouseEvent) => {
+      if (!hostRef.current?.contains(event.target as Node)) setIsMounted(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideMouseDown);
+    return () => document.removeEventListener("mousedown", closeOnOutsideMouseDown);
+  }, []);
+
+  return isMounted ? (
+    <div ref={hostRef}>
+      <CustomModelDropdown label="Model" value="" onChange={vi.fn()} models={COLLAPSIBLE_MODELS} />
+    </div>
+  ) : null;
+}
 
 describe("CustomModelDropdown", () => {
   beforeEach(() => {
@@ -111,6 +132,73 @@ describe("CustomModelDropdown", () => {
     }
   });
 
+  it.each([
+    { breakpoint: "desktop", mobile: false },
+    { breakpoint: "mobile", mobile: true },
+  ])("keeps the portaled provider toggle interactive in an unguarded outside-close host at $breakpoint", async ({ mobile }) => {
+    vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
+      matches: mobile && (query === "(max-width: 768px)" || query === "(max-width: 640px)"),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    } as MediaQueryList));
+    const user = userEvent.setup();
+    render(<UnGuardedOutsideCloseHost />);
+
+    await user.click(screen.getByRole("button", { name: "Model" }));
+    const toggle = await screen.findByTestId("model-combobox-provider-toggle-anthropic");
+
+    await user.click(toggle);
+
+    expect(screen.getByTestId("model-combobox-portal")).toBeInTheDocument();
+    expect(screen.getByTestId("model-combobox-provider-toggle-anthropic")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Claude Sonnet")).toBeNull();
+
+    await user.click(screen.getByTestId("model-combobox-provider-toggle-anthropic"));
+    expect(screen.getByTestId("model-combobox-portal")).toBeInTheDocument();
+    expect(screen.getByTestId("model-combobox-provider-toggle-anthropic")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Claude Sonnet")).toBeTruthy();
+  });
+
+  it("keeps independently mounted portaled dropdown instances interactive", async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <CustomModelDropdown label="First model" value="" onChange={vi.fn()} models={COLLAPSIBLE_MODELS} />
+        <CustomModelDropdown label="Second model" value="" onChange={vi.fn()} models={COLLAPSIBLE_MODELS} />
+      </>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "First model" }));
+    const firstPortal = await screen.findByTestId("model-combobox-portal");
+    await user.click(within(firstPortal).getByTestId("model-combobox-provider-toggle-anthropic"));
+    expect(within(firstPortal).queryByText("Claude Sonnet")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Second model" }));
+    const secondPortal = await screen.findByTestId("model-combobox-portal");
+    await user.click(within(secondPortal).getByTestId("model-combobox-provider-toggle-anthropic"));
+    expect(within(secondPortal).queryByText("Claude Sonnet")).toBeNull();
+  });
+
+  it("keeps the provider toggle interactive in a modal-style host", async () => {
+    const user = userEvent.setup();
+    render(
+      <div role="dialog" aria-label="Model settings">
+        <CustomModelDropdown label="Modal model" value="" onChange={vi.fn()} models={COLLAPSIBLE_MODELS} />
+      </div>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Modal model" }));
+    await user.click(screen.getByTestId("model-combobox-provider-toggle-anthropic"));
+
+    expect(screen.getByTestId("model-combobox-portal")).toBeInTheDocument();
+    expect(screen.queryByText("Claude Sonnet")).toBeNull();
+  });
+
   it("collapses provider rows, preserves special rows, and persists the preference", async () => {
     const user = userEvent.setup();
 
@@ -151,9 +239,14 @@ describe("CustomModelDropdown", () => {
     expect(screen.queryByText("Claude Sonnet")).toBeNull();
     expect(screen.getByRole("button", { name: "Expand anthropic" })).toBeTruthy();
 
-    await user.type(screen.getByPlaceholderText("Filter models…"), "sonnet");
+    const filter = screen.getByPlaceholderText("Filter models…");
+    await user.type(filter, "sonnet");
     expect(screen.getByText("Claude Sonnet")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Collapse anthropic" })).toHaveAttribute("aria-expanded", "true");
+
+    await user.clear(filter);
+    expect(screen.queryByText("Claude Sonnet")).toBeNull();
+    expect(screen.getByRole("button", { name: "Expand anthropic" })).toHaveAttribute("aria-expanded", "false");
 
     view.unmount();
     window.localStorage.setItem("fusion-dashboard-model-dropdown-collapsed-providers", "not-json");

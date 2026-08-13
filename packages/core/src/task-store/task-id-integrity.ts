@@ -888,5 +888,5 @@ export async function invokeTaskCreatedHookImpl(store: TaskStore, task: Task): P
 
 export async function createBranchGroupImpl(store: TaskStore, input: BranchGroupCreateInput): Promise<BranchGroup> {
         const layer = store.asyncLayer!;
-    return createBranchGroupAsync(layer.db, input);
+    return createBranchGroupAsync(layer.db, input, layer.projectId);
 }

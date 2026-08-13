@@ -254,6 +254,7 @@ export function registerMessagingScriptRoutes(ctx: ApiRoutesContext): void {
         limit: parseInt(req.query.limit as string) || 20,
         offset: parseInt(req.query.offset as string) || 0,
         read: req.query.unreadOnly === "true" ? false : undefined,
+        archived: req.query.archived === "true",
         type: req.query.type as MessageType | undefined,
       };
       const messages = await msgStore.getInbox(DASHBOARD_USER_ID, "user", filter);
@@ -273,6 +274,7 @@ export function registerMessagingScriptRoutes(ctx: ApiRoutesContext): void {
       const filter = {
         limit: parseInt(req.query.limit as string) || 20,
         offset: parseInt(req.query.offset as string) || 0,
+        archived: req.query.archived === "true",
         type: req.query.type as MessageType | undefined,
       };
       const messages = await msgStore.getOutbox(DASHBOARD_USER_ID, "user", filter);
@@ -409,6 +411,7 @@ export function registerMessagingScriptRoutes(ctx: ApiRoutesContext): void {
       const messages = await msgStore.getConversation(
         { id: DASHBOARD_USER_ID, type: "user" },
         { id: participantId, type: participantType as ParticipantType },
+        { archived: req.query.archived === "true" },
       );
       res.json(messages);
     } catch (err: unknown) {
@@ -536,6 +539,29 @@ export function registerMessagingScriptRoutes(ctx: ApiRoutesContext): void {
     }
   });
 
+  // IMPORTANT: Register archive actions before the generic /messages/:id route.
+  router.post("/messages/:id/archive", async (req, res) => {
+    try {
+      const message = await (await getMessageStore(req)).archiveMessage(req.params.id);
+      res.json(message);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) throw err;
+      if ((err instanceof Error ? err.message : String(err)).includes("not found")) throw notFound(err instanceof Error ? err.message : String(err));
+      rethrowAsApiError(err);
+    }
+  });
+
+  router.post("/messages/:id/unarchive", async (req, res) => {
+    try {
+      const message = await (await getMessageStore(req)).unarchiveMessage(req.params.id);
+      res.json(message);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) throw err;
+      if ((err instanceof Error ? err.message : String(err)).includes("not found")) throw notFound(err instanceof Error ? err.message : String(err));
+      rethrowAsApiError(err);
+    }
+  });
+
   router.post("/messages/:id/read", async (req, res) => {
     try {
       const msgStore = await getMessageStore(req);
@@ -571,7 +597,7 @@ export function registerMessagingScriptRoutes(ctx: ApiRoutesContext): void {
   router.get("/agents/mailbox/all", async (req, res) => {
     try {
       const msgStore = await getMessageStore(req);
-      const messages = await msgStore.getAllAgentToAgentMessages();
+      const messages = await msgStore.getAllAgentToAgentMessages({ archived: req.query.archived === "true" });
       const unreadCount = await msgStore.getUnreadAgentToAgentCount();
       res.json({ messages, total: messages.length, unreadCount });
     } catch (err: unknown) {
@@ -587,8 +613,9 @@ export function registerMessagingScriptRoutes(ctx: ApiRoutesContext): void {
       const msgStore = await getMessageStore(req);
       const agentId = req.params.id;
       const mailbox = await msgStore.getMailbox(agentId, "agent");
-      const inbox = await msgStore.getInbox(agentId, "agent");
-      const outbox = await msgStore.getOutbox(agentId, "agent");
+      const archived = req.query.archived === "true";
+      const inbox = await msgStore.getInbox(agentId, "agent", { archived });
+      const outbox = await msgStore.getOutbox(agentId, "agent", { archived });
       res.json({ ...mailbox, messages: inbox, inbox, outbox });
     } catch (err: unknown) {
       if (err instanceof ApiError) {

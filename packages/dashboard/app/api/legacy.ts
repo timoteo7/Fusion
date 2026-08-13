@@ -39,6 +39,7 @@ export {
   fetchTaskPrompt,
   fetchTaskRuntimeFallback,
   checkDuplicateTasks,
+  createTaskFromRecommendation,
   createTask,
   repairOverlapBlocker,
   updateTask,
@@ -809,6 +810,7 @@ export {
   isAgentHeartbeatEnabled,
   fetchAgentHeartbeats,
   fetchAgentMemory,
+  fetchAgentMemoryConsolidations,
   fetchAgentMemoryFile,
   fetchAgentMemoryFiles,
   fetchAgentPromptSizes,
@@ -839,6 +841,7 @@ export type {
   AgentDetail,
   AgentHeartbeatEvent,
   AgentHeartbeatRun,
+  MemoryConsolidationEvent,
   AgentPerformanceSummary,
   AgentPromptSizePoint,
   AgentReflection,
@@ -1071,6 +1074,10 @@ export {
   fetchMilestoneValidation,
   fetchMilestoneValidationTelemetry,
   fetchMission,
+  fetchMissionBlockedDiagnostics,
+  clearMissionBlockedStatus,
+  normalizeMissionBlockers,
+  parseMissionResumeConflict,
   fetchMissionAutopilotStatus,
   fetchMissionEvents,
   fetchMissionHealth,
@@ -1094,6 +1101,9 @@ export {
   triageAllSliceFeatures,
   triageFeature,
   triggerValidation,
+  VALIDATION_ALREADY_RUNNING,
+  repairFeatureValidation,
+  reconcileMission,
   unlinkFeatureFromAssertion,
   unlinkFeatureFromTask,
   updateAssertion,
@@ -1123,6 +1133,7 @@ export type {
   MissionEventsResponse,
   MissionFeature,
   MissionFeatureLoopSnapshot,
+  MissionReconcilePassResult,
   MissionStatus,
   MissionSummary,
   MissionValidatorRun,
@@ -1132,6 +1143,7 @@ export type {
   SliceStatus,
   SliceWithFeatures,
   ValidationRunsResponse,
+  ValidationAlreadyRunningDetail,
 } from "./missions/missions.js";
 /*
  * FNXC:CodeOrganization 2026-07-20-14:00:
@@ -1275,6 +1287,7 @@ export type {
  */
 export {
   addAgentRating,
+  archiveMessage,
   createProposedTask,
   decideApproval,
   deleteAgentRating,
@@ -1299,6 +1312,7 @@ export {
   resetAgentBudget,
   sendMessage,
   triggerAgentReflection,
+  unarchiveMessage,
 } from "./chat/messaging.js";
 export type {
   AgentMailboxResponse,

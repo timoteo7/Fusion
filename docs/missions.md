@@ -128,7 +128,7 @@ The Mission Manager create/edit form exposes this as **Branch strategy** plus a 
 
 ### Mission auto-merge override
 
-The **Merge behavior** control can inherit the project default, explicitly enable auto-merge, or select **Single pull request**. In-context help explains that auto-merge lands each feature individually while a single pull request retains all features on a shared branch for joint review. The latter persists `autoMerge: false` on the mission and stamps newly triaged feature tasks with the same false override, while preserving the mission's shared branch group. Returning the control to inherited clears the mission override. Once a shared branch has members, Mission detail displays its branch name, member count, and PR state.
+The **Merge behavior** control appears in each Mission Manager create and edit form. Use the secondary **Create** link beside **Plan New Mission** when a manual create is needed; the primary planning CTA continues to start the AI interview. Its in-context help explains that **Inherited** follows the project setting, **Auto-merge** lands each feature as it passes, and **Single pull request** retains all features on a shared branch for joint review. The latter persists `autoMerge: false` on the mission and stamps newly triaged feature tasks with the same false override, while preserving the mission's shared branch group. Returning the control to inherited clears the mission override. Mission detail shows the branch name, canonical member count, and PR state only after it resolves a mission-owned group through a linked task's branch context; unavailable, stale, or foreign groups remain hidden.
 
 ### Shared branch-group invariant across entry points
 
@@ -149,6 +149,14 @@ On mobile, Mission Manager surfaces the primary **Plan New Mission** CTA at the 
 Mission detail refreshes now preserve expanded milestone/slice state and keep the selected milestone expanded, so persisted milestone acceptance criteria remain visible across live updates.
 
 Mission, milestone, slice, and feature read-only text surfaces in Mission Manager render Markdown (GFM) for descriptions, verification, and acceptance criteria; edit forms continue to use raw plain-text `<textarea>` inputs.
+
+### Clearing a stale mission blocked badge
+
+Use **Clear blocked status** when the mission-level `blocked` badge is stale. It recomputes and records the mission status with an attributed audit event, but does **not** resume the mission, unpause linked tasks, re-arm autopilot, or clear lineage stops. **Resume** remains the separate operation that reactivates execution.
+
+`MissionBlockerDescriptor` is the canonical diagnosis shape: `{ rootFeatureId, reason, source }`, where `source` is `feature-row` or `lineage-stop`. Diagnostics, clear responses, and `POST /api/missions/:missionId/resume` `409 MISSION_RESUME_CONFLICT` use the same array, deduplicated on `(rootFeatureId, source, reason)` while preserving same-root entries with different sources.
+
+Feature-validation repair controls repair feature state only; they intentionally do not modify a mission-level status badge.
 
 ### CLI
 
@@ -179,6 +187,8 @@ Fusion surfaces the persisted mission↔goal linkage through REST, CLI, and pi-e
 | `PUT /api/missions/:missionId/goals` | Replace the full linked-goal set with body `{ goalIds: string[] }`. Duplicate ids are deduplicated before reconciliation. |
 | `POST /api/missions/:missionId/goals/:goalId` | Idempotently link one goal to a mission. |
 | `DELETE /api/missions/:missionId/goals/:goalId` | Idempotently unlink one goal from a mission. |
+| `GET /api/missions/:missionId/blocked-diagnostics` | Return the read-only blocked-badge diagnosis: mission status, recomputed status, clearability, resumability, and canonical blockers. |
+| `POST /api/missions/:missionId/clear-blocked` | Clear only a stale mission `blocked` badge. Optional `{ reason }` is bounded and audit-attributed; it returns `{ mission, blockers }`. |
 
 The mission detail payload keeps `linkedGoals` separate from the milestone tree so read paths can surface strategy context without traversing slices/features. All goal-link write endpoints preserve the same invariant: missing goals on link write paths (`POST /api/missions`, `PATCH /api/missions/:missionId`, `PUT /api/missions/:missionId/goals`, `POST /api/missions/:missionId/goals/:goalId`) reject with `400 { code: "GOAL_NOT_FOUND" }`, archived goals reject with `400 { code: "GOAL_ARCHIVED" }`, duplicate/relinked ids are no-ops, and the `DELETE /api/missions/:missionId/goals/:goalId` unlink path treats unknown goals as a `404` while remaining allowed even after a goal is archived.
 
@@ -205,6 +215,8 @@ The canonical per-parameter tool reference lives in `packages/cli/skill/fusion/r
 | `fn_mission_unlink_goal` | Idempotently unlink a goal from a mission, including archived goals. |
 | `fn_mission_delete` | Delete a mission and its hierarchy. |
 | `fn_mission_update` | Update mission title/description using partial patches. |
+| `fn_mission_set_status` | Set mission lifecycle status with an attributed audit event. |
+| `fn_mission_clear_blocked` | Clear a stale mission-level `blocked` badge without resuming automation (operator-only). |
 | `fn_milestone_add` | Add a milestone to a mission. |
 | `fn_milestone_update` | Update milestone fields using partial patches. |
 | `fn_slice_add` | Add a slice to a milestone. |
@@ -213,6 +225,8 @@ The canonical per-parameter tool reference lives in `packages/cli/skill/fusion/r
 | `fn_feature_add` | Add a feature to a slice with optional acceptance criteria. |
 | `fn_feature_delete` | Delete a feature (with linked-task guard and optional `force`). |
 | `fn_feature_update` | Update feature fields using partial patches. |
+| `fn_feature_set_status` | Set feature status; execution statuses require a linked task. |
+| `fn_feature_repair_validation` | Clear a stale validation badge or re-run an eligible validation. |
 | `fn_feature_link_task` | Link a feature to a task for implementation. |
 | `fn_milestone_delete` | Delete a milestone (with linked-task guard and optional `force`). |
 
@@ -253,6 +267,20 @@ Updates an existing feature's `title`, `description`, or `acceptanceCriteria`. P
 | `acceptanceCriteria` | string | — | Updated acceptance criteria for completing the feature |
 
 Use this to edit existing features without delete-and-re-add cycles.
+
+### Repair feature validation state
+
+`fn_feature_repair_validation` repairs a stale feature validation state without weakening normal execution-loop transitions. Use `clear` to clear an eligible `blocked` or `needs_fix` loop state (and a blocked feature status); use `re_run` to create a new validator run only when it is safe.
+
+The shared eligibility rule is used by the store, agent tool, REST route, and dashboard. A `blocked` or `needs_fix` loop state permits both actions regardless of feature status. A blocked status with no loop state or `idle` also permits both. A blocked status with `validating`, `implementing`, or `passed` permits **Clear only**; `re_run` is refused while a live cycle is active and for passed features. Healthy features expose neither action, and `re_run` also refuses a feature with an in-flight validator run or no linked assertions.
+
+For a status-changing clear, the engine resolves a target status and loop target plus a ground-truth fence. The fence type lives in `@fusion/core` while the engine produces it, preserving core's dependency direction. It captures the linked task identity, lane role, and whether that task was observed `live` or `absent`. A missing, deleted, or archived linked task is an absent ground truth that resolves to `defined`, so it can be repaired rather than permanently rejected.
+
+The store rechecks the fence under its feature-row lock: a live task must still be live and unchanged, while an absent task must remain absent. It retries a stale resolution once. The no-`taskStore` fixture fallback records `groundTruthTaskVerified: false` for a non-null task ID. Callers provide both resolved targets: the store ignores `resolvedLoopState` on a status-only clear and ignores `resolvedStatus` on a loop-only clear, avoiding stale pre-lock branching. The mutation and `feature_validation_repaired` audit event commit in one transaction; clearing resets the implementation retry count, and unlinked features cannot be resumed as `triaged` or `in-progress`. The normal execution loop still cannot escape `blocked` by itself.
+
+### Clear a stale mission blocked badge
+
+`fn_mission_clear_blocked` repairs only a stale mission-level `blocked` badge. It accepts an audit-logged optional `reason` and reports residual canonical blockers, but does not clear them or resume automation. Use **Resume mission** when automation should be re-armed. The tool is withheld from agent sessions and is available only to a human operator through the CLI/pi extension.
 
 ## Mission delete policy (hard delete with linked-task guard)
 
@@ -329,7 +357,7 @@ Milestones now carry three complementary free-text fields:
 Slices represent staged execution windows.
 
 - Pending slices remain inactive
-- Active slices are currently allowed to progress
+- Automatic progression admits at most one active slice per mission
 - Completion rolls up through feature → slice → milestone → mission
 
 Manual activation is available through `fn mission activate-slice <slice-id>`.
@@ -351,12 +379,14 @@ Typical flow:
 
 1. Mission is watched (missions updated with `autopilotEnabled: true` or explicitly started are watched)
 2. Task completion updates feature status
-3. If a slice is complete, autopilot activates next pending slice
+3. If no slice is active, autopilot activates only the earliest pending slice after every earlier milestone and slice is complete
 4. When milestones are all complete, mission transitions to complete
 
 If validation cannot run (unexpected loop state, duplicate trigger, blocked validation, or validator error), Fusion logs a mission `warning`/`error` event with structured metadata so the stuck state is visible in mission events.
 
 Mission `status` and `autopilotEnabled` transitions are atomically written with a mission activity event. The event records stable actor type/id, optional display name, source, and before/after values; unchanged values create no transition event. Dashboard controls identify an operator, tools identify an agent when they expose a sensitive mutation, and autonomous engine paths identify the system/autopilot.
+
+Automatic hierarchy rollup, including terminal-task delivery reconciliation, owns only `planning`, `active`, and `complete` for missions and milestones. It never rewrites intentional `blocked` or `archived` status during hierarchy churn; a blocked mission stays blocked even after all milestones complete. Those statuses change only through resume, an explicit status write, or the mission clear-blocked path.
 
 ## `autopilotEnabled` vs `autoAdvance`
 
@@ -372,8 +402,10 @@ Mission `status` and `autopilotEnabled` transitions are atomically written with 
 
 **Slice progression (on slice completion):**
 
-- `autopilotEnabled=true` → next pending slice is automatically activated
-- `autopilotEnabled=false`, `autoAdvance=true` → next pending slice is activated (legacy compat)
+- `autopilotEnabled=true` → serial admission activates only the earliest eligible pending slice. Any active slice blocks admission; earlier milestones and slices must be complete before later milestones start.
+- Explicit milestone dependencies are additional restrictions and never override creation order.
+- Duplicate completion callbacks and stale/startup recovery calls are idempotent no-ops when a slice is already active or no eligible slice exists.
+- `autopilotEnabled=false`, `autoAdvance=true` → the legacy compatibility entry uses the same serial admission rule
 - `autopilotEnabled=false`, `autoAdvance=false` → manual activation required
 
 **Dashboard UI:** The Mission Manager groups mission run settings together: explicit **Start mission / Stop mission / Resume mission** actions control mission run-state, while the **Autopilot** toggle controls automatic slice advancement and feature planning. The autopilot badge uses human-readable states (`Off`, `Watching`, `Activating slice`, `Completing`). When enabling autopilot on an already-active mission, the system automatically checks whether recovery is needed (no active slice or completed active slice) and progresses accordingly.
@@ -577,6 +609,8 @@ interface MissionValidatorRun {
 
 **Validation timeout:** 10 minutes (`VALIDATION_TIMEOUT_MS = 10 * 60 * 1000`). If session creation, auth/credit checks, prompting, or timeout fails, the run is marked `error` and emits a surfaced `validation_error` mission event instead of silently spawning a fix feature.
 
+**Manual validation admission:** `POST /api/missions/features/:featureId/validate` admits manual runs atomically per feature. A fresh `running` run, including an engine-started run, returns `409` with `details: { code: "VALIDATION_ALREADY_RUNNING", runId, featureId, startedAt }` and does not mutate the feature. The guard ignores runs older than the stale window. Automatic `admitValidatorRun` remains fingerprint-scoped: a fingerprint-less manual run does not suppress a later automatic dispatch (tracked by FN-8976).
+
 **Stale validator-run reaper:** startup recovery and periodic self-healing also sweep `MissionValidatorRun` rows stuck in `status="running"` longer than `VALIDATOR_RUN_STALE_MAX_AGE_MS` (currently 6 hours). Runs still owned by the live process (tracked in `activeValidations`) are skipped, so a slow-but-legitimate verification is never reaped while its session is in-flight. Ownerless stale runs are reaped to terminal `status="error"`, their reap reason is stored in `summary`, and live (non-`done`) mission features are moved to `loopState="needs_fix"` with `lastValidatorStatus="error"` so the loop can re-trigger. A *done* feature's loop state is intentionally left untouched (it keeps the `loopState="validating"` set when the run started) so the reaper does not rewrite a feature that already finished its task. Runs whose parent mission is already `complete`/`archived` are likewise terminated without touching feature state. Each successful reap emits a run-audit event with `mutationType: "mission:validator-run-reaped"`.
 
 **Verification wall-clock is bounded under the reaper window.** The aggregate verification budget — checkout materialization plus the test-suite command (`VERIFICATION_COMMAND_TIMEOUT_MS`, 10 min), including the optional pre-fix baseline run — is provably far shorter than the 6-hour reaper stale window, so a legitimate verification run completes long before it would be eligible for reaping. The reaper's `activeValidations` skip is the second line of defense: an in-flight run is never reaped regardless of wall-clock.
@@ -614,7 +648,7 @@ A feature transitions to `blocked` when:
 - `MilestoneValidationRollup.state` reflects `blocked` assertions
 - The feature remains in `blocked` state until operator intervention
 - Deleting a generated fix, or archiving/deleting its generated task, records a durable root-scoped `operator-intervention` stop in the same transaction as unlink/removal. Recovery, duplicate delivery, unarchive, task/root recreation, and relinking cannot mint a sibling. The stop remains even if a hierarchy cascade removes root and lineage rows.
-- `POST /api/missions/:missionId/resume` is the sole resume seam. It atomically clears only operator-intervention stops, preserves attempt counts, moves extant roots to `needs_fix`, and activates the mission. If any root is budget-exhausted or legacy-unknown, it returns a typed `MISSION_RESUME_CONFLICT` with canonical root IDs/reason categories and changes no root, tombstone, counter, or mission state.
+- `POST /api/missions/:missionId/resume` is the sole resume seam. It atomically clears only operator-intervention stops, preserves attempt counts, moves extant roots to `needs_fix`, and activates the mission. If any root is non-resumable, it changes no root, tombstone, counter, or mission state and returns HTTP 409 with `code: "MISSION_RESUME_CONFLICT"`, `blockerSchemaVersion: 1`, and `blockers: MissionBlockerDescriptor[]`. A descriptor has `schemaVersion: 1`, `kind: "mission-resume-conflict"`, `rootFeatureId`, closed `reason` (`budget-exhausted`, `operator-intervention`, or fail-closed `legacy-unknown-stop`), and `source` (`feature-row` or `lineage-stop`); lineage stops also retain `stoppedAt` and `origin`. Unknown or empty persisted reasons normalize to `legacy-unknown-stop`, retaining a non-empty persisted value as `rawReason`. The canonical array is deduplicated on `(rootFeatureId, source, reason)` while preserving distinct cross-source provenance. Consumers must treat an unrecognized `blockerSchemaVersion` as non-resumable and ask an operator rather than guessing. FN-8979 retired the v0 mirror; `legacyBlockers` is not part of this response.
 
 On engine restart, `recoverActiveMissions()` re-enqueues features in `validating` or `needs_fix` states, ensuring no validation work is lost. It also re-triggers `implementing` features whose linked task is already `done`/`archived` and whose assertion validation has not passed yet. When the stale-run reaper has already converted an abandoned validator run into `needs_fix`, `processTaskOutcome()` promotes the feature back through `implementing` and re-validates instead of skipping it. The same recovery path is replayed during periodic self-heal maintenance, so historically stranded `implementing` features can self-heal without requiring an engine restart.
 
@@ -738,9 +772,21 @@ See also: [Multi-Project](./multi-project.md) and [Task Management](./task-manag
 
 ## Agent and dashboard-chat tools
 
-Mission hierarchy operations are available with the same project-scoped `MissionStore` contract in the pi extension, engine-managed executor/triage/heartbeat agents, and provider-backed dashboard chat. The surface is `fn_mission_list`, `fn_mission_show`, `fn_mission_create`, `fn_mission_update`, `fn_mission_delete`, `fn_milestone_add`, `fn_milestone_update`, `fn_milestone_delete`, `fn_slice_add`, `fn_slice_activate`, `fn_slice_delete`, `fn_feature_add`, `fn_feature_update`, `fn_feature_delete`, and `fn_feature_link_task`.
+Mission hierarchy operations are available with the same project-scoped `MissionStore` contract in the pi extension, engine-managed executor/triage/heartbeat agents, and provider-backed dashboard chat. The surface is `fn_mission_list`, `fn_mission_show`, `fn_mission_create`, `fn_mission_update`, `fn_mission_set_status`, `fn_mission_delete`, `fn_milestone_add`, `fn_milestone_update`, `fn_milestone_delete`, `fn_slice_add`, `fn_slice_activate`, `fn_slice_delete`, `fn_feature_add`, `fn_feature_update`, `fn_feature_set_status`, `fn_feature_repair_validation`, `fn_feature_delete`, and `fn_feature_link_task`.
 
-`fn_mission_list` and `fn_mission_show` are positively classified read-only. All other hierarchy operations mutate persisted project data and remain subject to the engine action gate and permanent-agent permission policy; they are never treated as unknown or exempt tools.
+`fn_mission_list` and `fn_mission_show` are positively classified read-only. All other hierarchy operations, including `fn_feature_repair_validation` and `fn_mission_reconcile`, mutate persisted project data and remain subject to the engine action gate and permanent-agent permission policy; they are never treated as unknown or exempt tools. `fn_mission_clear_blocked` is intentionally absent from agent tool lists: it is classified as `task_agent_mutation` in both gate paths and denied in readonly workflow steps, while the CLI/pi-extension hard-withholds it from agent principals.
+
+## Automatic mission reconciliation
+
+The scheduler startup and self-healing maintenance passes, mission autopilot, task moves, and `fn_mission_reconcile({ id?, dryRun? })` use one idempotent reconciliation authority. `POST /api/missions/:missionId/reconcile` exposes the same pass; `dryRun: true` returns planned changes without mutation. Automatic writes are attributed to `mission-reconcile:<startup|self-healing|autopilot|task-move>` and API/tool calls retain their operator or agent actor.
+
+### Mission Manager reconcile control
+
+Mission detail includes **Reconcile now** for an on-demand operator pass. It first requests a zero-write dry-run preview and lists the server-returned planned feature actions. **Apply reconcile** is a separate explicit action; a failed apply leaves that preview available to retry. Archived missions report as skipped and offer no apply action.
+
+Selection changes discard reconcile responses silently, including responses arriving before the newly selected mission detail finishes loading. Leaving a mission also releases its busy and preview state so the next mission is immediately actionable. While a new mission detail is loading, the retained previous header's reconcile controls are inert (disabled and handler-refused), preventing reconciliation of the mission just left.
+
+Correction scans every non-archived mission and slice but never activates or triages work. It maps deterministic task lifecycle lanes, failure state, and assertion validation to feature status, repairs stale validation badges when the store supports its fenced repair primitive, and uses explicit task links only to reconcile shipped archived delivery through the store's `terminal-task-reconcile` attribution. A bounded `mission:reconcile-pass` audit event records IDs, source enums, and counters only. Git history, GitHub polling, FR-41 receipts, and FN-8845 spec-lock drift are deliberately deferred extension inputs.
 
 For example, activate a ready work unit with `fn_slice_activate({ id: "SL-…" })`. Link it to live work with `fn_feature_link_task({ featureId: "F-…", taskId: "FN-…" })`. Linking delegates to `MissionStore.linkFeatureToTask()`: it verifies the task is a live row in the same project, changes the feature to `triaged`, and records the mission/slice linkage on the task. Archived, deleted, missing, and other-project tasks are rejected.
 
@@ -758,6 +804,13 @@ Autonomous no-task heartbeat agents may create or delegate implementation work o
 
 ## Validator memoization and failure budget (FN-8694)
 
-Automatic feature validation is content-addressed by landed SHA, resolved judge provider/model, and exact built prompts. Admission is atomic per project, feature, and fingerprint: a matching running run is not duplicated; the latest terminal history is selected deterministically; static-only passes are reused; and matching failures permit at most three dispatched runs before the feature is blocked. Behavioral or mixed assertions never reuse a pass, but failures are still budgeted.
+Automatic feature validation is content-addressed by landed SHA, resolved judge provider/model, and exact built prompts. Admission is atomic per project and feature: its in-flight check observes every fresh running validator, including fingerprint-less manual and non-memo automatic runs, while honoring the reaper stale window so a dead run cannot wedge validation. After that liveness check, terminal history is selected deterministically by fingerprint: static-only passes are reused, and matching failures permit at most three dispatched runs before the feature is blocked. Behavioral or mixed assertions never reuse a pass, but failures are still budgeted.
 
-Every automatic suppression appends one visible `validation memoized` activity event (`running`, `reuse-pass`, or `budget-exhausted`) with fingerprint and referenced run ID where available. Initial exhaustion additionally appends one `validation-stuck` event; later unchanged sweeps append only their memoized event. No synthetic validator run or verdict is created for reuse or exhaustion. Missing landed SHA, fallback checkout, unknown judge identity, and preparation failures fail open to ordinary validation; `error`/`blocked` outcomes are transient. Manual validation bypasses memoization and the budget. Recovery revisits only a feature bearing FN-8694's budget-block provenance: unchanged inputs remain blocked, while a changed prepared fingerprint can be admitted; unrelated blocked/remediation/operator states stay closed.
+Every automatic suppression appends one visible `validation memoized` activity event (`running`, `reuse-pass`, or `budget-exhausted`) with fingerprint and referenced run ID where available. Initial exhaustion additionally appends one `validation-stuck` event; later unchanged sweeps append only their memoized event. No synthetic validator run or verdict is created for reuse or exhaustion. Missing landed SHA, fallback checkout, unknown judge identity, and preparation failures fail open to ordinary validation; `error`/`blocked` outcomes are transient. Manual validation bypasses memoization and the budget, but its live run blocks a concurrent automatic dispatch. Recovery revisits only a feature bearing FN-8694's budget-block provenance: unchanged inputs remain blocked, while a changed prepared fingerprint can be admitted; unrelated blocked/remediation/operator states stay closed.
+
+## Spec alignment
+
+A linked task may expose a separate spec alignment signal: `on-plan`, `diverged-needs-review`, `diverged-relocked-approved`, or `unavailable`. This signal is independent of feature delivery and validation status; it never marks a feature done, blocks a task, or substitutes for assertion validation. Archived tasks retain their task-visible lock history but follow the existing unlink behavior and do not recreate a feature projection. Scheduler and autopilot reconciliation persist the current deterministic projection on each linked feature even when delivery status does not change, and Mission Manager renders that retained projection.
+
+
+`fn_feature_set_status` preserves the linked-task guard: `triaged`, `in-progress`, `done`, and `blocked` require a linked task; link an existing task with `fn_feature_link_task` or triage the feature first. Feature status writes emit `feature_status_changed` atomically with the row write at every production writer: engine and pi tools, dashboard REST repairs, scheduler work, linking/claiming, terminal-task reconciliation, validator reuse, and superseded-fix reconciliation. Feature and mission status events use one total, size-capped metadata builder, which persists only ids-only actor fields (`type`, `id`, `source`; never `displayName`) and an optional redacted, byte-bounded reason.

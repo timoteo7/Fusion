@@ -13,11 +13,11 @@
  */
 import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { readOwnCliVersion } from "./cli-version.js";
 import { installQuietGate, resolveQuietMode, setQuietMode, uninstallQuietGate } from "./output.js";
 
 // @ts-expect-error -- Bun-only global; undefined in Node
@@ -128,12 +128,14 @@ async function loadCommandHandlers() {
   const { runSettingsExport } = await import("./commands/settings-export.js");
   const { runSettingsImport } = await import("./commands/settings-import.js");
   const { runMcpList, runMcpAdd, runMcpEdit, runMcpRemove, runMcpEnable, runMcpDisable, runMcpImport, runMcpExport, runMcpValidate } = await import("./commands/mcp.js");
+  const { runMcpMemoryServer } = await import("./commands/mcp-memory-server.js");
   const { runWorkflowValidate } = await import("./commands/workflow.js");
   const { runGitStatus, runGitFetch, runGitPull, runGitPush } = await import("./commands/git.js");
   const { runBranchGroupList, runBranchGroupShow, runBranchGroupPromote, runBranchGroupAbandon } = await import("./commands/branch-group.js");
   const { runBackupCreate, runBackupList, runBackupRestore, runBackupCleanup } = await import("./commands/backup.js");
   const { runDbVacuum, runDbMigrate } = await import("./commands/db.js");
   const { runMemoryBackupCreate, runMemoryBackupList, runMemoryBackupRestore } = await import("./commands/memory-backup.js");
+  const { runKnowledgeGraphBuild } = await import("./commands/knowledge-graph.js");
   const { runMissionCreate, runMissionList, runMissionShow, runMissionDelete, runMissionActivateSlice, runMissionLinkGoal, runMissionUnlinkGoal, runMissionGoals } = await import("./commands/mission.js");
   const { runGoalsList, runGoalsCreate, runGoalsArchive, runGoalsCitations } = await import("./commands/goals.js");
   const { runProjectList, runProjectAdd, runProjectRemove, runProjectShow, runProjectInfo, runProjectSetDefault, runProjectDetect } = await import("./commands/project.js");
@@ -151,7 +153,8 @@ async function loadCommandHandlers() {
   const { runPluginCreate, runPluginNew } = await import("./commands/plugin-scaffold.js");
   const { runPluginDev } = await import("./commands/plugin-dev.js");
   const { runPluginPublish } = await import("./commands/plugin-publish.js");
-  const { runSkillsSearch, runSkillsInstall } = await import("./commands/skills.js");
+  const { runSkillsSearch, runSkillsInstall, runSkillsGet } = await import("./commands/skills.js");
+  const { runComputer } = await import("./commands/computer.js");
   const { runResearchCreate, runResearchList, runResearchShow, runResearchExport, runResearchCancel, runResearchRetry } = await import("./commands/research.js");
   const { runExperimentFinalize } = await import("./commands/experiment-finalize.js");
   const { dispatchUpdateCliArgs } = await import("./commands/update.js");
@@ -210,6 +213,7 @@ async function loadCommandHandlers() {
     runMcpImport,
     runMcpExport,
     runMcpValidate,
+    runMcpMemoryServer,
     runWorkflowValidate,
     runGitStatus,
     runGitFetch,
@@ -228,6 +232,7 @@ async function loadCommandHandlers() {
     runMemoryBackupCreate,
     runMemoryBackupList,
     runMemoryBackupRestore,
+    runKnowledgeGraphBuild,
     runMissionCreate,
     runMissionList,
     runMissionShow,
@@ -283,6 +288,8 @@ async function loadCommandHandlers() {
     runPluginPublish,
     runSkillsSearch,
     runSkillsInstall,
+    runSkillsGet,
+    runComputer,
     runResearchCreate,
     runResearchList,
     runResearchShow,
@@ -466,6 +473,8 @@ PR:
   fn memory-backup --list    List all memory backups
   fn memory-backup --restore <dir>
                              Restore memory from a backup directory snapshot
+  fn knowledge-graph build [--force] [--dir <path>] [--json]
+                             Build the deterministic knowledge graph
   fn plugin list | ls                List installed plugins
   fn plugin install <path-or-package> [--ai-scan] Install a plugin from path or package
   fn plugin add <path-or-package>     Alias for plugin install
@@ -489,6 +498,9 @@ PR:
   fn skills install <owner/repo>      Install skills from a source
   fn skills install <owner/repo> --skill <name>
                                       Install a specific skill
+  fn skills get <skill-name>           Print a built-in version-matched guide
+  fn computer <subcommand> [--json]  Inspect and automate supported desktop applications
+                                      See fn computer --help for snapshot → act → snapshot commands
 
 Options:
   --project, -P <name>       Target a specific project (bypasses CWD detection)
@@ -502,7 +514,7 @@ Options:
   --no-engine                Start dashboard only (no AI engine)
   --supervise                (default) Run with auto-restart on crash and System-panel restart support
   --no-supervise             Run the dashboard without the supervising parent process
-  --lang <locale>            Terminal-UI locale for this run (en, zh-CN, zh-TW, fr, es, ko); the browser dashboard resolves its own language
+  --lang <locale>            Terminal-UI locale for this run (en, zh-CN, zh-TW, fr, es, ko, pt-BR); the browser dashboard resolves its own language
   --attach <file>            Attach file(s) on task create (repeatable)
   --depends <id>             Declare dependency on task create (repeatable)
   --no-dedup                 Bypass deterministic duplicate guard on task create
@@ -632,41 +644,6 @@ function parsePrCreateOptions(args: string[]) {
   };
 }
 
-/**
- * Locate `@runfusion/fusion`'s own version by walking up from the running
- * `bin.js`. Mirrors `packages/dashboard/src/cli-package-version.ts` but is
- * inlined here to avoid pulling the dashboard barrel into the bin's static
- * import graph (bin keeps app imports dynamic until env bootstrap is done).
- */
-function readOwnCliVersion(): string | undefined {
-  let currentDir: string;
-  try {
-    currentDir = dirname(fileURLToPath(import.meta.url));
-  } catch {
-    return undefined;
-  }
-  for (let i = 0; i < 8; i += 1) {
-    const pkgPath = resolve(currentDir, "package.json");
-    if (existsSync(pkgPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
-          name?: string;
-          version?: string;
-        };
-        if (parsed.name === "@runfusion/fusion" && typeof parsed.version === "string") {
-          return parsed.version;
-        }
-      } catch {
-        // Ignore malformed manifest and keep walking.
-      }
-    }
-    const parentDir = resolve(currentDir, "..");
-    if (parentDir === currentDir) break;
-    currentDir = parentDir;
-  }
-  return undefined;
-}
-
 async function main() {
   const { cleanedArgs: args, projectName, skipOnboarding, quiet } = extractGlobalProjectFlag(process.argv.slice(2));
   const hasJsonFlag = args.includes("--json");
@@ -682,12 +659,14 @@ async function main() {
   if (effectiveQuiet) installQuietGate();
   else uninstallQuietGate();
 
-  // Print version and exit before any application imports. This is what the
+  // Print version and exit before any application imports. The leaf resolver
+// keeps this static graph built-ins-only rather than importing the dashboard
+// resolver. This is what the
   // dashboard's CLI Binary panel probes via `<bin> --version`; without an
   // early exit, the flag falls through to the default `dashboard` command and
   // boots the full server.
   if (args.includes("--version") || args.includes("-v")) {
-    console.log(readOwnCliVersion() ?? "unknown");
+    console.log(readOwnCliVersion(import.meta.url) ?? "unknown");
     process.exit(0);
   }
 
@@ -761,6 +740,7 @@ async function main() {
     runMcpImport,
     runMcpExport,
     runMcpValidate,
+    runMcpMemoryServer,
     runWorkflowValidate,
     runGitStatus,
     runGitFetch,
@@ -779,6 +759,7 @@ async function main() {
     runMemoryBackupCreate,
     runMemoryBackupList,
     runMemoryBackupRestore,
+    runKnowledgeGraphBuild,
     runMissionCreate,
     runMissionList,
     runMissionShow,
@@ -834,6 +815,8 @@ async function main() {
     runPluginPublish,
     runSkillsSearch,
     runSkillsInstall,
+    runSkillsGet,
+    runComputer,
     runResearchCreate,
     runResearchList,
     runResearchShow,
@@ -1792,6 +1775,9 @@ async function main() {
           secretScope,
         };
         switch (subcommand) {
+          case "serve-memory":
+            await runMcpMemoryServer(getFlagValue(args, "--project-root") ?? process.cwd());
+            break;
           case "list":
           case "ls":
             await runMcpList({ projectName, json: args.includes("--json") });
@@ -2003,6 +1989,20 @@ async function main() {
           console.error("Usage: fn backup --create | --list | --cleanup | --restore <filename>");
           process.exit(1);
         }
+        break;
+      }
+
+      case "knowledge-graph": {
+        const usage = "Usage: fn knowledge-graph build [--force] [--dir <path>] [--json]";
+        const dirIndex = args.indexOf("--dir");
+        const allowed = new Set(["build", "--force", "--dir", "--json"]);
+        const hasUnknownArgument = args.slice(1).some((arg, index) => !allowed.has(arg)
+          && !(dirIndex >= 0 && index === dirIndex));
+        if (args[1] !== "build" || hasUnknownArgument || (dirIndex >= 0 && !args[dirIndex + 1])) {
+          console.error(usage);
+          process.exit(1);
+        }
+        await runKnowledgeGraphBuild({ projectName, force: args.includes("--force"), json: args.includes("--json"), dir: dirIndex >= 0 ? args[dirIndex + 1] : undefined });
         break;
       }
 
@@ -2267,6 +2267,12 @@ async function main() {
         break;
       }
 
+      case "computer": {
+        const exitCode = await runComputer(args.slice(1), { projectRoot: process.cwd() });
+        if (exitCode !== 0) process.exit(exitCode);
+        break;
+      }
+
       case "skills": {
         const subcommand = args[1];
 
@@ -2278,6 +2284,7 @@ async function main() {
           console.log("  fn skills install <owner/repo>      Install skills from a source");
           console.log("  fn skills install <owner/repo> --skill <name>");
           console.log("                                      Install a specific skill");
+          console.log("  fn skills get <skill-name>           Print a built-in version-matched guide");
           console.log("\nExamples:");
           console.log("  fn skills search react");
           console.log("  fn skills search firebase --limit 5");
@@ -2329,8 +2336,14 @@ async function main() {
           break;
         }
 
+        if (subcommand === "get") {
+          const exitCode = await runSkillsGet(args.slice(2));
+          if (exitCode !== 0) process.exit(exitCode);
+          break;
+        }
+
         console.error(`Unknown subcommand: skills ${subcommand}`);
-        console.log("Try: fn skills search | install");
+        console.log("Try: fn skills search | install | get");
         process.exit(1);
         break;
       }
@@ -2349,6 +2362,12 @@ async function main() {
   }
 }
 
+/*
+ * FNXC:CliAwaitLiveness 2026-08-11-09:17:
+ * Preserve this await and the skip-main build/test guard. A forced success exit
+ * would mask a non-settling command promise and could terminate long-running
+ * CLI modes before their intended shutdown path completes.
+ */
 if (process.env.FUSION_CLI_SKIP_MAIN !== "1") {
   await main();
 }

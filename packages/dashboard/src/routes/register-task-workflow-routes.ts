@@ -14,7 +14,8 @@ handler, and one alias would hide every new unattributed route added between now
 
 U9: replace these with the request's resolved actor. Nothing else about the call sites changes.
 */
-import { createLogger } from "@fusion/core";
+import { createIngestedCheckResolver, createLogger, isCurrentSpecDriftReport, resolveRequiredCheckNames } from "@fusion/core";
+import type { Request, Response } from "express";
 
 const severityAuditLog = createLogger("dashboard-register-task-workflow-routes");
 
@@ -75,6 +76,7 @@ import {
   resolveNearDuplicateCanonicalFlags,
   isEphemeralAgent,
   parseExplicitDuplicateMarker,
+  resolveExplicitDuplicateMarker,
   resolveWorkflowIrForTask,
   resolveWorkflowIrForTaskWithProvenance,
   resolveReviewColumns,
@@ -100,6 +102,7 @@ import {
 } from "@fusion/core";
 import { GitHubClient } from "../github.js";
 import { resolveArtifactMediaPath } from "../artifact-media.js";
+import { archivedColumnsForTask } from "../task-lifecycle-lanes.js";
 import { githubRateLimiter } from "../github-poll.js";
 import { createTrackingIssueForTask } from "../github-tracking-hook.js";
 import { parseGitHubBadgeUrl } from "./register-git-github.js";
@@ -108,6 +111,7 @@ import {
 
   planTaskWorktreePath,
   promoteHeldTask,
+  evaluateTaskReleaseGate,
   performTaskRevert,
   revertWorkspaceTask,
   TaskRevertError,
@@ -115,6 +119,7 @@ import {
   prepareRevertPrBranch,
   prepareWorkspaceRevertPrBranches,
   isInReviewMissingWorktreeSessionStartFailure,
+  inspectExternalGitCheckout,
   // FN-8004 follow-up: shared with SelfHealingManager.recoverStaleMergingStatus so the manual
   // Retry gate and the automatic sweep agree on when a merge-active stamp is orphaned.
   isStaleMergeActiveStatus,
@@ -371,7 +376,6 @@ async function resolveTerminalColumnsForTask(store: TaskStore, taskId: string): 
     return new Set(["done", "archived"]);
   }
 }
-
 
 function isArtifactType(value: string): value is ArtifactType {
   return ARTIFACT_TYPES.has(value as ArtifactType);
@@ -916,7 +920,7 @@ function getWorkflowReviewKind(
   return undefined;
 }
 
-function buildWorkflowReviewItemId(task: Task, result: WorkflowStepResult, findingId?: string): string {
+function buildWorkflowReviewItemId(task: Task, result: WorkflowStepResult, findingId?: string, resolution?: string): string {
   const identity = JSON.stringify({
     taskId: task.id,
     workflowStepId: result.workflowStepId,
@@ -930,6 +934,7 @@ function buildWorkflowReviewItemId(task: Task, result: WorkflowStepResult, findi
     output: result.output,
     notes: result.notes,
     findingId,
+    resolution,
   });
   return `workflow-review-${createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
 }
@@ -943,7 +948,7 @@ async function buildWorkflowReviewItems(task: Task, store: TaskStore): Promise<T
       const timestamp = result.completedAt ?? result.startedAt ?? task.updatedAt ?? task.createdAt;
       if (result.findings?.length) {
         return result.findings.map((finding) => ({
-          itemId: buildWorkflowReviewItemId(task, result, finding.id),
+          itemId: buildWorkflowReviewItemId(task, result, finding.id, finding.resolution),
           sourceMode: "reviewer-agent" as const,
           title: finding.title,
           body: finding.body,
@@ -953,6 +958,7 @@ async function buildWorkflowReviewItems(task: Task, store: TaskStore): Promise<T
           ...(finding.filePath ? { filePath: finding.filePath } : {}),
           ...(finding.line ? { line: finding.line } : {}),
           ...(finding.severity ? { severity: finding.severity } : {}),
+          ...(finding.resolution ? { resolution: finding.resolution } : {}),
           reviewState: result.verdict,
           verdict: result.verdict,
           reviewType,
@@ -1492,12 +1498,14 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         const enrichable = holdRows.slice(0, AWAITING_PLANNING_ENRICH_LIMIT);
         if (holdRows.length > enrichable.length) {
           severityAuditLog.warn(
-            `awaitingPlanning enrichment truncated: ${enrichable.length}/${holdRows.length} hold-lane tasks ` +
+            `awaitingPlanning/releaseGate enrichment truncated: ${enrichable.length}/${holdRows.length} hold-lane tasks ` +
             "annotated (remaining cards fall back to the client step-count heuristic)",
           );
         }
         if (enrichable.length > 0) {
           const flagByTask = new Map<string, boolean>();
+          const releaseGateByTask = new Map<string, import("@fusion/core").TaskReleaseGateVerdict>();
+          const irCache = new Map<string, WorkflowIr>();
           await Promise.all(enrichable.map(async (task) => {
             let promptContent: string | null = null;
             try {
@@ -1509,11 +1517,22 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
               if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return;
             }
             flagByTask.set(task.id, isTaskAwaitingPlanning(task, promptContent));
+            /*
+            FNXC:PromoteVisibility 2026-08-11-20:38:
+            Share the hold-lane cap with awaitingPlanning and cache IR resolution per selected workflow:
+            exact Promote visibility must not turn a board load into unbounded workflow reads.
+            */
+            const ir = await resolveWorkflowIrForTask(scopedStore, task.id, irCache);
+            const releaseGate = await evaluateTaskReleaseGate(scopedStore, task, { ir });
+            if (releaseGate) releaseGateByTask.set(task.id, releaseGate);
           }));
-          if (flagByTask.size > 0) {
+          if (flagByTask.size > 0 || releaseGateByTask.size > 0) {
             tasks = tasks.map((task) => {
               const awaitingPlanning = flagByTask.get(task.id);
-              return awaitingPlanning === undefined ? task : { ...task, awaitingPlanning };
+              const releaseGate = releaseGateByTask.get(task.id);
+              return awaitingPlanning === undefined && releaseGate === undefined
+                ? task
+                : { ...task, ...(awaitingPlanning === undefined ? {} : { awaitingPlanning }), ...(releaseGate === undefined ? {} : { releaseGate }) };
             });
           }
         }
@@ -1619,8 +1638,23 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
     }
   });
 
-  // Create task
-  router.post("/tasks", async (req, res) => {
+  /*
+  FNXC:TaskRecommendations 2026-08-08-05:10:
+  Recommendation children use this exact production intake pipeline, not a direct store write.
+  Keeping normalization, duplicate guards, lock cleanup, source metadata, and workflow routing here
+  prevents a convenience action from becoming a policy bypass.
+  */
+  const createTaskThroughGuardedIntake = async (
+    req: Request,
+    res: Response,
+    trusted?: {
+      proposalClaimId?: string;
+      /** A recommendation child auto-archived by a late deterministic conflict. */
+      recoverArchivedProposalTask?: Task;
+      onCreated?: (task: Task) => Promise<unknown>;
+      responseForCreated?: (task: Task, result: unknown) => unknown;
+    },
+  ): Promise<void> => {
     try {
       const { store: scopedStore, projectId } = await getProjectContext(req);
       const {
@@ -1631,6 +1665,8 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         breakIntoSubtasks,
         enabledWorkflowSteps,
         workflowId,
+        agentId,
+        assignedAgentId,
         modelPresetId,
         modelProvider,
         modelId,
@@ -1742,6 +1778,12 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
       // the store below (mapped to 4xx in the catch handler).
       if (workflowId !== undefined && workflowId !== null && typeof workflowId !== "string") {
         throw badRequest("workflowId must be a string or null");
+      }
+
+      // The public aliases normalize once; owner eligibility is enforced by the shared store boundary.
+      const requestedOwnerId = assignedAgentId ?? agentId;
+      if (requestedOwnerId !== undefined && (typeof requestedOwnerId !== "string" || requestedOwnerId.trim() === "")) {
+        throw badRequest("agentId must be a non-empty string");
       }
 
       // Check for summarize flag in request
@@ -1886,6 +1928,31 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         if (
           deterministicGuard.action === "duplicate"
           && deterministicGuard.existing
+          && typeof trusted?.proposalClaimId === "string"
+          && trusted.proposalClaimId.length > 0
+          && typeof deterministicGuard.existing.proposalClaimId === "string"
+          && deterministicGuard.existing.proposalClaimId.length > 0
+          && deterministicGuard.existing.proposalClaimId === trusted.proposalClaimId
+        ) {
+          /*
+          FNXC:TaskRecommendations 2026-08-08-05:27:
+          The database proposal claim is project-scoped, cross-process at-most-once authority.
+          A second process can observe its newly-created child while checking the normal content
+          guard; reuse that immutable same-recommendation winner and repair the parent link rather
+          than surfacing the ordinary duplicate conflict reserved for distinct recommendations.
+
+          FNXC:TaskRecommendations 2026-08-12-00:58:
+          Reuse is reserved for a named proposal claim on both the trusted request and canonical.
+          Comparing absent ids made every ordinary deterministic duplicate return 200 and skipped
+          the duplicate-blocker classification that preserves legitimate done or archived creates.
+          */
+          const trustedCreateResult = await trusted?.onCreated?.(deterministicGuard.existing);
+          res.status(200).json(trusted?.responseForCreated?.(deterministicGuard.existing, trustedCreateResult) ?? deterministicGuard.existing);
+          return;
+        }
+        if (
+          deterministicGuard.action === "duplicate"
+          && deterministicGuard.existing
           && await classifyDuplicateBlocker(deterministicGuard.existing)
         ) {
           throw conflict("duplicate_candidates", {
@@ -1991,7 +2058,15 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
       // FN-5220: layered intake ordering remains deterministic -> similarity -> near-duplicate intent -> explicit-marker.
       try {
         const combinedText = `${normalizedTitle ?? ""}\n${normalizedDescription}`;
-        const explicitDuplicateMarker = parseExplicitDuplicateMarker(combinedText);
+        /*
+        FNXC:TaskRecommendations 2026-08-08-07:57:
+        Recommendation titles and descriptions are both required, so parsing only their combined
+        text makes a description-only `DUPLICATE: FN-####` marker unreachable from the server-owned
+        recommendation payload. Check the canonical description shape first while retaining the
+        ordinary combined-input check, so both intake paths enforce the explicit-marker guard.
+        */
+        const explicitDuplicateMarker = parseExplicitDuplicateMarker(normalizedDescription)
+          ?? parseExplicitDuplicateMarker(combinedText);
         const explicitMarkerBypassed =
           bypassDuplicateCheck === true ||
           (explicitDuplicateMarker ? acknowledgedDuplicateIds.includes(explicitDuplicateMarker.canonicalId) : false);
@@ -2053,6 +2128,7 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         // U6/R3: forward only when the client set it (string | null). Leaving it
         // absent preserves the project-default inheritance behavior.
         ...(workflowId !== undefined ? { workflowId: workflowId as string | null } : {}),
+        ...(typeof requestedOwnerId === "string" ? { assignedAgentId: requestedOwnerId.trim() } : {}),
         modelPresetId: validateOptionalModelField(modelPresetId, "modelPresetId"),
         modelProvider: executorModel.provider ?? undefined,
         modelId: executorModel.modelId ?? undefined,
@@ -2093,7 +2169,38 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         ...(validatedGithubTracking ? { githubTracking: validatedGithubTracking } : {}),
         // FNXC:PlannerOversight 2026-07-14-18:11: only persist when client sent an explicit boolean override.
         ...(typeof sessionAdvisorEnabled === "boolean" ? { sessionAdvisorEnabled } : {}),
+        ...(trusted?.proposalClaimId ? { proposalClaimId: trusted.proposalClaimId } : {}),
       };
+
+      /*
+      FNXC:TaskRecommendations 2026-08-08-08:34:
+      A late deterministic conflict archives the just-created recommendation child but retains its
+      immutable proposal claim. Re-run every normal intake guard before restoring that child: an
+      unchanged canonical still produces the standard duplicate conflict, while an inactive
+      canonical lets the original claimed child return to its workflow-resolved intake lane.
+      */
+      if (trusted?.recoverArchivedProposalTask) {
+        /*
+        FNXC:TaskRecommendations 2026-08-08-08:44:
+        A deterministic-duplicate archive is a lane move, not an operator archive, so it has no
+        pre-archive history for generic restore to replay. Re-home its recovered child to that
+        child's workflow intake explicitly; otherwise custom workflows can restore it to a legacy
+        fallback or complete lane instead of the normal guarded-intake destination.
+
+        FNXC:TaskRecommendations 2026-08-09-06:06:
+        Never call the cold-storage unarchive path here. Deterministic reconciliation keeps the row in
+        active storage and may move it to a custom archived-trait lane; re-home that live row directly
+        through the explicit recovery bypass because archive-to-intake is intentionally non-adjacent.
+        */
+        const archivedTask = trusted.recoverArchivedProposalTask;
+        const intakeColumn = await resolveIntakeColumnForTask(scopedStore, archivedTask.id);
+        const recoveredTask = archivedTask.column === intakeColumn
+          ? archivedTask
+          : await scopedStore.moveTask(archivedTask.id, intakeColumn, { recoveryRehome: true });
+        const trustedCreateResult = await trusted.onCreated?.(recoveredTask);
+        res.status(200).json(trusted.responseForCreated?.(recoveredTask, trustedCreateResult) ?? recoveredTask);
+        return;
+      }
 
       const task = await scopedStore.createTask(
         createInput,
@@ -2134,6 +2241,24 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
             : "keep-created",
       });
         if (deterministicReconcile.outcome === "archived") {
+          /*
+          FNXC:TaskRecommendations 2026-08-08-08:26:
+          A recommendation child that loses the post-create deterministic race cannot be presented
+          as a successful Created action. Its parent remains unlinked, so return the same
+          duplicate_candidates conflict shape as the pre-create guard rather than an unwrapped task.
+          */
+          if (trusted?.proposalClaimId) {
+            throw conflict("duplicate_candidates", {
+              matches: [{
+                id: deterministicReconcile.canonical.id,
+                title: deterministicReconcile.canonical.title ?? "",
+                description: deterministicReconcile.canonical.description ?? "",
+                column: deterministicReconcile.canonical.column,
+                score: 1,
+                deterministic: true,
+              }],
+            });
+          }
           res.status(200).json(deterministicReconcile.canonical);
           return;
         }
@@ -2158,7 +2283,8 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
           }
         }
 
-        res.status(201).json(taskWithBranchContext);
+        const trustedCreateResult = await trusted?.onCreated?.(taskWithBranchContext);
+        res.status(201).json(trusted?.responseForCreated?.(taskWithBranchContext, trustedCreateResult) ?? taskWithBranchContext);
         return;
       } finally {
         deterministicGuard.releaseLock();
@@ -2174,9 +2300,180 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         message.includes("must be a string")
         || message.includes("must be an array of strings")
         || /^Workflow '.*' not found$/.test(message)
-        || /is a fragment and cannot be selected/.test(message);
+        || /is a fragment and cannot be selected/.test(message)
+        || message.startsWith("Task intake owner resolution failed:");
       const status = isClientError ? 400 : 500;
       throw new ApiError(status, message);
+    }
+  };
+
+  // Ordinary dashboard creation deliberately shares the guarded production intake above.
+  router.post("/tasks", async (req, res) => {
+    await createTaskThroughGuardedIntake(req, res);
+  });
+
+  /*
+  FNXC:TaskRecommendations 2026-08-08-05:27:
+  A recommendation key must serialize BEFORE the guarded intake takes its content-fingerprint lock.
+  Otherwise two clicks can both pass pre-create duplicate checks and the loser observes a duplicate
+  conflict instead of the one child it is required to reuse. The key includes project identity,
+  because task ids are composite project-scoped identities.
+  */
+  const acquireRecommendationIdempotencyLock = async (projectId: string, taskId: string, recommendationId: string): Promise<() => void> => {
+    const key = `recommendation-idempotency:${projectId}:${taskId}:${recommendationId}`;
+    const predecessor = deterministicGuardLocks.get(key);
+    let releaseGate: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    deterministicGuardLocks.set(key, gate);
+    if (predecessor) await predecessor;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseGate?.();
+      if (deterministicGuardLocks.get(key) === gate) deterministicGuardLocks.delete(key);
+    };
+  };
+
+  router.post("/tasks/:id/recommendations/:recommendationId/create", async (req, res) => {
+    let releaseParentRecommendationLock: (() => void) | undefined;
+    let releaseRecommendationLock: (() => void) | undefined;
+    try {
+      if (req.body && Object.keys(req.body).length > 0) {
+        throw badRequest("recommendation creation does not accept client-controlled task options");
+      }
+      const { store: scopedStore, projectId } = await getProjectContext(req);
+      const lockProjectId = projectId ?? "default";
+      /*
+      FNXC:TaskRecommendations 2026-08-08-06:42:
+      Recommendation links share one JSONB parent field. Serialize all recommendation mutations
+      for that parent before taking an individual recommendation key so simultaneous actions for
+      different rows cannot overwrite each other's createdTaskId during read-modify-write repair.
+      The individual key still precedes the guarded intake fingerprint lock as required.
+      */
+      releaseParentRecommendationLock = await acquireRecommendationIdempotencyLock(lockProjectId, req.params.id, "parent-mutation");
+      releaseRecommendationLock = await acquireRecommendationIdempotencyLock(lockProjectId, req.params.id, req.params.recommendationId);
+      // Re-read only after acquiring the recommendation identity lock; this is the queue winner's authority.
+      const parent = await scopedStore.getTask(req.params.id).catch(() => null);
+      if (!parent || parent.deletedAt) throw notFound("Task not found");
+      const completeColumns = await (async () => {
+        try {
+          const ir = await resolveWorkflowIrForTask(scopedStore, parent.id);
+          const columns = columnsWithFlag(ir, "complete");
+          return new Set(columns.length > 0 ? columns : ["done"]);
+        } catch {
+          return new Set(["done"]);
+        }
+      })();
+      if (!completeColumns.has(parent.column)) {
+        throw conflict("recommendations are available only on completed tasks");
+      }
+      const recommendation = parent.recommendations?.find((item) => item.id === req.params.recommendationId);
+      if (!recommendation) throw notFound("Recommendation not found");
+
+      const repairLink = async (child: Task): Promise<Task> => {
+        try {
+          /*
+          FNXC:TaskRecommendations 2026-08-08-06:52:
+          Route-local promise locks only coordinate one dashboard process. The TaskStore mutation
+          takes the project-scoped PostgreSQL advisory lock and re-reads the parent in that same
+          transaction, so concurrent dashboard instances cannot overwrite another recommendation
+          link after the durable child claim has been created.
+          */
+          return await scopedStore.linkTaskRecommendation(parent.id, recommendation.id, child.id, completeColumns);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (
+            message === "Recommendation no longer exists"
+            || message === "Recommendation is already linked to another task"
+            || message === "Recommendations are available only on completed tasks"
+          ) {
+            throw conflict(message);
+          }
+          throw error;
+        }
+      };
+
+      if (recommendation.createdTaskId) {
+        if (!/^[A-Z]+-\d+$/.test(recommendation.createdTaskId)) {
+          throw conflict("Recommendation link is malformed");
+        }
+        const linked = await scopedStore.getTask(recommendation.createdTaskId).catch(() => null);
+        const linkedArchiveColumns = linked
+          ? await archivedColumnsForTask(scopedStore, linked.id)
+          : new Set<string>();
+        /*
+        FNXC:TaskRecommendations 2026-08-08-06:34:
+        A prior link is reusable only while its child remains in a live task lane. Archived and
+        soft-deleted children are historical records, not an actionable Created result; conflict
+        rather than silently resurrecting or linking a second child.
+
+        FNXC:TaskRecommendations 2026-08-09-03:30:
+        Archive unavailability uses archivedColumnsForTask (workflow archived trait), not a
+        legacy `"archived"` column literal — custom archive-lane boards keep the same rule.
+        */
+        if (!linked || linked.deletedAt || linkedArchiveColumns.has(linked.column)) {
+          throw conflict("Recommendation link points to an unavailable task");
+        }
+        return res.status(200).json({ task: linked, parent });
+      }
+
+      const proposalClaimId = `recommendation:${parent.lineageId ?? parent.id}:${recommendation.id}`;
+      /*
+      FNXC:TaskRecommendations 2026-08-08-05:41:
+      Proposal claims deliberately survive soft deletion to prevent a stale recommendation retry
+      from colliding with the unique claim and manufacturing a second child. Read tombstones here
+      only to return a conflict; they are never relinked or exposed as live recommendation tasks.
+      */
+      const existing = (await scopedStore.listTasks({ slim: false, includeArchived: true, includeDeleted: true }))
+        .find((task) => task.proposalClaimId === proposalClaimId);
+      const existingArchiveColumns = existing
+        ? await archivedColumnsForTask(scopedStore, existing.id)
+        : new Set<string>();
+      /*
+      FNXC:TaskRecommendations 2026-08-08-08:44:
+      Deterministic reconciliation moves a child to its workflow's archived trait, which may be
+      named anything but `archived`. Detect that trait before retry recovery so a custom-workflow
+      child reaches the explicit intake re-home rather than being stranded as an unavailable claim.
+      */
+      const recoverArchivedProposalTask = existing
+        && !existing.deletedAt
+        && existingArchiveColumns.has(existing.column)
+        && typeof existing.sourceMetadata?.deterministicDuplicateOf === "string"
+        ? existing
+        : undefined;
+      if (existing && !recoverArchivedProposalTask) {
+        if (existing.deletedAt || existingArchiveColumns.has(existing.column)) throw conflict("Recommendation task is unavailable");
+        const repairedParent = await repairLink(existing);
+        return res.status(200).json({ task: existing, parent: repairedParent });
+      }
+
+      const originalBody = req.body;
+      req.body = {
+        title: recommendation.title,
+        description: recommendation.description,
+        source: {
+          sourceType: "api",
+          sourceParentTaskId: parent.id,
+          sourceMetadata: { recommendationId: recommendation.id, recommendationCategory: recommendation.category },
+        },
+      };
+      try {
+        await createTaskThroughGuardedIntake(req, res, {
+          proposalClaimId,
+          recoverArchivedProposalTask,
+          onCreated: repairLink,
+          responseForCreated: (child, linkedParent) => ({ task: child, parent: linkedParent as Task }),
+        });
+      } finally {
+        req.body = originalBody;
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError) throw err;
+      rethrowAsApiError(err);
+    } finally {
+      releaseRecommendationLock?.();
+      releaseParentRecommendationLock?.();
     }
   });
 
@@ -3178,6 +3475,8 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
       const autoPauseClearPatch = buildAutoPauseClearPatch(task);
       const clearedDeadlockAutoPause = Object.keys(autoPauseClearPatch).length > 0;
       const retryLogSuffix = clearedDeadlockAutoPause ? ", cleared deadlock auto-pause" : "";
+      // FNXC:TaskWedgeNotifications 2026-08-10-20:15: dashboard Retry is explicit operator intervention, so it clears the spent generic-terminal budget.
+      await scopedStore.resetTerminalFailureAutoRecoveryBudget(req.params.id);
 
       if (isMissingWorktreeSessionRetry) {
         /*
@@ -4073,6 +4372,38 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
     }
   });
 
+  /*
+  FNXC:SpecLock 2026-08-09-12:34:
+  Task Detail reads retained structural evidence from the store rather than recomputing it in the
+  browser, keeping displayed alignment identical to the execution-time evaluator.
+  */
+  router.get("/tasks/:id/spec-lock", async (req, res) => {
+    try {
+      const { store: scopedStore } = await getProjectContext(req);
+      const task = await scopedStore.getTask(req.params.id);
+      const [latestLock, activeLock, currentPlan, latestReport, locks, currentPlans, reports] = await Promise.all([
+        scopedStore.getLatestSpecLock(req.params.id),
+        scopedStore.getActiveSpecLock(req.params.id),
+        scopedStore.getLatestCurrentPlanEvidence(req.params.id),
+        scopedStore.getLatestSpecDriftReport(req.params.id),
+        scopedStore.listSpecLocks(req.params.id),
+        scopedStore.listCurrentPlanEvidence(req.params.id),
+        scopedStore.listSpecDriftReports(req.params.id),
+      ]);
+      /*
+      FNXC:SpecDrift 2026-08-09-19:19:
+      Route readers expose the active lock separately and never promote a historical clean report
+      after a prompt rewrite or re-lock. The stale row remains in immutable history for audit.
+      */
+      const report = isCurrentSpecDriftReport(latestReport, latestLock, currentPlan, task.approvedPlanFingerprint) ? latestReport : undefined;
+      res.json({ latestLock: latestLock ?? null, activeLock: activeLock ?? null, currentPlan: currentPlan ?? null, report: report ?? null, latestReport: latestReport ?? null, history: { locks, currentPlans, reports } });
+    } catch (err: unknown) {
+      if (err instanceof ApiError) throw err;
+      if (isTaskLookupMiss(err)) throw notFound(`Task ${req.params.id} not found`);
+      rethrowAsApiError(err, "Internal server error");
+    }
+  });
+
   // Get single task with prompt content
   router.get("/tasks/:id", async (req, res) => {
     try {
@@ -4350,14 +4681,22 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
          * manual gate falls back to today's always-re-park behavior for this task.
          */
         let approvedPlanFingerprint: string | undefined;
+        let approvedPrompt: string | undefined;
         try {
           const { readFile } = await import("node:fs/promises");
           const { join } = await import("node:path");
           const promptPath = join(scopedStore.getRootDir(), ".fusion", "tasks", task.id, "PROMPT.md");
           const promptText = await readFile(promptPath, "utf8");
+          approvedPrompt = promptText;
           approvedPlanFingerprint = computePlanApprovalFingerprint(promptText);
         } catch {
-          // No PROMPT.md to fingerprint (unusual for an awaiting-approval task) — leave unset.
+          /*
+          FNXC:SpecLockApproval 2026-08-09-20:04:
+          Manual approval is a release boundary, so an unreadable PROMPT.md cannot fall back to
+          clearing a stale fingerprint and releasing un-lockable work. Keep the existing hold until
+          the operator restores a readable, structurally comparable plan that can be locked.
+          */
+          throw conflict("Cannot approve plan: PROMPT.md must be readable to create the immutable spec lock");
         }
 
         /*
@@ -4408,6 +4747,15 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
           approvedWorkflowStepResults = results;
         }
 
+        /*
+        FNXC:SpecLock 2026-08-09-17:37:
+        Validate an exhausted Plan Review before attempting persistence. A malformed cap state must
+        retain its established conflict response, while every valid release still locks under this fence.
+        */
+        if (approvedPlanFingerprint && approvedPrompt) {
+          await scopedStore.lockCurrentPlanWhilePlanningLocked(task.id, approvedPlanFingerprint, approvedPrompt);
+        }
+
         const approvalPatch = {
           status: null,
           approvedPlanFingerprint: approvedPlanFingerprint ?? null,
@@ -4442,6 +4790,12 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
          * so a stale plan can never bypass a later manual approval gate.
          */
         const approved = await scopedStore.updateTask(task.id, approvalPatch, UNATTRIBUTED_MUTATION_CONTEXT);
+        /*
+        FNXC:SpecDrift 2026-08-09-07:36:
+        Publish the deterministic report before the approval handoff seeds graph execution. A
+        missing/unreadable PROMPT.md yields an unavailable report rather than an unexamined release.
+        */
+        await scopedStore.reconcileSpecDriftWhilePlanningLocked(approved);
         /*
          * FNXC:PlanApprovalDispatch 2026-08-05-01:57:
          * Clearing awaiting-approval is only the first half of the operator decision. Resume the
@@ -5971,9 +6325,28 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
       const existingTaskForDuplicateDismissal = dismissNearDuplicate === true
         ? await scopedStore.getTask(req.params.id)
         : null;
+      let duplicateDismissalResolution: ReturnType<typeof resolveExplicitDuplicateMarker> | null = null;
       if (dismissNearDuplicate === true) {
         const isTriageMarkerDecision = existingTaskForDuplicateDismissal?.sourceMetadata?.duplicateSource === "triage-marker"
           && existingTaskForDuplicateDismissal.pausedReason === "duplicate-decision-required";
+        const existingPrompt = existingTaskForDuplicateDismissal
+          ? await readFile(join(scopedStore.getRootDir(), ".fusion", "tasks", existingTaskForDuplicateDismissal.id, "PROMPT.md"), "utf-8").catch(() => null)
+          : null;
+        duplicateDismissalResolution = resolveExplicitDuplicateMarker(existingPrompt, existingTaskForDuplicateDismissal?.title);
+        /*
+         * FNXC:DuplicateIntake 2026-08-09-02:29:
+         * FN-8840 extends an explicit redirect to task titles. Keep must retire the source that
+         * created the duplicate-decision hold before releasing it: otherwise a title marker is
+         * immediately re-ingested, while deleting PROMPT.md for a title-only redirect loses an
+         * operator-authored plan. Same-ID prompt/title markers remain one cleanup operation;
+         * conflicts deliberately retain both sources for explicit operator correction.
+         */
+        if (!duplicateDismissalResolution.conflict && duplicateDismissalResolution.marker) {
+          const titleMarker = parseExplicitDuplicateMarker(existingTaskForDuplicateDismissal?.title ?? "");
+          if (title === undefined && titleMarker?.canonicalId === duplicateDismissalResolution.marker.canonicalId) {
+            updates.title = `Duplicate redirect cleared: ${titleMarker.canonicalId}`;
+          }
+        }
         /*
          * FNXC:DuplicateIntake 2026-07-16-13:00:
          * Keep resolves Issue #2225's default triage-marker hold by acknowledging the link,
@@ -6009,7 +6382,11 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
       }
 
       const task = await scopedStore.updateTask(req.params.id, updates, UNATTRIBUTED_MUTATION_CONTEXT);
-      if (dismissNearDuplicate === true && task.sourceMetadata?.duplicateSource === "triage-marker") {
+      if (
+        dismissNearDuplicate === true
+        && task.sourceMetadata?.duplicateSource === "triage-marker"
+        && duplicateDismissalResolution?.source === "prompt"
+      ) {
         const { rm } = await import("node:fs/promises");
         await rm(join(scopedStore.getRootDir(), ".fusion", "tasks", task.id, "PROMPT.md"), { force: true });
       }
@@ -6154,6 +6531,55 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
     }
   });
 
+  /**
+   * FNXC:ExternalTaskCheckoutRouting 2026-08-09-22:43:
+   * Persist one operator-validated external checkout for both implementation and enforced review. The execution/review route belongs in task source metadata, not the user-defined workflow custom-field schema, and clearing the route must null every persisted routing key.
+   */
+  router.patch("/tasks/:id/external-checkout", async (req, res) => {
+    try {
+      const { store: scopedStore } = await getProjectContext(req);
+      const checkoutPath = (req.body as { checkoutPath?: unknown } | undefined)?.checkoutPath;
+      await scopedStore.getTask(req.params.id);
+
+      if (checkoutPath === null) {
+        const task = await scopedStore.updateTask(req.params.id, {
+          sourceMetadataPatch: {
+            externalExecutionCheckout: null,
+            externalExecutionBranch: null,
+            externalReviewCheckout: null,
+          },
+        });
+        await scopedStore.logEntry(req.params.id, "External execution/review checkout routing cleared by operator");
+        res.json(task);
+        return;
+      }
+
+      const inspection = await inspectExternalGitCheckout(checkoutPath, { requireClean: true });
+      if (!inspection.valid || !inspection.checkoutPath || !inspection.branch) {
+        throw badRequest(`Invalid external checkout: ${inspection.reason ?? "unknown error"}`);
+      }
+
+      const task = await scopedStore.updateTask(req.params.id, {
+        sourceMetadataPatch: {
+          externalExecutionCheckout: inspection.checkoutPath,
+          externalExecutionBranch: inspection.branch,
+          externalReviewCheckout: inspection.checkoutPath,
+        },
+      });
+      await scopedStore.logEntry(
+        req.params.id,
+        `External execution/review checkout routed to ${inspection.checkoutPath} (${inspection.branch}) by operator`,
+      );
+      res.json(task);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) throw err;
+      if (isTaskLookupMiss(err) || (err instanceof Error ? err.message : String(err)).includes("not found")) {
+        throw notFound(err instanceof Error ? err.message : String(err));
+      }
+      rethrowAsApiError(err);
+    }
+  });
+
   // Patch a task's custom field values (U13/KTD-14). Delegates to the single
   // store write authority (`updateTaskCustomFields`), which validates the patch
   // against the task's workflow field schema. A typed rejection surfaces as a
@@ -6252,7 +6678,9 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         if (!owner || !repo) {
           throw badRequest("Could not determine GitHub repository for PR review fetch");
         }
-        reviewData = await new GitHubClient(options?.githubToken ?? process.env.GITHUB_TOKEN).getPrReviewDetails(owner, repo, task.prInfo.number);
+        const requiredCheckNames = resolveRequiredCheckNames(await scopedStore.getSettings());
+        const resolveIngestedChecks = createIngestedCheckResolver(scopedStore.getAsyncLayer?.());
+        reviewData = await new GitHubClient(options?.githubToken ?? process.env.GITHUB_TOKEN).getPrReviewDetails(owner, repo, task.prInfo.number, { requiredCheckNames, ...(resolveIngestedChecks ? { resolveIngestedChecks } : {}) });
       } else {
         reviewData = await buildDirectTaskReviewData(task, scopedStore);
       }
@@ -6280,7 +6708,9 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         if (!owner || !repo) {
           throw badRequest("Could not determine GitHub repository for PR review refresh");
         }
-        reviewData = await new GitHubClient(options?.githubToken ?? process.env.GITHUB_TOKEN).getPrReviewDetails(owner, repo, task.prInfo.number);
+        const requiredCheckNames = resolveRequiredCheckNames(await scopedStore.getSettings());
+        const resolveIngestedChecks = createIngestedCheckResolver(scopedStore.getAsyncLayer?.());
+        reviewData = await new GitHubClient(options?.githubToken ?? process.env.GITHUB_TOKEN).getPrReviewDetails(owner, repo, task.prInfo.number, { requiredCheckNames, ...(resolveIngestedChecks ? { resolveIngestedChecks } : {}) });
       } else {
         reviewData = await buildDirectTaskReviewData(task, scopedStore);
       }
@@ -6329,7 +6759,9 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         if (!owner || !repo) {
           throw badRequest("Could not determine GitHub repository for PR review fetch");
         }
-        canonicalReviewData = await new GitHubClient(options?.githubToken ?? process.env.GITHUB_TOKEN).getPrReviewDetails(owner, repo, task.prInfo.number);
+        const requiredCheckNames = resolveRequiredCheckNames(await scopedStore.getSettings());
+        const resolveIngestedChecks = createIngestedCheckResolver(scopedStore.getAsyncLayer?.());
+        canonicalReviewData = await new GitHubClient(options?.githubToken ?? process.env.GITHUB_TOKEN).getPrReviewDetails(owner, repo, task.prInfo.number, { requiredCheckNames, ...(resolveIngestedChecks ? { resolveIngestedChecks } : {}) });
       } else {
         canonicalReviewData = await buildDirectTaskReviewData(task, scopedStore);
       }
@@ -6344,6 +6776,7 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
         path: item.filePath,
         line: item.line,
         severity: item.severity,
+        resolution: item.resolution,
         threadId: item.threadId,
         htmlUrl: item.url,
         state: item.reviewState ?? undefined,
@@ -6381,6 +6814,13 @@ export function registerTaskWorkflowRoutes(ctx: ApiRoutesContext, deps: TaskWork
       }
 
       const canonicalById = new Map(reviewState.items.map((item) => [item.id, item] as const));
+      const resolvedSelection = selectedItems.find((selected) => {
+        const item = canonicalById.get(selected.id);
+        return item?.resolution === "resolved-in-review" || item?.resolution === "superseded";
+      });
+      if (resolvedSelection) {
+        throw badRequest("Review items already resolved during review cannot be selected for revision");
+      }
       const canonicalSelections = selectedItems.map((selected) => {
         const item = canonicalById.get(selected.id);
         if (!item) throw badRequest("selectedItems must reference existing review items");

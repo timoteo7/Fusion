@@ -164,6 +164,32 @@ describe("useTasks", () => {
     expect(result.current.tasks[0].id).toBe("FN-001");
   });
 
+  it("expires an idle release verdict without waiting for another snapshot", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const evaluatedAt = new Date().toISOString();
+    const task = createMockTask({
+      updatedAt: evaluatedAt,
+      releaseGate: {
+        promoteBlocked: false,
+        unplannedForExecution: false,
+        blockedOnApproval: false,
+        reason: null,
+        readyAtCapacityBoundary: false,
+        evaluatedAt,
+        evaluatedForUpdatedAt: evaluatedAt,
+      },
+    });
+    mockFetchTasks.mockResolvedValue([task]);
+
+    const { result } = renderHook(() => useTasks({ sseEnabled: false }));
+    await waitFor(() => expect(result.current.tasks[0]?.releaseGate).toBeDefined());
+
+    act(() => {
+      vi.advanceTimersByTime(30_001);
+    });
+    expect(result.current.tasks[0]?.releaseGate).toBeUndefined();
+  });
+
   it("hydrates per-project cached tasks synchronously", () => {
     mockReadCache.mockReturnValueOnce([createMockTask({ id: "FN-CACHED" })]);
     const { result } = renderHook(() => useTasks({ projectId: "proj-1" }));
@@ -1089,6 +1115,64 @@ describe("useTasks", () => {
 
       expect(result.current.tasks[0].title).toBe("New Title");
       expect(result.current.tasks[0].column).toBe("in-progress");
+    });
+
+    it("clears paused lifecycle state from a production-shaped unpause event", async () => {
+      const pausedTask = createMockTask({
+        id: "FN-PAUSED",
+        column: "in-progress" as Column,
+        paused: true,
+        userPaused: true,
+        pausedByAgentId: "agent-1",
+        pausedReason: "operator",
+        status: "paused",
+        updatedAt: "2026-01-02T00:00:00Z",
+      });
+      mockFetchTasks.mockResolvedValueOnce([pausedTask]);
+
+      const { result } = renderHook(() => useTasks());
+
+      await waitFor(() => {
+        expect(result.current.tasks[0]?.paused).toBe(true);
+      });
+
+      // TaskStore represents cleared optional lifecycle fields as `undefined`.
+      // REST/SSE JSON serialization omits those keys, so this mirrors the wire
+      // payload observed by a passive dashboard after another client unpauses.
+      const unpausedWireTask = JSON.parse(JSON.stringify(createMockTask({
+        ...pausedTask,
+        paused: undefined,
+        userPaused: undefined,
+        pausedByAgentId: undefined,
+        pausedReason: undefined,
+        status: undefined,
+        // Canonical SSE delivery order resolves lifecycle ambiguity when the store's
+        // millisecond clock ties the already-visible row.
+        updatedAt: pausedTask.updatedAt,
+      }))) as Task;
+      expect(unpausedWireTask).not.toHaveProperty("paused");
+      expect(unpausedWireTask).not.toHaveProperty("status");
+
+      act(() => {
+        MockEventSource.instances[0]._emit("task:updated", {
+          ...unpausedWireTask,
+          updatedAt: "2026-01-01T23:59:00Z",
+        });
+      });
+
+      expect(result.current.tasks[0]?.paused).toBe(true);
+      expect(result.current.tasks[0]?.status).toBe("paused");
+
+      act(() => {
+        MockEventSource.instances[0]._emit("task:updated", unpausedWireTask);
+      });
+
+      expect(result.current.tasks[0]).toEqual(expect.objectContaining({ id: "FN-PAUSED" }));
+      expect(result.current.tasks[0]?.paused).toBeUndefined();
+      expect(result.current.tasks[0]?.userPaused).toBeUndefined();
+      expect(result.current.tasks[0]?.pausedByAgentId).toBeUndefined();
+      expect(result.current.tasks[0]?.pausedReason).toBeUndefined();
+      expect(result.current.tasks[0]?.status).toBeUndefined();
     });
 
     it("preserves stable execution metadata during sparse same-column updates", async () => {
@@ -2026,10 +2110,10 @@ describe("useTasks", () => {
       const keep = createMockTask({ id: "FN-KEEP", column: "in-progress" as Column, paused: false, userPaused: false });
       const unpaused = createMockTask({
         ...paused,
-        paused: false,
-        userPaused: false,
-        pausedByAgentId: null,
-        pausedReason: null,
+        paused: undefined,
+        userPaused: undefined,
+        pausedByAgentId: undefined,
+        pausedReason: undefined,
         updatedAt: "2026-07-12T00:00:00.000Z",
       });
       mockFetchTasks.mockResolvedValueOnce([paused, keep]);
@@ -2049,10 +2133,12 @@ describe("useTasks", () => {
       });
 
       expect(mockUnpauseTask).toHaveBeenCalledWith("FN-PAUSE", "proj-1");
-      expect(returned).toEqual(expect.objectContaining({ id: "FN-PAUSE", paused: false, userPaused: false }));
+      expect(returned).toEqual(expect.objectContaining({ id: "FN-PAUSE" }));
+      expect(returned).toHaveProperty("paused", undefined);
+      expect(returned).toHaveProperty("userPaused", undefined);
       expect(result.current.tasks.find((task) => task.id === "FN-PAUSE")).toEqual(unpaused);
-      expect(result.current.tasks.find((task) => task.id === "FN-PAUSE")?.paused).toBe(false);
-      expect(result.current.tasks.find((task) => task.id === "FN-PAUSE")?.userPaused).toBe(false);
+      expect(result.current.tasks.find((task) => task.id === "FN-PAUSE")?.paused).toBeUndefined();
+      expect(result.current.tasks.find((task) => task.id === "FN-PAUSE")?.userPaused).toBeUndefined();
       expect(mockFetchTasks).toHaveBeenCalledTimes(1);
       expect(mockWriteCache).toHaveBeenCalledWith(
         `${swrCache.SWR_CACHE_KEYS.TASKS_PREFIX}proj-1`,

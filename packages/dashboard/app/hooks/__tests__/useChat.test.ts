@@ -168,7 +168,7 @@ describe("useChat", () => {
     const { result } = renderHook(() => useChat("proj-123"));
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123", "active");
     });
 
     await waitFor(() => {
@@ -210,7 +210,7 @@ describe("useChat", () => {
     });
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith(projectId);
+      expect(mockFetchChatSessions).toHaveBeenCalledWith(projectId, "active");
     });
   });
 
@@ -390,13 +390,13 @@ describe("useChat", () => {
     });
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("p1");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("p1", "active");
     });
 
     rerender({ projectId: "p2" });
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("p2");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("p2", "active");
     });
     expect(mockFetchChatSessions).toHaveBeenCalledTimes(2);
   });
@@ -943,6 +943,31 @@ describe("useChat", () => {
     await waitFor(() => {
       expect(result.current.sessions).toHaveLength(0);
     });
+  });
+
+  it("keeps archived sessions out of the default refresh and restores them from the archived list", async () => {
+    const active = makeSession({ id: "session-active", agentId: "agent-001", title: "Active" });
+    const archived = makeSession({ id: "session-archived", agentId: "agent-002", title: "Archived", status: "archived" });
+    mockFetchChatSessions.mockResolvedValue({ sessions: [active, archived] });
+    mockUpdateChatSession.mockResolvedValue({ session: active });
+
+    const { result } = renderHook(() => useChat("proj-archive"));
+
+    await waitFor(() => {
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-archive", "active");
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-active"]);
+    });
+
+    await act(async () => {
+      await result.current.refreshArchivedSessions();
+    });
+    expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-archive", "archived");
+    expect(result.current.archivedSessions.map((session) => session.id)).toEqual(["session-archived"]);
+
+    await act(async () => {
+      await result.current.unarchiveSession("session-archived");
+    });
+    expect(mockUpdateChatSession).toHaveBeenCalledWith("session-archived", { status: "active" }, "proj-archive");
   });
 
   it("renames a session optimistically, trims the API title, and updates the active header state", async () => {
@@ -3245,7 +3270,7 @@ describe("useChat", () => {
     const { result } = renderHook(() => useChat("proj-123"));
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123", "active");
     });
 
     expect(() => {
@@ -5086,6 +5111,60 @@ describe("useChat", () => {
         const userMessages = result.current.messages.filter((message) => message.role === "user");
         expect(userMessages).toHaveLength(1);
       });
+    });
+
+    it("forwards stream acceptance but retains delivery fallback on accepted provider errors", async () => {
+      mockFetchChatSessions.mockResolvedValueOnce({
+        sessions: [makeSession({ id: "session-001", agentId: "agent-001" })],
+      });
+      mockFetchChatMessages.mockResolvedValueOnce({ messages: [] });
+      let acceptedHandler: (() => void) | undefined;
+      let errorHandler: ((data: string | apiModule.ChatFailureInfo, meta?: apiModule.ChatStreamErrorMeta) => void) | undefined;
+      mockStreamChatResponse.mockImplementation((_sessionId, _content, handlers) => {
+        acceptedHandler = handlers.onAccepted;
+        errorHandler = handlers.onError;
+        return { close: vi.fn(), isConnected: () => true };
+      });
+
+      const { result } = renderHook(() => useChat("proj-123"));
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+      act(() => result.current.selectSession("session-001"));
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      const onAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onFailed = vi.fn();
+      act(() => result.current.sendMessage("Hello!", undefined, { onAccepted, onDelivered, onFailed }));
+      act(() => acceptedHandler?.());
+      expect(onAccepted).toHaveBeenCalledTimes(1);
+
+      act(() => errorHandler?.("Provider failed", { requestAccepted: true, receivedStreamEvent: true }));
+      expect(onDelivered).toHaveBeenCalledTimes(1);
+      expect(onFailed).not.toHaveBeenCalled();
+    });
+
+    it("does not accept when the stream reports a pre-acceptance error", async () => {
+      mockFetchChatSessions.mockResolvedValueOnce({
+        sessions: [makeSession({ id: "session-001", agentId: "agent-001" })],
+      });
+      mockFetchChatMessages.mockResolvedValueOnce({ messages: [] });
+      let errorHandler: ((data: string | apiModule.ChatFailureInfo, meta?: apiModule.ChatStreamErrorMeta) => void) | undefined;
+      mockStreamChatResponse.mockImplementation((_sessionId, _content, handlers) => {
+        errorHandler = handlers.onError;
+        return { close: vi.fn(), isConnected: () => true };
+      });
+
+      const { result } = renderHook(() => useChat("proj-123"));
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+      act(() => result.current.selectSession("session-001"));
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      const onAccepted = vi.fn();
+      const onFailed = vi.fn();
+      act(() => result.current.sendMessage("Hello!", undefined, { onAccepted, onFailed }));
+      act(() => errorHandler?.("Request failed", { requestAccepted: false, receivedStreamEvent: false }));
+      expect(onAccepted).not.toHaveBeenCalled();
+      expect(onFailed).toHaveBeenCalledTimes(1);
     });
 
     it("keeps accepted sent message visible after provider error and reconciles persisted echo", async () => {

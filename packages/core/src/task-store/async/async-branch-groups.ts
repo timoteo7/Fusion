@@ -23,7 +23,7 @@
  */
 import { and, asc, eq, notInArray, sql } from "drizzle-orm";
 import * as schema from "../../postgres/schema/index.js";
-import type { AsyncDataLayer, DbTransaction } from "../../postgres/data-layer.js";
+import { projectScopeFor, type AsyncDataLayer, type DbTransaction } from "../../postgres/data-layer.js";
 import {
   validateBranchGroupBranchName,
 } from "../../branch/branch-assignment.js";
@@ -97,6 +97,7 @@ export function rowToBranchGroup(row: BranchGroupRow): BranchGroup {
 export async function createBranchGroup(
   db: AsyncDataLayer["db"] | DbTransaction,
   input: BranchGroupCreateInput,
+  projectId?: string,
 ): Promise<BranchGroup> {
   // Fix #11: reject injection-shaped branch names at the persistence boundary.
   validateBranchGroupBranchName(input.branchName);
@@ -117,7 +118,7 @@ export async function createBranchGroup(
     updatedAt: now,
     closedAt: input.closedAt ?? null,
   });
-  const created = await getBranchGroup(db, id);
+  const created = await getBranchGroup(db, id, projectId);
   if (!created) throw new Error(`Failed to read branch group ${id} after create`);
   return created;
 }
@@ -128,11 +129,15 @@ export async function createBranchGroup(
 export async function getBranchGroup(
   db: AsyncDataLayer["db"] | DbTransaction,
   id: string,
+  projectId?: string,
 ): Promise<BranchGroup | null> {
   const rows = await db
     .select()
     .from(schema.project.branchGroups)
-    .where(eq(schema.project.branchGroups.id, id))
+    .where(and(
+      eq(schema.project.branchGroups.id, id),
+      projectScopeFor(schema.project.branchGroups.projectId, projectId),
+    ))
     .limit(1);
   const row = rows[0] as BranchGroupRow | undefined;
   return row ? rowToBranchGroup(row) : null;
@@ -146,6 +151,7 @@ export async function getBranchGroupBySource(
   db: AsyncDataLayer["db"] | DbTransaction,
   sourceType: BranchGroup["sourceType"],
   sourceId: string,
+  projectId?: string,
 ): Promise<BranchGroup | null> {
   const rows = await db
     .select()
@@ -154,6 +160,7 @@ export async function getBranchGroupBySource(
       and(
         eq(schema.project.branchGroups.sourceType, sourceType),
         eq(schema.project.branchGroups.sourceId, sourceId),
+        projectScopeFor(schema.project.branchGroups.projectId, projectId),
       ),
     )
     .limit(1);
@@ -168,11 +175,15 @@ export async function getBranchGroupBySource(
 export async function getBranchGroupByBranchName(
   db: AsyncDataLayer["db"] | DbTransaction,
   branchName: string,
+  projectId?: string,
 ): Promise<BranchGroup | null> {
   const rows = await db
     .select()
     .from(schema.project.branchGroups)
-    .where(eq(schema.project.branchGroups.branchName, branchName))
+    .where(and(
+      eq(schema.project.branchGroups.branchName, branchName),
+      projectScopeFor(schema.project.branchGroups.projectId, projectId),
+    ))
     .orderBy(sql`${schema.project.branchGroups.createdAt} DESC`)
     .limit(1);
   const row = rows[0] as BranchGroupRow | undefined;
@@ -191,16 +202,18 @@ export async function ensureBranchGroupForSource(
   sourceType: BranchGroup["sourceType"],
   sourceId: string,
   init: Omit<BranchGroupCreateInput, "sourceType" | "sourceId">,
+  projectId?: string,
 ): Promise<BranchGroup> {
-  const existing = await getBranchGroupBySource(db, sourceType, sourceId);
+  const existing = await getBranchGroupBySource(db, sourceType, sourceId, projectId);
   if (existing) return existing;
 
-  // branch_groups.branchName is globally UNIQUE — reuse an existing open group
-  // for this branch rather than colliding on insert.
-  const existingByBranch = await getBranchGroupByBranchName(db, init.branchName);
+  // FNXC:BranchGroupProjectIsolation 2026-08-12-14:16: Branch names are unique
+  // per physical project partition, so only this project's existing group may
+  // be reused; matching names in another project must not suppress creation.
+  const existingByBranch = await getBranchGroupByBranchName(db, init.branchName, projectId);
   if (existingByBranch) return existingByBranch;
 
-  return createBranchGroup(db, { sourceType, sourceId, ...init });
+  return createBranchGroup(db, { sourceType, sourceId, ...init }, projectId);
 }
 
 /**
@@ -209,14 +222,15 @@ export async function ensureBranchGroupForSource(
 export async function listBranchGroups(
   db: AsyncDataLayer["db"] | DbTransaction,
   options?: { status?: BranchGroup["status"] },
+  projectId?: string,
 ): Promise<BranchGroup[]> {
-  const query = db
+  const conditions = [projectScopeFor(schema.project.branchGroups.projectId, projectId)];
+  if (options?.status) conditions.push(eq(schema.project.branchGroups.status, options.status));
+  const rows = await db
     .select()
     .from(schema.project.branchGroups)
+    .where(and(...conditions))
     .orderBy(asc(schema.project.branchGroups.createdAt));
-  const rows = options?.status
-    ? await query.where(eq(schema.project.branchGroups.status, options.status))
-    : await query;
   return (rows as BranchGroupRow[]).map((row) => rowToBranchGroup(row));
 }
 
@@ -231,8 +245,9 @@ export async function updateBranchGroup(
   db: AsyncDataLayer["db"] | DbTransaction,
   id: string,
   patch: BranchGroupUpdate,
+  projectId?: string,
 ): Promise<BranchGroup> {
-  const current = await getBranchGroup(db, id);
+  const current = await getBranchGroup(db, id, projectId);
   if (!current) throw new Error(`Branch group ${id} not found`);
 
   // Fix #11: a rename must reject injection-shaped names.
@@ -261,9 +276,12 @@ export async function updateBranchGroup(
       updatedAt: now,
       closedAt: nextClosedAt,
     })
-    .where(eq(schema.project.branchGroups.id, id));
+    .where(and(
+      eq(schema.project.branchGroups.id, id),
+      projectScopeFor(schema.project.branchGroups.projectId, projectId),
+    ));
 
-  const updated = await getBranchGroup(db, id);
+  const updated = await getBranchGroup(db, id, projectId);
   if (!updated) throw new Error(`Branch group ${id} disappeared after update`);
   return updated;
 }

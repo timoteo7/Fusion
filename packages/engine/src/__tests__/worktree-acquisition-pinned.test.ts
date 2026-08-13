@@ -8,8 +8,13 @@ The pinned-mode branch is validated in isolation with mocked git/liveness seams 
 deterministic (no real-git worktree creation). classifyTaskWorktree / branch lookup / fs existence are the
 observable inputs to derive→validate→reuse-or-recreate; we drive each of them.
 */
+/*
+FNXC:TestHarnessIntegrity 2026-08-12-01:04:
+A moved `vi.mock` target and its `importActual` sibling must change together; guarding only the mock target
+leaves the factory broken at runtime.
+*/
 vi.mock("../worktree/worktree-pool.js", async () => {
-  const actual = await vi.importActual<any>("../worktree-pool.js");
+  const actual = await vi.importActual<any>("../worktree/worktree-pool.js");
   return {
     ...actual,
     classifyTaskWorktree: vi.fn().mockResolvedValue({ ok: true }),
@@ -20,8 +25,13 @@ vi.mock("../worktree/worktree-pool.js", async () => {
   };
 });
 
+/*
+FNXC:TestHarnessIntegrity 2026-08-12-01:04:
+A moved `vi.mock` target and its `importActual` sibling must change together; guarding only the mock target
+leaves the factory broken at runtime.
+*/
 vi.mock("../execution/branch-conflicts.js", async () => {
-  const actual = await vi.importActual<any>("../branch-conflicts.js");
+  const actual = await vi.importActual<any>("../execution/branch-conflicts.js");
   return {
     ...actual,
     classifyBootstrapMisbinding: vi.fn().mockResolvedValue({
@@ -30,6 +40,38 @@ vi.mock("../execution/branch-conflicts.js", async () => {
       foreignCommitCount: 0,
       nonAttributedCount: 0,
     }),
+  };
+});
+
+/*
+FNXC:TestHarnessIntegrity 2026-08-12-01:04:
+The real worktree-pool factory now loads after its sibling path is repaired. Keep this pinned-path suite
+filesystem-free by isolating the reservation seam rather than relying on the nonexistent `/repo` fixture root.
+*/
+vi.mock("@fusion/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@fusion/core")>();
+  return {
+    ...actual,
+    canonicalizeWorktreePath: vi.fn(async (path: string) => path),
+    acquireWorktreePathReservation: vi.fn(async () => ({
+      canonicalPath: "/repo/.worktrees/fn-7996",
+      token: "test-reservation",
+      previousState: "free",
+      state: "held",
+      release: vi.fn(async () => undefined),
+      quarantine: vi.fn(async () => undefined),
+    })),
+  };
+});
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    mkdir: vi.fn(async () => undefined),
+    realpath: vi.fn(async (path: string) => path),
+    rename: vi.fn(async () => undefined),
+    stat: vi.fn(async () => ({ isDirectory: () => true })),
   };
 });
 
@@ -47,6 +89,7 @@ vi.mock("node:fs", async () => {
 });
 
 import { existsSync } from "node:fs";
+import { rename } from "node:fs/promises";
 import { classifyTaskWorktree, getRegisteredWorktreeBranches, removeWorktree } from "../worktree/worktree-pool.js";
 
 const ROOT = "/repo";
@@ -225,7 +268,7 @@ describe("acquireTaskWorktree — task-pinned mode", () => {
     }));
   });
 
-  it("reclaims an unregistered same-name dir in place", async () => {
+  it("preserves an unregistered same-name dir before recreating in place", async () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(classifyTaskWorktree).mockResolvedValue({ ok: false, classification: "unregistered", reason: "not registered" } as any);
     const createWorktree = vi.fn(async (branch: string, path: string) => ({ path, branch }));
@@ -238,7 +281,8 @@ describe("acquireTaskWorktree — task-pinned mode", () => {
       createWorktree,
     });
 
-    expect(removeWorktree).toHaveBeenCalledWith(expect.objectContaining({ worktreePath: PINNED }));
+    expect(removeWorktree).not.toHaveBeenCalled();
+    expect(rename).toHaveBeenCalledWith(PINNED, expect.stringContaining("/.fusion/recovery/worktrees/fn-7996-"));
     expect(createWorktree).toHaveBeenCalledWith("fusion/fn-7996", PINNED, "FN-7996", "main", false);
     expect(result.worktreePath).toBe(PINNED);
   });

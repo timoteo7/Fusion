@@ -38,9 +38,10 @@ import {
 } from "./concurrency/concurrency.js";
 import { planTaskWorktreePath, resolveTaskWorkingBranch } from "./worktree/worktree-names.js";
 import { schedulerLog } from "./logger.js";
+import { createRepeatSuppressedLog } from "./util/repeat-suppressed-log.js";
 import { type PrMonitor, type PrComment } from "./merge/pr-monitor.js";
-import { reconcileMissionFeatureState } from "./missions/mission-feature-sync.js";
-import { resolveDedicatedPlannerColumnsForTask, resolvePlannerLanesForTask } from "./planner-lane-resolution.js";
+import { reconcileMissionState, type MissionReconcileSource } from "./missions/mission-state-reconcile.js";
+import { resolveDedicatedPlannerColumnsForTask } from "./planner-lane-resolution.js";
 import { evaluateSpecStaleness, getPromptPath } from "./execution/spec-staleness.js";
 import { resolveEffectiveNode, type EffectiveNode } from "./project/effective-node.js";
 import { applyUnavailableNodePolicy, decideOwningNodeHandoff } from "./project/node-routing-policy.js";
@@ -908,6 +909,25 @@ function releaseReservedSlot(reservedSlots: number): number {
   return Math.max(0, reservedSlots - 1);
 }
 
+/**
+ * FNXC:DependencyUnblock 2026-08-10-08:20:
+ * Dependency auto-unblock clears ONLY the `queued` blocked marker it owns — never an arbitrary lifecycle status.
+ *
+ * Both unblock paths used to write `status: null` unconditionally, meaning to undo the `status: "queued"` the
+ * blocked branch sets a few lines up. But `status` is a shared lifecycle channel, and the value most likely to
+ * be sitting there is `needs-replan` — the graph's durable replan signal, and the ONLY thing that re-admits a
+ * hold-column card to planning (`isTaskAwaitingPlanning` refuses a card whose PROMPT.md is already a real spec).
+ *
+ * FN-8923 died exactly here. Its plan node held on principal routing, triage correctly recorded
+ * `needs-replan`, and then its blocker completing nulled that status. From that moment the card was invisible
+ * to BOTH lanes: triage saw a fully-written spec with no replan flag and skipped it, while the executor's
+ * `isUnplannedForExecution` still refused to dispatch because no capacity-boundary continuation existed. It sat
+ * silent in Todo for 7+ hours with zero run-audit rows — not stuck in a retry loop, simply unowned.
+ */
+export function clearBlockedStatusOnly(dependent: Pick<Task, "status">): { status: null } | Record<string, never> {
+  return dependent.status === "queued" || dependent.status == null ? { status: null } : {};
+}
+
 export class Scheduler {
   private running = false;
   private scheduling = false;
@@ -944,6 +964,8 @@ export class Scheduler {
   private wasPermanentAgentUnavailable = new Set<string>();
   /** Tracks dispatch-queued reason signatures to avoid per-tick log spam. */
   private wasDispatchQueuedReasonLogged = new Set<string>();
+  /** Tracks per-task symbol-lock renewal outcomes so a persistent loss/error reports once, not once per poll. */
+  private readonly symbolLockRenewalLog = createRepeatSuppressedLog();
   /** Tracks per-task candidacy fingerprints for task:updated auto-claim invalidation gating. */
   private lastAutoClaimFingerprint = new Map<string, string>();
   /** Tracks recent engine-sourced in-progress → todo requeues to prevent immediate re-dispatch races. */
@@ -1220,7 +1242,7 @@ export class Scheduler {
                     `Auto-reblocked: unresolved dependency ${unresolvedDeps[0]} remains after ${task.id} reached ${to}`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
                   );
                 } else {
-                  await this.store.updateTask(dependent.id, { blockedBy: null, status: null }, UNATTRIBUTED_MUTATION_CONTEXT);
+                  await this.store.updateTask(dependent.id, { blockedBy: null, ...clearBlockedStatusOnly(dependent) }, UNATTRIBUTED_MUTATION_CONTEXT);
                   const unblockMessage = currentlyBlockedByCompletedTask
                     ? `Auto-unblocked: blocker ${task.id} reached ${to}`
                     : `Auto-unblocked: blocker ${task.id} reached ${to} — all dependencies satisfied`;
@@ -1495,7 +1517,7 @@ export class Scheduler {
                   `Auto-reblocked (FN-5496): unresolved dependency ${nextBlocker} remains after blocker ${task.id} was soft-deleted`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
                 );
               } else if (dependent.column === deletedParked.hold) {
-                await this.store.updateTask(dependent.id, { blockedBy: null, status: null }, UNATTRIBUTED_MUTATION_CONTEXT);
+                await this.store.updateTask(dependent.id, { blockedBy: null, ...clearBlockedStatusOnly(dependent) }, UNATTRIBUTED_MUTATION_CONTEXT);
                 await this.store.logEntry(dependent.id, `Auto-unblocked (FN-5496): blocker ${task.id} was soft-deleted`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
               } else {
                 await this.store.updateTask(dependent.id, { blockedBy: null }, UNATTRIBUTED_MUTATION_CONTEXT);
@@ -1615,6 +1637,7 @@ export class Scheduler {
     this.wasNodeDispatchValidationBlocked.clear();
     this.wasPermanentAgentUnavailable.clear();
     this.wasDispatchQueuedReasonLogged.clear();
+    this.symbolLockRenewalLog.reset();
     schedulerLog.log("Stopped");
   }
 
@@ -2161,22 +2184,57 @@ export class Scheduler {
         try {
           missionLinked = Boolean(await this.options.missionStore.getFeatureByTaskId(task.id));
         } catch (error) {
-          schedulerLog.warn(`Symbol-lock renewal lineage lookup failed for ${task.id}:`, error);
+          const message = error instanceof Error ? error.message : String(error);
+          this.symbolLockRenewalLog.logOnce(
+            schedulerLog,
+            task.id,
+            `lineage-lookup-failed:${message}`,
+            `Symbol-lock renewal lineage lookup failed for ${task.id}: ${message}`,
+            "warn",
+          );
           continue;
         }
       }
       if (!missionLinked) continue;
 
+      /*
+      FNXC:EngineDiagnostics 2026-08-10-17:13:
+      Renewal re-runs every poll for every implementation-column task that declares symbols, and a LOST lock never
+      recovers by renewing — `renewSymbolLocks` reports the same `lost` set on every subsequent pass, so the warning and
+      its `logEntry` companion repeated forever: log-pane spam plus an unbounded activityLog append for a stuck task.
+      Report a lost set (and a persistent renewal error) once per task per distinct signature — a changed set of lost
+      symbols or a new error message is a real transition and reports again — and clear the memo on a clean renewal so a
+      later loss is reported afresh. The `logEntry` write is gated on the SAME first-occurrence decision, so the task's
+      activity log records the transition rather than one row per poll.
+      */
       try {
         const result = await this.store.renewSymbolLocks(symbols, task.id, SYMBOL_LOCK_LEASE_MS);
         if (result.lost.length > 0) {
-          schedulerLog.warn(`Symbol-lock renewal lost ownership for ${task.id}: ${result.lost.join(", ")}`);
-          await this.store.logEntry(task.id, `symbol-lock renewal lost: ${result.lost.join(", ")}`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
+          const lost = [...result.lost].sort();
+          const appended = this.symbolLockRenewalLog.logOnce(
+            schedulerLog,
+            task.id,
+            `lost:${lost.join(",")}`,
+            `Symbol-lock renewal lost ownership for ${task.id}: ${result.lost.join(", ")}`,
+            "warn",
+          );
+          if (appended) {
+            await this.store.logEntry(task.id, `symbol-lock renewal lost: ${result.lost.join(", ")}`, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
+          }
+        } else {
+          this.symbolLockRenewalLog.clear(task.id);
         }
       } catch (error) {
         // Do not abort capacity admission for unrelated tasks; the durable expiry
         // and self-healing reconciliation remain the crash-safe backstop.
-        schedulerLog.warn(`Symbol-lock renewal failed for ${task.id}:`, error);
+        const message = error instanceof Error ? error.message : String(error);
+        this.symbolLockRenewalLog.logOnce(
+          schedulerLog,
+          task.id,
+          `renewal-failed:${message}`,
+          `Symbol-lock renewal failed for ${task.id}: ${message}`,
+          "warn",
+        );
       }
     }
   }
@@ -2215,16 +2273,28 @@ export class Scheduler {
       falls back to the legacy literal "in-progress" check per task.
       */
       const wipIrCache = new Map<string, WorkflowIr>();
+      // FNXC:WorkflowScheduling 2026-08-09-06:07: Share this pass-local selection cache with the hold sweep and reservation path; a persistent cache would hide mutable selection writes.
+      const selectionCache = new Map<string, { workflowId: string; stepIds: string[] } | undefined>();
       const workflowIdByTaskId = new Map<string, string>();
-      await Promise.all(tasks.map(async (task) => {
-        try {
-          const selection = await this.store.getTaskWorkflowSelectionAsync(task.id);
-          workflowIdByTaskId.set(task.id, selection?.workflowId ?? "builtin:coding");
-        } catch {
-          // Same degradation as resolveWorkflowIrForTask: selection failure → default coding workflow.
-          workflowIdByTaskId.set(task.id, "builtin:coding");
+      const taskIds = [...new Set(tasks.map((task) => task.id))];
+      try {
+        if (this.store.getTaskWorkflowSelectionsAsync) {
+          const selections = await this.store.getTaskWorkflowSelectionsAsync(taskIds);
+          for (const taskId of taskIds) selectionCache.set(taskId, selections.get(taskId));
+        } else {
+          await Promise.all(taskIds.map(async (taskId) => {
+            try { selectionCache.set(taskId, await this.store.getTaskWorkflowSelectionAsync(taskId)); } catch { /* default below */ }
+          }));
         }
-      }));
+      } catch {
+        // FNXC:WorkflowScheduling 2026-08-09-08:16: a batch transport failure
+        // must retain the legacy per-task retry path. Defaulting the entire pass
+        // merges distinct capacity pools before the sweep can retry each row.
+        await Promise.all(taskIds.map(async (taskId) => {
+          try { selectionCache.set(taskId, await this.store.getTaskWorkflowSelectionAsync(taskId)); } catch { /* default below */ }
+        }));
+      }
+      for (const task of tasks) workflowIdByTaskId.set(task.id, selectionCache.get(task.id)?.workflowId ?? "builtin:coding");
       /*
       FNXC:WorkflowResolvedColumns 2026-07-30-15:40 (fleet conversion, scheduler.ts):
       Per distinct workflow: columnId → resolved trait flags; null when the IR failed to resolve or
@@ -2269,9 +2339,8 @@ export class Scheduler {
         isReviewColumnRole(columnFlagsForTask(task), task.column);
       /*
       FNXC:ConcurrencyIndicators 2026-08-01-19:22:
-      Failed WIP is not a live holder (isRunningAgentTask). Keep the WIP id list aligned so
-      diagnostic maxConcurrent holders and any WIP-only arithmetic do not re-count stranded failed
-      parks that the worktree ledger already excludes.
+      Failed WIP is not a live holder (isRunningAgentTask). Keep the WIP list aligned so
+      same-sweep executor reservation arithmetic does not re-count stranded failed parks.
       */
       const wipTaskIds = tasks
         .filter((task) => isWipColumnTask(task) && task.status !== "failed")
@@ -2285,10 +2354,32 @@ export class Scheduler {
       shared with the board; planning, WIP, and active review count, while queued/paused/terminal
       tasks do not. Same-sweep reservations below keep newly released tasks visible immediately.
       */
-      const activeWorktreeTaskIds = await persistedTopLevelAgentTaskIdsFromStore(this.store, tasks);
+      /*
+      FNXC:WorkflowScheduling 2026-08-09-11:01:
+      The active-worktree count resolves every task's IR before the hold sweep. It
+      must read the same pass-scoped selection cache rather than silently adding
+      one selection query per card after the batch; otherwise this production
+      path recreates issue #3364's three-connection-pool saturation.
+      */
+      const selectionCachedStore = new Proxy(this.store, {
+        get: (target, property, receiver) => {
+          if (property === "getTaskWorkflowSelectionAsync") {
+            return async (taskId: string) => selectionCache.has(taskId)
+              ? selectionCache.get(taskId)
+              : await target.getTaskWorkflowSelectionAsync(taskId);
+          }
+          if (property === "getTaskWorkflowSelection") {
+            return (taskId: string) => selectionCache.has(taskId)
+              ? selectionCache.get(taskId)
+              : target.getTaskWorkflowSelection(taskId);
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const activeWorktreeTaskIds = await persistedTopLevelAgentTaskIdsFromStore(selectionCachedStore, tasks);
       let reservedWorktreeSlots = activeWorktreeTaskIds.length;
       let reservedConcurrentSlots = wipTaskIds.length;
-      const inProgressTaskIds = wipTaskIds;
       const dispatchPrepByTaskId = new Map<string, {
         baseBranch: string | null;
         dispatchStormCount: number;
@@ -2394,6 +2485,7 @@ export class Scheduler {
 
       const result = await runHoldReleaseSweep(this.store, {
         now: () => Date.now(),
+        selectionCache,
         reserveSlot: async (task): Promise<SlotReservation | null> => {
           let reservedScope = false;
 
@@ -2402,7 +2494,7 @@ export class Scheduler {
           The workflow-column dispatch path is the only dispatcher when the flag is on, so the planning/bootstrap guards from the legacy todo filter must also apply here — and they must be TRAIT-based, not keyed on the literal "todo" column id. A custom workflow's intake/planning column can be renamed (`ideas`, `Inbox`, the default workflow's renamed "Planning"), so gating this guard on `task.column === "todo"` alone let an unplanned card in a renamed intake column bypass the stub check and release straight into execution (FN-7648). `isUnplannedForExecution` resolves the intake trait on the task's OWN resolved workflow IR so every renamed variant is covered.
           */
           try {
-            const ir = await resolveWorkflowIrForTask(this.store, task.id);
+            const ir = await resolveWorkflowIrForTask(this.store, task.id, wipIrCache, selectionCache);
             if (await isUnplannedForExecution(this.store, task, ir)) {
               await checkAndRecordUnplannedExecutionBlock(this.store, task, ir);
               return null;
@@ -2828,23 +2920,6 @@ export class Scheduler {
             }
           }
 
-          const concurrencyDiagnostic = computeConcurrencyGateDiagnostic({
-            agentSlots: reservedConcurrentSlots,
-            maxConcurrent,
-            activeWorktrees: reservedWorktreeSlots,
-            maxWorktrees,
-            worktreeHolderTaskIds: [...activeWorktreeTaskIds, ...dispatchPrepByTaskId.keys()],
-            semaphore: this.options.semaphore,
-            inProgressTaskIds,
-            topLevelClaimedSlots: reservedWorktreeSlots,
-          });
-          /*
-          The sweep diagnostic is intentionally descriptive only. Worktree preparation can outlive
-          a holder, so using this older snapshot as an admission gate strands queued cards even after
-          capacity frees. The serialized fresh reservation below is the sole capacity authority; the
-          diagnostic remains available to explain a rejection from that authoritative check.
-          */
-
           /*
           FNXC:WorktreeCapacity 2026-08-01-04:38:
           Serialize the workflow scheduler's direct hold release with planning and merge admission.
@@ -2869,7 +2944,7 @@ export class Scheduler {
             return { count: ids.length, ids };
           })();
           let projectSlotReserved = false;
-          await projectAdmissionCoordinator.admitNext({
+          const admittedTaskId = await projectAdmissionCoordinator.admitNext({
             projectId: this.store.getRootDir(),
             maxConcurrent: activeTaskLimit,
             claimed: async () => (await getFinalClaimSnapshot()).count,
@@ -2892,14 +2967,28 @@ export class Scheduler {
               activeScopes.delete(task.id);
               activeScopeColumns.delete(task.id);
             }
-            const bindingGate: ConcurrencyGateName = maxWorktrees !== null && maxWorktrees <= maxConcurrent
-              ? "maxWorktrees"
-              : "maxConcurrent";
-            const reason = formatConcurrencyLimitReason({
-              ...concurrencyDiagnostic,
-              available: 0,
-              bindingGates: [...new Set([...concurrencyDiagnostic.bindingGates, bindingGate])],
+            /*
+            FNXC:WorktreeCapacity 2026-08-08-04:17:
+            A scheduler candidate can lose one serialized admission pass because a higher-priority
+            merge/planning provider was selected, even with a free slot. Only call it exhaustion
+            after the coordinator admitted nobody and report the fresh canonical holder snapshot
+            that made that decision; the pre-sweep snapshot is diagnostic-only and can be stale.
+            */
+            const freshClaims = await getFinalClaimSnapshot();
+            const exhausted = admittedTaskId === undefined;
+            const freshDiagnostic = computeConcurrencyGateDiagnostic({
+              agentSlots: freshClaims.count,
+              maxConcurrent,
+              activeWorktrees: freshClaims.count,
+              maxWorktrees,
+              worktreeHolderTaskIds: freshClaims.ids,
+              semaphore: this.options.semaphore,
+              inProgressTaskIds: freshClaims.ids,
+              topLevelClaimedSlots: freshClaims.count,
             });
+            const reason = exhausted
+              ? formatConcurrencyLimitReason(freshDiagnostic)
+              : `queued — higher-priority lifecycle admission started: task=${admittedTaskId}`;
             await this.store.updateTask(task.id, { status: "queued" }, UNATTRIBUTED_MUTATION_CONTEXT);
             await this.logDispatchQueuedReason(task.id, reason);
             return null;
@@ -3062,7 +3151,16 @@ export class Scheduler {
         return;
       }
 
-      const feature = await this.resolveMissionFeatureForTask(missionStore, task);
+      /*
+      FNXC:MissionAutoReconcile 2026-08-11-03:27:
+      Task moves must enter the reconciliation authority before title-based ownership repair. The
+      authority rejects ambiguous titles within a slice, so duplicate feature titles cannot make a
+      move attach its task to whichever unlinked feature happened to be listed first.
+      */
+      if (task.missionId) {
+        await reconcileMissionState({ taskStore: this.store, missionStore }, { missionId: task.missionId, source: "task-move" });
+      }
+      const feature = await resolveMissionFeatureForTask(missionStore, task);
       if (!feature) {
         /*
         FNXC:EngineDiagnostics 2026-08-03-05:54:
@@ -3080,35 +3178,22 @@ export class Scheduler {
         return;
       }
 
-      const hasLinkedAssertions = (await missionStore.listAssertionsForFeature(feature.id)).length > 0;
-
-      const reconciliation = await reconcileMissionFeatureState(
-        this.store,
-        { ...task, column: toColumn },
-        feature,
-        {
-          hasLinkedAssertions,
-          plannerColumns: await resolvePlannerLanesForTask(this.store, task.id),
-        },
-      );
-
-      if (reconciliation.kind === "blocked") {
-        schedulerLog.warn(`Task ${taskId} mission update blocked — ${reconciliation.reason}`);
-        return;
-      }
-
-      if (reconciliation.kind === "failure") {
-        schedulerLog.warn(`Task ${taskId} mission update reported failure — ${reconciliation.reason}`);
-        return;
-      }
-
       const sliceIdBeforeUpdate = feature.sliceId;
-
-      if (reconciliation.kind === "update") {
-        await missionStore.updateFeatureStatus(feature.id, reconciliation.status);
-        schedulerLog.log(
-          `Feature ${feature.id} marked ${reconciliation.status} (${reconciliation.reason})`,
-        );
+      const featureSlice = await missionStore.getSlice(feature.sliceId);
+      const milestone = featureSlice ? await missionStore.getMilestone(featureSlice.milestoneId) : undefined;
+      const missionId = task.missionId ?? milestone?.missionId;
+      if (!missionId) {
+        schedulerLog.warn(`Task ${taskId} feature ${feature.id} has no resolvable mission; skipping reconciliation`);
+        return;
+      }
+      /*
+      FNXC:MissionAutoReconcile 2026-08-11-02:39:
+      Live moves use the same authority as maintenance rather than retaining a second direct
+      writer. This keeps task-move attribution and validation-badge repair identical to every
+      other deterministic ground-truth projection.
+      */
+      if (missionId !== task.missionId) {
+        await reconcileMissionState({ taskStore: this.store, missionStore }, { missionId, source: "task-move" });
       }
 
       /*
@@ -3137,38 +3222,6 @@ export class Scheduler {
     } catch (err) {
       schedulerLog.error(`Error handling mission task move for ${taskId}:`, err);
     }
-  }
-
-  private async resolveMissionFeatureForTask(missionStore: MissionStore | AsyncMissionStore, task: Task): Promise<MissionFeature | undefined> {
-    const linkedFeature = await resolveMissionFeatureForTask(missionStore, task);
-    if (linkedFeature) {
-      return linkedFeature;
-    }
-
-    if (!task.sliceId || !task.title) {
-      return undefined;
-    }
-
-    const normalizedTaskTitle = this.normalizeMissionFeatureTitle(task.title);
-    const matchingFeature = (await missionStore
-      .listFeatures(task.sliceId))
-      .find((feature) =>
-        !feature.taskId
-        && this.normalizeMissionFeatureTitle(feature.title) === normalizedTaskTitle
-      );
-
-    if (!matchingFeature) {
-      return undefined;
-    }
-
-    schedulerLog.warn(
-      `Repairing one-way mission link: task ${task.id} matched unlinked feature ${matchingFeature.id}`,
-    );
-    return missionStore.linkFeatureToTask(matchingFeature.id, task.id);
-  }
-
-  private normalizeMissionFeatureTitle(title: string): string {
-    return title.trim().replace(/\s+/g, " ").toLowerCase();
   }
 
   /**
@@ -3266,17 +3319,6 @@ export class Scheduler {
         return;
       }
 
-      const missionHierarchy = await missionStore.getMissionWithHierarchy(mission.id);
-      const hasActiveSlice = missionHierarchy?.milestones.some((candidateMilestone) =>
-        candidateMilestone.slices.some((candidateSlice) =>
-          candidateSlice.id !== slice.id && candidateSlice.status === "active"
-        )
-      );
-      if (hasActiveSlice) {
-        schedulerLog.log(`Mission ${mission.id} already has an active slice; skipping auto-advance`);
-        return;
-      }
-
       const nextSlice = await this.activateNextPendingSlice(mission.id);
       if (nextSlice) {
         schedulerLog.log(`Auto-advanced: activated slice ${nextSlice.id} for mission ${mission.id}`);
@@ -3300,36 +3342,15 @@ export class Scheduler {
     const missionStore = this.options.missionStore;
 
     try {
-      const mission = await missionStore.getMissionWithHierarchy(missionId);
-      if (!mission || mission.status !== "active") {
-        schedulerLog.log(`Mission ${missionId}: not active, skipping slice activation`);
-        return null;
-      }
-
-      const sortedMilestones = [...mission.milestones].sort((a, b) => a.orderIndex - b.orderIndex);
-
-      for (const milestone of sortedMilestones) {
-        const dependenciesMet = milestone.dependencies.every((dependencyId) => {
-          const dependency = mission.milestones.find((candidate) => candidate.id === dependencyId);
-          return dependency?.status === "complete";
-        });
-        if (!dependenciesMet) {
-          continue;
-        }
-
-        const pendingSlice = [...milestone.slices]
-          .sort((a, b) => a.orderIndex - b.orderIndex)
-          .find((slice) => slice.status === "pending");
-        if (!pendingSlice) {
-          continue;
-        }
-
-        const activated = await missionStore.activateSlice(pendingSlice.id);
+      // The store atomically re-reads the hierarchy and claims the candidate.
+      // A duplicate signal is an expected no-op, not a scheduler error.
+      const activated = await missionStore.tryActivateNextPendingSlice(missionId);
+      if (activated) {
         schedulerLog.log(`Activated slice ${activated.id} for mission ${missionId}`);
         return activated;
       }
 
-      schedulerLog.log(`Mission ${missionId}: no pending slices to activate`);
+      schedulerLog.log(`Mission ${missionId}: no serially eligible slice to activate`);
       return null;
     } catch (err) {
       schedulerLog.error(`Error activating next slice for mission ${missionId}:`, err);
@@ -3347,197 +3368,79 @@ export class Scheduler {
    *
    * @returns The total number of fixes applied across all missions
    */
-  async reconcileAllMissionFeatures(): Promise<number> {
-    if (!this.options.missionStore) {
-      return 0;
-    }
-
+  async reconcileAllMissionFeatures(source: MissionReconcileSource = "self-healing"): Promise<number> {
+    if (!this.options.missionStore) return 0;
+    /*
+    FNXC:MissionAutoReconcile 2026-08-11-02:39:
+    Correction scans every non-archived mission and slice, but never activates or triages work.
+    Those autonomy actions remain in their dedicated active-mission paths; this shared service only
+    projects deterministic task ground truth into existing roadmap state.
+    */
     const missionStore = this.options.missionStore;
-    let totalFixed = 0;
+    /*
+    FNXC:MissionAutoReconcile 2026-08-11-03:10:
+    Reconcile unique title matches before the active-only triage tier. Otherwise an unlinked
+    feature with an already-existing delivery task is triaged into a duplicate before correction
+    can restore its guarded task link.
+    */
+    const result = await reconcileMissionState({ taskStore: this.store, missionStore }, { source });
+    const activationFixes = await this.reconcileActiveMissionAutomation(missionStore);
+    return result.statusUpdates + result.badgeRepairs + result.terminalRepairs + activationFixes;
+  }
 
+  /*
+  FNXC:MissionAutoReconcile 2026-08-11-02:39:
+  Correction intentionally scans non-archived history, but this activation tier remains limited
+  to active missions and active slices. It retains generated-fix recovery and triage without
+  creating work while correcting an idle, blocked, or complete roadmap.
+  */
+  private async reconcileActiveMissionAutomation(missionStore: MissionStore | AsyncMissionStore): Promise<number> {
+    let fixed = 0;
     try {
-      const missions = await missionStore.listMissions();
-      const activeMissions = missions.filter((m) => m.status === "active");
-      const activeMissionIds = new Set(activeMissions.map((mission) => mission.id));
-      const taskBySliceAndTitle = new Map<string, Task | null>();
-      const missionTasks = await this.store.listTasks({ slim: true, includeArchived: false });
-
-      for (const task of missionTasks) {
-        if (!task.missionId || !task.sliceId || !task.title || !activeMissionIds.has(task.missionId)) {
-          continue;
-        }
-
-        const key = this.getMissionFeatureTitleKey(task.sliceId, task.title);
-        taskBySliceAndTitle.set(
-          key,
-          taskBySliceAndTitle.has(key) ? null : task,
-        );
-      }
-
-      for (const mission of activeMissions) {
+      const missions = (await missionStore.listMissions()).filter((mission) => mission.status === "active");
+      for (const mission of missions) {
         const hierarchy = await missionStore.getMissionWithHierarchy(mission.id);
         if (!hierarchy) continue;
-
-        const activeSlices = hierarchy.milestones
-          .flatMap((milestone) => milestone.slices)
-          .filter((slice) => slice.status === "active");
-
-        for (const slice of activeSlices) {
-          const missionAutoTriageEnabled = mission.autopilotEnabled === true || mission.autoAdvance === true;
-          const supersededFixes = await missionStore.reconcileSupersededGeneratedFixFeatures(slice.id);
-          if (supersededFixes.supersededCount > 0) {
-            totalFixed += supersededFixes.supersededCount;
-            schedulerLog.warn(
-              `Superseded ${supersededFixes.supersededCount} stale generated fix feature(s) during mission reconciliation for slice ${slice.id}`,
-            );
-          }
-          const features = supersededFixes.supersededCount > 0
-            ? await missionStore.listFeatures(slice.id)
-            : slice.features;
-          const supersededFeatureIds = new Set(supersededFixes.featureIds);
-
-          if (supersededFixes.supersededCount > 0) {
-            const refreshedSlice = await missionStore.getSlice(slice.id);
-            if (refreshedSlice?.status === "complete") {
-              /*
-              FNXC:Missions 2026-07-11-12:35:
-              Startup reconciliation can terminalize every stale generated-fix feature in an active slice before the scheduler loop runs no-task recovery.
-              Treat the recomputed complete slice as complete immediately so stale fixes do not keep an active slice from advancing after restart.
-              */
-              await this.onSliceComplete(refreshedSlice);
-              continue;
+        for (const slice of hierarchy.milestones.flatMap((milestone) => milestone.slices).filter((slice) => slice.status === "active")) {
+          try {
+            const superseded = await missionStore.reconcileSupersededGeneratedFixFeatures(slice.id);
+            fixed += superseded.supersededCount;
+            if (superseded.supersededCount > 0) {
+              const refreshed = await missionStore.getSlice(slice.id);
+              if (refreshed?.status === "complete") { await this.onSliceComplete(refreshed); continue; }
             }
-          }
-
-          for (const feature of features) {
-            let featureForReconciliation = feature;
-            let task: Task | undefined;
-            if (supersededFeatureIds.has(feature.id)) {
-              /*
-              FNXC:Missions 2026-07-11-12:35:
-              The title-to-task map is built before generated-fix supersedence detaches stale task ownership.
-              Skip freshly superseded features so pre-reconciliation task links cannot be restored in the same startup sweep.
-              */
-              continue;
-            }
-            if (feature.status === "done" && this.isGeneratedFixFeature(feature) && !feature.taskId) {
-              /*
-              FNXC:Missions 2026-07-11-12:35:
-              Done generated-fix features with no task ownership are terminal after supersedence clears their board links.
-              Keep any done feature that still has task ownership in startup self-healing so linked task drift can still be repaired.
-              */
-              continue;
-            }
-            if (feature.taskId) {
-              task = await this.store.getTask(feature.taskId);
-            } else {
-              const matchedTask = taskBySliceAndTitle.get(
-                this.getMissionFeatureTitleKey(feature.sliceId, feature.title),
-              );
-              if (matchedTask) {
-                schedulerLog.warn(
-                  `Repairing one-way mission link during reconciliation: task ${matchedTask.id} matched unlinked feature ${feature.id}`,
-                );
-                featureForReconciliation = await missionStore.linkFeatureToTask(feature.id, matchedTask.id);
-                task = matchedTask;
-                totalFixed++;
-                await this.emitStrandedFeatureTriageAudit(mission.id, slice.id, feature.id, matchedTask.id);
-              } else if (
-                missionAutoTriageEnabled
-                && feature.status !== "blocked"
-              ) {
-                if (feature.status !== "defined" && this.isGeneratedFixFeature(feature)) {
-                  try {
-                    schedulerLog.warn(
-                      `Blocking stranded generated fix feature ${feature.id}: no linked task and no title-matched task available`,
-                    );
-                    await missionStore.updateFeature(feature.id, {
-                      status: "blocked",
-                      loopState: "blocked",
-                      taskId: undefined,
-                    });
-                    totalFixed++;
-                  } catch (error) {
-                    schedulerLog.warn(
-                      `Failed to block stranded fix feature ${feature.id} during reconciliation: ${error instanceof Error ? error.message : String(error)}`,
-                    );
-                  }
-                } else if (feature.status === "defined" || feature.status === "triaged" || feature.status === "in-progress") {
-                  try {
-                    const featureToTriage = feature.status === "defined"
-                      ? feature
-                      : await missionStore.updateFeature(feature.id, {
-                        status: "defined",
-                        loopState: "idle",
-                        taskId: undefined,
-                      });
-                    if (featureToTriage.status !== feature.status) {
-                      totalFixed++;
-                    }
-                    featureForReconciliation = await missionStore.triageFeature(featureToTriage.id);
-                    task = featureForReconciliation.taskId
-                      ? await this.store.getTask(featureForReconciliation.taskId)
-                      : undefined;
-                    totalFixed++;
-                    if (featureForReconciliation.taskId) {
-                      await this.emitStrandedFeatureTriageAudit(
-                        mission.id,
-                        slice.id,
-                        featureForReconciliation.id,
-                        featureForReconciliation.taskId,
-                      );
-                    }
-                  } catch (error) {
-                    schedulerLog.warn(
-                      `Failed to triage stranded feature ${feature.id} during reconciliation: ${error instanceof Error ? error.message : String(error)}`,
-                    );
-                  }
-                } else {
-                  schedulerLog.warn(
-                    `Skipping stranded feature ${feature.id} with terminal status ${feature.status}: no linked task and no title-matched task available`,
-                  );
-                }
+            const listFeatures = (missionStore as unknown as { listFeatures?: (sliceId: string) => Promise<MissionFeature[]> | MissionFeature[] }).listFeatures;
+            /*
+            FNXC:MissionAutoReconcile 2026-08-12-21:58:
+            Mission-store methods use their receiver, so optional-capability probing must invoke listFeatures with missionStore.
+            Per-slice containment logs a failed slice but lets remaining slices and missions reconcile in the same pass.
+            */
+            const features = listFeatures ? await listFeatures.call(missionStore, slice.id) : slice.features;
+            const supersededFeatureIds = new Set(superseded.featureIds ?? []);
+            const autoTriage = mission.autopilotEnabled === true || mission.autoAdvance === true;
+            for (const feature of features) {
+              if (supersededFeatureIds.has(feature.id) || feature.taskId || !autoTriage || feature.status === "blocked") continue;
+              if (feature.status !== "defined" && this.isGeneratedFixFeature(feature)) {
+                await missionStore.updateFeature(feature.id, { status: "blocked", loopState: "blocked", taskId: undefined });
+                fixed++;
+                continue;
               }
+              if (feature.status !== "defined" && feature.status !== "triaged" && feature.status !== "in-progress") continue;
+              const ready = feature.status === "defined" ? feature : await missionStore.updateFeature(feature.id, { status: "defined", loopState: "idle", taskId: undefined });
+              if (ready !== feature) fixed++;
+              const triaged = await missionStore.triageFeature(ready.id);
+              fixed++;
+              if (triaged.taskId) await this.emitStrandedFeatureTriageAudit(mission.id, slice.id, triaged.id, triaged.taskId);
             }
-
-            if (!task) continue;
-
-            const hasLinkedAssertions = (await missionStore.listAssertionsForFeature(featureForReconciliation.id)).length > 0;
-            const reconciliation = await reconcileMissionFeatureState(this.store, task, featureForReconciliation, {
-              hasLinkedAssertions,
-            });
-
-            if (reconciliation.kind === "failure") {
-              if (this.options.onTaskFailed) {
-                await this.options.onTaskFailed(task.id);
-                totalFixed++;
-              } else {
-                schedulerLog.warn(`Skipping failed feature reconciliation for ${feature.id} — ${reconciliation.reason}`);
-              }
-              continue;
-            }
-
-            if (reconciliation.kind === "blocked") {
-              schedulerLog.warn(`Skipping feature ${feature.id} reconciliation — ${reconciliation.reason}`);
-              continue;
-            }
-
-            if (reconciliation.kind === "update") {
-              await missionStore.updateFeatureStatus(featureForReconciliation.id, reconciliation.status);
-              totalFixed++;
-            }
+          } catch (error) {
+            schedulerLog.error(`Error during active mission recovery reconciliation for slice ${slice.id}:`, error);
           }
         }
       }
-
-      if (totalFixed > 0) {
-        schedulerLog.log(`Mission feature reconciliation: fixed ${totalFixed} inconsistencies`);
-      }
-    } catch (err) {
-      schedulerLog.error("Error during mission feature reconciliation:", err);
+    } catch (error) {
+      schedulerLog.error("Error during active mission recovery reconciliation:", error);
     }
-
-    return totalFixed;
+    return fixed;
   }
 
   private async emitStrandedFeatureTriageAudit(
@@ -3569,10 +3472,6 @@ export class Scheduler {
         `Feature ${featureId} failed to emit stranded-feature triage audit: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-  }
-
-  private getMissionFeatureTitleKey(sliceId: string, title: string): string {
-    return `${sliceId}\0${this.normalizeMissionFeatureTitle(title)}`;
   }
 
   private isGeneratedFixFeature(feature: Pick<MissionFeature, "generatedFromFeatureId" | "generatedFromRunId">): boolean {

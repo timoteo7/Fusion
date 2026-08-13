@@ -9,7 +9,7 @@
  * and `react`. Do NOT import dashboard components, hooks, or CSS here.
  */
 import type { ReactNode } from "react";
-import type { Task, TaskDetail, TraitFlags, WorkflowStep } from "@fusion/core";
+import type { NativeStructureRef, Task, TaskDetail, TraitFlags, WorkflowStep } from "@fusion/core";
 
 /**
  * Tab identifiers for the task detail modal. Mirrors the dashboard's local enum.
@@ -17,7 +17,12 @@ import type { Task, TaskDetail, TraitFlags, WorkflowStep } from "@fusion/core";
  * FNXC:TaskDetailActivity 2026-06-30-22:15:
  * Plugins should continue passing `chat` to open the renamed Activity tab; the id is stable compatibility surface, while the top-level label is no longer Chat. Legacy `logs` requests remain accepted by the host and route to Activity → Feed because Logs is no longer a visible top-level tab.
  */
-export type DetailTaskTab = "summary" | "chat" | "definition" | "logs" | "changes" | "comments" | "model" | "workflow" | "pr" | "retries";
+/*
+FNXC:TaskRecommendations 2026-08-08-07:15:
+Plugins use this public initial-tab contract, so Recommendations must remain type-safe outside the
+modal implementation as well as in every built-in task-detail host.
+*/
+export type DetailTaskTab = "summary" | "recommendations" | "chat" | "definition" | "logs" | "changes" | "comments" | "model" | "workflow" | "pr" | "retries";
 
 export type PluginToastType = "success" | "error" | "warning" | "info";
 
@@ -37,6 +42,14 @@ export interface PluginDashboardViewContext {
   openTaskDetail: (task: Task | TaskDetail, initialTab?: DetailTaskTab) => void;
   /** Open a project-relative file in the dashboard's built-in file viewer. */
   openFile: (path: string, options?: { workspace?: string; line?: number; col?: number }) => void;
+  /*
+  FNXC:NativeStructurePluginDrag 2026-08-09-05:13:
+  The host owns the native-structure MIME because this types-only contract may import only core and
+  React; plugins must not duplicate a protocol string that can drift. An absent hook means this host
+  has no structure drag support, while false means a coarse pointer wrote nothing and callers must
+  not widen effectAllowed.
+  */
+  beginNativeStructureDrag?: (dataTransfer: DataTransfer, ref: NativeStructureRef) => boolean;
   /*
   FNXC:WorkflowLifecycleColumns 2026-07-31-15:30:
   The board's resolved column traits, per task id — so a plugin view that draws its OWN card is not

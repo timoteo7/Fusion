@@ -14,9 +14,9 @@
  * shared `toWorkflowDefinition` mapper expects JSON strings (it parseWorkflowIr's
  * them), so we re-stringify here to keep the mapper backend-agnostic.
  */
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
-import type { AsyncDataLayer } from "../postgres/data-layer.js";
+import { projectScopeFor, type AsyncDataLayer } from "../postgres/data-layer.js";
 import type { StoredWorkflowRow } from "../workflows/workflow-definition-types.js";
 
 /** SQLite-shaped workflow row (ir/layout as JSON strings) consumed by toWorkflowDefinition. */
@@ -41,6 +41,7 @@ export async function listWorkflowRows(layer: AsyncDataLayer): Promise<WorkflowR
   const rows = await layer.db
     .select()
     .from(schema.project.workflows)
+    .where(projectScopeFor(schema.project.workflows.projectId, layer.projectId))
     .orderBy(asc(schema.project.workflows.createdAt));
   return rows.map(rowToWorkflowRow);
 }
@@ -50,7 +51,19 @@ export async function getWorkflowRow(layer: AsyncDataLayer, id: string): Promise
   const rows = await layer.db
     .select()
     .from(schema.project.workflows)
-    .where(eq(schema.project.workflows.id, id))
+    .where(and(
+      eq(schema.project.workflows.id, id),
+      projectScopeFor(schema.project.workflows.projectId, layer.projectId),
+    ))
     .limit(1);
   return rows[0] ? rowToWorkflowRow(rows[0]) : undefined;
+}
+
+/**
+ * Intentionally unscoped workflow-id occupancy scan used only by the allocator.
+ * A project-local allocator must burn a colliding ID rather than reuse an ID in
+ * another partition when a stale counter or legacy row is present.
+ */
+export async function listWorkflowIdsAcrossProjects(layer: AsyncDataLayer): Promise<Array<{ id: string }>> {
+  return layer.db.select({ id: schema.project.workflows.id }).from(schema.project.workflows);
 }

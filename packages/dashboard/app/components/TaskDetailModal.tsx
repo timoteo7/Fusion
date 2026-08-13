@@ -9,6 +9,7 @@ import { FloatingWindow } from "./FloatingWindow";
 import { useMobileScrollLock } from "../hooks/useMobileScrollLock";
 import { useModalDismissPreference, useOverlayDismiss } from "../hooks/useOverlayDismiss";
 import { useColumnLabel } from "../i18n/labels";
+import type { DetailTaskTab } from "../hooks/useModalManager";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -34,8 +35,8 @@ import {
   isWipColumnRole,
 } from "../utils/columnRoles";
 import { resolveEffectiveAutoMerge } from "../../../core/src/merge/task-merge";
-import { uploadAttachment, deleteAttachment, updateTask, repairOverlapBlocker, fetchTaskDetail, fetchTaskPrompt, fetchTaskVerificationRequest, fetchSettings, fetchTaskEffectiveSettings, fetchGlobalSettings, requestSpecRevision, rebuildTaskSpec, approvePlan, rejectPlan, refineTask, fetchWorkflowResults, assignTask, fetchAgents, fetchAgent, refreshPrStatus, fetchBoardWorkflows, updateTaskCustomFields, summarizeTitle, fetchWorkflowSettingValues, nudgeOverseer, stopOverseer, explainOverseer, fetchModels, fetchNodes, api } from "../api";
-import type { RevertTaskOptions, RevertTaskResult, ModelInfo, NodeInfo } from "../api";
+import { uploadAttachment, deleteAttachment, updateTask, repairOverlapBlocker, fetchTaskDetail, fetchTaskPrompt, fetchSpecLock, fetchTaskVerificationRequest, fetchSettings, fetchTaskEffectiveSettings, fetchGlobalSettings, requestSpecRevision, rebuildTaskSpec, approvePlan, rejectPlan, refineTask, fetchWorkflowResults, assignTask, fetchAgents, fetchAgent, refreshPrStatus, fetchBoardWorkflows, updateTaskCustomFields, summarizeTitle, fetchWorkflowSettingValues, nudgeOverseer, stopOverseer, explainOverseer, fetchModels, fetchNodes, api } from "../api";
+import type { RevertTaskOptions, RevertTaskResult, ModelInfo, NodeInfo, SpecLockResponse } from "../api";
 import type { BoardWorkflowsPayload, WorkflowFieldDefinition, CustomFieldRejection } from "../api";
 import { WorkflowIcon } from "./WorkflowIcon";
 import { ApiRequestError } from "../api";
@@ -55,6 +56,7 @@ import { TaskPlannerChatTab } from "./TaskPlannerChatTab";
 import { TaskReviewTab } from "./TaskReviewTab";
 import { TaskChangesTab } from "./TaskChangesTab";
 import { TaskSummaryTab } from "./TaskSummaryTab";
+import { TaskRecommendationsTab } from "./TaskRecommendationsTab";
 import { TaskCostTab } from "./TaskCostTab";
 import { WorkspaceWorktreesSummary, isWorkspaceTask } from "./WorkspaceWorktreesSummary";
 import { TaskForm, type PendingImage } from "./TaskForm";
@@ -254,7 +256,7 @@ function formatDurationCompact(ageMs: number): string {
   return `${minutes}m`;
 }
 
-type TabId = "summary" | "cost" | "definition" | "chat" | "planner-chat" | "logs" | "changes" | "review" | "pr" | "comments" | "model" | "workflow" | "documents" | "stats" | "routing" | "retries" | "terminal" | "worktree-terminal" | `plugin-${string}`;
+type TabId = "summary" | "recommendations" | "cost" | "definition" | "chat" | "planner-chat" | "logs" | "changes" | "review" | "pr" | "comments" | "model" | "workflow" | "documents" | "stats" | "routing" | "retries" | "terminal" | "worktree-terminal" | `plugin-${string}`;
 type ActivitySegment = "current" | "feed" | "raw-logs" | "interventions";
 
 /*
@@ -379,7 +381,7 @@ export interface TaskDetailModalProps {
   /* Per-task lifecycle traits for the blocker fan-out; see the useMemo that consumes it. */
   columnFlagsByTaskId?: ReadonlyMap<string, BlockerFanoutColumnFlags>;
   onClose: () => void;
-  onOpenDetail: (task: Task | TaskDetail) => void; // For clicking dependencies
+  onOpenDetail: (task: Task | TaskDetail, initialTab?: DetailTaskTab) => void; // For clicking linked task details
   onMoveTask: (id: string, column: Column, optionsOrPosition?: { preserveProgress?: boolean } | number) => Promise<Task>;
   /** Opens a New Task draft from a reverted task description. */
   onReviseTask?: (task: Task) => void;
@@ -849,6 +851,7 @@ export function TaskDetailContent({
     !("prompt" in task),
   );
   const [verificationRequest, setVerificationRequest] = useState<TaskVerificationRequest | null>(null);
+  const [specLock, setSpecLock] = useState<SpecLockResponse | null>(null);
   const detailRequestGenerationRef = useRef(0);
   const detailRequestRef = useRef<{ key: string; promise: Promise<TaskDetail> } | null>(null);
   /*
@@ -894,6 +897,20 @@ export function TaskDetailContent({
     const timer = window.setInterval(refresh, 5_000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [task.id, projectId, active]);
+
+  /*
+  FNXC:SpecLockTaskDetail 2026-08-09-07:36:
+  Both modal and right-dock hosts render this shared content, so the Definition tab requests the
+  persisted report once per visible task. Rendering must not re-evaluate prompt prose in-browser.
+  */
+  useEffect(() => {
+    if (!active || activeTab !== "definition") return;
+    let cancelled = false;
+    void fetchSpecLock(task.id, projectId)
+      .then((value) => { if (!cancelled) setSpecLock(value); })
+      .catch(() => { if (!cancelled) setSpecLock(null); });
+    return () => { cancelled = true; };
+  }, [active, activeTab, projectId, task.id]);
 
   useEffect(() => {
     // FNXC:TaskDetailPlan 2026-08-03-02:06: hidden kept-alive hosts defer their initial detail request until reveal.
@@ -1198,6 +1215,37 @@ export function TaskDetailContent({
       setActiveTab("definition");
     }
   }, [activeTab, task.column, isDoneColumn, detailFlagsAreForThisTask]);
+
+  /*
+  FNXC:TaskRecommendations 2026-08-12-23:01:
+  Empty Recommendations tabs on nearly every completed card are operator noise, so visibility now
+  requires captured content; TaskRecommendationsTab keeps its empty branch as a defensive fallback
+  if an open tab's snapshot empties. A task switch briefly merges the prior full-detail snapshot into
+  the next slim prop before effects clear it, so read recommendations only from a snapshot proven to
+  belong to this task. Reconciliation needs that same positive identity proof rather than
+  detailLoading: rejected fetches, stale switch state, and hidden kept-alive hosts can all report not
+  loading while this task's recommendation answer remains unknown. As with PR and Summary, waiting
+  preserves an operator or deep-link tab selection until the answer is safe to act on.
+  */
+  const detailSnapshotIsForThisTask = fullDetail?.id === task.id;
+  const taskOwnedRecommendations = detailSnapshotIsForThisTask
+    ? workingTask.recommendations
+    : task.recommendations;
+  const hasRecommendations = isDoneColumn && (taskOwnedRecommendations?.length ?? 0) > 0;
+  useEffect(() => {
+    if (!detailFlagsAreForThisTask) return;
+    if (!detailSnapshotIsForThisTask) return;
+    if (activeTab === "recommendations" && !hasRecommendations) {
+      setActiveTab("definition");
+    }
+  }, [
+    activeTab,
+    detailFlagsAreForThisTask,
+    detailSnapshotIsForThisTask,
+    fullDetail?.id,
+    hasRecommendations,
+    task.id,
+  ]);
 
   // Reset planner-chat focus when the operator opens a different task.
   useEffect(() => {
@@ -3820,7 +3868,21 @@ export function TaskDetailContent({
     } catch {
       addToast(t("taskDetail.deps.loadFailed", "Failed to load dependency {{id}}", { id: depId }), "error");
     }
-  }, [onOpenDetail, addToast]);
+  }, [onOpenDetail, addToast, projectId, t]);
+
+  /*
+  FNXC:SharedBranchPromotionAdvisories 2026-08-08-02:16:
+  FN-8823 promotion advisories must open the landed member on Review, not its
+  done-task default tab; archived members require a fresh detail read.
+  */
+  const handleOpenMemberReview = useCallback(async (memberTaskId: string) => {
+    try {
+      const detail = await fetchTaskDetail(memberTaskId, projectId);
+      onOpenDetail(detail, "review");
+    } catch {
+      addToast(t("branchGroup.reviewLoadFailed", "Failed to open review for {{id}}", { id: memberTaskId }), "error");
+    }
+  }, [addToast, onOpenDetail, projectId, t]);
 
   // Spec save handlers (must be declared before functions that use them)
   const handleSaveSpec = useCallback(async (newContent: string) => {
@@ -4098,12 +4160,19 @@ export function TaskDetailContent({
   without mounting an empty error-message shell. The default banner fetches agent logs
   independently of the Raw Logs segment because FN-7995 persists bounded `tool_error`
   detail there; the Raw-Logs-gated display list is not a diagnostic data source.
+
+  FNXC:TaskFailedBanner 2026-08-07-23:36:
+  Only the latest tool completion can supply failure detail. A later `tool_result` or a blank latest `tool_error` prevents an older recovered error from being attributed to the current failure.
   */
   const shouldShowTaskFailureAlert = Boolean(task.status === "failed" && !hasPendingRecovery && !isPlannerChatExpanded);
   const taskFailureReason = task.error?.trim() || t("taskDetail.error.genericFailureReason", "The task failed before it could complete.");
   const taskFailureToolDetail = useMemo(() => {
-    const lastToolError = [...agentLogEntries].reverse().find((entry) => entry.type === "tool_error" && entry.detail?.trim());
-    return lastToolError?.detail?.trim().slice(0, 1024);
+    const lastToolCompletion = agentLogEntries.findLast(
+      (entry) => entry.type === "tool_result" || entry.type === "tool_error",
+    );
+    return lastToolCompletion?.type === "tool_error"
+      ? lastToolCompletion.detail?.trim().slice(0, 1024) || undefined
+      : undefined;
   }, [agentLogEntries]);
   const taskFailureHint = /workflow graph terminated|step-execute|no files? (were )?modified/i.test(`${task.error ?? ""}\n${taskFailureToolDetail ?? ""}`)
     ? t("taskDetail.error.retryHint", "Consider retrying with a different model or node.")
@@ -4355,14 +4424,46 @@ export function TaskDetailContent({
     }
   }, [oversightActive, activitySegment]);
 
+  /*
+  FNXC:TaskActivityFeedFreshness 2026-08-07-08:30:
+  Task list and SSE snapshots intentionally strip task.log. If a shared detail host captured an
+  empty full-detail snapshot before activity was written, selecting Feed must retry that complete
+  read instead of preserving "(no activity)" forever. Populated feeds remain snapshot-stable and
+  incur no extra request; Live and Raw keep their independent streaming paths.
+  */
+  const activityFeedIsEmpty = !workingTask.log?.length;
+  const refreshEmptyActivityFeed = useCallback(() => {
+    if (!activityFeedIsEmpty) return;
+
+    const requestGeneration = ++detailRequestGenerationRef.current;
+    requestTaskDetail(task.id, projectId)
+      .then((detail) => {
+        if (!mountedRef.current
+          || detailRequestGenerationRef.current !== requestGeneration
+          || activeTaskIdRef.current !== detail.id) return;
+
+        const promptResponse = latestPromptResponseRef.current;
+        const promptResponseMatchesDetail = promptResponse?.key === `${projectId ?? ""}:${detail.id}`;
+        const detailWithLatestPrompt = promptResponseMatchesDetail
+          ? { ...detail, prompt: promptResponse.prompt } as TaskDetail
+          : detail;
+        setFullDetail((previous) => previous?.id === detail.id
+          ? mergeTaskSnapshot(previous, detailWithLatestPrompt, { fullSnapshot: true })
+          : detailWithLatestPrompt);
+        setDetailLoading(false);
+      })
+      .catch(() => undefined);
+  }, [activityFeedIsEmpty, task.id, projectId, requestTaskDetail]);
+
   const selectActivityView = useCallback((value: ActivitySegment) => {
     activityViewMenuViewportGuardUntilRef.current = 0;
     setActiveTab("chat");
     setActivitySegment(value);
+    if (value === "feed") refreshEmptyActivityFeed();
     setShowActivityViewMenu(false);
     setActivityViewMenuPosition(null);
     requestAnimationFrame(() => activityViewButtonRef.current?.focus());
-  }, []);
+  }, [refreshEmptyActivityFeed]);
 
   const handleActivityTabKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
     const shouldOpenMenu = event.key === "ArrowDown" || (event.altKey && event.key === "ArrowDown");
@@ -5443,6 +5544,7 @@ export function TaskDetailContent({
                   taskId={task.id}
                   projectId={projectId}
                   onBranchGroupReset={handleBranchGroupReset}
+                  onOpenReviewTask={handleOpenMemberReview}
                 />
               )}
               {/* FNXC:Workspace 2026-06-21-00:00: workspace tasks have no singular
@@ -5571,6 +5673,14 @@ export function TaskDetailContent({
                 onClick={() => setActiveTab("summary")}
               >
                 {t("taskDetail.tabs.summary", "Summary")}
+              </button>
+            )}
+            {hasRecommendations && (
+              <button
+                className={`detail-tab${activeTab === "recommendations" ? " detail-tab-active" : ""}`}
+                onClick={() => setActiveTab("recommendations")}
+              >
+                {t("taskDetail.tabs.recommendations", "Recommendations")}
               </button>
             )}
             <button
@@ -5716,6 +5826,25 @@ export function TaskDetailContent({
           ) : activeTab === "summary" && isDoneColumn ? (
             <div className="detail-section detail-section--summary">
               <TaskSummaryTab task={workingTask} columnFlags={detailColumnFlags} pricingOverrides={globalSettings?.modelPricingOverrides} />
+            </div>
+          ) : activeTab === "recommendations" && hasRecommendations ? (
+            <div className="detail-section">
+              <TaskRecommendationsTab
+                task={workingTask}
+                projectId={projectId}
+                onTaskReconciled={(updatedTask) => {
+                  /*
+                  FNXC:TaskRecommendations 2026-08-08-05:27:
+                  The create route returns the durable parent link update. Publish that exact snapshot
+                  to the board owner and retained detail snapshot so modal, main-panel, list, and
+                  floating hosts cannot retain a stale Create affordance while SSE catches up.
+                  */
+                  setFullDetail((previous) => previous?.id === updatedTask.id
+                    ? mergeTaskSnapshot(previous, updatedTask, { fullSnapshot: true })
+                    : previous);
+                  onTaskUpdated?.(updatedTask);
+                }}
+              />
             </div>
           ) : activeTab === "cost" ? (
             <div className="detail-section detail-section--cost">
@@ -6054,6 +6183,49 @@ export function TaskDetailContent({
           ) : (
           <>
           {/* FNXC:TaskDetailSummaryTab 2026-07-29-00:00: FN-8197 keeps Definition focused on plan, retry, and source metadata; completed merge metadata renders exclusively in the done-only Summary tab. */}
+          {specLock && (
+            <section className="detail-section spec-lock-report" data-testid="spec-lock-report" aria-label="Spec lock alignment">
+              <div className="detail-source-header">
+                <div className="detail-source-summary">
+                  <span className="detail-source-label">Spec alignment</span>
+                  <span className="badge">{specLock.report?.alignment ?? "unavailable"}</span>
+                </div>
+              </div>
+              <dl className="detail-source-grid">
+                <div><dt>Latest lock</dt><dd>v{specLock.latestLock?.version ?? "—"}</dd></div>
+                <div><dt>Current plan</dt><dd>v{specLock.currentPlan?.version ?? "—"}</dd></div>
+                <div><dt>Lock state</dt><dd>{specLock.activeLock ? "active" : "inactive"}</dd></div>
+                <div><dt>Findings</dt><dd>{specLock.report?.findings.length ?? 0}</dd></div>
+              </dl>
+              {specLock.latestLock && (
+                <p className="spec-lock-provenance">
+                  Accepted {specLock.latestLock.acceptedAt} · plan hash {specLock.latestLock.currentPlanHash} · approval {specLock.latestLock.approvalFingerprint}
+                </p>
+              )}
+              {specLock.currentPlan && (
+                <p className="spec-lock-provenance">
+                  Captured {specLock.currentPlan.capturedAt} · source revision {specLock.currentPlan.sourceRevision} · source hash {specLock.currentPlan.sourceHash}
+                </p>
+              )}
+              {specLock.latestLock?.diff?.changedSections.length ? (
+                <p className="spec-lock-provenance">Re-lock changed: {specLock.latestLock.diff.changedSections.join(", ")}</p>
+              ) : null}
+              {(specLock.history?.locks.length ?? 0) > 1 || (specLock.history?.currentPlans.length ?? 0) > 1 || (specLock.history?.reports.length ?? 0) > 1 ? (
+                <p className="spec-lock-provenance">
+                  Retained history: {specLock.history.locks.map((lock) => `lock v${lock.version}`).join(", ") || "no locks"}; {specLock.history.currentPlans.map((plan) => `plan v${plan.version}`).join(", ") || "no plan evidence"}; {specLock.history.reports.length} reports
+                </p>
+              ) : null}
+              {specLock.report?.findings.length ? (
+                <ul className="spec-lock-findings">
+                  {specLock.report.findings.map((finding, index) => (
+                    <li key={`${finding.kind}:${finding.category}:${finding.path ?? index}`}>
+                      {finding.kind}: {finding.category}{finding.path ? ` (${finding.path})` : ""}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
+          )}
           {(retrySummary?.total ?? 0) > 0 && (
             <div className="detail-section detail-retries-section">
               <div className="detail-source-header">

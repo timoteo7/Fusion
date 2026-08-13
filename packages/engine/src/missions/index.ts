@@ -2,4 +2,10 @@
  * FNXC:CodeOrganization 2026-07-22-18:00:
  * Domain folder for engine/missions. Import modules by path.
  */
-export {};
+export {
+  reconcileMissionState,
+  hasTerminalReconcileCapability,
+  type MissionReconcileSource,
+  type MissionReconcilePassResult,
+  type ReconcileMissionStateDeps,
+} from "./mission-state-reconcile.js";

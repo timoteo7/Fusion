@@ -4,6 +4,7 @@ import { TaskExecutor } from "../executor.js";
 import { reviewStep as mockedReviewStepFn } from "../execution/reviewer.js";
 import {
   createMockStore,
+  createWorkflowRoutingAgentStore,
   mockedCreateFnAgent,
   mockedExecSync,
   mockedExistsSync,
@@ -13,6 +14,18 @@ import {
 import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 
 const mockedReviewStep = vi.mocked(mockedReviewStepFn);
+
+/*
+FNXC:EngineTests 2026-08-09-11:30:
+The graph resolves an executor principal before reaching tool or step-numbering behavior. Route
+these focused fixtures through the shared durable agent so their assertions reach the owned seam.
+*/
+function createRoutingExecutor(store: any) {
+  return new TaskExecutor(store, "/tmp/test", {
+    agentStore: createWorkflowRoutingAgentStore(store).agentStore,
+  });
+}
+
 
 describe("executor tool step numbering is 0-based", () => {
   beforeEach(() => {
@@ -63,7 +76,7 @@ describe("executor tool step numbering is 0-based", () => {
       } as any;
     });
 
-    const executor = new TaskExecutor(store, "/tmp/test");
+    const executor = createRoutingExecutor(store);
     await executor.execute({
       id: "FN-6607-T",
       title: "Zero based steps",
@@ -104,7 +117,7 @@ describe("executor tool step numbering is 0-based", () => {
       updatedAt: new Date().toISOString(),
     } as any);
 
-    const executor = new TaskExecutor(store as any, "/tmp/test");
+    const executor = createRoutingExecutor(store);
     await (executor as any).recoverApprovedStepsOnResume("FN-6607-R");
 
     expect(store.updateStep).toHaveBeenCalledWith("FN-6607-R", 1, "done");
@@ -144,7 +157,7 @@ describe("executor tool step numbering is 0-based", () => {
       return "";
     });
 
-    const executor = new TaskExecutor(store as any, "/tmp/test");
+    const executor = createRoutingExecutor(store);
     await (executor as any).reconcileStepsFromGitHistory("FN-7273", detail, "/tmp/wt");
 
     expect(store.updateStep).not.toHaveBeenCalled();
@@ -192,7 +205,7 @@ describe("executor tool step numbering is 0-based", () => {
       return "";
     });
 
-    const executor = new TaskExecutor(store as any, "/tmp/test");
+    const executor = createRoutingExecutor(store);
     await (executor as any).reconcileStepsFromGitHistory("FN-7273", detail, "/tmp/wt");
 
     expect(store.updateStep).toHaveBeenCalledWith("FN-7273", 2, "done");
@@ -276,7 +289,7 @@ describe("executor tool step numbering is 0-based", () => {
       },
     }) as any);
 
-    const executor = new TaskExecutor(store as any, "/tmp/test");
+    const executor = createRoutingExecutor(store);
     await executor.execute(task);
 
     expect(store.logEntry).toHaveBeenCalledWith(

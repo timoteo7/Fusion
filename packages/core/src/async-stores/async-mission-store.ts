@@ -15,13 +15,15 @@ import { EventEmitter } from "node:events";
 import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
 import type { AsyncDataLayer } from "../postgres/data-layer.js";
-import { FEATURE_LOOP_TRANSITIONS, normalizeMissionAssertionType, renderValidationCause } from "../missions/mission-types.js";
+import { boundMissionEventReason, classifyMissionResumeBlockers, FEATURE_LOOP_REPAIR_TRANSITIONS, buildMissionStatusEventMetadata, featureValidationRepairEligibility, FEATURE_LOOP_TRANSITIONS, normalizeMissionAssertionType, normalizeMissionTransitionActorForEvent, renderValidationCause, ROLLUP_OWNED_MILESTONE_STATUSES, ROLLUP_OWNED_MISSION_STATUSES, selectNextSerialMissionSlice, shouldApplyRecomputedStatus, VALIDATION_INFLIGHT_STALE_MAX_AGE_MS } from "../missions/mission-types.js";
+import { normalizeMissionBlockerReason } from "../missions/mission-blockers.js";
 import type {
   Mission,
   Milestone,
   Slice,
   MissionFeature,
   MissionValidatorRun,
+  MissionManualValidatorRunAdmission,
   ValidatorRunAdmission,
   ValidatorRunAdmissionInput,
   MissionAssertionFailureRecord,
@@ -50,6 +52,9 @@ import type {
   ValidationDiagnostics,
   MissionTransitionActor,
   MissionUpdateOptions,
+  MissionFeatureRepairGroundTruth,
+  MissionBlockerDescriptor,
+  MissionBlockedDiagnostics,
 } from "../missions/mission-types.js";
 import type { Goal } from "../goals/goal-types.js";
 import {
@@ -107,6 +112,7 @@ import {
   listFeaturesByIds,
   listFeatures,
   listFeaturesForMilestone,
+  listFeaturesForMission,
   listAllFeatures,
   updateFeature,
   deleteFeature,
@@ -225,9 +231,50 @@ export class MissionRemediationStoppedError extends Error {
 
 /** Stable mission-wide conflict payload for the sole explicit lineage-stop resume seam. */
 export class MissionResumeConflictError extends Error {
-  constructor(public readonly blockers: Array<{ id: string; reason: string }>) {
+  constructor(public readonly descriptors: MissionBlockerDescriptor[]) {
     super("Mission resume is blocked by non-resumable lineage stops");
     this.name = "MissionResumeConflictError";
+  }
+
+}
+
+/** Raised when a clear request races a prior clear or targets a non-blocked mission. */
+export class MissionBlockedClearConflictError extends Error {
+  constructor(public readonly status: MissionStatus) {
+    super(`Mission is not blocked (status: ${status})`);
+    this.name = "MissionBlockedClearConflictError";
+  }
+}
+
+/** Raised when a stale caller view offers an action no longer supported by the locked feature. */
+export class RepairNotEligibleError extends Error {
+  constructor(featureId: string, action: string) {
+    super(`Feature ${featureId} is not eligible for validation repair action '${action}'`);
+    this.name = "RepairNotEligibleError";
+  }
+}
+
+/** Raised before mutation when caller-derived linked-task ground truth has changed. */
+export class RepairGroundTruthStaleError extends Error {
+  constructor(featureId: string, message = `Ground truth for feature ${featureId} changed while repairing`) {
+    super(message);
+    this.name = "RepairGroundTruthStaleError";
+  }
+}
+
+/** Expected re-run conflict: an existing validation run must retain exclusive ownership. */
+export class RepairValidatorRunInFlightError extends Error {
+  constructor(featureId: string) {
+    super(`Feature ${featureId} already has a running validator run`);
+    this.name = "RepairValidatorRunInFlightError";
+  }
+}
+
+/** Expected re-run input failure retained from the manual validation entry point. */
+export class RepairAssertionsMissingError extends Error {
+  constructor() {
+    super("Feature has no linked assertions. Link assertions before triggering validation.");
+    this.name = "RepairAssertionsMissingError";
   }
 }
 
@@ -586,12 +633,12 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
         createdAt: mission.createdAt,
         updatedAt: new Date().toISOString(),
       };
-      const transitions: Array<{ eventType: MissionEventType; description: string; metadata: Record<string, unknown> }> = [];
+      const transitions: Array<{ eventType: MissionEventType; description: string; metadataInput: Parameters<typeof buildMissionStatusEventMetadata>[0] }> = [];
       if (mission.status !== updated.status) {
         transitions.push({
           eventType: "mission_status_changed",
           description: `Mission status changed from ${mission.status} to ${updated.status}`,
-          metadata: { source: actor.source, actor, field: "status", from: mission.status, to: updated.status },
+          metadataInput: { entity: "mission", field: "status", from: mission.status, to: updated.status, ids: {}, actor, reason: options.reason },
         });
       }
       // FNXC:MissionAutonomyAudit 2026-07-23-14:20: Legacy rows may omit this
@@ -603,16 +650,22 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
         transitions.push({
           eventType: isAutopilotEnabled ? "autopilot_enabled" : "autopilot_disabled",
           description: `Autopilot ${isAutopilotEnabled ? "enabled" : "disabled"}`,
-          metadata: { source: actor.source, actor, field: "autopilotEnabled", from: wasAutopilotEnabled, to: isAutopilotEnabled },
+          metadataInput: { entity: "mission", field: "autopilotEnabled", from: wasAutopilotEnabled, to: isAutopilotEnabled, ids: {}, actor },
         });
       }
       await updateMission(tx, updated);
       if (transitions.length === 0) return { updated, events: [] as MissionEvent[] };
+      /*
+      FNXC:MissionStatusWrites 2026-08-10-12:47:
+      Like feature transitions, mission audit metadata is built only after the row write. The
+      builder is total, so malformed caller-shaped actor or reason data cannot abort this same
+      transaction after a legitimate lifecycle repair has been applied.
+      */
       let seq = await getMaxEventSeq(tx);
       const events = await Promise.all(transitions.map(async (transition) => {
         const event: MissionEvent = {
           id: this.generateId("ME"), missionId: id, eventType: transition.eventType,
-          description: transition.description, metadata: transition.metadata,
+          description: transition.description, metadata: buildMissionStatusEventMetadata(transition.metadataInput),
           timestamp: new Date().toISOString(), seq: ++seq,
         };
         await insertMissionEvent(tx, event);
@@ -642,6 +695,59 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     this.emit("mission:deleted", id);
   }
 
+  private async getMissionBlockedDescriptorsWithHandle(handle: QueryHandle, missionId: string, lockStops = false): Promise<MissionBlockerDescriptor[]> {
+    const features = await listFeaturesForMission(handle, missionId);
+    const stopsQuery = handle.select().from(schema.project.missionLineageStops)
+      .where(and(eq(schema.project.missionLineageStops.projectId, missionProjectId()), eq(schema.project.missionLineageStops.missionId, missionId)));
+    const stops = lockStops ? await stopsQuery.for("update") : await stopsQuery;
+    const roots = features.filter((feature) => !feature.generatedFromFeatureId && feature.loopState === "blocked");
+    return classifyMissionResumeBlockers({ rootFeatures: roots, lineageStops: stops, missionId }).blockers;
+  }
+
+  async getMissionBlockedDiagnostics(missionId: string): Promise<MissionBlockedDiagnostics> {
+    const mission = await getMission(this.db, missionId);
+    if (!mission) throw new Error(`Mission ${missionId} not found`);
+    const [recomputedStatus, blockers] = await Promise.all([
+      this.computeMissionStatusWithHandle(this.db, missionId),
+      this.getMissionBlockedDescriptorsWithHandle(this.db, missionId),
+    ]);
+    return { missionId, status: mission.status, recomputedStatus, clearable: mission.status === "blocked", resumable: mission.status === "blocked" && blockers.length === 0, blockers };
+  }
+
+  /**
+   * FNXC:MissionBlockedRepair 2026-08-11-02:56:
+   * Clearing repairs only a stale mission badge. It never resumes automation, unpauses tasks, or
+   * launders feature and lineage stops; Resume remains the sole path that changes those states.
+   * The legacy synchronous MissionStore is not constructed at runtime, so it intentionally has no
+   * parallel primitive.
+   */
+  async clearMissionBlockedStatus(missionId: string, options: { actor: MissionTransitionActor; reason?: string }): Promise<{ mission: Mission; blockers: MissionBlockerDescriptor[] }> {
+    const result = await this.layer.transactionImmediate(async (tx) => {
+      const mission = await getMission(tx, missionId);
+      if (!mission) throw new Error(`Mission ${missionId} not found`);
+      // Match resume's lock before deciding whether the stale badge can be cleared.
+      await tx.select().from(schema.project.missions).where(eq(schema.project.missions.id, missionId)).for("update");
+      const locked = await getMission(tx, missionId);
+      if (!locked) throw new Error(`Mission ${missionId} not found`);
+      if (locked.status !== "blocked") throw new MissionBlockedClearConflictError(locked.status);
+      const blockers = await this.getMissionBlockedDescriptorsWithHandle(tx, missionId, true);
+      const status = await this.computeMissionStatusWithHandle(tx, missionId);
+      const updated = { ...locked, status, updatedAt: new Date().toISOString() };
+      await updateMission(tx, updated);
+      const event: MissionEvent = {
+        id: this.generateId("ME"), missionId, eventType: "mission_status_changed",
+        description: "Mission blocked status cleared",
+        metadata: buildMissionStatusEventMetadata({ entity: "mission", field: "status", from: "blocked", to: status, ids: { missionId, repairAction: "clear-blocked" }, actor: options.actor, reason: options.reason }),
+        timestamp: new Date().toISOString(), seq: (await getMaxEventSeq(tx)) + 1,
+      };
+      await insertMissionEvent(tx, event);
+      return { mission: updated, blockers, event };
+    });
+    this.emit("mission:updated", result.mission);
+    this.emit("mission:event", result.event);
+    return { mission: result.mission, blockers: result.blockers };
+  }
+
   /**
    * FNXC:MissionLineageBudget 2026-07-22-12:00:
    * Resume is the only seam that clears operator intervention. Classify every
@@ -662,16 +768,13 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       const stops = await tx.select().from(schema.project.missionLineageStops)
         .where(and(eq(schema.project.missionLineageStops.projectId, missionProjectId()), eq(schema.project.missionLineageStops.missionId, id))).for("update");
       const roots = allFeatures.filter((feature) => featureMission.get(feature.id) === id && !feature.generatedFromFeatureId && feature.loopState === "blocked");
-      const stopIds = new Set(stops.map((stop) => stop.rootFeatureId));
-      const blockers = roots.filter((root) => root.implementationStopReason !== "operator-intervention")
-        .map((root) => ({ id: root.id, reason: root.implementationStopReason ?? "legacy-unknown-stop" }));
-      for (const stop of stops) if (stop.reason !== "operator-intervention") blockers.push({ id: stop.rootFeatureId, reason: stop.reason });
-      if (blockers.length > 0) {
-        const stable = blockers.sort((a, b) => a.id.localeCompare(b.id));
-        throw new MissionResumeConflictError(stable);
+      const classified = classifyMissionResumeBlockers({ rootFeatures: roots, lineageStops: stops, missionId: id });
+      if (classified.blockers.length > 0) {
+        throw new MissionResumeConflictError(classified.blockers);
       }
+      const clearableFeatureIds = new Set(classified.clearableFeatureIds);
       for (const root of roots) {
-        if (root.implementationStopReason === "operator-intervention" || stopIds.has(root.id)) {
+        if (clearableFeatureIds.has(root.id)) {
           await updateFeature(tx, { ...root, loopState: "needs_fix", implementationStopReason: undefined, implementationStoppedAt: undefined, implementationStopOrigin: undefined, updatedAt: new Date().toISOString() });
         }
       }
@@ -976,6 +1079,52 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     await reorderSlices(this.layer, orderedIds);
   }
 
+  /**
+   * FNXC:MissionSliceAdmission 2026-08-08-03:07:
+   * Automatic slice progression obtains one project-scoped advisory lock before
+   * selecting and claiming work. Duplicate completion and recovery callbacks
+   * therefore lose without publishing an activation or minting more tasks.
+   */
+  async tryActivateNextPendingSlice(missionId: string): Promise<Slice | undefined> {
+    const admitted = await this.layer.transactionImmediate(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(
+        CONCAT('mission-slice-admission:', COALESCE(NULLIF(current_setting('fusion.project_id', true), ''), '__legacy_unscoped__'), ':', CAST(${missionId} AS text)),
+        0
+      ))`);
+      const mission = await getMission(tx, missionId);
+      if (!mission) return undefined;
+      const milestones = await listMilestones(tx, missionId);
+      const hierarchy: MissionWithHierarchy = {
+        ...mission,
+        milestones: await Promise.all(milestones.map(async (milestone) => ({
+          ...milestone,
+          slices: (await listSlices(tx, milestone.id)).map((slice) => ({ ...slice, features: [] })),
+        }))),
+      };
+      const candidate = selectNextSerialMissionSlice(hierarchy);
+      if (!candidate) return undefined;
+      const now = new Date().toISOString();
+      const updated: Slice = { ...candidate, status: "active", activatedAt: now, updatedAt: now };
+      await updateSlice(tx, updated);
+      return updated;
+    });
+    if (!admitted) return undefined;
+
+    this.emit("slice:updated", admitted);
+    await this.recomputeMilestoneStatus(admitted.milestoneId);
+    const milestone = await getMilestone(this.db, admitted.milestoneId);
+    const mission = milestone ? await getMission(this.db, milestone.missionId) : undefined;
+    if (mission?.autopilotEnabled === true || mission?.autoAdvance === true) {
+      try {
+        await this.triageSlice(admitted.id);
+      } catch (err) {
+        severityAuditLog.error(`[AsyncMissionStore] Auto-triage failed for slice ${admitted.id}:`, err);
+      }
+    }
+    this.emit("slice:activated", admitted);
+    return admitted;
+  }
+
   async activateSlice(id: string): Promise<Slice> {
     const slice = await getSlice(this.db, id);
     if (!slice) throw new Error(`Slice ${id} not found`);
@@ -1056,29 +1205,65 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     return getFeatureByTaskId(this.db, taskId);
   }
 
-  async updateFeature(id: string, updates: Partial<MissionFeature>): Promise<MissionFeature> {
-    const feature = await getFeature(this.db, id);
-    if (!feature) throw new Error(`Feature ${id} not found`);
-    const updated: MissionFeature = {
-      ...feature,
-      ...updates,
-      id,
-      sliceId: feature.sliceId,
-      createdAt: feature.createdAt,
-      updatedAt: new Date().toISOString(),
+  /*
+  FNXC:MissionStatusWrites 2026-08-10-12:47:
+  Status events share the feature mutation transaction. The metadata builder is total, so it is
+  safe after the row write; missing hierarchy skips auditing rather than blocking a repair.
+  */
+  private async recordFeatureStatusChange(tx: QueryHandle, feature: MissionFeature, toStatus: FeatureStatus, actor?: MissionTransitionActor, reason?: unknown, seq?: number): Promise<MissionEvent | undefined> {
+    if (feature.status === toStatus) return undefined;
+    const slice = await getSlice(tx, feature.sliceId);
+    const milestone = slice ? await getMilestone(tx, slice.milestoneId) : undefined;
+    const mission = milestone ? await getMission(tx, milestone.missionId) : undefined;
+    if (!mission) return undefined;
+    const event: MissionEvent = {
+      id: this.generateId("ME"), missionId: mission.id, eventType: "feature_status_changed",
+      description: `Feature ${feature.id} status changed from ${feature.status} to ${toStatus}`,
+      metadata: buildMissionStatusEventMetadata({ entity: "feature", field: "status", from: feature.status, to: toStatus, ids: { featureId: feature.id, sliceId: slice?.id }, actor, reason }),
+      timestamp: new Date().toISOString(), seq: seq ?? (await getMaxEventSeq(tx)) + 1,
     };
-    await updateFeature(this.db, updated);
+    await insertMissionEvent(tx, event);
+    return event;
+  }
+
+  /**
+   * Locks the feature before reading its status pre-image. A concurrent writer must observe the
+   * prior committed transition before it can write the next one, so every audit `from` is exact.
+   */
+  private async getFeatureForStatusWrite(tx: QueryHandle, id: string): Promise<MissionFeature | undefined> {
+    const locked = await tx.select({ id: schema.project.missionFeatures.id })
+      .from(schema.project.missionFeatures)
+      .where(eq(schema.project.missionFeatures.id, id))
+      .for("update");
+    return locked.length > 0 ? getFeature(tx, id) : undefined;
+  }
+
+  async updateFeature(id: string, updates: Partial<MissionFeature>, options: MissionUpdateOptions = {}): Promise<MissionFeature> {
+    const { updated, event, taskIdChanged, statusChanged } = await this.layer.transactionImmediate(async (tx) => {
+      const feature = await this.getFeatureForStatusWrite(tx, id);
+      if (!feature) throw new Error(`Feature ${id} not found`);
+      const updated: MissionFeature = { ...feature, ...updates, id, sliceId: feature.sliceId, createdAt: feature.createdAt, updatedAt: new Date().toISOString() };
+      await updateFeature(tx, updated);
+      const event = updates.status !== undefined ? await this.recordFeatureStatusChange(tx, feature, updates.status, options.actor, options.reason) : undefined;
+      // FNXC:MissionStatusWrites 2026-08-10-13:32: Preserve no-op PATCH behavior:
+      // unchanged optional fields must not trigger a post-commit rollup solely because present.
+      return {
+        updated,
+        event,
+        taskIdChanged: updates.taskId !== undefined && updates.taskId !== feature.taskId,
+        statusChanged: updates.status !== undefined && updates.status !== feature.status,
+      };
+    });
     this.emit("feature:updated", updated);
-    const taskIdChanged = updates.taskId !== undefined && updates.taskId !== feature.taskId;
-    const statusChanged = updates.status !== undefined && updates.status !== feature.status;
+    if (event) this.emit("mission:event", event);
     if (taskIdChanged || statusChanged) await this.recomputeSliceStatus(updated.sliceId);
-    const shouldSyncAssertion =
-      updates.title !== undefined || updates.description !== undefined || updates.acceptanceCriteria !== undefined;
-    if (shouldSyncAssertion) {
-      await this.ensureFeatureAssertion(updated);
-      return (await getFeature(this.db, updated.id)) ?? updated;
-    }
+    const shouldSyncAssertion = updates.title !== undefined || updates.description !== undefined || updates.acceptanceCriteria !== undefined;
+    if (shouldSyncAssertion) { await this.ensureFeatureAssertion(updated); return (await getFeature(this.db, updated.id)) ?? updated; }
     return updated;
+  }
+
+  async updateFeatureStatus(featureId: string, status: FeatureStatus, options: MissionUpdateOptions = {}): Promise<MissionFeature> {
+    return this.updateFeature(featureId, { status }, options);
   }
 
   /*
@@ -1139,13 +1324,6 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     await this.recomputeSliceStatus(sliceId);
   }
 
-  async updateFeatureStatus(featureId: string, status: FeatureStatus): Promise<MissionFeature> {
-    const feature = await getFeature(this.db, featureId);
-    if (!feature) throw new Error(`Feature ${featureId} not found`);
-    const updated = await this.updateFeature(featureId, { status });
-    await this.recomputeSliceStatus(updated.sliceId);
-    return updated;
-  }
 
   /**
    * FNXC:MissionReconciliation 2026-07-20-08:34:
@@ -1153,7 +1331,7 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
    */
   async reconcileFeatureDoneWithTerminalTask(featureId: string, taskId: string): Promise<MissionFeature> {
     const outcome = await this.layer.transactionImmediate(async (tx) => {
-      const feature = await getFeature(tx, featureId);
+      const feature = await this.getFeatureForStatusWrite(tx, featureId);
       if (!feature) {
         throw new TerminalTaskReconciliationError("FEATURE_NOT_FOUND", `Feature ${featureId} not found`);
       }
@@ -1221,6 +1399,9 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
         ? { ...feature, taskId, status: "done", updatedAt: now }
         : feature;
       if (featureChanged) await updateFeature(tx, reconciledFeature);
+      const event = feature.status !== "done"
+        ? await this.recordFeatureStatusChange(tx, feature, "done", { type: "system", id: "mission-store", source: "terminal-task-reconcile" })
+        : undefined;
 
       if (evidence.kind === "done") {
         await setTaskMissionLinkage(tx, taskId, mission.id, slice.id);
@@ -1231,21 +1412,31 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       if (reconciledSlice !== slice) await updateSlice(tx, reconciledSlice);
 
       const milestoneStatus = await this.computeMilestoneStatusWithHandle(tx, milestone.id);
-      const reconciledMilestone = milestone.status === milestoneStatus
-        ? milestone
-        : { ...milestone, status: milestoneStatus, updatedAt: now };
+      /*
+      FNXC:MissionStatusRollup 2026-08-11-04:27:
+      This automatic writer bypasses recomputeMilestoneStatus because it must persist within this
+      terminal-task transaction via updateMilestone(tx, ...). Dashboard mission-routes and engine
+      mission-state-reconcile call this path, so it independently applies the shared ownership rule.
+      */
+      const reconciledMilestone = shouldApplyRecomputedStatus(
+        milestone.status,
+        milestoneStatus,
+        ROLLUP_OWNED_MILESTONE_STATUSES,
+      ) ? { ...milestone, status: milestoneStatus, updatedAt: now } : milestone;
       if (reconciledMilestone !== milestone) await updateMilestone(tx, reconciledMilestone);
 
       return {
         feature: reconciledFeature,
         featureChanged,
         linked: feature.taskId !== taskId,
+        event,
         slice: reconciledSlice !== slice ? reconciledSlice : undefined,
         milestone: reconciledMilestone !== milestone ? reconciledMilestone : undefined,
       };
     });
 
     if (outcome.featureChanged) this.emit("feature:updated", outcome.feature);
+    if (outcome.event) this.emit("mission:event", outcome.event);
     if (outcome.linked) this.emit("feature:linked", { feature: outcome.feature, taskId });
     if (outcome.slice) this.emit("slice:updated", outcome.slice);
     if (outcome.milestone) this.emit("milestone:updated", outcome.milestone);
@@ -1260,7 +1451,7 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
    */
   async claimDefinedFeatureTaskInTransaction(
     tx: import("../postgres/data-layer.js").DbTransaction,
-    input: { featureId: string; taskId: string; missionId: string; sliceId: string; requireExistingFeatureLink?: boolean },
+    input: { featureId: string; taskId: string; missionId: string; sliceId: string; requireExistingFeatureLink?: boolean; statusEvent?: { value?: MissionEvent } },
   ): Promise<MissionFeature> {
     /*
     FNXC:MissionAdmission 2026-07-23-15:30:
@@ -1331,6 +1522,8 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       updatedAt: now,
     };
     await updateFeature(tx, updated);
+    const event = await this.recordFeatureStatusChange(tx, feature, "triaged", { type: "system", id: "mission-store", source: "defined-feature-claim" });
+    if (input.statusEvent) input.statusEvent.value = event;
     // The inserted task already carries this verified linkage; retain this write
     // for retry parity when the same canonical is claimed again.
     await setTaskMissionLinkage(tx, input.taskId, input.missionId, input.sliceId);
@@ -1338,8 +1531,10 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
   }
 
   async claimDefinedFeatureTask(input: { featureId: string; taskId: string; missionId: string; sliceId: string }): Promise<MissionFeature> {
-    const feature = await this.layer.transactionImmediate((tx) => this.claimDefinedFeatureTaskInTransaction(tx, { ...input, requireExistingFeatureLink: true }));
+    const statusEvent: { value?: MissionEvent } = {};
+    const feature = await this.layer.transactionImmediate((tx) => this.claimDefinedFeatureTaskInTransaction(tx, { ...input, requireExistingFeatureLink: true, statusEvent }));
     this.emit("feature:updated", feature);
+    if (statusEvent.value) this.emit("mission:event", statusEvent.value);
     this.emit("feature:linked", { feature, taskId: input.taskId });
     await this.recomputeSliceStatus(feature.sliceId);
     return feature;
@@ -1427,7 +1622,7 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     existing taskId: retries may reuse only that same canonical task.
     */
     const outcome = await this.layer.transactionImmediate(async (tx) => {
-      const feature = await getFeature(tx, featureId);
+      const feature = await this.getFeatureForStatusWrite(tx, featureId);
       if (!feature) throw new Error(`Feature ${featureId} not found`);
       if (feature.taskId && feature.taskId !== taskId) {
         throw new Error(`Feature ${featureId} is already linked to task ${feature.taskId}`);
@@ -1455,13 +1650,15 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
         updatedAt: now,
       };
       await updateFeature(tx, updated);
+      const event = await this.recordFeatureStatusChange(tx, feature, "triaged", { type: "system", id: "mission-store", source: "mission-link" });
       await setTaskMissionLinkage(tx, taskId, milestone.missionId, slice.id);
-      return updated;
+      return { feature: updated, event };
     });
-    this.emit("feature:updated", outcome);
-    this.emit("feature:linked", { feature: outcome, taskId });
-    await this.recomputeSliceStatus(outcome.sliceId);
-    return outcome;
+    this.emit("feature:updated", outcome.feature);
+    if (outcome.event) this.emit("mission:event", outcome.event);
+    this.emit("feature:linked", { feature: outcome.feature, taskId });
+    await this.recomputeSliceStatus(outcome.feature.sliceId);
+    return outcome.feature;
   }
 
   async unlinkFeatureFromTask(featureId: string): Promise<MissionFeature> {
@@ -1475,37 +1672,266 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
   }
 
   // ════════════════ VALIDATOR RUNS ════════════════
-  async startValidatorRun(featureId: string, triggerType?: string, taskId?: string, inputFingerprint?: string): Promise<MissionValidatorRun> {
-    const feature = await getFeature(this.db, featureId);
-    if (!feature) throw new Error(`Feature ${featureId} not found`);
-    const slice = await getSlice(this.db, feature.sliceId);
+  /**
+   * Explicit actor-only escape hatch for stale validation badges. It deliberately does not alter
+   * transitionLoopState: ordinary execution remains unable to leave a blocked state.
+   */
+  async repairFeatureValidationState(
+    featureId: string,
+    options: {
+      action: "clear" | "re_run";
+      actor: MissionTransitionActor;
+      reason?: string;
+      resolvedStatus?: FeatureStatus;
+      resolvedLoopState?: FeatureLoopState;
+      groundTruth?: MissionFeatureRepairGroundTruth;
+    },
+  ): Promise<{ feature: MissionFeature; run?: MissionValidatorRun }> {
+    const outcome = await this.layer.transactionImmediate(async (tx) => {
+      const feature = await this.getFeatureForStatusWrite(tx, featureId);
+      if (!feature) throw new Error(`Feature ${featureId} not found`);
+      const eligibility = featureValidationRepairEligibility(feature);
+      if ((options.action === "clear" && !eligibility.clear) || (options.action === "re_run" && !eligibility.reRun)) {
+        throw new RepairNotEligibleError(featureId, options.action);
+      }
+      const now = new Date().toISOString();
+      const priorLoopState = feature.loopState;
+      const priorStatus = feature.status;
+      let groundTruthMetadata: Record<string, unknown> = {};
+
+      if (options.action === "clear" && feature.status === "blocked") {
+        const fence = options.groundTruth;
+        if (!fence || fence.featureId !== featureId || fence.taskId !== (feature.taskId ?? null)) {
+          throw new RepairGroundTruthStaleError(featureId);
+        }
+        let taskVerified = true;
+        if (fence.taskId === null) {
+          if (fence.taskLiveness !== "absent") throw new RepairGroundTruthStaleError(featureId);
+        } else if (this.taskStore) {
+          /*
+          FNXC:MissionValidationRepair 2026-08-11-02:05:
+          This verifier deliberately uses the engine producer's physical absence predicate only:
+          a missing/soft-deleted row or the legacy `archived` column. It must not resolve workflow
+          lanes under the lock; renamed archived lanes become absent only once archived physically.
+          */
+          const rows = await tx.select({ column: schema.project.tasks.column, updatedAt: schema.project.tasks.updatedAt, deletedAt: schema.project.tasks.deletedAt })
+            .from(schema.project.tasks).where(and(eq(schema.project.tasks.projectId, missionProjectId()), eq(schema.project.tasks.id, fence.taskId))).for("update");
+          const task = rows[0];
+          /*
+          FNXC:MissionValidationRepair 2026-08-11-03:04 DELIBERATE-LITERAL:
+          The locked verifier must match the producer's physical legacy-row predicate; renamed
+          archive lanes remain live until archival soft-deletes them.
+          */
+          const liveness = task && !task.deletedAt && task.column !== "archived" ? "live" : "absent";
+          if (fence.taskLiveness === "live") {
+            if (liveness !== "live" || task!.column !== fence.taskColumn || task!.updatedAt !== fence.taskUpdatedAt) throw new RepairGroundTruthStaleError(featureId);
+          } else if (liveness === "live") {
+            throw new RepairGroundTruthStaleError(featureId);
+          }
+        } else {
+          /*
+          FNXC:MissionValidationRepair 2026-08-11-00:06:
+          Production AsyncMissionStore construction supplies TaskStore. This fixture-only fallback
+          verifies feature identity but records that linked-task ground truth was not checked.
+          */
+          taskVerified = false;
+        }
+        groundTruthMetadata = {
+          groundTruthTaskId: fence.taskId,
+          groundTruthLaneRole: fence.laneRole,
+          groundTruthTaskLiveness: fence.taskLiveness,
+          groundTruthTaskVerified: taskVerified,
+        };
+      }
+
+      let updated: MissionFeature;
+      let run: MissionValidatorRun | undefined;
+      if (options.action === "clear") {
+        const currentLoop = feature.loopState;
+        const appliesLoop = currentLoop === "blocked" || currentLoop === "needs_fix";
+        const nextLoop = appliesLoop ? options.resolvedLoopState ?? "idle" : currentLoop;
+        if (appliesLoop && !FEATURE_LOOP_REPAIR_TRANSITIONS[currentLoop].includes(nextLoop!)) {
+          throw new Error(`Invalid validation repair transition from '${currentLoop}' to '${nextLoop}'`);
+        }
+        const appliesStatus = feature.status === "blocked";
+        const nextStatus = appliesStatus ? options.resolvedStatus : feature.status;
+        if (appliesStatus && (nextStatus !== "in-progress" && nextStatus !== "triaged" && nextStatus !== "defined")) {
+          throw new Error("Validation repair requires resolvedStatus of in-progress, triaged, or defined");
+        }
+        if (appliesStatus && (nextStatus === "in-progress" || nextStatus === "triaged") && !feature.taskId) {
+          throw new Error(`Feature ${featureId} has no linked task for status '${nextStatus}'`);
+        }
+        /*
+        FNXC:MissionValidationRepair 2026-08-11-01:20:
+        The engine alone classifies lifecycle lanes, but a caller must not pair an arbitrary
+        status with its fence. This narrow relationship check keeps a live completed/custom lane
+        from being repaired as in-progress while preserving core's no-workflow-resolution rule.
+        */
+        if (appliesStatus) {
+          const fence = options.groundTruth!;
+          const matchesLane = (nextStatus === "in-progress" && fence.taskLiveness === "live" && fence.laneRole === "wip")
+            || (nextStatus === "triaged" && fence.taskLiveness === "live" && fence.laneRole === "planner")
+            || (nextStatus === "defined" && fence.taskLiveness === "absent" && fence.laneRole === "none");
+          if (!matchesLane) throw new RepairGroundTruthStaleError(featureId);
+        }
+        if (!appliesLoop && !appliesStatus) throw new RepairNotEligibleError(featureId, options.action);
+        updated = {
+          ...feature,
+          loopState: nextLoop,
+          status: nextStatus!,
+          implementationAttemptCount: 0,
+          ...(feature.lastValidatorStatus === "blocked" || feature.lastValidatorStatus === "failed" ? { lastValidatorStatus: undefined } : {}),
+          updatedAt: now,
+        };
+        await updateFeature(tx, updated);
+      } else {
+        if (feature.lastValidatorRunId) {
+          const latest = await getValidatorRun(tx, feature.lastValidatorRunId);
+          if (latest?.status === "running") throw new RepairValidatorRunInFlightError(featureId);
+        }
+        if ((await listAssertionsForFeature(tx, featureId)).length === 0) {
+          throw new RepairAssertionsMissingError();
+        }
+        run = await this.buildValidatorRun(tx, feature, "manual");
+        await createValidatorRun(tx, run);
+        updated = { ...feature, validatorAttemptCount: run.validatorAttempt, lastValidatorRunId: run.id, loopState: "validating", updatedAt: now };
+        await updateFeature(tx, updated);
+      }
+      const slice = await getSlice(tx, feature.sliceId);
+      if (!slice) throw new Error(`Slice ${feature.sliceId} not found`);
+      const milestone = await getMilestone(tx, slice.milestoneId);
+      if (!milestone) throw new Error(`Milestone ${slice.milestoneId} not found`);
+      const boundedReason = boundMissionEventReason(options.reason);
+      const event: MissionEvent = {
+        id: this.generateId("ME"), missionId: milestone.missionId, eventType: "feature_validation_repaired", description: "feature validation repaired",
+        metadata: {
+          featureId, action: options.action, priorLoopState, priorStatus, priorLastValidatorStatus: feature.lastValidatorStatus,
+          priorImplementationAttemptCount: feature.implementationAttemptCount ?? 0, nextLoopState: updated.loopState,
+          nextStatus: updated.status, statusChanged: updated.status !== feature.status, ...(run ? { validatorRunId: run.id } : {}),
+          actor: normalizeMissionTransitionActorForEvent(options.actor),
+          ...(boundedReason.value !== undefined ? { reason: boundedReason.value } : {}),
+          ...(boundedReason.truncated ? { reasonTruncated: true } : {}), ...groundTruthMetadata,
+        }, timestamp: now, seq: (await getMaxEventSeq(tx)) + 1,
+      };
+      await insertMissionEvent(tx, event);
+      return { feature: updated, run, event };
+    });
+    this.emit("feature:updated", outcome.feature);
+    if (outcome.run) this.emit("validator-run:started", outcome.run);
+    this.emit("mission:event", outcome.event);
+    await this.recomputeSliceStatus(outcome.feature.sliceId);
+    return { feature: outcome.feature, ...(outcome.run ? { run: outcome.run } : {}) };
+  }
+
+  private async buildValidatorRun(tx: QueryHandle, feature: MissionFeature, triggerType?: string, taskId?: string, inputFingerprint?: string): Promise<MissionValidatorRun> {
+    const slice = await getSlice(tx, feature.sliceId);
     if (!slice) throw new Error(`Slice ${feature.sliceId} not found`);
-    const milestone = await getMilestone(this.db, slice.milestoneId);
+    const milestone = await getMilestone(tx, slice.milestoneId);
     if (!milestone) throw new Error(`Milestone ${slice.milestoneId} not found`);
     const now = new Date().toISOString();
-    const newValidatorAttemptCount = (feature.validatorAttemptCount ?? 0) + 1;
-    const run: MissionValidatorRun = {
-      id: this.generateId("VR"),
-      featureId,
-      milestoneId: milestone.id,
-      sliceId: slice.id,
-      status: "running",
-      triggerType,
-      implementationAttempt: feature.implementationAttemptCount ?? 0,
-      validatorAttempt: newValidatorAttemptCount,
-      taskId,
-      inputFingerprint,
-      startedAt: now,
-      createdAt: now,
-      updatedAt: now,
-    };
-    await createValidatorRun(this.db, run);
-    this.emit("validator-run:started", run);
-    await this.updateFeature(featureId, {
-      validatorAttemptCount: newValidatorAttemptCount,
-      lastValidatorRunId: run.id,
-      loopState: "validating",
+    return { id: this.generateId("VR"), featureId: feature.id, milestoneId: milestone.id, sliceId: slice.id, status: "running", triggerType,
+      implementationAttempt: feature.implementationAttemptCount ?? 0, validatorAttempt: (feature.validatorAttemptCount ?? 0) + 1,
+      taskId, inputFingerprint, startedAt: now, createdAt: now, updatedAt: now };
+  }
+
+  /*
+  FNXC:MissionValidation 2026-08-11-05:38:
+  Find the newest live run while callers hold the feature lock. Lock run rows in the same feature
+  then runs order so manual and automatic admission remain serialized across processes.
+  */
+  private async findBlockingInFlightRun(
+    tx: QueryHandle,
+    featureId: string,
+    now = Date.now(),
+  ): Promise<MissionValidatorRun | undefined> {
+    const rows = await tx.select().from(schema.project.missionValidatorRuns).where(and(
+      eq(schema.project.missionValidatorRuns.projectId, missionProjectId()),
+      eq(schema.project.missionValidatorRuns.featureId, featureId),
+      eq(schema.project.missionValidatorRuns.status, "running"),
+    )).orderBy(
+      desc(schema.project.missionValidatorRuns.completedAt),
+      desc(schema.project.missionValidatorRuns.startedAt),
+      desc(schema.project.missionValidatorRuns.createdAt),
+      desc(schema.project.missionValidatorRuns.id),
+    ).for("update");
+    const cutoff = now - VALIDATION_INFLIGHT_STALE_MAX_AGE_MS;
+    return rows.map((row) => rowToValidatorRun(row as never))
+      .find((run) => Date.parse(run.startedAt) >= cutoff);
+  }
+
+  /*
+  FNXC:MissionValidation 2026-08-11-03:43:
+  Manual validation previously had no in-flight guard: automatic admission is fingerprint-scoped
+  and FN-8947 guarded only repair re-runs. This feature-scoped transaction observes engine-started
+  runs, while runs beyond the reaper window do not wedge the button. FN-8976 shares this predicate
+  with automatic admission so fingerprint-less manual runs cannot create a second live validator.
+  */
+  async startManualValidatorRun(
+    featureId: string,
+    input: { triggerType?: string; taskId?: string } = {},
+  ): Promise<MissionManualValidatorRunAdmission> {
+    const admission = await this.layer.transactionImmediate<MissionManualValidatorRunAdmission>(async (tx) => {
+      const locked = await tx.select().from(schema.project.missionFeatures).where(and(
+        eq(schema.project.missionFeatures.projectId, missionProjectId()),
+        eq(schema.project.missionFeatures.id, featureId),
+      )).for("update");
+      const feature = locked[0] ? await getFeature(tx, featureId) : undefined;
+      if (!feature) throw new Error(`Feature ${featureId} not found`);
+      const blockingRun = await this.findBlockingInFlightRun(tx, featureId);
+      if (blockingRun) return { outcome: "already-running", run: blockingRun };
+      const run = await this.buildValidatorRun(tx, feature, input.triggerType ?? "manual", input.taskId);
+      await createValidatorRun(tx, run);
+      await updateFeature(tx, {
+        ...feature,
+        validatorAttemptCount: run.validatorAttempt,
+        lastValidatorRunId: run.id,
+        loopState: "validating",
+        updatedAt: run.startedAt,
+      });
+      return { outcome: "started", run };
     });
+    if (admission.outcome === "started") this.emit("validator-run:started", admission.run);
+    return admission;
+  }
+
+  /*
+  FNXC:MissionValidation 2026-08-11-04:27:
+  The engine's non-memo fallback still calls this low-level creator, so it must share the feature
+  row lock with manual admission. Preserve unrestricted automatic seeding and fingerprint behavior,
+  but refuse an engine fallback that arrives after a fresh manual run; otherwise the two paths can
+  serialize as manual-create then fallback-create and leave two running rows.
+  */
+  async startValidatorRun(featureId: string, triggerType?: string, taskId?: string, inputFingerprint?: string): Promise<MissionValidatorRun> {
+    const run = await this.layer.transactionImmediate<MissionValidatorRun>(async (tx) => {
+      const locked = await tx.select().from(schema.project.missionFeatures).where(and(
+        eq(schema.project.missionFeatures.projectId, missionProjectId()),
+        eq(schema.project.missionFeatures.id, featureId),
+      )).for("update");
+      const feature = locked[0] ? await getFeature(tx, featureId) : undefined;
+      if (!feature) throw new Error(`Feature ${featureId} not found`);
+
+      if (triggerType === "task_completion") {
+        const cutoff = Date.now() - VALIDATION_INFLIGHT_STALE_MAX_AGE_MS;
+        const manualRun = (await listValidatorRunsByFeature(tx, featureId)).find(
+          (candidate) => candidate.status === "running"
+            && candidate.triggerType === "manual"
+            && Date.parse(candidate.startedAt) >= cutoff,
+        );
+        if (manualRun) throw new Error(`Validator run ${manualRun.id} is already running for feature ${featureId}`);
+      }
+
+      const created = await this.buildValidatorRun(tx, feature, triggerType, taskId, inputFingerprint);
+      await createValidatorRun(tx, created);
+      await updateFeature(tx, {
+        ...feature,
+        validatorAttemptCount: created.validatorAttempt,
+        lastValidatorRunId: created.id,
+        loopState: "validating",
+        updatedAt: created.startedAt,
+      });
+      return created;
+    });
+    this.emit("validator-run:started", run);
     return run;
   }
 
@@ -1515,13 +1941,22 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
    * holding a database transaction while a model session executes.
    */
   async admitValidatorRun(featureId: string, input: ValidatorRunAdmissionInput): Promise<ValidatorRunAdmission> {
-    return this.layer.transactionImmediate(async (tx) => {
+    let statusEvent: MissionEvent | undefined;
+    const admission = await this.layer.transactionImmediate<ValidatorRunAdmission>(async (tx) => {
       const locked = await tx.select().from(schema.project.missionFeatures).where(and(
         eq(schema.project.missionFeatures.projectId, missionProjectId()),
         eq(schema.project.missionFeatures.id, featureId),
       )).for("update");
       const feature = locked[0] ? await getFeature(tx, featureId) : undefined;
       if (!feature) throw new Error(`Feature ${featureId} not found`);
+      /*
+      FNXC:MissionValidation 2026-08-11-05:38:
+      Automatic admission must observe fingerprint-less manual and non-memo automatic runs so
+      one feature cannot validate concurrently. The shared reaper window prevents a dead run
+      from starving the loop; reuse-pass and failure-budget decisions below stay strictly
+      fingerprint-scoped because they are content-addressed.
+      */
+      const blockingRun = await this.findBlockingInFlightRun(tx, featureId);
       const rows = await tx.select().from(schema.project.missionValidatorRuns).where(and(
         eq(schema.project.missionValidatorRuns.projectId, missionProjectId()),
         eq(schema.project.missionValidatorRuns.featureId, featureId),
@@ -1534,15 +1969,28 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       const slice = await getSlice(tx, feature.sliceId);
       const milestone = slice ? await getMilestone(tx, slice.milestoneId) : undefined;
       const mission = milestone ? await getMission(tx, milestone.missionId) : undefined;
-      const append = async (outcome: ValidatorRunAdmission["outcome"], run?: MissionValidatorRun, stuck = false) => {
+      const append = async (
+        outcome: ValidatorRunAdmission["outcome"],
+        run?: MissionValidatorRun,
+        stuck = false,
+        blockingScope?: ValidatorRunAdmission["blockingScope"],
+      ) => {
         if (!mission) return;
         const seq = (await getMaxEventSeq(tx)) + 1;
-        await insertMissionEvent(tx, { id: this.generateId("ME"), missionId: mission.id, eventType: "warning", description: "validation memoized", metadata: { outcome, featureId, fingerprint: input.inputFingerprint, ...(run ? { runId: run.id } : {}) }, timestamp: new Date().toISOString(), seq });
+        await insertMissionEvent(tx, { id: this.generateId("ME"), missionId: mission.id, eventType: "warning", description: "validation memoized", metadata: { outcome, featureId, fingerprint: input.inputFingerprint, ...(run ? { runId: run.id } : {}), ...(blockingScope ? { blockingScope } : {}) }, timestamp: new Date().toISOString(), seq });
         if (stuck) await insertMissionEvent(tx, { id: this.generateId("ME"), missionId: mission.id, eventType: "warning", description: "validation-stuck", metadata: { featureId, fingerprint: input.inputFingerprint, ...(run ? { runId: run.id } : {}) }, timestamp: new Date().toISOString(), seq: seq + 1 });
       };
-      if (running) { await append("running", running); return { outcome: "running", run: running }; }
+      if (blockingRun) {
+        await append("running", blockingRun, false, "feature");
+        return { outcome: "running", run: blockingRun, blockingScope: "feature" };
+      }
+      if (running) {
+        await append("running", running, false, "fingerprint");
+        return { outcome: "running", run: running, blockingScope: "fingerprint" };
+      }
       if (terminal?.status === "passed" && input.reusePass) {
         await updateFeature(tx, { ...feature, status: "done", loopState: "passed", lastValidatorStatus: "passed", lastValidatorRunId: terminal.id, updatedAt: new Date().toISOString() });
+        statusEvent = await this.recordFeatureStatusChange(tx, feature, "done", { type: "system", id: "mission-store", source: "validator-reuse-pass" });
         await append("reuse-pass", terminal);
         return { outcome: "reuse-pass", run: terminal };
       }
@@ -1564,6 +2012,10 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       await updateFeature(tx, { ...feature, validatorAttemptCount: run.validatorAttempt, lastValidatorRunId: run.id, loopState: "validating", validationBudgetFingerprint: feature.validationBudgetFingerprint !== input.inputFingerprint ? undefined : feature.validationBudgetFingerprint, validationBudgetRunId: feature.validationBudgetFingerprint !== input.inputFingerprint ? undefined : feature.validationBudgetRunId, validationBudgetBlockedAt: feature.validationBudgetFingerprint !== input.inputFingerprint ? undefined : feature.validationBudgetBlockedAt, updatedAt: now });
       return { outcome: "start", run };
     });
+    // FNXC:MissionStatusWrites 2026-08-10-13:45: Emit only after commit so observers never
+    // receive a transition for a transaction that subsequently rolls back.
+    if (statusEvent) this.emit("mission:event", statusEvent);
+    return admission;
   }
 
   async getValidatorRun(id: string): Promise<MissionValidatorRun | undefined> {
@@ -1587,24 +2039,35 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     const run = await getValidatorRun(this.db, runId);
     if (!run) throw new Error(`Validator run ${runId} not found`);
     if (run.status !== "running") throw new Error(`Validator run ${runId} is not in 'running' status`);
-    const feature = await getFeature(this.db, run.featureId);
-    if (!feature) throw new Error(`Feature ${run.featureId} not found`);
     const now = new Date().toISOString();
     const loopState: FeatureLoopState = result === "passed" ? "passed" : result === "failed" ? "needs_fix" : result === "blocked" ? "blocked" : "validating";
     const updatedRun: MissionValidatorRun = { ...run, status: result, summary, blockedReason, completedAt: now, updatedAt: now };
-    const won = await this.layer.transactionImmediate(async (tx) => {
+    /*
+    FNXC:MissionValidation 2026-08-11-05:26:
+    A validator run becomes historical when a newer admission replaces feature.lastValidatorRunId. Complete the historical run, but only the current owner may project loop state or trigger passed-run reconciliation.
+    */
+    const completion = await this.layer.transactionImmediate(async (tx) => {
+      await tx.select().from(schema.project.missionFeatures).where(and(
+        eq(schema.project.missionFeatures.projectId, missionProjectId()),
+        eq(schema.project.missionFeatures.id, run.featureId),
+      )).for("update");
+      const feature = await getFeature(tx, run.featureId);
+      if (!feature) throw new Error(`Feature ${run.featureId} not found`);
       const winner = await transitionRunningValidatorRun(tx, updatedRun);
-      if (!winner) return false;
-      await updateFeature(tx, { ...feature, loopState, lastValidatorStatus: result, updatedAt: now });
-      return true;
+      if (!winner) return { won: false, ownsFeature: false, feature };
+      const ownsFeature = feature.lastValidatorRunId === run.id;
+      if (ownsFeature) await updateFeature(tx, { ...feature, loopState, lastValidatorStatus: result, updatedAt: now });
+      return { won: true, ownsFeature, feature };
     });
-    if (!won) return (await getValidatorRun(this.db, runId)) ?? updatedRun;
-    const updatedFeature = await getFeature(this.db, feature.id);
-    if (updatedFeature) this.emit("feature:updated", updatedFeature);
-    await this.recomputeSliceStatus(feature.sliceId);
+    if (!completion.won) return (await getValidatorRun(this.db, runId)) ?? updatedRun;
+    if (completion.ownsFeature) {
+      const updatedFeature = await getFeature(this.db, completion.feature.id);
+      if (updatedFeature) this.emit("feature:updated", updatedFeature);
+      await this.recomputeSliceStatus(completion.feature.sliceId);
+    }
     const durationMs = Math.max(0, Date.parse(now) - Date.parse(run.startedAt));
     this.emit("validator-run:completed", updatedRun, result, durationMs);
-    if (result === "passed") await this.reconcileSupersededGeneratedFixFeatures(feature.sliceId);
+    if (result === "passed" && completion.ownsFeature) await this.reconcileSupersededGeneratedFixFeatures(completion.feature.sliceId);
     return updatedRun;
   }
 
@@ -1647,18 +2110,35 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     if (!mission) throw new Error(`Mission ${milestone.missionId} not found`);
     const now = new Date().toISOString();
     const updatedRun: MissionValidatorRun = { ...run, status: "error", summary: reason, completedAt: now, updatedAt: now };
-    const shouldUpdateFeature = mission.status !== "archived" && mission.status !== "complete" && feature.status !== "done";
-    const won = await this.layer.transactionImmediate(async (tx) => {
+    const reaped = await this.layer.transactionImmediate(async (tx) => {
+      await tx.select().from(schema.project.missionFeatures).where(and(
+        eq(schema.project.missionFeatures.projectId, missionProjectId()),
+        eq(schema.project.missionFeatures.id, run.featureId),
+      )).for("update");
+      const currentFeature = await getFeature(tx, run.featureId);
+      if (!currentFeature) throw new Error(`Feature ${run.featureId} not found`);
       const winner = await transitionRunningValidatorRun(tx, updatedRun);
-      if (!winner) return false;
-      if (shouldUpdateFeature) await updateFeature(tx, { ...feature, loopState: "needs_fix", lastValidatorStatus: "error", updatedAt: now });
-      return true;
+      if (!winner) return { won: false, updatedFeature: false, feature: currentFeature };
+      const ownsFeature = currentFeature.lastValidatorRunId === run.id;
+      /*
+      FNXC:MissionValidation 2026-08-11-05:54:
+      Reaper eligibility must use mission state protected by the same transaction as the feature update. A mission that becomes archived or complete after the preflight read must not be reopened by a stale validator reap.
+      */
+      await tx.select().from(schema.project.missions).where(and(
+        eq(schema.project.missions.projectId, missionProjectId()),
+        eq(schema.project.missions.id, mission.id),
+      )).for("update");
+      const currentMission = await getMission(tx, mission.id);
+      if (!currentMission) throw new Error(`Mission ${mission.id} not found`);
+      const shouldUpdateFeature = ownsFeature && currentMission.status !== "archived" && currentMission.status !== "complete" && currentFeature.status !== "done";
+      if (shouldUpdateFeature) await updateFeature(tx, { ...currentFeature, loopState: "needs_fix", lastValidatorStatus: "error", updatedAt: now });
+      return { won: true, updatedFeature: shouldUpdateFeature, feature: currentFeature };
     });
-    if (!won) return (await getValidatorRun(this.db, runId)) ?? updatedRun;
-    if (shouldUpdateFeature) {
-      const updatedFeature = await getFeature(this.db, feature.id);
+    if (!reaped.won) return (await getValidatorRun(this.db, runId)) ?? updatedRun;
+    if (reaped.updatedFeature) {
+      const updatedFeature = await getFeature(this.db, reaped.feature.id);
       if (updatedFeature) this.emit("feature:updated", updatedFeature);
-      await this.recomputeSliceStatus(feature.sliceId);
+      await this.recomputeSliceStatus(reaped.feature.sliceId);
     }
     this.emit("validator-run:completed", updatedRun, "error", Math.max(0, Date.parse(now) - Date.parse(run.startedAt)));
     return updatedRun;
@@ -1814,11 +2294,7 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       throw new MissionRemediationStoppedError("budget-exhausted");
     }
     if (outcome.kind === "stopped") {
-      throw new MissionRemediationStoppedError(
-        outcome.reason === "budget-exhausted" || outcome.reason === "operator-intervention"
-          ? outcome.reason
-          : "legacy-unknown-stop",
-      );
+      throw new MissionRemediationStoppedError(normalizeMissionBlockerReason(outcome.reason).reason);
     }
     const feature = outcome.feature;
     this.emit("feature:created", feature);
@@ -1856,20 +2332,48 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       FNXC:PostgresMissionStatusReconciliation 2026-07-14-17:55:
       Superseded generated fixes are one reconciliation set. Update their terminal status in one statement instead of routing every ID through updateFeature/getFeature/cascade reads; emit the same per-feature observable events after persistence.
       */
-      await this.db.update(schema.project.missionFeatures).set({
-        status: "done",
-        taskId: null,
-        loopState: "passed",
-        lastValidatorStatus: "passed",
-        updatedAt: now,
-      }).where(inArray(schema.project.missionFeatures.id, ids));
-      for (const id of ids) {
-        const feature = byId.get(id)!;
+      const { events, updatedFeatures } = await this.layer.transactionImmediate(async (tx) => {
+        /*
+        FNXC:MissionStatusWrites 2026-08-10-13:21:
+        The bulk reconciliation must lock and re-read its candidates inside this transaction.
+        Using the earlier discovery snapshot would let a concurrent link/status writer overwrite
+        a newer row and emit an event with a stale `from` status.
+        */
+        const locked = await tx.select({ id: schema.project.missionFeatures.id })
+          .from(schema.project.missionFeatures)
+          .where(inArray(schema.project.missionFeatures.id, ids))
+          .for("update");
+        const lockedIds = locked.map((row) => row.id);
+        const preImages = lockedIds.length > 0 ? await listFeaturesByIds(tx, lockedIds) : [];
+        const changed = preImages.filter((feature) => feature.status !== "done" || feature.loopState !== "passed" || feature.lastValidatorStatus !== "passed" || feature.taskId);
+        if (changed.length === 0) return { events: [] as MissionEvent[], updatedFeatures: [] as MissionFeature[] };
+
+        await tx.update(schema.project.missionFeatures).set({
+          status: "done",
+          taskId: null,
+          loopState: "passed",
+          lastValidatorStatus: "passed",
+          updatedAt: now,
+        }).where(inArray(schema.project.missionFeatures.id, changed.map((feature) => feature.id)));
+        // One sequence read preserves contiguous ordering for the bulk statement without
+        // expanding its write into per-feature updates.
+        let seq = await getMaxEventSeq(tx);
+        const events: MissionEvent[] = [];
+        for (const feature of changed) {
+          if (feature.status !== "done") {
+            const event = await this.recordFeatureStatusChange(tx, feature, "done", { type: "system", id: "mission-store", source: "superseded-fix-reconcile" }, undefined, ++seq);
+            if (event) events.push(event);
+          }
+        }
+        return { events, updatedFeatures: changed };
+      });
+      for (const event of events) this.emit("mission:event", event);
+      for (const feature of updatedFeatures) {
         const updated = { ...feature, status: "done" as const, taskId: undefined, loopState: "passed" as const, lastValidatorStatus: "passed" as const, updatedAt: now };
         this.emit("feature:updated", updated);
         if (feature.taskId) await clearTaskMissionLinkage(this.db, feature.taskId);
       }
-      await this.recomputeSliceStatus(sliceId);
+      if (updatedFeatures.length > 0) await this.recomputeSliceStatus(sliceId);
     }
     return { supersededCount: ids.length, featureIds: ids };
   }
@@ -2485,7 +2989,11 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
   }
 
   async computeMissionStatus(missionId: string): Promise<MissionStatus> {
-    const milestones = await listMilestones(this.db, missionId);
+    return this.computeMissionStatusWithHandle(this.db, missionId);
+  }
+
+  private async computeMissionStatusWithHandle(handle: QueryHandle, missionId: string): Promise<MissionStatus> {
+    const milestones = await listMilestones(handle, missionId);
     if (milestones.length === 0) return "planning";
     const allComplete = milestones.every((m) => m.status === "complete");
     if (allComplete) return "complete";
@@ -2502,16 +3010,55 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     if (slice && slice.status !== newStatus) await this.updateSlice(sliceId, { status: newStatus });
   }
 
+  /*
+  FNXC:MissionStatusRollup 2026-08-11-04:27:
+  updateMilestone, deleteMilestone, updateSlice, deleteSlice, slice admission, and the engine's
+  recomputeMissionStatusChain reach this cascade. It must not clear blocked/archived intent: even
+  an all-complete blocked mission stays blocked until an explicit clear or resume. Lock the row,
+  compute, and persist in one transaction so an explicit status write cannot race past the guard.
+  The direct atomic milestone write retains updateMilestone's normal mission cascade after commit.
+  The terminal-task transaction has a second milestone writer guarded with this same predicate below.
+  */
   private async recomputeMilestoneStatus(milestoneId: string): Promise<void> {
-    const newStatus = await this.computeMilestoneStatus(milestoneId);
-    const milestone = await getMilestone(this.db, milestoneId);
-    if (milestone && milestone.status !== newStatus) await this.updateMilestone(milestoneId, { status: newStatus });
+    const updated = await this.layer.transactionImmediate(async (tx) => {
+      await tx.select().from(schema.project.milestones).where(eq(schema.project.milestones.id, milestoneId)).for("update");
+      const milestone = await getMilestone(tx, milestoneId);
+      if (!milestone) return undefined;
+      const newStatus = await this.computeMilestoneStatusWithHandle(tx, milestoneId);
+      if (!shouldApplyRecomputedStatus(milestone.status, newStatus, ROLLUP_OWNED_MILESTONE_STATUSES)) return undefined;
+      const updated = { ...milestone, status: newStatus, updatedAt: new Date().toISOString() };
+      await updateMilestone(tx, updated);
+      return updated;
+    });
+    if (!updated) return;
+    this.emit("milestone:updated", updated);
+    await this.recomputeMissionStatus(updated.missionId);
   }
 
   private async recomputeMissionStatus(missionId: string): Promise<void> {
-    const newStatus = await this.computeMissionStatus(missionId);
-    const mission = await getMission(this.db, missionId);
-    if (mission && mission.status !== newStatus) await this.updateMission(missionId, { status: newStatus });
+    const outcome = await this.layer.transactionImmediate(async (tx) => {
+      await tx.select().from(schema.project.missions).where(eq(schema.project.missions.id, missionId)).for("update");
+      const mission = await getMission(tx, missionId);
+      if (!mission) return undefined;
+      const newStatus = await this.computeMissionStatusWithHandle(tx, missionId);
+      if (!shouldApplyRecomputedStatus(mission.status, newStatus, ROLLUP_OWNED_MISSION_STATUSES)) return undefined;
+      const updated = { ...mission, status: newStatus, updatedAt: new Date().toISOString() };
+      await updateMission(tx, updated);
+      const event: MissionEvent = {
+        id: this.generateId("ME"), missionId, eventType: "mission_status_changed",
+        description: `Mission status changed from ${mission.status} to ${updated.status}`,
+        metadata: buildMissionStatusEventMetadata({
+          entity: "mission", field: "status", from: mission.status, to: updated.status, ids: {},
+          actor: { type: "system", id: "mission-store", displayName: "Mission store", source: "mission-store" },
+        }),
+        timestamp: new Date().toISOString(), seq: (await getMaxEventSeq(tx)) + 1,
+      };
+      await insertMissionEvent(tx, event);
+      return { updated, event };
+    });
+    if (!outcome) return;
+    this.emit("mission:updated", outcome.updated);
+    this.emit("mission:event", outcome.event);
   }
 
   /*

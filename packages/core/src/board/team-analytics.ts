@@ -360,8 +360,18 @@ async function aggregateTeamAnalyticsAsync(
   interpolated as SQL text.
   */
   const inList = (lanes: readonly string[]) => sql.join(lanes.map((lane) => sql`${lane}`), sql`, `);
+  /*
+  FNXC:MultiProjectIsolation 2026-08-11-09:13:
+  Runfusion/Fusion#3414 requires analytics to carry the agent ownership predicate:
+  owner/superuser PostgreSQL connections bypass RLS. An unbound layer remains an
+  intentional cross-project analytics reader, so its predicate is a no-op.
+  */
+  const agentProjectId = layer.projectId?.trim();
+  const agentScope = agentProjectId ? sql`WHERE project_id = ${agentProjectId}` : sql``;
+  // FNXC:MultiProjectIsolation 2026-08-11-10:25: Bound analytics must scope every task-derived metric, not only its agent directory, because duplicate agent IDs can otherwise import another project's token usage.
+  const taskScope = agentProjectId ? sql`AND project_id = ${agentProjectId}` : sql``;
   const agents = (await layer.db.execute(
-    sql`SELECT id, name, role, state FROM project.agents ORDER BY id`,
+    sql`SELECT id, name, role, state FROM project.agents ${agentScope} ORDER BY id`,
   )) as unknown as AgentRow[];
 
   const tokFrom = query.from !== undefined ? sql`AND token_usage_last_used_at >= ${query.from}` : sql``;
@@ -379,7 +389,7 @@ async function aggregateTeamAnalyticsAsync(
           token_usage_model_provider      AS "tokenUsageModelProvider",
           token_usage_model_id            AS "tokenUsageModelId"
         FROM project.tasks
-        WHERE assigned_agent_id IS NOT NULL AND token_usage_last_used_at IS NOT NULL ${tokFrom} ${tokTo}`,
+        WHERE assigned_agent_id IS NOT NULL AND token_usage_last_used_at IS NOT NULL ${taskScope} ${tokFrom} ${tokTo}`,
   )) as Array<Record<string, unknown>>;
   const tokenRows: TaskTokenRow[] = tokenRowsRaw.map((r) => ({
     agentId: String(r.agentId),
@@ -399,14 +409,14 @@ async function aggregateTeamAnalyticsAsync(
   const completedRows = (await layer.db.execute(
     sql`SELECT assigned_agent_id AS "agentId", count(*)::int AS count
         FROM project.tasks
-        WHERE assigned_agent_id IS NOT NULL AND "column" IN (${inList(completeLanes)}) AND column_moved_at IS NOT NULL ${compFrom} ${compTo}
+        WHERE assigned_agent_id IS NOT NULL AND "column" IN (${inList(completeLanes)}) AND column_moved_at IS NOT NULL ${taskScope} ${compFrom} ${compTo}
         GROUP BY assigned_agent_id`,
   )) as unknown as CountByAgentRow[];
 
   const currentRows = (await layer.db.execute(
     sql`SELECT assigned_agent_id AS "agentId", "column" AS "columnName", count(*)::int AS count
         FROM project.tasks
-        WHERE assigned_agent_id IS NOT NULL AND "column" IN (${inList(activeLanes)})
+        WHERE assigned_agent_id IS NOT NULL AND "column" IN (${inList(activeLanes)}) ${taskScope}
         GROUP BY assigned_agent_id, "column"`,
   )) as unknown as Array<CountByAgentRow & { columnName: string }>;
 
@@ -419,7 +429,7 @@ async function aggregateTeamAnalyticsAsync(
           AND modified_files IS NOT NULL
           AND jsonb_typeof(modified_files) = 'array'
           AND jsonb_array_length(modified_files) > 0
-          ${filesFrom} ${filesTo}`,
+          ${taskScope} ${filesFrom} ${filesTo}`,
   )) as Array<{ agentId: string; modifiedFiles: unknown }>;
   const fileRows: ModifiedFilesRow[] = fileRowsRaw.map((r) => ({
     agentId: String(r.agentId),

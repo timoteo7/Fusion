@@ -1,6 +1,6 @@
 {
   "name": "@fusion/core",
-  "version": "0.75.1",
+  "version": "0.76.0-beta.2",
   "license": "MIT",
   "description": "Fusion core: task store, scheduler, settings, and shared domain types backing the Fusion AI coding agent.",
   "homepage": "https://github.com/Runfusion/Fusion#readme",
@@ -39,6 +39,16 @@
       "source": "./src/i18n/detect-content-language.ts",
       "import": "./dist/i18n/detect-content-language.js"
     },
+    "./mcp-builtin-servers": {
+      "types": "./src/config/mcp-builtin-servers.ts",
+      "source": "./src/config/mcp-builtin-servers.ts",
+      "import": "./dist/config/mcp-builtin-servers.js"
+    },
+    "./memory-mcp": {
+      "types": "./src/memory/mcp/index.ts",
+      "source": "./src/memory/mcp/index.ts",
+      "import": "./dist/memory/mcp/index.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -53,15 +63,14 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --silent=passed-only --reporter=dot",
     "test:embedded-postgres": "vitest run src/__tests__/postgres/embedded-lifecycle.test.ts --silent=passed-only --reporter=dot",
-    "test:pg-gate": "vitest run --config vitest.pg.config.ts src/__tests__/postgres/handoff-to-review-atomicity.pg.test.ts src/__tests__/postgres/task-lifecycle-e2e.pg.test.ts src/__tests__/postgres/sync-workflow-ir-is-always-default.pg.test.ts --silent=passed-only --reporter=dot",
+    "test:pg-gate": "vitest run --config vitest.pg.config.ts src/__tests__/postgres/handoff-to-review-atomicity.pg.test.ts src/__tests__/postgres/task-lifecycle-e2e.pg.test.ts --silent=passed-only --reporter=dot",
     "test:unit-gate": "vitest run src/__tests__/task-merge.test.ts src/__tests__/legacy-adoption.test.ts src/__tests__/no-hardcoded-lifecycle-columns.test.ts src/__tests__/sync-workflow-ir-callsite-allowlist.test.ts --silent=passed-only --reporter=dot"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@earendil-works/pi-coding-agent": "0.84.1",
     "@types/dockerode": "^3.3.41",
     "@types/node": "^25.5.0",
     "@vitest/coverage-v8": "^4.1.10",
-    "typescript": "^5.7.0",
     "vitest": "^4.1.10"
   },
   "engines": {
@@ -78,7 +87,8 @@
     "extract-zip": "^2.0.1",
     "postgres": "^3.4.9",
     "tar": "^7.5.13",
-    "yaml": "^2.8.3"
+    "yaml": "^2.8.3",
+    "typescript": "^5.7.0"
   },
   "optionalDependencies": {
     "keytar": "^7.9.0"

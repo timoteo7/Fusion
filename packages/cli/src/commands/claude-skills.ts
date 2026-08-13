@@ -36,6 +36,8 @@ import { fileURLToPath } from "node:url";
  * `packages/cli/skill/fusion/` is symlinked in at this path.
  */
 export const FUSION_SKILL_NAME = "fusion";
+export const SHIPPED_SKILL_NAMES = [FUSION_SKILL_NAME, "computer-use"] as const;
+export type ShippedSkillName = (typeof SHIPPED_SKILL_NAMES)[number];
 
 /**
  * Result of an install attempt.
@@ -99,11 +101,13 @@ export function isPiClaudeCliConfigured(
  *
  * Returns null if the directory is missing (e.g. broken install).
  */
-export function resolveFusionSkillSource(): string | null {
+export function resolveShippedSkillSource(skillName: ShippedSkillName): string | null {
   const here = fileURLToPath(import.meta.url);
-  const candidate = resolve(dirname(here), "..", "..", "skill", FUSION_SKILL_NAME);
+  const candidate = resolve(dirname(here), "..", "..", "skill", skillName);
   return existsSync(candidate) ? candidate : null;
 }
+/** Backward-compatible fusion delegate. */
+export function resolveFusionSkillSource(): string | null { return resolveShippedSkillSource(FUSION_SKILL_NAME); }
 
 /**
  * Install the fusion skill into `<projectPath>/.claude/skills/fusion`.
@@ -117,22 +121,22 @@ export function resolveFusionSkillSource(): string | null {
  *
  * Never throws: errors are captured and returned as {outcome: "failed", reason}.
  */
-export function installFusionSkillIntoProject(
-  projectPath: string,
+export function installShippedSkillIntoProject(
+  projectPath: string, skillName: ShippedSkillName,
   options: { source?: string | null; enabled?: boolean } = {},
 ): InstallResult {
-  const target = join(projectPath, ".claude", "skills", FUSION_SKILL_NAME);
+  const target = join(projectPath, ".claude", "skills", skillName);
 
   if (options.enabled === false) {
     return { outcome: "skipped", target, reason: "pi-claude-cli not configured" };
   }
 
-  const source = options.source ?? resolveFusionSkillSource();
+  const source = options.source ?? resolveShippedSkillSource(skillName);
   if (!source) {
     return {
       outcome: "failed",
       target,
-      reason: "fusion skill source directory not found in installed package",
+      reason: `${skillName} skill source directory not found in installed package`,
     };
   }
 
@@ -209,21 +213,20 @@ export function installFusionSkillIntoProject(
  * Failures are collected but never thrown — startup must not be blocked by
  * filesystem quirks on a single project.
  */
-export function ensureFusionSkillForProjects(
-  projects: Array<{ id: string; name: string; path: string }>,
-  options: { enabled: boolean; source?: string | null } = { enabled: false },
-): InstallResult[] {
-  if (!options.enabled) {
-    return projects.map((p) => ({
-      outcome: "skipped" as const,
-      target: join(p.path, ".claude", "skills", FUSION_SKILL_NAME),
-      reason: "pi-claude-cli not configured",
-    }));
-  }
-  const source = options.source ?? resolveFusionSkillSource();
-  return projects.map((p) =>
-    installFusionSkillIntoProject(p.path, { source, enabled: true }),
-  );
+export function installShippedSkillsIntoProject(projectPath: string, options: { enabled?: boolean; sources?: Partial<Record<ShippedSkillName, string | null>> } = {}): InstallResult[] {
+  return SHIPPED_SKILL_NAMES.map((skillName) => installShippedSkillIntoProject(projectPath, skillName, { enabled: options.enabled, source: options.sources?.[skillName] }));
+}
+
+export function ensureShippedSkillsForProjects(projects: Array<{ id: string; name: string; path: string }>, options: { enabled: boolean; sources?: Partial<Record<ShippedSkillName, string | null>> }): InstallResult[] {
+  return projects.flatMap((project) => installShippedSkillsIntoProject(project.path, options));
+}
+
+/** Backward-compatible fusion delegates. */
+export function installFusionSkillIntoProject(projectPath: string, options: { source?: string | null; enabled?: boolean } = {}): InstallResult {
+  return installShippedSkillIntoProject(projectPath, FUSION_SKILL_NAME, options);
+}
+export function ensureFusionSkillForProjects(projects: Array<{ id: string; name: string; path: string }>, options: { enabled: boolean; source?: string | null } = { enabled: false }): InstallResult[] {
+  return projects.map((project) => installFusionSkillIntoProject(project.path, options));
 }
 
 function isBrokenSymlink(path: string): boolean {

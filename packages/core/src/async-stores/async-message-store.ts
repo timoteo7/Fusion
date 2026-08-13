@@ -43,6 +43,7 @@ interface MessageRow {
   content: string;
   type: string;
   read: number | null;
+  archived: number | null;
   metadata: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
@@ -61,6 +62,7 @@ const messageColumns = {
   content: schema.project.messages.content,
   type: schema.project.messages.type,
   read: schema.project.messages.read,
+  archived: schema.project.messages.archived,
   metadata: schema.project.messages.metadata,
   createdAt: schema.project.messages.createdAt,
   updatedAt: schema.project.messages.updatedAt,
@@ -76,6 +78,7 @@ function rowToMessage(row: MessageRow): Message {
     content: row.content,
     type: row.type as MessageType,
     read: (row.read ?? 0) === 1,
+    archived: (row.archived ?? 0) === 1,
     metadata: row.metadata ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -87,6 +90,13 @@ function participantIdsForLookup(ownerId: string, ownerType: ParticipantType): s
     return [DASHBOARD_USER_ID, "user", "user:dashboard", "User: user:dashboard"];
   }
   return [ownerId];
+}
+
+/** Archived correspondence stays out of default reads; NULL preserves pre-migration rows. */
+function archivedCondition(archived?: boolean) {
+  if (archived === true) return eq(schema.project.messages.archived, 1);
+  if (archived === false) return or(eq(schema.project.messages.archived, 0), sql`${schema.project.messages.archived} IS NULL`)!;
+  return or(eq(schema.project.messages.archived, 0), sql`${schema.project.messages.archived} IS NULL`)!;
 }
 
 /**
@@ -115,6 +125,7 @@ export async function sendMessage(
     content: sanitizedContent,
     type: message.type,
     read: message.read ? 1 : 0,
+    archived: message.archived ? 1 : 0,
     metadata: sanitizedMetadata,
     createdAt: message.createdAt,
     updatedAt: message.updatedAt,
@@ -124,6 +135,7 @@ export async function sendMessage(
     content: sanitizedContent,
     metadata: sanitizedMetadata,
     read: message.read ? 1 : 0,
+    archived: message.archived ? 1 : 0,
   });
 }
 
@@ -146,6 +158,7 @@ export async function sendMessageOnce(
       content: message.content,
       type: message.type,
       read: message.read ? 1 : 0,
+      archived: message.archived ? 1 : 0,
       metadata: message.metadata,
       createdAt: message.createdAt,
       updatedAt: message.updatedAt,
@@ -219,7 +232,7 @@ export async function queryMessagesByParticipant(
   const idCol = direction === "to" ? schema.project.messages.toId : schema.project.messages.fromId;
   const typeCol = direction === "to" ? schema.project.messages.toType : schema.project.messages.fromType;
   const participantIds = participantIdsForLookup(ownerId, ownerType);
-  const conditions: ReturnType<typeof eq>[] = [
+  const conditions = [
     inArray(idCol, participantIds),
     eq(typeCol, ownerType),
   ];
@@ -229,6 +242,7 @@ export async function queryMessagesByParticipant(
   if (filter?.read !== undefined) {
     conditions.push(eq(schema.project.messages.read, filter.read ? 1 : 0));
   }
+  conditions.push(archivedCondition(filter?.archived));
   const limit = filter?.limit ?? 100;
   const offset = filter?.offset ?? 0;
   const rows = await handle
@@ -264,6 +278,22 @@ export async function markMessageAsRead(
  * Mark all inbox messages as read for a participant. Returns the count of
  * messages that were unread before the update.
  */
+export async function setMessageArchived(
+  handle: QueryHandle,
+  id: string,
+  archived: boolean,
+): Promise<Message | null> {
+  const existing = await getMessage(handle, id);
+  if (!existing) return null;
+  if (existing.archived === archived) return existing;
+  const rows = await handle
+    .update(schema.project.messages)
+    .set({ archived: archived ? 1 : 0, updatedAt: new Date().toISOString() })
+    .where(eq(schema.project.messages.id, id))
+    .returning(messageColumns);
+  return rows[0] ? rowToMessage(rows[0] as MessageRow) : null;
+}
+
 export async function markAllMessagesAsRead(
   handle: QueryHandle,
   ownerId: string,
@@ -279,6 +309,7 @@ export async function markAllMessagesAsRead(
         inArray(schema.project.messages.toId, participantIds),
         eq(schema.project.messages.toType, ownerType),
         eq(schema.project.messages.read, 0),
+        archivedCondition(),
       ),
     );
   const count = countRows[0]?.count ?? 0;
@@ -290,6 +321,7 @@ export async function markAllMessagesAsRead(
         inArray(schema.project.messages.toId, participantIds),
         eq(schema.project.messages.toType, ownerType),
         eq(schema.project.messages.read, 0),
+        archivedCondition(),
       ),
     );
   return count;
@@ -343,7 +375,7 @@ export async function getConversation(
   handle: QueryHandle,
   participantA: { id: string; type: ParticipantType },
   participantB: { id: string; type: ParticipantType },
-  options?: { limit?: number },
+  options?: Pick<MessageFilter, "limit" | "archived">,
 ): Promise<Message[]> {
   const limit = Math.max(1, options?.limit ?? DEFAULT_CONVERSATION_LIMIT);
   const aIds = participantIdsForLookup(participantA.id, participantA.type);
@@ -352,19 +384,22 @@ export async function getConversation(
     .select(messageColumns)
     .from(schema.project.messages)
     .where(
-      or(
-        and(
-          inArray(schema.project.messages.fromId, aIds),
-          eq(schema.project.messages.fromType, participantA.type),
-          inArray(schema.project.messages.toId, bIds),
-          eq(schema.project.messages.toType, participantB.type),
+      and(
+        or(
+          and(
+            inArray(schema.project.messages.fromId, aIds),
+            eq(schema.project.messages.fromType, participantA.type),
+            inArray(schema.project.messages.toId, bIds),
+            eq(schema.project.messages.toType, participantB.type),
+          ),
+          and(
+            inArray(schema.project.messages.fromId, bIds),
+            eq(schema.project.messages.fromType, participantB.type),
+            inArray(schema.project.messages.toId, aIds),
+            eq(schema.project.messages.toType, participantA.type),
+          ),
         ),
-        and(
-          inArray(schema.project.messages.fromId, bIds),
-          eq(schema.project.messages.fromType, participantB.type),
-          inArray(schema.project.messages.toId, aIds),
-          eq(schema.project.messages.toType, participantA.type),
-        ),
+        archivedCondition(options?.archived),
       ),
     )
     .orderBy(desc(schema.project.messages.createdAt))
@@ -390,6 +425,7 @@ export async function getMailbox(
         inArray(schema.project.messages.toId, participantIds),
         eq(schema.project.messages.toType, ownerType),
         eq(schema.project.messages.read, 0),
+        archivedCondition(),
       ),
     );
   const unreadCount = unreadRows[0]?.count ?? 0;
@@ -400,6 +436,7 @@ export async function getMailbox(
       and(
         inArray(schema.project.messages.toId, participantIds),
         eq(schema.project.messages.toType, ownerType),
+        archivedCondition(),
       ),
     )
     .orderBy(desc(schema.project.messages.createdAt), desc(schema.project.messages.id))
@@ -415,11 +452,14 @@ export async function getMailbox(
 /**
  * Get all agent-to-agent messages (newest first).
  */
-export async function getAllAgentToAgentMessages(handle: QueryHandle): Promise<Message[]> {
+export async function getAllAgentToAgentMessages(
+  handle: QueryHandle,
+  filter?: Pick<MessageFilter, "archived">,
+): Promise<Message[]> {
   const rows = await handle
     .select(messageColumns)
     .from(schema.project.messages)
-    .where(eq(schema.project.messages.type, "agent-to-agent"))
+    .where(and(eq(schema.project.messages.type, "agent-to-agent"), archivedCondition(filter?.archived)))
     .orderBy(desc(schema.project.messages.createdAt), desc(schema.project.messages.id));
   return rows.map((row) => rowToMessage(row as MessageRow));
 }
@@ -435,6 +475,7 @@ export async function getUnreadAgentToAgentCount(handle: QueryHandle): Promise<n
       and(
         eq(schema.project.messages.type, "agent-to-agent"),
         eq(schema.project.messages.read, 0),
+        archivedCondition(),
       ),
     );
   return rows[0]?.count ?? 0;

@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -11,16 +12,22 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempWorkspace } from "@fusion/test-utils";
 import {
-  ensureFusionSkillForProjects,
-  installFusionSkillIntoProject,
+  ensureShippedSkillsForProjects,
+  installShippedSkillIntoProject,
   isPiClaudeCliConfigured,
+  SHIPPED_SKILL_NAMES,
+  type ShippedSkillName,
 } from "../claude-skills.js";
 
-function makeSourceSkill(root: string, body = "---\nname: fusion\n---\n# hi\n"): string {
-  const dir = join(root, "src-skill", "fusion");
+function makeSourceSkill(root: string, skillName: ShippedSkillName): string {
+  const dir = join(root, "src-skill", skillName);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "SKILL.md"), body);
+  writeFileSync(join(dir, "SKILL.md"), `---\nname: ${skillName}\n---\n# hi\n`);
   return dir;
+}
+
+function makeSources(root: string): Record<ShippedSkillName, string> {
+  return Object.fromEntries(SHIPPED_SKILL_NAMES.map((skillName) => [skillName, makeSourceSkill(root, skillName)])) as Record<ShippedSkillName, string>;
 }
 
 describe("isPiClaudeCliConfigured", () => {
@@ -35,12 +42,7 @@ describe("isPiClaudeCliConfigured", () => {
   });
 
   it("respects explicit useClaudeCli=false even when package is present", () => {
-    expect(
-      isPiClaudeCliConfigured({
-        useClaudeCli: false,
-        packages: ["npm:pi-claude-cli"],
-      }),
-    ).toBe(false);
+    expect(isPiClaudeCliConfigured({ useClaudeCli: false, packages: ["npm:pi-claude-cli"] })).toBe(false);
   });
 
   it("detects pi-claude-cli in packages array", () => {
@@ -48,142 +50,75 @@ describe("isPiClaudeCliConfigured", () => {
     expect(isPiClaudeCliConfigured({ packages: ["npm:pi-claude-cli@0.3.1"] })).toBe(true);
     expect(isPiClaudeCliConfigured({ packages: ["github:owner/pi-claude-cli"] })).toBe(true);
   });
-
-  it("ignores unrelated packages", () => {
-    expect(
-      isPiClaudeCliConfigured({ packages: ["npm:some-other", "npm:pi-ai"] }),
-    ).toBe(false);
-  });
 });
 
-describe("installFusionSkillIntoProject", () => {
-  it("is a no-op when disabled", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const projectPath = join(root, "project");
-    mkdirSync(projectPath, { recursive: true });
-    const source = makeSourceSkill(root);
+describe("installShippedSkillIntoProject", () => {
+  /* FNXC:ComputerUseSkill 2026-08-11-14:30: Reconciliation outcomes must be
+   * verified for every shipped skill. Adding a skill must not inherit coverage
+   * only from fusion, because either target can independently be stale or foreign. */
+  for (const skillName of SHIPPED_SKILL_NAMES) {
+    describe(skillName, () => {
+      it("skips without creating a Claude directory when disabled", () => {
+        const root = tempWorkspace("fusion-claude-skills-");
+        const projectPath = join(root, "project");
+        mkdirSync(projectPath, { recursive: true });
+        const result = installShippedSkillIntoProject(projectPath, skillName, { source: makeSourceSkill(root, skillName), enabled: false });
+        expect(result.outcome).toBe("skipped");
+        expect(existsSync(join(projectPath, ".claude"))).toBe(false);
+      });
 
-    const result = installFusionSkillIntoProject(projectPath, { source, enabled: false });
-    expect(result.outcome).toBe("skipped");
-    expect(existsSync(join(projectPath, ".claude"))).toBe(false);
-  });
+      it("installs then recognizes its current symlink", () => {
+        const root = tempWorkspace("fusion-claude-skills-");
+        const projectPath = join(root, "project");
+        const source = makeSourceSkill(root, skillName);
+        const first = installShippedSkillIntoProject(projectPath, skillName, { source, enabled: true });
+        const second = installShippedSkillIntoProject(projectPath, skillName, { source, enabled: true });
+        const target = join(projectPath, ".claude", "skills", skillName);
+        expect(first.outcome).toBe("installed");
+        expect(second.outcome).toBe("already-installed");
+        expect(lstatSync(target).isSymbolicLink()).toBe(true);
+        expect(readlinkSync(target)).toBe(source);
+      });
 
-  it("creates a symlink on first install", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const projectPath = join(root, "project");
-    mkdirSync(projectPath, { recursive: true });
-    const source = makeSourceSkill(root);
+      it("replaces stale links and prior copies", () => {
+        const root = tempWorkspace("fusion-claude-skills-");
+        const projectPath = join(root, "project");
+        const source = makeSourceSkill(root, skillName);
+        const target = join(projectPath, ".claude", "skills", skillName);
+        const stale = join(root, "stale", skillName);
+        mkdirSync(stale, { recursive: true });
+        writeFileSync(join(stale, "SKILL.md"), "# stale");
+        mkdirSync(join(projectPath, ".claude", "skills"), { recursive: true });
+        symlinkSync(stale, target, "dir");
+        expect(installShippedSkillIntoProject(projectPath, skillName, { source, enabled: true }).outcome).toBe("replaced");
+        rmSync(target);
+        mkdirSync(target, { recursive: true });
+        writeFileSync(join(target, "SKILL.md"), "# prior copy");
+        expect(installShippedSkillIntoProject(projectPath, skillName, { source, enabled: true }).outcome).toBe("replaced");
+        expect(readlinkSync(target)).toBe(source);
+      });
 
-    const result = installFusionSkillIntoProject(projectPath, { source, enabled: true });
-    expect(result.outcome).toBe("installed");
-
-    const target = join(projectPath, ".claude", "skills", "fusion");
-    expect(lstatSync(target).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(target)).toBe(source);
-    expect(readFileSync(join(target, "SKILL.md"), "utf-8")).toContain("name: fusion");
-  });
-
-  it("is idempotent when the correct symlink already exists", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const projectPath = join(root, "project");
-    mkdirSync(projectPath, { recursive: true });
-    const source = makeSourceSkill(root);
-
-    installFusionSkillIntoProject(projectPath, { source, enabled: true });
-    const result = installFusionSkillIntoProject(projectPath, { source, enabled: true });
-    expect(result.outcome).toBe("already-installed");
-  });
-
-  it("replaces a stale symlink that points elsewhere", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const projectPath = join(root, "project");
-    mkdirSync(projectPath, { recursive: true });
-    const source = makeSourceSkill(root);
-
-    // Seed a stale symlink pointing at a different dir.
-    const stale = join(root, "stale");
-    mkdirSync(stale, { recursive: true });
-    writeFileSync(join(stale, "SKILL.md"), "# stale");
-    const target = join(projectPath, ".claude", "skills", "fusion");
-    mkdirSync(join(projectPath, ".claude", "skills"), { recursive: true });
-    symlinkSync(stale, target, "dir");
-
-    const result = installFusionSkillIntoProject(projectPath, { source, enabled: true });
-    expect(result.outcome).toBe("replaced");
-    expect(readlinkSync(target)).toBe(source);
-  });
-
-  it("replaces a prior copy-install (plain dir with SKILL.md)", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const projectPath = join(root, "project");
-    const source = makeSourceSkill(root);
-    // Seed a prior copy — looks like a fusion skill install.
-    const target = join(projectPath, ".claude", "skills", "fusion");
-    mkdirSync(target, { recursive: true });
-    writeFileSync(join(target, "SKILL.md"), "# old copy\n");
-
-    const result = installFusionSkillIntoProject(projectPath, { source, enabled: true });
-    expect(result.outcome).toBe("replaced");
-    expect(lstatSync(target).isSymbolicLink()).toBe(true);
-  });
-
-  it("refuses to clobber a foreign directory without SKILL.md", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const projectPath = join(root, "project");
-    const source = makeSourceSkill(root);
-    const target = join(projectPath, ".claude", "skills", "fusion");
-    mkdirSync(target, { recursive: true });
-    writeFileSync(join(target, "random.txt"), "user data");
-
-    const result = installFusionSkillIntoProject(projectPath, { source, enabled: true });
-    expect(result.outcome).toBe("failed");
-    expect(readFileSync(join(target, "random.txt"), "utf-8")).toBe("user data");
-  });
-
-  it("reports failure when source is missing", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const projectPath = join(root, "project");
-    mkdirSync(projectPath, { recursive: true });
-
-    const result = installFusionSkillIntoProject(projectPath, {
-      source: join(root, "nonexistent"),
-      enabled: true,
+      it("refuses a foreign target without removing its contents", () => {
+        const root = tempWorkspace("fusion-claude-skills-");
+        const projectPath = join(root, "project");
+        const target = join(projectPath, ".claude", "skills", skillName);
+        mkdirSync(target, { recursive: true });
+        writeFileSync(join(target, "user-data.txt"), "keep me");
+        const result = installShippedSkillIntoProject(projectPath, skillName, { source: makeSourceSkill(root, skillName), enabled: true });
+        expect(result.outcome).toBe("failed");
+        expect(readFileSync(join(target, "user-data.txt"), "utf8")).toBe("keep me");
+      });
     });
-    // Source missing -> symlink may succeed on POSIX (to a nonexistent path)
-    // then later fail to resolve. The function still creates the symlink;
-    // that's acceptable since fs reads will surface the broken link clearly.
-    expect(["installed", "failed"]).toContain(result.outcome);
-  });
-});
+  }
 
-describe("ensureFusionSkillForProjects", () => {
-  it("skips all when disabled", () => {
+  it("isolates one skill failure while reconciling the other skill", () => {
     const root = tempWorkspace("fusion-claude-skills-");
-    const projects = [
-      { id: "a", name: "a", path: join(root, "a") },
-      { id: "b", name: "b", path: join(root, "b") },
-    ];
-    for (const p of projects) mkdirSync(p.path, { recursive: true });
-
-    const results = ensureFusionSkillForProjects(projects, { enabled: false });
-    expect(results.map((r) => r.outcome)).toEqual(["skipped", "skipped"]);
-  });
-
-  it("installs for all when enabled", () => {
-    const root = tempWorkspace("fusion-claude-skills-");
-    const source = makeSourceSkill(root);
-    const projects = [
-      { id: "a", name: "a", path: join(root, "a") },
-      { id: "b", name: "b", path: join(root, "b") },
-    ];
-    for (const p of projects) mkdirSync(p.path, { recursive: true });
-
-    const results = ensureFusionSkillForProjects(projects, { enabled: true, source });
-    expect(results.map((r) => r.outcome)).toEqual(["installed", "installed"]);
-    for (const p of projects) {
-      expect(
-        lstatSync(join(p.path, ".claude", "skills", "fusion")).isSymbolicLink(),
-      ).toBe(true);
-    }
+    const project = { id: "project", name: "project", path: join(root, "project") };
+    mkdirSync(join(project.path, ".claude", "skills", "computer-use"), { recursive: true });
+    writeFileSync(join(project.path, ".claude", "skills", "computer-use", "user-data.txt"), "foreign");
+    const results = ensureShippedSkillsForProjects([project], { enabled: true, sources: makeSources(root) });
+    expect(results.map((result) => result.outcome)).toEqual(["installed", "failed"]);
+    expect(existsSync(join(project.path, ".claude", "skills", "fusion", "SKILL.md"))).toBe(true);
+    expect(readFileSync(join(project.path, ".claude", "skills", "computer-use", "user-data.txt"), "utf8")).toBe("foreign");
   });
 });

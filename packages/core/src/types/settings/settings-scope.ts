@@ -474,6 +474,8 @@ export interface GlobalSettings {
   /** How long a task must remain in `status='failed'` before a push notification fires.
    *  Set to 0 to dispatch immediately (legacy behavior). Default: 30000 ms. */
   failureNotificationDelayMs?: number;
+  /** How long a wedge must persist before an operator alert. 0 restores immediate legacy delivery; default 300000 ms. */
+  wedgeNotificationSettleMs?: number;
   /** `sticky-only` (default) defers failure notifications by `failureNotificationDelayMs`
    *  and suppresses them if the task self-recovers. `all` restores the legacy
    *  immediate-dispatch behavior. `terminal-only` suppresses failure notifications
@@ -1026,6 +1028,12 @@ export type ReportActionType = "bug" | "feedback" | "idea" | "help";
 export type ReportTarget = "issue" | "discussion";
 
 export interface ProjectSettings {
+  /**
+   * FNXC:TaskRecommendations 2026-08-08-05:02:
+   * A project controls completion-suggestion volume centrally. Zero is an
+   * explicit opt-out; executor validation enforces the 0..20 integer boundary.
+   */
+  maxRecommendationsPerTask?: number;
   /** Hard stop: when true, all automated agent activity is **immediately**
    *  terminated — active triage, execution, and merge agent sessions are
    *  killed, and the scheduler stops dispatching new work. Acts as a
@@ -1249,6 +1257,14 @@ export interface ProjectSettings {
    *  be enforced server-side. Only applies when `mergeStrategy === "pull-request"`.
    *  Default: false. */
   requirePrApproval?: boolean;
+  /*
+  FNXC:PrMergeAutoMerge 2026-08-09-09:28:
+  Issue #3359(c) requires this opt-in to hand final policy evaluation and wait-for-green
+  to GitHub native auto-merge. It only applies to pull-request merging and fails closed
+  when the repository does not permit auto-merge rather than immediately merging.
+  */
+  /** Enable GitHub native PR auto-merge in pull-request mode. Default: false. */
+  githubNativeAutoMerge?: boolean;
   /** When true (default), the Review-response loop automatically acts on PR review
    *  threads (human + bot): it dispatches an agent that fixes + pushes + replies, or
    *  disagrees with reasoning. When false, the loop is inert — review threads are left
@@ -1619,20 +1635,28 @@ export interface ProjectSettings {
    *  re-introduce code that an earlier sibling task already deleted.
    *  Default: true. */
   worktreeRebaseLocalBase?: boolean;
-  /** Master switch for pre-merge auto-prerebase policy. When false, merger
-   *  bypasses hot-file and divergence-threshold prerebase triggers.
-   *  Default: true. */
+  /*
+   * FNXC:MergerUnification 2026-08-09-12:04:
+   * Master-plan U0 made runAiMerge the sole production merge path. These fields
+   * remain published surface to avoid a breaking @runfusion/fusion type change.
+   */
+  /**
+   * @deprecated Inert under master-plan U0; consumed only by soft-deprecated
+   * aiMergeTask. Retained as published surface. Legacy full opt-out switch.
+   * Default: true.
+   */
   prerebaseAutoEnabled?: boolean;
-  /** Shared-infrastructure file paths that trigger pre-merge auto-prerebase
-   *  when they changed between `<task.baseCommitSha>` and local main HEAD.
-   *  Empty array disables hot-file triggering.
-   *  Default: curated project hot-file list. */
+  /**
+   * @deprecated Inert under master-plan U0; consumed only by soft-deprecated
+   * aiMergeTask. Retained as published surface. Legacy hot-file trigger list.
+   * Default: curated project hot-file list.
+   */
   prerebaseHotFiles?: string[];
-  /** Commit-count threshold for pre-merge auto-prerebase. When the commit
-   *  count of `<task.baseCommitSha>..localMainHead` exceeds this value, the
-   *  merger auto-prerebases regardless of hot-file overlap.
-   *  Set to 0 or undefined to disable count-based triggering.
-   *  Default: 50. */
+  /**
+   * @deprecated Inert under master-plan U0; consumed only by soft-deprecated
+   * aiMergeTask. Retained as published surface. Legacy divergence trigger.
+   * Default: 50.
+   */
   prerebaseDivergenceThreshold?: number;
   /** Strategy used when a merge conflict can't be resolved by AI. See
    *  {@link MergeConflictStrategy}. Default: "smart". */
@@ -1655,6 +1679,12 @@ export interface ProjectSettings {
   mergeDiffVolumeThreshold?: number;
   /** Additional file globs allowlisted by the pre-commit diff-volume gate on top of generated/lockfile patterns. Default applied at read site: []. */
   mergeDiffVolumeAllowlist?: string[];
+  /**
+   * FNXC:PrMergeRequiredChecks 2026-08-09-06:39:
+   * Fusion honors these names independently of GitHub's isRequired flag. Empty preserves
+   * legacy GitHub-delegated behavior; an absent named check blocks zero-suite PR merges.
+   */
+  requiredChecks?: string[];
   /** Controls overlap protection when `mergeConflictStrategy="smart-prefer-main"`
    *  reaches its Attempt 3 fallback. Default: "flip-to-prefer-branch". */
   mergeStrategyOverlapBehavior?: MergeStrategyOverlapBehavior;
@@ -1745,12 +1775,6 @@ export interface ProjectSettings {
    * FN-7557: default is now "auto-approve-all" (previously deferred to workflow via "workflow"). Unset/new projects bypass the manual awaiting-approval gate by default; projects with an explicit stored value are unaffected.
    */
   planApprovalMode?: "workflow" | "auto-approve-all" | "require-all";
-  /**
-   * FNXC:WorkflowAgentRouting 2026-08-07-08:57:
-   * Retain this legacy input for persisted settings and client compatibility. Workflow stages
-   * always route through durable multi-role principals; this flag cannot affect that routing.
-   */
-  ephemeralAgentsEnabled?: boolean;
   /*
   FNXC:EphemeralAgentTaskCreation 2026-07-30-12:00:
   The three-state policy routes ephemeral-worker follow-ups to allow, operator validation, or deny.
@@ -2075,6 +2099,8 @@ export interface ProjectSettings {
   /** Directory for memory backup snapshots, relative to project root.
    *  Default: ".fusion/backups/memory". */
   memoryBackupDir?: string;
+  /** Directory for the committable deterministic knowledge graph. */
+  knowledgeGraphDir?: string;
   /** Scope of memory backup snapshots.
    *  - "project": backups `.fusion/memory` only
    *  - "agents": backups `.fusion/agent-memory` only
@@ -2410,6 +2436,26 @@ export interface Settings extends GlobalSettings, ProjectSettings {
   leanPlanning?: boolean;
   /** Auto-approve generated specs and skip the independent spec reviewer. */
   autoApproveSpec?: boolean;
+  /** Wall-clock timeout (ms) for a single triage planning/specification AI turn.
+   *
+   *  FNXC:TriagePlanningTimeout 2026-08-10-18:32:
+   *  Workflow-native (like `leanPlanning`/`autoApproveSpec` above) — it never lived in project or
+   *  global settings, so it is declared HERE rather than on `ProjectSettings`, and must never be
+   *  added to `MOVED_SETTINGS_KEYS`. `workflowStepTimeoutMs` covers pre-merge workflow STEPS only
+   *  and never applied to the planning session, which had no Fusion-side ceiling at all: the
+   *  provider SDK's 300s `APIConnectionTimeoutError` caps time-to-first-byte and is cleared once
+   *  headers arrive, so a hung stream ran unbounded (observed: 126 minutes). On timeout the session
+   *  is aborted and the failure consumes one attempt of the bounded planning retry budget.
+   *  Default: {@link DEFAULT_PLANNING_TIMEOUT_MS}. */
+  planningTimeoutMs?: number;
+  /** Ceiling on consecutive Plan Review REVISE → replan cycles before the task is parked at
+   *  `awaiting-approval` with `awaitingApprovalReason: "plan-review-replan-cap"`.
+   *
+   *  FNXC:PlanReviewReplan 2026-08-10-18:32:
+   *  Workflow-native. Applies to the UNBOUNDED default only: an explicit `planReviewMaxRevisions`
+   *  or node `maxRevisions` budget is a stricter, earlier gate and wins. Unset uses
+   *  {@link DEFAULT_PLAN_REVIEW_REPLAN_CAP}; `0` parks on the first REVISE. */
+  planReviewReplanCap?: number;
   /** Index signature for dynamic settings access */
   [key: string]: unknown;
 }
@@ -2420,6 +2466,9 @@ export {
   DEFAULT_SETTINGS,
   GLOBAL_SETTINGS_KEYS,
   PROJECT_SETTINGS_KEYS,
+  NON_VERSIONED_SETTINGS_KEYS,
+  isNonVersionedSettingsKey,
+  mergeRestoredProjectSettings,
   isGlobalOnlySettingsKey,
   isGlobalSettingsKey,
   isProjectSettingsKey,

@@ -9,7 +9,11 @@
 
 import { definePlugin } from "@fusion/plugin-sdk";
 import { resolveCliSettings } from "./cli-spawn.js";
-import { installFusionSkillIntoHermesHome } from "./fusion-skill-install.js";
+import {
+  installComputerUseSkillIntoHermesHome,
+  installFusionSkillIntoHermesHome,
+  shouldInstallComputerUseSkill,
+} from "./fusion-skill-install.js";
 import { HermesRuntimeAdapter } from "./runtime-adapter.js";
 import type {
   FusionPlugin,
@@ -66,6 +70,9 @@ const plugin: FusionPlugin = definePlugin({
     onLoad: (ctx: PluginContext) => {
       const settings = resolveCliSettings(ctx.settings);
       const skillInstall = installFusionSkillIntoHermesHome({ profile: settings.profile });
+      const computerUseInstall = shouldInstallComputerUseSkill()
+        ? installComputerUseSkillIntoHermesHome({ profile: settings.profile })
+        : null;
 
       if (skillInstall.outcome === "warning") {
         ctx.logger.warn(
@@ -77,8 +84,13 @@ const plugin: FusionPlugin = definePlugin({
         );
       }
 
+      if (computerUseInstall?.outcome === "warning" || computerUseInstall?.outcome === "skipped") {
+        ctx.logger.warn(
+          `Hermes Runtime Plugin: computer-use skill auto-install ${computerUseInstall.outcome}: ${computerUseInstall.reason ?? "unknown"}`,
+        );
+      }
       ctx.logger.info(
-        `Hermes Runtime Plugin loaded — binary=${settings.binaryPath} model=${settings.model ?? "(default)"} fusionSkill=${skillInstall.outcome}`,
+        `Hermes Runtime Plugin loaded — binary=${settings.binaryPath} model=${settings.model ?? "(default)"} fusionSkill=${skillInstall.outcome}${computerUseInstall ? ` computerUseSkill=${computerUseInstall.outcome}` : ""}`,
       );
       ctx.emitEvent("hermes-runtime:loaded", {
         runtimeId: HERMES_RUNTIME_ID,
@@ -109,9 +121,14 @@ export {
   listHermesProfiles,
 } from "./cli-spawn.js";
 export {
+  COMPUTER_USE_SKILL_NAME,
+  getComputerUseSkillSourceCandidates,
+  installComputerUseSkillIntoHermesHome,
   installFusionSkillIntoHermesHome,
+  resolveBundledComputerUseSkillSource,
   resolveBundledFusionSkillSource,
   resolveHermesHome,
+  shouldInstallComputerUseSkill,
 } from "./fusion-skill-install.js";
 export type { HermesCliSettings, HermesCliResult, HermesProfileSummary } from "./cli-spawn.js";
 

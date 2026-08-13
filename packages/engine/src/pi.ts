@@ -2705,6 +2705,11 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
     provider-verified reasoning levels and adds Kimi/OpenRouter OAuth plus constrained tools;
     retain Fusion's ModelRuntime session construction and supplemental catalog merges rather
     than duplicating upstream provider behavior.
+
+    FNXC:ModelCatalog 2026-08-12-20:46:
+    FN-9007 advances the exact matched Pi runtime closure from 0.82.1 to 0.84.1.
+    Keep constructing sessions through ModelRuntime so Fusion inherits the updated provider
+    catalog and SDK behavior without duplicating upstream runtime policy.
     */
     const createSessionOptions: NonNullable<Parameters<typeof createAgentSession>[0]> = {
       cwd: options.cwd,

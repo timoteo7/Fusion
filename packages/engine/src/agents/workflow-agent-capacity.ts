@@ -42,33 +42,48 @@ export class WorkflowAgentCapacity {
     return `${projectId}\u0000${attemptId}`;
   }
 
+  /**
+   * FNXC:WorkflowAgentRouting 2026-08-11-09:12:
+   * Workflow principals have NO execution cap. Admission always succeeds; the lease is taken purely as
+   * bookkeeping — it is what `activeSessions` counts and what the renewal timer keeps warm — never as a
+   * gate.
+   *
+   * Why the caps went away: the workflow roles (triage, executor, reviewer, merger) stand in for STAGES,
+   * not for workers, and there are typically one of each. Capping their concurrent sessions therefore
+   * capped the whole board — a project with a single Workflow Executor serialized every implementation
+   * task behind one session regardless of what `maxConcurrent`/`maxWorktrees` allowed. The refusal was
+   * also invisible: it surfaced as a durable `held` row reading
+   * `workflow-principal-agent-capacity:executor`, and until the FN reclaim sweep shipped alongside this
+   * change, nothing re-polled a `held` row at all. Task parallelism is already bounded where it belongs
+   * (worktree + concurrency admission on the task itself); a second bound at the principal was pure
+   * serialization with no safety value.
+   *
+   * `maxProjectSessions` is deliberately REMOVED from the input rather than defaulted to undefined, so a
+   * caller cannot silently reintroduce the cap without first deleting this contract.
+   * `runtimeConfig.maxWorkflowSessions` is likewise no longer consulted, here or in
+   * `routeWorkflowPrincipal`'s availability test.
+   */
   public async acquire(input: {
     projectId: string;
     agent: Pick<Agent, "id" | "runtimeConfig">;
     attemptId: string;
-    maxProjectSessions?: number;
   }): Promise<WorkflowAgentCapacityResult> {
     const attemptKey = this.attemptKey(input.projectId, input.attemptId);
     const existing = this.leases.get(attemptKey);
     if (existing) return { status: "acquired", lease: existing };
-    const agentLimit = input.agent.runtimeConfig?.maxWorkflowSessions;
-    const maxAgentSessions = typeof agentLimit === "number" && Number.isFinite(agentLimit)
-      ? agentLimit
-      : undefined;
     if (this.leaseStore) {
+      /*
+      FNXC:WorkflowAgentRouting 2026-08-11-09:12:
+      No limits are passed, so the durable store records the lease and returns "acquired". The store
+      KEEPS its limit parameters: they remain the correct cross-process gate for a caller that genuinely
+      needs one, and the reclaim of expired rows there is still what frees leases after a crash.
+      */
       const outcome = await this.leaseStore.acquireWorkflowSessionCapacity({
         agentId: input.agent.id,
         attemptId: input.attemptId,
-        maxProjectSessions: input.maxProjectSessions,
-        maxAgentSessions,
         leaseDurationMs: WorkflowAgentCapacity.LEASE_DURATION_MS,
       });
       if (outcome !== "acquired") return { status: "held", reason: outcome };
-    } else {
-      // Unit-test/local fallback retains deterministic semantics without pretending to coordinate processes.
-      const local = [...this.leases.values()].filter((lease) => lease.projectId === input.projectId);
-      if (input.maxProjectSessions !== undefined && local.length >= input.maxProjectSessions) return { status: "held", reason: "project-capacity" };
-      if (maxAgentSessions !== undefined && local.filter((lease) => lease.agentId === input.agent.id).length >= maxAgentSessions) return { status: "held", reason: "agent-capacity" };
     }
     const lease = { projectId: input.projectId, agentId: input.agent.id, attemptId: input.attemptId };
     this.leases.set(attemptKey, lease);

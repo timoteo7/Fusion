@@ -94,6 +94,15 @@ const PERMANENT_TASK_AGENT_ONLY_TOOLS = [
   "fn_mission_create",
   "fn_mission_delete",
   "fn_mission_update",
+  "fn_mission_set_status",
+  /*
+   * FNXC:ToolGovernance 2026-08-11-03:58:
+   * Mission blocked-badge repair overrides a durable stop signal, so its CLI/pi-extension
+   * surface is hard-withheld from agent principals. Classify it here so both gate paths
+   * never fall through as unrecognized and readonly workflow steps record an explicit denial.
+   */
+  "fn_mission_clear_blocked",
+  "fn_mission_reconcile",
   "fn_mission_backfill_assertions",
   "fn_milestone_add",
   "fn_slice_add",
@@ -104,6 +113,8 @@ const PERMANENT_TASK_AGENT_ONLY_TOOLS = [
   "fn_slice_activate",
   "fn_feature_link_task",
   "fn_feature_update",
+  "fn_feature_repair_validation",
+  "fn_feature_set_status",
   "fn_milestone_update",
   /* FNXC:Ideation 2026-07-30-15:30: Persisted divergence/convergence writes require both action and permanent-agent policy recognition. */
   "fn_ideation_start",
@@ -236,7 +247,13 @@ export const READONLY_FN_TOOLS: ReadonlySet<string> = new Set([
   "fn_post_room_message",
   "fn_update_identity",
   "fn_reflect_on_performance",
+  /*
+  FNXC:ToolGovernance 2026-08-12-22:11:
+  fn_agent_read_evaluations is a subtree-scoped read. Authorization is enforced by
+  the extension tool's getChainOfCommand boundary, not by this action classifier.
+  */
   "fn_read_evaluations",
+  "fn_agent_read_evaluations",
 ]);
 
 export const COORDINATION_EXEMPT_TOOLS = [
@@ -297,6 +314,8 @@ export const COORDINATION_EXEMPT_TOOLS = [
   "fn_post_room_message",
   "fn_memory_append",
   "fn_read_evaluations",
+  // FNXC:ToolGovernance 2026-08-12-22:11: The manager read is subtree-authorized in extension.ts; follow-up remains absent so it falls back to task_agent_mutation policy.
+  "fn_agent_read_evaluations",
   "fn_update_identity",
   "fn_reflect_on_performance",
 ] as const;

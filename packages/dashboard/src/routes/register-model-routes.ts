@@ -9,6 +9,7 @@ import { getGrokPickerModels, GROK_PICKER_PROVIDER_ID } from "../grok-model-cach
 import { getClaudePickerModels, CLAUDE_PICKER_PROVIDER_ID } from "../claude-model-cache.js";
 import { getOmpPickerModels, OMP_PICKER_PROVIDER_ID } from "../omp-model-cache.js";
 import { getHermesPickerModels, HERMES_PICKER_PROVIDER_ID } from "../hermes-model-cache.js";
+import { refreshModelRegistryForRequest } from "../model-registry-refresh-cache.js";
 import type { AuthStorageLike } from "../routes.js";
 import type { ApiRouteRegistrar } from "./types.js";
 
@@ -330,7 +331,16 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
     }
 
     try {
-      await options.modelRegistry.refresh();
+      const refreshOutcome = await refreshModelRegistryForRequest(options.modelRegistry);
+      if (["timed_out", "failed", "stale_in_flight", "negative_cached"].includes(refreshOutcome)) {
+        runtimeLogger.child("models").warn(`Model registry refresh outcome: ${refreshOutcome}; serving retained catalog`);
+      }
+      /*
+      FNXC:ModelCatalog 2026-08-12-01:00:
+      FN-8902 bounds and caches only the refresh operation. Supplemental merges and
+      dedupe remain unconditional per request because refresh can replace provider
+      rows; cached, failed, or timed-out paths must return the same live catalog shape.
+      */
       if (options.modelRegistry.registerProvider) {
         mergeSupplementalAnthropicModels(options.modelRegistry as Parameters<typeof mergeSupplementalAnthropicModels>[0], (message) => runtimeLogger.child("models").warn(message));
         /*

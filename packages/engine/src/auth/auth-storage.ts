@@ -364,19 +364,15 @@ FNXC:ProviderAuth 2026-07-07-00:00:
 FN-7646: the cross-process ~/.fusion/agent/auth.json coordination invariant (concurrent
 writers merge per-provider instead of clobbering each other's credentials) depends on the
 vendored @earendil-works/pi-coding-agent AuthStorage backend using proper-lockfile locking
-plus a per-provider read-modify-merge (FileAuthStorageBackend.persistProviderChange /
-refreshOAuthTokenWithLock re-read the file under a lock and spread
-{...currentData, [provider]: credential} rather than flushing a whole-file in-memory
-snapshot). packages/engine/package.json already pins this at
-"@earendil-works/pi-coding-agent": "0.82.1" (exact matched runtime pair; locked per-provider
-merge requires >=0.80.3) — do not downgrade below 0.80.x, and re-verify this comment against
-dist/core/auth-storage.js if the pin is ever lowered. See
-
-FNXC:ProviderAuth 2026-07-24-12:00:
-FN-8564 retains Fusion's credential-store adapter on Pi 0.82.x. The release adds Kimi Code and
-OpenRouter OAuth, so new upstream login providers must still use the same queued, cross-process
-credential persistence contract rather than bypassing Fusion auth storage.
+plus a per-provider read-modify-merge. See
 packages/engine/src/__tests__/auth-storage-concurrency.test.ts for the regression coverage.
+
+FNXC:ProviderAuth 2026-08-12-20:46:
+FN-9007 re-verified pi-coding-agent@0.84.1 dist/core/auth-storage.js: FileAuthStorageBackend's
+proper-lockfile-guarded withLockAsync rereads auth.json and AuthStorage.modify merges
+{ ...currentData, [provider]: next } before writing. This preserves the per-provider
+read-modify-merge contract rather than flushing a whole-file in-memory snapshot as the
+credential-store adapter handles new upstream providers.
 */
 
 /*

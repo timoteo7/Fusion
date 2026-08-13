@@ -52,7 +52,7 @@ vi.mock("../../update-cache.js", () => ({
 // channel helpers, but importing the @fusion/core barrel would drag core's
 // git-binary through this file's node:child_process mock. Substitute the
 // barrel with the actual app-version source module (the only part used here).
-vi.mock("@fusion/core", async () => await vi.importActual("../../../../core/src/app-version.js"));
+vi.mock("@fusion/core", async () => await vi.importActual("../../../../core/src/i18n/app-version.js"));
 
 import { runUpdate } from "../update.js";
 

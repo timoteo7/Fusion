@@ -89,6 +89,18 @@ import {
   QUEUED_EPISODE_SIGNATURE_VERSION,
   MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
   WORKFLOW_PRINCIPAL_FENCE_VERSION,
+  TASK_RECOMMENDATIONS_VERSION,
+  GITHUB_CHECK_STATES_VERSION,
+  AGENT_ACTIVITY_EVENTS_VERSION,
+  SPEC_LOCK_DRIFT_REPORT_VERSION,
+  SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION,
+  MEMORY_RECALL_RECORDS_VERSION,
+  MISSION_FEATURE_SPEC_ALIGNMENT_VERSION,
+  AGENT_RATING_PROJECT_ISOLATION_VERSION,
+  AGENT_RATINGS_PROJECT_PARTITION_VERSION,
+  PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
+  PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
+  MESSAGE_ARCHIVE_SCHEMA_VERSION,
   IDENTITY_ACTORS_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
@@ -112,9 +124,21 @@ describe("schema-applier: immutable migration identities", () => {
     expect(QUEUED_EPISODE_SIGNATURE_VERSION).toBe("0044");
     expect(MULTI_ROLE_WORKFLOW_AGENTS_VERSION).toBe("0045");
     expect(WORKFLOW_PRINCIPAL_FENCE_VERSION).toBe("0046");
-    // FNXC:Identity 2026-08-09-03:04: per-migration identities are immutable; only the ceiling moves as 0047 adds the identity schema.
-    expect(IDENTITY_ACTORS_VERSION).toBe("0047");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0047");
+    expect(TASK_RECOMMENDATIONS_VERSION).toBe("0047");
+    expect(GITHUB_CHECK_STATES_VERSION).toBe("0048");
+    expect(AGENT_ACTIVITY_EVENTS_VERSION).toBe("0049");
+    expect(SPEC_LOCK_DRIFT_REPORT_VERSION).toBe("0050");
+    expect(SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION).toBe("0051");
+    expect(MEMORY_RECALL_RECORDS_VERSION).toBe("0052");
+    expect(MISSION_FEATURE_SPEC_ALIGNMENT_VERSION).toBe("0053");
+    expect(AGENT_RATING_PROJECT_ISOLATION_VERSION).toBe("0054");
+    expect(AGENT_RATINGS_PROJECT_PARTITION_VERSION).toBe("0055");
+    expect(PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION).toBe("0056");
+    expect(PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION).toBe("0057");
+    expect(MESSAGE_ARCHIVE_SCHEMA_VERSION).toBe("0058");
+    // FNXC:Identity 2026-08-09-03:04: per-migration identities are immutable; only the ceiling moves as 0059 adds the identity schema.
+    expect(IDENTITY_ACTORS_VERSION).toBe("0059");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0059");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -729,7 +753,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 107 project tables, 21 central tables, 1 archive table", async () => {
+  it("creates all 114 project tables, 21 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -748,23 +772,17 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     FNXC:PgSchemaApplier 2026-08-03-02:16:
     Project table count = historical core baseline plus later migrations. 0040 adds 2 lifecycle
     outbox tables; 0041 adds 4 lifecycle consumer tables; 0043 adds the durable unplanned-dispatch
-    refusal marker (100 → 105). Plugin tables are added separately by the schema-init hook and are
-    excluded here.
-
-    FNXC:Identity 2026-08-09-03:04:
-    107, not 105: 0046 added project.workflow_agent_capacity_leases without updating this count
-    (pre-existing drift, observed red before this change), and 0047 adds project.actor_role_grants.
+    refusal marker (100 → 105); later baseline additions bring the count to 106; and 0048 adds
+    GitHub check state (106 → 107); 0049 adds the agent-activity outbox and counter (→ 109);
+    0050 adds immutable lock, evidence, and report history (109 → 112); 0052 adds recall records (→ 113). Plugin tables are added separately
+    by the schema-init hook and are excluded here.
     */
-    expect(bySchema.project).toBe(107);
+    expect(bySchema.project).toBe(114);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
     database still CREATEs it from the historical 0000 baseline and then drops it,
     so fresh and upgraded databases converge on the same shape.
-
-    FNXC:Identity 2026-08-09-03:04:
-    21, not 17: migration 0047 adds central.actors, actor_credentials, actor_sessions, and
-    actor_provider_links (KTD7 — identity is central because one daemon serves N projects).
     */
     expect(bySchema.central).toBe(21);
     expect(bySchema.archive).toBe(1);
@@ -1782,6 +1800,18 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      TASK_RECOMMENDATIONS_VERSION,
+      GITHUB_CHECK_STATES_VERSION,
+      AGENT_ACTIVITY_EVENTS_VERSION,
+      SPEC_LOCK_DRIFT_REPORT_VERSION,
+      SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION,
+      MEMORY_RECALL_RECORDS_VERSION,
+      MISSION_FEATURE_SPEC_ALIGNMENT_VERSION,
+      AGENT_RATING_PROJECT_ISOLATION_VERSION,
+      AGENT_RATINGS_PROJECT_PARTITION_VERSION,
+  PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
+      PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
+      MESSAGE_ARCHIVE_SCHEMA_VERSION,
       IDENTITY_ACTORS_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
@@ -1855,6 +1885,18 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      TASK_RECOMMENDATIONS_VERSION,
+      GITHUB_CHECK_STATES_VERSION,
+      AGENT_ACTIVITY_EVENTS_VERSION,
+      SPEC_LOCK_DRIFT_REPORT_VERSION,
+      SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION,
+      MEMORY_RECALL_RECORDS_VERSION,
+      MISSION_FEATURE_SPEC_ALIGNMENT_VERSION,
+      AGENT_RATING_PROJECT_ISOLATION_VERSION,
+      AGENT_RATINGS_PROJECT_PARTITION_VERSION,
+  PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
+      PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
+      MESSAGE_ARCHIVE_SCHEMA_VERSION,
       IDENTITY_ACTORS_VERSION,
     ]);
   });
@@ -2061,6 +2103,18 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      TASK_RECOMMENDATIONS_VERSION,
+      GITHUB_CHECK_STATES_VERSION,
+      AGENT_ACTIVITY_EVENTS_VERSION,
+      SPEC_LOCK_DRIFT_REPORT_VERSION,
+      SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION,
+      MEMORY_RECALL_RECORDS_VERSION,
+      MISSION_FEATURE_SPEC_ALIGNMENT_VERSION,
+      AGENT_RATING_PROJECT_ISOLATION_VERSION,
+      AGENT_RATINGS_PROJECT_PARTITION_VERSION,
+  PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
+      PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
+      MESSAGE_ARCHIVE_SCHEMA_VERSION,
       IDENTITY_ACTORS_VERSION,
     ]);
   });
@@ -2148,6 +2202,18 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      TASK_RECOMMENDATIONS_VERSION,
+      GITHUB_CHECK_STATES_VERSION,
+      AGENT_ACTIVITY_EVENTS_VERSION,
+      SPEC_LOCK_DRIFT_REPORT_VERSION,
+      SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION,
+      MEMORY_RECALL_RECORDS_VERSION,
+      MISSION_FEATURE_SPEC_ALIGNMENT_VERSION,
+      AGENT_RATING_PROJECT_ISOLATION_VERSION,
+      AGENT_RATINGS_PROJECT_PARTITION_VERSION,
+  PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
+      PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
+      MESSAGE_ARCHIVE_SCHEMA_VERSION,
       IDENTITY_ACTORS_VERSION,
     ]);
   });
@@ -2235,6 +2301,18 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       QUEUED_EPISODE_SIGNATURE_VERSION,
       MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
       WORKFLOW_PRINCIPAL_FENCE_VERSION,
+      TASK_RECOMMENDATIONS_VERSION,
+      GITHUB_CHECK_STATES_VERSION,
+      AGENT_ACTIVITY_EVENTS_VERSION,
+      SPEC_LOCK_DRIFT_REPORT_VERSION,
+      SPEC_LOCK_SOURCE_REVISION_BIGINT_VERSION,
+      MEMORY_RECALL_RECORDS_VERSION,
+      MISSION_FEATURE_SPEC_ALIGNMENT_VERSION,
+      AGENT_RATING_PROJECT_ISOLATION_VERSION,
+      AGENT_RATINGS_PROJECT_PARTITION_VERSION,
+  PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
+      PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
+      MESSAGE_ARCHIVE_SCHEMA_VERSION,
       IDENTITY_ACTORS_VERSION,
     ]);
   });
@@ -2260,7 +2338,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-006 AUTOINCREMENT → identity with seque
       WHERE n.nspname = 'project' AND a.attidentity = 'a'
       ORDER BY c.relname
     `)) as unknown as Array<{ table_name: string; column_name: string }>;
-    // The 8 AUTOINCREMENT columns from the SQLite schema.
+    // The 9 identity columns include immutable spec-drift report history.
     const identityTables = rows.map((r) => r.table_name);
     expect(identityTables).toEqual(
       expect.arrayContaining([
@@ -2274,7 +2352,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-006 AUTOINCREMENT → identity with seque
         "incidents",
       ]),
     );
-    expect(rows.length).toBe(9);
+    expect(rows.length).toBe(10);
   });
 
   it("sequence continuity: consecutive inserts produce increasing IDs without collision", async () => {
@@ -2291,6 +2369,63 @@ pgDescribe("schema-applier: VAL-SCHEMA-006 AUTOINCREMENT → identity with seque
     `)) as unknown as Array<{ id: number }>;
     expect(rows.length).toBe(2);
     expect(rows[1].id).toBeGreaterThan(rows[0].id);
+  });
+});
+
+pgDescribe("schema-applier: agent ratings project partition", () => {
+  let ctx: TestContext | null = null;
+
+  afterEach(async () => {
+    await teardownDb(ctx);
+    ctx = null;
+  });
+
+  it("creates the composite rating key and reapplying is a no-op", async () => {
+    /*
+    FNXC:AgentRatingsProjectIsolation 2026-08-12-01:00:
+    Fresh baselines and repaired upgrades must agree that duplicate rating IDs are legal only across project partitions. Reapplying after bookkeeping must not mutate the healthy schema.
+    */
+    ctx = await setupFreshDb();
+    await applySchemaBaseline(ctx.db);
+    const columns = (await ctx.db.execute(sql`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'project' AND table_name = 'agent_ratings' AND column_name = 'project_id'
+    `)) as unknown as Array<{ column_name: string }>;
+    expect(columns).toEqual([{ column_name: "project_id" }]);
+    const keys = (await ctx.db.execute(sql`
+      SELECT a.attname AS column_name
+      FROM pg_constraint c
+      JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ordinal) ON true
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+      WHERE c.conrelid = 'project.agent_ratings'::regclass AND c.contype = 'p'
+      ORDER BY k.ordinal
+    `)) as unknown as Array<{ column_name: string }>;
+    expect(keys).toEqual([{ column_name: "project_id" }, { column_name: "id" }]);
+    await expect(applySchemaBaseline(ctx.db)).resolves.toMatchObject({ applied: false });
+  });
+
+  it("repairs a drifted key that contains project_id but omits rating id", async () => {
+    /*
+    FNXC:AgentRatingsProjectPartition 2026-08-12-01:30:
+    Historical drift can leave (project_id, agent_id) as the primary key. The
+    upgrade must replace it because only (project_id, id) protects rating identity.
+    */
+    ctx = await setupFreshDb();
+    await applySchemaBaseline(ctx.db);
+    await ctx.db.execute(sql`ALTER TABLE project.agent_ratings DROP CONSTRAINT agent_ratings_pkey`);
+    await ctx.db.execute(sql`ALTER TABLE project.agent_ratings ADD CONSTRAINT agent_ratings_pkey PRIMARY KEY (project_id, agent_id)`);
+    await ctx.db.execute(sql`DELETE FROM public.fusion_schema_migrations WHERE version = ${AGENT_RATINGS_PROJECT_PARTITION_VERSION}`);
+
+    await expect(applySchemaBaseline(ctx.db)).resolves.toMatchObject({ applied: true });
+    const keys = (await ctx.db.execute(sql`
+      SELECT a.attname AS column_name
+      FROM pg_constraint c
+      JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ordinal) ON true
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+      WHERE c.conrelid = 'project.agent_ratings'::regclass AND c.contype = 'p'
+      ORDER BY k.ordinal
+    `)) as unknown as Array<{ column_name: string }>;
+    expect(keys).toEqual([{ column_name: "project_id" }, { column_name: "id" }]);
   });
 });
 
@@ -2319,8 +2454,8 @@ pgDescribe("schema-applier: VAL-SCHEMA-005 CHECK constraints preserved and enfor
     await applySchemaBaseline(ctx.db);
     await expectPgError(
       ctx.db.execute(sql`
-        INSERT INTO project.agent_ratings (id, agent_id, rater_type, score, created_at)
-        VALUES ('r1', 'a1', 'user', 99, '2026-01-01')
+        INSERT INTO project.agent_ratings (project_id, id, agent_id, rater_type, score, created_at)
+        VALUES ('schema-test', 'r1', 'a1', 'user', 99, '2026-01-01')
       `),
       /score_check|check constraint/i,
     );

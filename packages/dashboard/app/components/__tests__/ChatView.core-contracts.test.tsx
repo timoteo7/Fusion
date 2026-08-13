@@ -340,6 +340,30 @@ describe("Chat Session Action Menu", () => {
     expect(within(dialog!).getByText("Delete Conversation?")).toBeInTheDocument();
   });
 
+  it("keeps archived sessions out of the default sidebar and restores them from Archived", async () => {
+    const refreshArchivedSessions = vi.fn().mockResolvedValue(undefined);
+    const unarchiveSession = vi.fn().mockResolvedValue(undefined);
+    const active = { id: "session-active", agentId: "agent-001", status: "active" as const, title: "Active conversation", createdAt: "2026-04-08T00:00:00.000Z", updatedAt: "2026-04-08T00:00:00.000Z" };
+    const archived = { id: "session-archived", agentId: "agent-002", status: "archived" as const, title: "Archived conversation", createdAt: "2026-04-08T00:00:00.000Z", updatedAt: "2026-04-08T00:00:00.000Z" };
+    setupMockChat({
+      sessions: [active],
+      filteredSessions: [active],
+      archivedSessions: [archived],
+      refreshArchivedSessions,
+      unarchiveSession,
+    });
+
+    await renderWithAct(<ChatView projectId="proj-123" addToast={vi.fn()} />);
+
+    expect(screen.getByText("Active conversation")).toBeInTheDocument();
+    expect(screen.queryByText("Archived conversation")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("chat-archived-toggle"));
+    expect(refreshArchivedSessions).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("chat-archived-session-session-archived")).toHaveTextContent("Archived conversation");
+    await userEvent.click(screen.getByTestId("chat-archived-restore-session-archived"));
+    expect(unarchiveSession).toHaveBeenCalledWith("session-archived");
+  });
+
   it("clicking the action menu button does not select the session", async () => {
     const selectSession = vi.fn();
     setupMockChat({

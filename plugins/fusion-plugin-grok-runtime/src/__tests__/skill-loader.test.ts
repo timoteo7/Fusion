@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -8,6 +8,7 @@ import {
   buildGrokSkillRules,
   extractRequestedSkillNames,
   getFusionSkillSourceCandidates,
+  resolveBundledComputerUseSkillSource,
   resolveBundledFusionSkillSource,
   stageGrokSessionSkills,
 } from "../skill-loader.js";
@@ -144,5 +145,53 @@ describe("skill-loader", () => {
     expect(rules).toContain("fusion");
     expect(rules).toContain("fusion-custom-tools");
     expect(rules).toContain("Operator MCP servers");
+  });
+
+  it("stages bundled computer-use only on Darwin", () => {
+    const staged = stageGrokSessionSkills({ platform: "darwin" });
+    disposers.push(staged.dispose);
+    expect(existsSync(join(staged.pluginDir, "skills", "fusion", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(staged.pluginDir, "skills", "computer-use", "SKILL.md"))).toBe(true);
+    expect(staged.skillNames).toEqual(expect.arrayContaining(["fusion", "computer-use"]));
+  });
+
+  it("keeps bundled computer-use absent on non-Darwin through every option path", () => {
+    const source = resolveBundledComputerUseSkillSource(import.meta.url, "darwin")!;
+    const cases = [
+      { includeComputerUseSkill: true },
+      { requestedSkillNames: ["computer-use"] },
+      { additionalSkillPaths: [source] },
+      { includeComputerUseSkill: true, requestedSkillNames: ["computer-use"], additionalSkillPaths: [source] },
+    ];
+    for (const options of cases) {
+      const staged = stageGrokSessionSkills({ ...options, platform: "linux" });
+      disposers.push(staged.dispose);
+      expect(existsSync(join(staged.pluginDir, "skills", "computer-use"))).toBe(false);
+      expect(staged.skillNames).not.toContain("computer-use");
+    }
+  });
+
+  it("keeps user-owned computer-use roots on non-Darwin and honors suppression", () => {
+    const root = mkdtempSync(join(tmpdir(), "user-computer-use-"));
+    const userSkill = join(root, "computer-use");
+    mkdirSync(userSkill, { recursive: true });
+    writeFileSync(join(userSkill, "SKILL.md"), "# user skill\n");
+    const staged = stageGrokSessionSkills({ platform: "linux", additionalSkillPaths: [root] });
+    disposers.push(staged.dispose);
+    expect(existsSync(join(staged.pluginDir, "skills", "computer-use", "SKILL.md"))).toBe(true);
+    const overridden = stageGrokSessionSkills({ platform: "darwin", additionalSkillPaths: [root] });
+    disposers.push(overridden.dispose);
+    expect(readFileSync(join(overridden.pluginDir, "skills", "computer-use", "SKILL.md"), "utf8")).toContain("# user skill");
+    const suppressed = stageGrokSessionSkills({ platform: "darwin", includeComputerUseSkill: false });
+    disposers.push(suppressed.dispose);
+    expect(suppressed.skillNames).not.toContain("computer-use");
+  });
+
+  it("gates computer-use at source resolution and keeps rules as discovery-only", () => {
+    expect(resolveBundledComputerUseSkillSource(import.meta.url, "linux")).toBeNull();
+    expect(resolveBundledComputerUseSkillSource(import.meta.url, "darwin")).toBeTruthy();
+    const rules = buildGrokSkillRules({ skillNames: ["fusion", "computer-use"] });
+    expect(rules).toContain("computer-use");
+    expect(rules).not.toMatch(/fn computer|--/i);
   });
 });

@@ -1818,7 +1818,8 @@
       "workflows": "Workflows",
       "tokens": "",
       "tools": "",
-      "reviewArtifacts": "審查產物"
+      "reviewArtifacts": "審查產物",
+      "agentActivity": "Agent Activity"
     },
     "team": {
       "agent": "",
@@ -1900,6 +1901,33 @@
     "reviewArtifacts": {
       "title": "審查產物",
       "empty": "尚無審查產物。"
+    },
+    "agentActivity": {
+      "live": "Live",
+      "timeline": "Timeline",
+      "mode": "Activity mode",
+      "empty": "No agent activity yet.",
+      "loadingOlder": "Loading…",
+      "loadOlder": "Load older",
+      "showMore": "Show more loaded activity",
+      "end": "End of activity history",
+      "agentFilter": "Filter by agent",
+      "allAgents": "All agents",
+      "taskFilter": "Filter by task",
+      "typeFilter": "Filter by event type",
+      "allTypes": "All event types",
+      "rangeNote": "Time range filters loaded events; it is not sent to the server.",
+      "openTask": "Open task {{taskId}}",
+      "openAgent": "Open agent {{agentId}}",
+      "eventTypes": {
+        "task:started": "Task started",
+        "task:handed-off": "Task handed off",
+        "task:completed": "Task completed",
+        "agent:state-changed": "Agent state changed",
+        "workflow:gate-passed": "Workflow gate passed",
+        "workflow:gate-failed": "Workflow gate failed",
+        "approval:requested": "Approval requested"
+      }
     }
   },
   "comments": {
@@ -3646,6 +3674,7 @@
     "assertionUpdateFailed": "更新斷言失敗",
     "attemptRetries_one": "",
     "attemptRetries_other": "",
+    "autoMergeOverrideDescription": "繼承遵循專案設定。自動合併會在每個功能通過時合併。單一提取請求會將所有功能保留在一個共用分支上，以便共同審查與合併。",
     "autopilotActivatingSlice": "正在啟動切片",
     "autopilotCompleting": "完成中",
     "autopilotDescription": "開啟後，Fusion 會在工作完成時自動啟動下一個切片並規劃其功能。",
@@ -5929,7 +5958,6 @@
       "updating": "",
       "upperBoundOnMessagesFetchedFromTheRoom": "",
       "upToDate": "您已是最新版本 ✓",
-      "useEphemeralTaskWorkerAgents": "",
       "warnOnTheBoardWhenTodoWorkExceeds": "",
       "whenEnabledDefaultFusionSpawnsShortLived": "",
       "whenEnabledFusionChecksOpenAndClosedIssues": "",
@@ -6000,7 +6028,9 @@
       "taskCreateWorkflow": "",
       "taskCreateWorkflowHelp": "",
       "refinementTaskWorkflow": "",
-      "refinementTaskWorkflowHelp": ""
+      "refinementTaskWorkflowHelp": "",
+      "maxRecommendationsPerTask": "",
+      "maxRecommendationsPerTaskHelp": ""
     },
     "globalGeneral": {
       "andShowsUpdateNoticesInTheCLIAnd": "",
@@ -6349,7 +6379,9 @@
       "gitRemoteThatMergedResultsArePushedTo": "",
       "pushTargetBranch": "",
       "sameAsIntegrationBranchDefault": "",
-      "pushTargetBranchHelp": ""
+      "pushTargetBranchHelp": "",
+      "requiredChecks": "",
+      "requiredChecksHelp": ""
     },
     "mergeManually": "手動合併",
     "mobileNav": {
@@ -8020,7 +8052,8 @@
       "worktreeTerminal": "終端",
       "workflow": "工作流程",
       "summary": "Summary",
-      "cost": ""
+      "cost": "",
+      "recommendations": ""
     },
     "terminal": {
       "loading": ""
@@ -8122,6 +8155,15 @@
       "totalCostLabel": "",
       "totalTokens": "",
       "unknownModel": ""
+    },
+    "recommendations": {
+      "title": "",
+      "empty": "此任務未產生建議。",
+      "created": "",
+      "creating": "",
+      "retry": "",
+      "create": "",
+      "error": ""
     }
   },
   "taskDocuments": {
@@ -8326,7 +8368,9 @@
     "addressPrFeedback": "",
     "addressPrFeedbackFailed": "",
     "addressPrFeedbackStarted": "",
-    "addressingPrFeedback": ""
+    "addressingPrFeedback": "",
+    "fixedInReview": "已在審查中修正",
+    "superseded": "已被取代"
   },
   "tasks": {
     "addTaskPlaceholder": "新增任務……",

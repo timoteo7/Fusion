@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import type { Column, ModelPricingOverrides, TaskTokenUsage } from "@fusion/core";
+import { Profiler, type ReactNode } from "react";
+import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { Column, ModelPricingOverrides, Task, TaskDetail, TaskTokenUsage } from "@fusion/core";
 import {
   makeTask,
   noop,
@@ -33,7 +34,7 @@ function tokenUsage(overrides: Partial<TaskTokenUsage> = {}): TaskTokenUsage {
   };
 }
 
-function doneTask(overrides = {}) {
+function doneTask(overrides: Partial<TaskDetail> = {}) {
   return makeTask({
     column: "done",
     summary: "Completed **summary** with `packages/dashboard/app/components/TaskDetailModal.tsx`.",
@@ -73,6 +74,52 @@ function doneTask(overrides = {}) {
     },
     ...overrides,
   });
+}
+
+function slimDoneTask(overrides: Partial<TaskDetail> = {}): Task {
+  const { prompt: _prompt, ...task } = doneTask(overrides);
+  return task;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeCommitRecorder() {
+  const commits: { hasRecommendationsButton: boolean; planActive: boolean }[] = [];
+  const wrap = (children: ReactNode) => (
+    <Profiler id="task-detail" onRender={() => {
+      const buttons = Array.from(document.querySelectorAll<HTMLElement>(".detail-tabs .detail-tab"));
+      commits.push({
+        hasRecommendationsButton: buttons.some((button) => button.textContent?.trim() === "Recommendations"),
+        planActive: buttons.some((button) => button.textContent?.trim() === "Plan" && button.classList.contains("detail-tab-active")),
+      });
+    }}>
+      {children}
+    </Profiler>
+  );
+  return { commits, wrap };
+}
+
+function detailModal(task: Task | TaskDetail, initialTab?: "recommendations") {
+  return (
+    <TaskDetailModal
+      task={task}
+      initialTab={initialTab}
+      onClose={noop}
+      onMoveTask={noopMove}
+      onDeleteTask={noopDelete}
+      onMergeTask={noopMerge}
+      onOpenDetail={noopOpenDetail}
+      addToast={noop}
+    />
+  );
 }
 
 describe("TaskDetailModal Summary tab", () => {
@@ -181,6 +228,202 @@ describe("TaskDetailModal Summary tab", () => {
       expectButtonActive(screen.getByRole("button", { name: "Activity" }));
       rendered.unmount();
     }
+  });
+
+  it("hides Recommendations unless a completed task carries recommendations", async () => {
+    const empty = render(detailModal(doneTask({ recommendations: undefined }), "recommendations"));
+    const emptyTabs = document.querySelector(".detail-tabs");
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+    expect(screen.queryByText("No recommendations were produced for this task.")).toBeNull();
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Plan" })));
+    expect(Array.from(emptyTabs?.querySelectorAll<HTMLElement>(".detail-tab") ?? []).every((tab) => tab.textContent?.trim())).toBe(true);
+    expect(emptyTabs?.querySelector('[aria-label*="Recommendations"], [title*="Recommendations"]')).toBeNull();
+    const emptyButtonCount = emptyTabs?.querySelectorAll("button").length;
+    empty.unmount();
+
+    const noRecords = render(detailModal(doneTask({ recommendations: [] }), "recommendations"));
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Plan" })));
+    noRecords.unmount();
+
+    const recommendation = { id: "REC-1", title: "Review cache policy", description: "Check retention.", category: "improvement" as const };
+    const populated = render(detailModal(doneTask({ recommendations: [recommendation] }), "recommendations"));
+    const recommendations = screen.getByRole("button", { name: "Recommendations" });
+    expectButtonActive(recommendations);
+    expect(recommendations.classList.contains("detail-tab")).toBe(true);
+    expect(document.querySelector(".detail-tabs")?.contains(recommendations)).toBe(true);
+    expect(document.querySelector(".detail-tabs")?.querySelectorAll("button").length).toBe((emptyButtonCount ?? 0) + 1);
+    expect(screen.getByText("Review cache policy")).toBeInTheDocument();
+    populated.unmount();
+
+    render(detailModal(doneTask({ recommendations: [{ ...recommendation, id: "REC-2", createdTaskId: "FN-123" }] }), "recommendations"));
+    expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
+  });
+
+  it("requires completion before showing Recommendations", () => {
+    render(detailModal(makeTask({ column: "todo", recommendations: [{ id: "REC-3", title: "Follow up", description: "", category: "feature" }] }), "recommendations"));
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+  });
+
+  it("keeps a Recommendations deep link selected until this slim task resolves", async () => {
+    const pending = deferred<TaskDetail>();
+    const fetchTaskDetail = vi.mocked((await import("../../api")).fetchTaskDetail);
+    fetchTaskDetail.mockReset();
+    fetchTaskDetail.mockReturnValue(pending.promise);
+    const task = slimDoneTask({ id: "FN-pending" });
+    render(detailModal(task, "recommendations"));
+
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Plan" })).not.toHaveClass("detail-tab-active");
+    await act(async () => {
+      pending.resolve(doneTask({ id: task.id, recommendations: [{ id: "REC-pending", title: "Resolved recommendation", description: "", category: "feature" }] }));
+    });
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Recommendations" })));
+    expect(screen.getByText("Resolved recommendation")).toBeInTheDocument();
+  });
+
+  it("reconciles a Recommendations deep link to Plan when pending detail resolves empty", async () => {
+    const pending = deferred<TaskDetail>();
+    const fetchTaskDetail = vi.mocked((await import("../../api")).fetchTaskDetail);
+    fetchTaskDetail.mockReset();
+    fetchTaskDetail.mockReturnValue(pending.promise);
+    const task = slimDoneTask({ id: "FN-pending-empty" });
+    render(detailModal(task, "recommendations"));
+
+    expect(screen.getByRole("button", { name: "Plan" })).not.toHaveClass("detail-tab-active");
+    await act(async () => {
+      pending.resolve(doneTask({ id: task.id, recommendations: [] }));
+    });
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Plan" })));
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+  });
+
+  it("does not redirect a Recommendations deep link after detail fetch rejection", async () => {
+    const fetchTaskDetail = vi.mocked((await import("../../api")).fetchTaskDetail);
+    fetchTaskDetail.mockReset();
+    fetchTaskDetail.mockRejectedValue(new Error("unavailable"));
+    render(detailModal(slimDoneTask({ id: "FN-rejected" }), "recommendations"));
+
+    await waitFor(() => expect(fetchTaskDetail).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Plan" })).not.toHaveClass("detail-tab-active"));
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+  });
+
+  it("never reads a prior task snapshot during a slim task switch", async () => {
+    const pending = deferred<TaskDetail>();
+    const fetchTaskDetail = vi.mocked((await import("../../api")).fetchTaskDetail);
+    fetchTaskDetail.mockReset();
+    fetchTaskDetail.mockReturnValue(pending.promise);
+    const recorder = makeCommitRecorder();
+    const taskA = doneTask({ id: "FN-A", recommendations: [{ id: "REC-A", title: "Recommendation A", description: "", category: "bug" }] });
+    const view = render(recorder.wrap(detailModal(taskA, "recommendations")));
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Recommendations" })));
+
+    const priorCommitCount = recorder.commits.length;
+    const taskB = slimDoneTask({ id: "FN-B", recommendations: undefined });
+    view.rerender(recorder.wrap(detailModal(taskB, "recommendations")));
+    expect(recorder.commits.length).toBeGreaterThan(priorCommitCount);
+    const switchCommits = recorder.commits.slice(priorCommitCount);
+    expect(switchCommits.every((commit) => !commit.hasRecommendationsButton)).toBe(true);
+    expect(switchCommits.every((commit) => !commit.planActive)).toBe(true);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull());
+    expect(screen.getByRole("button", { name: "Plan" })).not.toHaveClass("detail-tab-active");
+
+    await act(async () => {
+      pending.resolve(doneTask({ id: taskB.id, recommendations: [{ id: "REC-B", title: "Recommendation B", description: "", category: "improvement" }] }));
+    });
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Recommendations" })));
+    expect(screen.getByText("Recommendation B")).toBeInTheDocument();
+    expect(screen.queryByText("Recommendation A")).toBeNull();
+  });
+
+  it("reconciles a task-switched Recommendations deep link when the new detail resolves empty", async () => {
+    const pending = deferred<TaskDetail>();
+    const fetchTaskDetail = vi.mocked((await import("../../api")).fetchTaskDetail);
+    fetchTaskDetail.mockReset();
+    fetchTaskDetail.mockReturnValue(pending.promise);
+    const taskA = doneTask({ id: "FN-switch-A", recommendations: [{ id: "REC-switch-A", title: "Prior recommendation", description: "", category: "bug" }] });
+    const view = render(detailModal(taskA, "recommendations"));
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Recommendations" })));
+
+    const taskB = slimDoneTask({ id: "FN-switch-B", recommendations: undefined });
+    view.rerender(detailModal(taskB, "recommendations"));
+    await act(async () => {
+      pending.resolve(doneTask({ id: taskB.id, recommendations: [] }));
+    });
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Plan" })));
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+  });
+
+  it("does not fetch or redirect Recommendations while an embedded host is hidden", async () => {
+    const pending = deferred<TaskDetail>();
+    const fetchTaskDetail = vi.mocked((await import("../../api")).fetchTaskDetail);
+    fetchTaskDetail.mockReset();
+    fetchTaskDetail.mockReturnValue(pending.promise);
+    const task = slimDoneTask({ id: "FN-hidden" });
+    const props = {
+      task,
+      embedded: true,
+      initialTab: "recommendations" as const,
+      onMoveTask: noopMove,
+      onDeleteTask: noopDelete,
+      onMergeTask: noopMerge,
+      onOpenDetail: noopOpenDetail,
+      addToast: noop,
+    };
+    const view = render(<TaskDetailContent {...props} active={false} />);
+    expect(fetchTaskDetail).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Plan" })).not.toHaveClass("detail-tab-active");
+
+    view.rerender(<TaskDetailContent {...props} active />);
+    await waitFor(() => expect(fetchTaskDetail).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      pending.resolve(doneTask({ id: task.id, recommendations: [] }));
+    });
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Plan" })));
+  });
+
+  it("restores Recommendations when a hidden embedded host resolves populated detail", async () => {
+    const pending = deferred<TaskDetail>();
+    const fetchTaskDetail = vi.mocked((await import("../../api")).fetchTaskDetail);
+    fetchTaskDetail.mockReset();
+    fetchTaskDetail.mockReturnValue(pending.promise);
+    const task = slimDoneTask({ id: "FN-hidden-populated" });
+    const props = {
+      task,
+      embedded: true,
+      initialTab: "recommendations" as const,
+      onMoveTask: noopMove,
+      onDeleteTask: noopDelete,
+      onMergeTask: noopMerge,
+      onOpenDetail: noopOpenDetail,
+      addToast: noop,
+    };
+    const view = render(<TaskDetailContent {...props} active={false} />);
+    expect(fetchTaskDetail).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Plan" })).not.toHaveClass("detail-tab-active");
+
+    view.rerender(<TaskDetailContent {...props} active />);
+    await act(async () => {
+      pending.resolve(doneTask({ id: task.id, recommendations: [{ id: "REC-hidden", title: "Restored recommendation", description: "", category: "feature" }] }));
+    });
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Recommendations" })));
+    expect(screen.getByText("Restored recommendation")).toBeInTheDocument();
+  });
+
+  it("gates the shared Recommendations tab strip entry at mobile width", () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    const empty = render(detailModal(doneTask({ recommendations: [] })));
+    expect(document.querySelector(".detail-tabs")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+    empty.unmount();
+
+    render(detailModal(doneTask({ recommendations: [{ id: "REC-mobile", title: "Mobile recommendation", description: "", category: "feature" }] }), "recommendations"));
+    const recommendationButton = screen.getByRole("button", { name: "Recommendations" });
+    expectButtonActive(recommendationButton);
+    expect(document.querySelector(".detail-tabs")?.contains(recommendationButton)).toBe(true);
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: previousWidth });
   });
 
   it("omits the token-cost section when token usage is absent", () => {
@@ -641,5 +884,38 @@ describe("TaskDetailModal Summary tab", () => {
     expectButtonActive(screen.getByRole("button", { name: "Summary" }));
     expect(document.querySelector(".detail-tabs")?.firstElementChild?.textContent).toBe("Activity");
     expect(screen.getByText("Completion summary")).toBeTruthy();
+  });
+
+  it("gates Recommendations through the shared embedded detail entrypoint", async () => {
+    const empty = render(
+      <TaskDetailContent
+        task={doneTask({ recommendations: [] })}
+        embedded
+        initialTab="recommendations"
+        onMoveTask={noopMove}
+        onDeleteTask={noopDelete}
+        onMergeTask={noopMerge}
+        onOpenDetail={noopOpenDetail}
+        addToast={noop}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Recommendations" })).toBeNull();
+    await waitFor(() => expectButtonActive(screen.getByRole("button", { name: "Plan" })));
+    empty.unmount();
+
+    render(
+      <TaskDetailContent
+        task={doneTask({ recommendations: [{ id: "REC-embedded", title: "Embedded recommendation", description: "", category: "bug" }] })}
+        embedded
+        initialTab="recommendations"
+        onMoveTask={noopMove}
+        onDeleteTask={noopDelete}
+        onMergeTask={noopMerge}
+        onOpenDetail={noopOpenDetail}
+        addToast={noop}
+      />,
+    );
+    expectButtonActive(screen.getByRole("button", { name: "Recommendations" }));
+    expect(screen.getByText("Embedded recommendation")).toBeInTheDocument();
   });
 });

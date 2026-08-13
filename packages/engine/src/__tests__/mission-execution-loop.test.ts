@@ -49,7 +49,7 @@ vi.mock("../logger.js", () => ({
   })),
 }));
 
-vi.mock("../agent-session-helpers.js", async (importOriginal) => {
+vi.mock("../agents/agent-session-helpers.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../agents/agent-session-helpers.js")>();
   return {
     ...actual,
@@ -1038,6 +1038,67 @@ describe("MissionExecutionLoop", () => {
       await loop.processTaskOutcome("FN-001");
 
       expect(missionStore.startValidatorRun).toHaveBeenCalledWith("F-001", "task_completion", "FN-001");
+    });
+
+    it.each(["running", "budget-exhausted"] as const)("preserves automatic %s admission short-circuit without invoking manual admission", async (outcome) => {
+      /*
+      FNXC:MissionValidation 2026-08-11-05:38:
+      FN-8976 makes a feature-scoped live run report the existing running outcome. The automatic
+      loop must dispose its memoized checkout and return without starting, passing, or manually
+      admitting a validator; budget-exhausted retains the same disposal boundary.
+      */
+      const feature = createMockFeature({ loopState: "implementing", taskId: "FN-001" });
+      missionStore._setFeature(feature);
+      missionStore.getFeatureByTaskId = vi.fn().mockReturnValue(feature);
+      missionStore._setAssertionsForFeature(feature.id, makeAssertions(1));
+      taskStore._setTask({ id: "FN-001", title: "Test", description: "Test task", log: [], mergeDetails: { commitSha: "landed-sha" } } as any);
+      taskStore.getSettings.mockResolvedValue({
+        missionStaleThresholdMs: 600_000,
+        missionMaxTaskRetries: 3,
+        defaultProvider: "memo-provider",
+        defaultModelId: "memo-model",
+      });
+      const admitValidatorRun = vi.fn().mockResolvedValue({ outcome });
+      const startManualValidatorRun = vi.fn();
+      Object.assign(missionStore, { admitValidatorRun, startManualValidatorRun });
+      const dispose = vi.fn().mockResolvedValue(undefined);
+      loop = new MissionExecutionLoop({
+        taskStore: taskStore as any,
+        missionStore: missionStore as any,
+        rootDir: "/tmp",
+        checkoutMaterializer: { materialize: vi.fn().mockResolvedValue({ dir: "/inspection/landed", dispose }), assertSourceClean: vi.fn() },
+      });
+      const handleValidationPass = vi.spyOn(loop as any, "handleValidationPass");
+      loop.start();
+
+      await loop.processTaskOutcome("FN-001");
+
+      expect(admitValidatorRun).toHaveBeenCalledOnce();
+      expect(startManualValidatorRun).not.toHaveBeenCalled();
+      expect(missionStore.startValidatorRun).not.toHaveBeenCalled();
+      expect(handleValidationPass).not.toHaveBeenCalled();
+      expect(createResolvedAgentSession).not.toHaveBeenCalled();
+      expect(dispose).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the non-memo automatic fallback separate from manual admission", async () => {
+      const feature = createMockFeature({ loopState: "implementing", taskId: "FN-001" });
+      missionStore._setFeature(feature);
+      missionStore.getFeatureByTaskId = vi.fn().mockReturnValue(feature);
+      taskStore._setTask({ id: "FN-001", title: "Test", description: "Test task", log: [] });
+      const startManualValidatorRun = vi.fn();
+      Object.assign(missionStore, { startManualValidatorRun });
+      loop = new MissionExecutionLoop({ taskStore: taskStore as any, missionStore: missionStore as any, rootDir: "/tmp" });
+      vi.spyOn(loop as any, "runValidation").mockResolvedValue({
+        result: { status: "pass", summary: "ok" },
+        inspection: { inspectionRoot: "/tmp", landedSha: undefined, fallbackUsed: true, workspaceStale: false },
+      });
+      loop.start();
+
+      await loop.processTaskOutcome("FN-001");
+
+      expect(missionStore.startValidatorRun).toHaveBeenCalledWith("F-001", "task_completion", "FN-001");
+      expect(startManualValidatorRun).not.toHaveBeenCalled();
     });
 
     it("requeues needs_fix features back through validation", async () => {

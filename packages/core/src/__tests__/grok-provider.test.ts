@@ -7,7 +7,7 @@ import {
 } from "../ai/grok-provider.js";
 import { ZAI_PROVIDER_ID, ZAI_PROVIDER_REGISTRATION, registerBuiltInZaiProvider } from "../ai/zai-provider.js";
 
-const EXPECTED_GROK_MODELS = ["grok-4.5", "grok-4", "grok-code-fast-1", "grok-3", "grok-3-mini"];
+const EXPECTED_GROK_MODELS = ["grok-4.6", "grok-4.5", "grok-4", "grok-code-fast-1", "grok-3", "grok-3-mini"];
 
 describe("GROK_PROVIDER_REGISTRATION", () => {
   it("uses the xAI OpenAI-compatible endpoint and API-key auth", () => {
@@ -24,6 +24,19 @@ describe("GROK_PROVIDER_REGISTRATION", () => {
     const modelIds = GROK_PROVIDER_REGISTRATION.models.map((model) => model.id);
     expect(modelIds).toEqual(EXPECTED_GROK_MODELS);
     expect(modelIds).toContain("grok-4.5");
+  });
+
+  it("registers Grok 4.6 with its compatible model shape", () => {
+    const grok46 = GROK_PROVIDER_REGISTRATION.models.find((model) => model.id === "grok-4.6");
+
+    expect(grok46).toMatchObject({
+      id: "grok-4.6",
+      name: "Grok 4.6",
+      reasoning: true,
+    });
+    expect(grok46?.contextWindow).toBeGreaterThan(0);
+    expect(grok46?.maxTokens).toBeGreaterThan(0);
+    expect(grok46?.compat).not.toHaveProperty("thinkingFormat");
   });
 
   it("does not copy Z.ai's thinkingFormat compat field", () => {
@@ -87,9 +100,21 @@ describe("registerBuiltInGrokProvider", () => {
 
 describe("mergeBuiltInGrokProviderModels", () => {
   it("re-adds missing built-in models after a user grok extension replacement", () => {
-    const extensionModels = GROK_PROVIDER_REGISTRATION.models
-      .filter((model) => model.id !== "grok-4.5")
-      .map((model) => ({ ...model }));
+    const extensionModels = [
+      ...GROK_PROVIDER_REGISTRATION.models
+        .filter((model) => model.id !== "grok-4.6")
+        .map((model) => ({ ...model })),
+      {
+        id: "extension-grok-preview",
+        name: "Extension Grok Preview",
+        reasoning: false,
+        input: ["text"] as const,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1024,
+        maxTokens: 512,
+        compat: { supportsDeveloperRole: false },
+      },
+    ];
     const registeredProviders = new Map<string, Partial<typeof GROK_PROVIDER_REGISTRATION>>();
     const registry = {
       registeredProviders,
@@ -109,22 +134,25 @@ describe("mergeBuiltInGrokProviderModels", () => {
 
     const mergedIds = registeredProviders.get(GROK_CLI_PROVIDER_ID)?.models?.map((model) => model.id);
     expect(mergedIds).toEqual(expect.arrayContaining(EXPECTED_GROK_MODELS));
-    expect(mergedIds).toContain("grok-4.5");
+    expect(mergedIds).toContain("grok-4.6");
+    expect(mergedIds).toContain("extension-grok-preview");
     expect(registeredProviders.get(GROK_CLI_PROVIDER_ID)?.name).toBe("User Grok extension");
   });
 
-  it("is a no-op when all built-in models are already present", () => {
+  it("does not duplicate, reorder, or drop models when Grok 4.6 is already present", () => {
     const registeredProviders = new Map<string, Partial<typeof GROK_PROVIDER_REGISTRATION>>();
-    const registry = {
-      registeredProviders,
-      registerProvider(providerName: string, config: typeof GROK_PROVIDER_REGISTRATION) {
-        registeredProviders.set(providerName, { ...registeredProviders.get(providerName), ...config });
-      },
+    const registerProvider = (providerName: string, config: typeof GROK_PROVIDER_REGISTRATION) => {
+      registeredProviders.set(providerName, { ...registeredProviders.get(providerName), ...config });
     };
+    const registry = { registeredProviders, registerProvider };
 
     registerBuiltInGrokProvider(registry);
+    const before = registeredProviders.get(GROK_CLI_PROVIDER_ID)?.models?.map((model) => model.id);
     expect(() => mergeBuiltInGrokProviderModels(registry)).not.toThrow();
-    const mergedIds = registeredProviders.get(GROK_CLI_PROVIDER_ID)?.models?.map((model) => model.id);
-    expect(mergedIds).toEqual(EXPECTED_GROK_MODELS);
+    const after = registeredProviders.get(GROK_CLI_PROVIDER_ID)?.models?.map((model) => model.id);
+
+    expect(before).toEqual(EXPECTED_GROK_MODELS);
+    expect(after).toEqual(before);
+    expect(after?.filter((id) => id === "grok-4.6")).toHaveLength(1);
   });
 });
