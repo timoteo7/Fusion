@@ -57,6 +57,19 @@ import { getRelativeTimeBucket } from "../utils/relativeTimeAgo";
 
 type MailboxTab = "inbox" | "outbox" | "archived" | "agents";
 
+/*
+FNXC:LifecycleColumnCensus 2026-08-13-21:58:
+DELIBERATE-LITERAL — mailbox folder tab, not a board column.
+
+FN-9014 named a folder `archived`. The tab comparison is that folder switch. Converting it to
+resolveLifecycleColumns would ask a workflow which lane a mailbox folder is in. Keep the
+comparison inside this helper so a real board guard that happens to use the name `activeTab`
+still counts in the census.
+*/
+function isMailboxArchivedTab(tab: MailboxTab): boolean {
+  return tab === "archived";
+}
+
 const ALL_AGENTS_MAILBOX_ID = "__all_agents__";
 
 interface MailboxModalProps {
@@ -488,7 +501,7 @@ export function MailboxModal({
     if (!isOpen) return;
     if (activeTab === "inbox") loadInbox();
     else if (activeTab === "outbox") loadOutbox();
-    else if (activeTab === "archived") loadArchivedInbox();
+    else if (isMailboxArchivedTab(activeTab)) loadArchivedInbox();
   }, [isOpen, activeTab, loadInbox, loadOutbox, loadArchivedInbox]);
 
   // Load agent mailbox when selected
@@ -701,7 +714,7 @@ export function MailboxModal({
       handleCloseMessage();
       if (activeTab === "inbox") loadInbox();
       else if (activeTab === "outbox") loadOutbox();
-      else if (activeTab === "archived") loadArchivedInbox();
+      else if (isMailboxArchivedTab(activeTab)) loadArchivedInbox();
       else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
       else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
       void refreshUnreadCount();
@@ -905,7 +918,7 @@ export function MailboxModal({
             <Send size={14} />
             <span>{t("mailbox.outboxTab", "Outbox")}</span>
           </button>
-          <button className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "archived" ? "active" : ""}`} onClick={() => { consumeCurrentDeepLink(); setActiveTab("archived"); setSelectedMessage(null); }} data-testid="mailbox-tab-archived"><Archive size={14} /><span>Archived</span></button>
+          <button className={`btn btn-sm btn-secondary mailbox-tab ${isMailboxArchivedTab(activeTab) ? "active" : ""}`} onClick={() => { consumeCurrentDeepLink(); setActiveTab("archived"); setSelectedMessage(null); }} data-testid="mailbox-tab-archived"><Archive size={14} /><span>Archived</span></button>
           <button
             className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "agents" ? "active" : ""}`}
             onClick={() => { consumeCurrentDeepLink(); setActiveTab("agents"); setSelectedMessage(null); }}
@@ -1092,7 +1105,7 @@ export function MailboxModal({
           {!selectedMessage && !showComposer && (
             <>
               {/* Inbox Tab */}
-              {activeTab === "archived" && (
+              {isMailboxArchivedTab(activeTab) && (
                 <div className="mailbox-list" data-testid="mailbox-archived-list">
                   {archivedInbox?.messages.length === 0 && <div className="mailbox-empty" data-testid="mailbox-archived-empty">No archived messages</div>}
                   {archivedInbox?.messages.map((message) => <button type="button" className="mailbox-item" key={message.id} onClick={() => void handleOpenMessage(message)} data-testid={`mailbox-item-${message.id}`}>{message.content}</button>)}

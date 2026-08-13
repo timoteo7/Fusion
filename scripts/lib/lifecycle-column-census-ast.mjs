@@ -85,15 +85,6 @@ export const ROLE_RECEIVER_TOKENS = [
   */
   "type", "mode", "kind", "phase", "agentState",
   /*
-  FNXC:LifecycleColumnCensus 2026-08-13-21:50:
-  FN-9014 added a mailbox folder tab named `archived` (inbox | outbox | archived | agents).
-  `activeTab === "archived"` is that folder, not a board column. Counting it as a lifecycle
-  guard made `--strict` rise 0 → 10 on every PR that merged main after #9014, including
-  unrelated organize waves. Converting the tab to resolveLifecycleColumns would ask a
-  workflow which lane a mailbox folder is in.
-  */
-  "activeTab",
-  /*
   FNXC:LifecycleColumnCensus 2026-07-29-20:50 (restores the pinned baseline):
   `outcome` names a RESULT enum, not a column. The one live instance is
   `deterministicReconcile.outcome === "archived"` — the verdict of a duplicate reconciliation, which
