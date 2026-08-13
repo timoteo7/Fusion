@@ -50,6 +50,8 @@ export const LEGACY_COLUMN_IDS = ["triage", "todo", "in-progress", "in-review", 
  */
 export const ROLE_RECEIVER_TOKENS = [
   "role", "agentType", "agent", "lane", "capability", "sessionPurpose", "surface", "purpose", "agentRole", "workflowRole",
+  /* FNXC:LifecycleColumnCensus 2026-08-13-21:50: mailbox folder tab, not a board column. */
+  "activeTab",
 ];
 
 /*
