@@ -52,7 +52,7 @@ import {
   buildDuplicateReplanExhaustedError,
 } from "./duplicate-marker-clear.js";
 import { mergeEffectiveSettings } from "./project/effective-settings.js";
-import { RemovalReason, classifyTaskWorktree, getRegisteredWorktreeBranchMap, getRegisteredWorktreePaths, isUsableTaskWorktree, relocateReclaimableWorktreeIntoRoot, removeWorktree, resolveWorktreeBackend, scanIdleWorktrees, scanOrphanedBranches } from "./worktree/worktree-pool.js";
+import { RemovalReason, getRegisteredWorktreeBranchMap, getRegisteredWorktreePaths, isUsableTaskWorktree, relocateReclaimableWorktreeIntoRoot, removeWorktree, resolveWorktreeBackend, scanIdleWorktrees, scanOrphanedBranches } from "./worktree/worktree-pool.js";
 import {
   isMissingWorktreeSessionStartFailure,
   isMergeActiveMissingWorktreeSessionStartFailure,
@@ -73,7 +73,7 @@ import {
   resolveErrorRecoveryLimit,
 } from "./agent-heartbeat.js";
 import { classifyForeignOnlyContamination, deriveTaskIdFromFusionBranch, inspectBranchConflict, listUniqueBranchCommits } from "./execution/branch-conflicts.js";
-import { createRunAuditor, generateSyntheticRunId, type DatabaseMutationType, type RunAuditor } from "./util/run-audit.js";
+import { createRunAuditor, generateSyntheticRunId, type DatabaseMutationType } from "./util/run-audit.js";
 import { finalizeProvenAutoMergeTask, validateWorkflowDoneMergeProof } from "./merge/auto-merge-finalization.js";
 import { AutoRecoveryDispatcher } from "./healing/auto-recovery.js";
 import { activeSessionRegistry, executingTaskLock } from "./agents/active-session-registry.js";
@@ -88,12 +88,12 @@ import { evaluateStrandedHoldContinuation, seedPreReleasePlanReviewContinuation 
 import { evaluateStrandedContinuationReclaim, RECLAIM_RETIRED_STATE } from "./workflows/stranded-continuation-reclaim.js";
 /*
 FNXC:Workspace 2026-06-22-14:10 (Phase D review G — cycle dissolved):
-`isRepoLanded` is the CANONICAL per-repo landed predicate (Phase C, exported A6). It now lives in
+`isRepoLanded` is the CANONICAL per-repo landed predicate (Phase C, exported A6). It lives in
 the dependency-free `workspace-land-predicate` module, NOT merger-ai. Previously self-healing
 imported it from merger-ai while merger-ai imports `MIN_TEMP_WORKTREE_REAP_AGE_MS` from
-self-healing — a real import cycle. Importing from the predicate module breaks the cycle.
+self-healing — a real import cycle.
+FNXC:CodeOrganization 2026-08-13-03:34: Live import now lives in workspace-reconcile.ts (U5 wave20 peel).
 */
-import { isRepoLanded } from "./merge/workspace-land-predicate.js";
 import { getCommitTaskOwnership } from "./merge/already-merged-detector.js";
 import { getTaskCompletionBlockerForStore } from "./execution/task-completion.js";
 import { shouldReclaimWedgedMerge } from "./merge/merge-reclaim-policy.js";
@@ -121,7 +121,7 @@ import { runSurfacingSweep, hours, type SurfacingCycle } from "./surfacing-sweep
    self-healing-git-evidence.ts. Imported back here because call sites remain. */
 import { SelfHealingGitEvidence, execAsync, shellQuote } from "./self-healing-git-evidence.js";
 import { evaluateParkedAgentTaskLink, PARKED_AGENT_LINK_FRESH_RUN_MS } from "./agents/task-agent-sync.js";
-import { classifyTerminalFailureAutoRecoveryForTask, describeSelfHealingNoActionWedge, describeTaskWedge } from "./notification/task-wedge-notification.js";
+import { classifyTerminalFailureAutoRecoveryForTask, describeTaskWedge } from "./notification/task-wedge-notification.js";
 import {
   MAX_TERMINAL_FAILURE_AUTO_RESUMES,
   MAX_TERMINAL_FAILURE_AUTO_RETRIES,
@@ -265,10 +265,9 @@ import {
 
 import {
   PHANTOM_EXECUTOR_BINDING_AGE_MULTIPLIER,
-  PRE_EXECUTION_WORKTREE_MAX_IDLE_MS,
   MAX_STARVATION_DROPS,
 } from "./self-healing/sweep-constants.js";
-import { isWorkspaceTaskLive, isWorkspaceOwnerLive } from "./self-healing/workspace-liveness.js";
+import { isWorkspaceTaskLive as isWorkspaceTaskLiveImpl, isWorkspaceOwnerLive as isWorkspaceOwnerLiveImpl } from "./self-healing/workspace-liveness.js";
 import {
   evaluateBackwardMoveTripleProof as evaluateBackwardMoveTripleProofImpl,
   emitBackwardMoveNoAction as emitBackwardMoveNoActionImpl,
@@ -992,11 +991,11 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
   }
 
   private isWorkspaceTaskLive(task: Task): { live: boolean; livePaths: string[] } {
-    return isWorkspaceTaskLive(task, this.options.isTaskActive);
+    return isWorkspaceTaskLiveImpl(task, this.options.isTaskActive);
   }
 
   private isWorkspaceOwnerLive(owner: Task | null | undefined, completeColumns: ReadonlySet<string>): boolean {
-    return isWorkspaceOwnerLive(owner, completeColumns);
+    return isWorkspaceOwnerLiveImpl(owner, completeColumns);
   }
 
   private async evaluateBackwardMoveTripleProof(

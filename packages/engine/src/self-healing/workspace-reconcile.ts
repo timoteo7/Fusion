@@ -408,7 +408,13 @@ export async function reconcileOrphanedWorkspaceWorktrees(host: WorkspaceReconci
 
         const repoRootDir = join(host.options.rootDir, repoRel);
         let success = false;
-        let reason = "removed";
+        /*
+        FNXC:CodeOrganization 2026-08-13-03:33:
+        Run-audit metadata stays ids/counts/outcomes-only. Git remove failures use a closed
+        outcome code here; the unbounded git error stays in the operator log only.
+        */
+        let outcome: "removed" | "git-remove-failed" = "removed";
+        let failureDetail = "";
         try {
           await execAsync(`git worktree remove --force ${shellQuote(worktreePath)}`, {
             cwd: repoRootDir,
@@ -416,7 +422,8 @@ export async function reconcileOrphanedWorkspaceWorktrees(host: WorkspaceReconci
           });
           success = true;
         } catch (err: unknown) {
-          reason = `git-remove-failed: ${err instanceof Error ? err.message : String(err)}`;
+          outcome = "git-remove-failed";
+          failureDetail = err instanceof Error ? err.message : String(err);
         }
         try {
           await createRunAuditor(host.store, {
@@ -428,7 +435,7 @@ export async function reconcileOrphanedWorkspaceWorktrees(host: WorkspaceReconci
           }).database({
             type: "task:reconcile-orphaned-workspace-worktree",
             target: task.id,
-            metadata: { taskId: task.id, repo: repoRel, worktreePath, success, reason },
+            metadata: { taskId: task.id, repo: repoRel, worktreePath, success, reason: outcome },
           });
         } catch { /* audit best-effort */ }
         if (success) {
@@ -438,7 +445,7 @@ export async function reconcileOrphanedWorkspaceWorktrees(host: WorkspaceReconci
         } else {
           const failures = (host.orphanWorktreeRemovalFailures.get(worktreePath) ?? 0) + 1;
           host.orphanWorktreeRemovalFailures.set(worktreePath, failures);
-          log.warn(`reconcileOrphanedWorkspaceWorktrees: ${reason} for ${worktreePath} (task ${task.id}, repo ${repoRel}) [${failures}/${MAX_STARVATION_DROPS}]${failures >= MAX_STARVATION_DROPS ? " — giving up; manual cleanup required" : ""}`);
+          log.warn(`reconcileOrphanedWorkspaceWorktrees: ${outcome}${failureDetail ? `: ${failureDetail}` : ""} for ${worktreePath} (task ${task.id}, repo ${repoRel}) [${failures}/${MAX_STARVATION_DROPS}]${failures >= MAX_STARVATION_DROPS ? " — giving up; manual cleanup required" : ""}`);
         }
       }
     }
