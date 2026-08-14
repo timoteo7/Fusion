@@ -3,6 +3,8 @@ import type { TaskDetail } from "@fusion/core";
 import "./executor-test-helpers.js";
 import { TaskExecutor } from "../executor.js";
 import { createMockStore, resetExecutorMocks } from "./executor-test-helpers.js";
+/* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): the executor threads a real mutation context to every store call, so these assertions pin it rather than dropping the argument. */
+import { ANY_MUTATION_CONTEXT } from "./mutation-context-matchers.js";
 
 const now = "2026-06-23T00:00:00.000Z";
 
@@ -67,9 +69,9 @@ describe("executor graph execute self-requeue gate", () => {
       live.id,
       expect.stringContaining("executor recovery preserved"),
       undefined,
-      undefined,
+      ANY_MUTATION_CONTEXT,
     );
-    expect(store.moveTask).not.toHaveBeenCalledWith(live.id, "in-review", expect.anything());
+    expect(store.moveTask).not.toHaveBeenCalledWith(live.id, "in-review", expect.anything(), ANY_MUTATION_CONTEXT);
     expect(store.updateTask).not.toHaveBeenCalledWith(
       live.id,
       expect.objectContaining({ status: "failed" }),
@@ -111,12 +113,12 @@ describe("executor graph execute self-requeue gate", () => {
     expect(store.updateTask).toHaveBeenCalledWith(
       live.id,
       expect.objectContaining({ status: null, error: null }),
-      undefined,
+      ANY_MUTATION_CONTEXT,
     );
     expect(store.moveTask).toHaveBeenCalledWith(
       live.id,
       "todo",
-      expect.objectContaining({ preserveProgress: true, moveSource: "engine", recoveryRehome: true }),
+      expect.objectContaining({ preserveProgress: true, moveSource: "engine", recoveryRehome: true }), ANY_MUTATION_CONTEXT,
     );
     expect(store.handoffToReview).not.toHaveBeenCalled();
   });
@@ -151,12 +153,12 @@ describe("executor graph execute self-requeue gate", () => {
     expect(store.updateTask).toHaveBeenCalledWith(
       live.id,
       expect.objectContaining({ status: null, error: null }),
-      undefined,
+      ANY_MUTATION_CONTEXT,
     );
     expect(store.moveTask).toHaveBeenCalledWith(
       live.id,
       "todo",
-      expect.objectContaining({ preserveProgress: true, moveSource: "engine", recoveryRehome: true }),
+      expect.objectContaining({ preserveProgress: true, moveSource: "engine", recoveryRehome: true }), ANY_MUTATION_CONTEXT,
     );
     expect(store.updateTask).not.toHaveBeenCalledWith(
       live.id,
@@ -208,9 +210,9 @@ describe("executor graph execute self-requeue gate", () => {
       live.id,
       expect.stringContaining("not flagging as failed"),
       undefined,
-      undefined,
+      ANY_MUTATION_CONTEXT,
     );
-    expect(store.moveTask).not.toHaveBeenCalledWith(live.id, "in-review", expect.anything());
+    expect(store.moveTask).not.toHaveBeenCalledWith(live.id, "in-review", expect.anything(), ANY_MUTATION_CONTEXT);
   });
 
   it("auto-recovers a no-live-session code-review-remediation failure with a durable failed gate result", async () => {
@@ -262,7 +264,7 @@ describe("executor graph execute self-requeue gate", () => {
       context: { "node:code-review-remediation:value": "remediation-not-scheduled" },
     });
 
-    expect(store.updateTask).toHaveBeenCalledWith(live.id, { postReviewFixCount: 100 }, undefined);
+    expect(store.updateTask).toHaveBeenCalledWith(live.id, { postReviewFixCount: 100 }, ANY_MUTATION_CONTEXT);
     expect(store.addTaskComment).toHaveBeenCalledWith(
       live.id,
       expect.stringContaining("Auto-revived from in-review: pre-merge workflow step \"Code Review\" had failed"),
@@ -272,7 +274,7 @@ describe("executor graph execute self-requeue gate", () => {
       live.id,
       expect.stringContaining("Auto-recovered retryable remediation node 'code-review-remediation'"),
       expect.stringContaining("Workflow revision key: code-review"),
-      undefined,
+      ANY_MUTATION_CONTEXT,
     );
     expect(store.updateTask).not.toHaveBeenCalledWith(
       live.id,
@@ -333,8 +335,23 @@ describe("executor graph execute self-requeue gate", () => {
       expect.anything(),
       expect.anything(),
     );
-    expect(store.updateTask).not.toHaveBeenCalledWith(live.id, { status: null, error: null }, undefined);
-    expect(store.updateTask).not.toHaveBeenCalledWith(live.id, { workflowStepResults: [] }, undefined);
+    /*
+    FNXC:EngineTests 2026-08-12-01:20:
+    FN-8910 turned these two writes into a NEGATIVE assertion (the card must stay parked). Main
+    spelled the negative as a three-argument call whose run context is `undefined`; U18 Stage C makes
+    the executor always pass a real context, so that spelling would pass vacuously. Scan the recorded
+    calls by patch shape instead, which is arity-independent and therefore cannot be satisfied by the
+    added context argument.
+    */
+    const resumeResetWrites = store.updateTask.mock.calls.filter(
+      ([id, patch]: [string, Record<string, unknown> | undefined, unknown?]) => id === live.id && patch?.status === null && patch?.error === null,
+    );
+    expect(resumeResetWrites).toEqual([]);
+    const stepResultClears = store.updateTask.mock.calls.filter(
+      ([id, patch]: [string, Record<string, unknown> | undefined, unknown?]) => id === live.id
+        && Array.isArray(patch?.workflowStepResults) && (patch?.workflowStepResults as unknown[]).length === 0,
+    );
+    expect(stepResultClears).toEqual([]);
   });
 
   it.each(["remediation-not-scheduled", "missing-remediation-context"])("FN-8910 keeps a completed review card in place when remediation reports %s", async (failureValue) => {
@@ -390,6 +407,7 @@ describe("executor graph execute self-requeue gate", () => {
       live.id,
       "todo",
       expect.objectContaining({ preserveProgress: true, recoveryRehome: true }),
+      ANY_MUTATION_CONTEXT,
     );
   });
 
@@ -424,7 +442,7 @@ describe("executor graph execute self-requeue gate", () => {
         status: "failed",
         error: expect.stringContaining("Workflow graph terminated with failure at node 'code-review-remediation'"),
       }),
-      undefined,
+      ANY_MUTATION_CONTEXT,
     );
   });
 
@@ -455,9 +473,9 @@ describe("executor graph execute self-requeue gate", () => {
         status: "failed",
         error: expect.stringContaining("Workflow graph terminated with failure at node 'parse'"),
       }),
-      undefined,
+      ANY_MUTATION_CONTEXT,
     );
     expect(store.handoffToReview).not.toHaveBeenCalled();
-    expect(store.moveTask).not.toHaveBeenCalledWith(live.id, "in-review", expect.anything());
+    expect(store.moveTask).not.toHaveBeenCalledWith(live.id, "in-review", expect.anything(), ANY_MUTATION_CONTEXT);
   });
 });
