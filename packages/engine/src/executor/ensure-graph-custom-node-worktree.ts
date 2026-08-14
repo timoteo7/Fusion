@@ -111,7 +111,16 @@ export async function ensureGraphCustomNodeWorktree(
     });
     deps.addActiveWorktree(task.id, acquisition.worktreePath);
     if (!acquisition.isResume) {
-      await captureBaseCommitSha(deps.store, task, acquisition.worktreePath, audit, { isResume: false });
+      // FNXC:Identity 2026-08-14-05:32: attribute the base-SHA write to the graph node's run,
+      // matching every other store write in this function.
+      await captureBaseCommitSha(
+        deps.store,
+        task,
+        acquisition.worktreePath,
+        audit,
+        { isResume: false },
+        runContextForTotal(deps.getRunContextFor, task.id),
+      );
     }
     deps.onStart?.(task, acquisition.worktreePath);
     executorLog.debug(`${task.id}: workflow node '${nodeId}' acquired worktree at ${acquisition.worktreePath}`);

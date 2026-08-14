@@ -3,7 +3,7 @@
  * ensureWorkflowMergeBoundaryTask peeled from TaskExecutor (U4).
  * Establish durable merge-column handoff + graph-native checklist projection before merge.
  */
-import type { TaskDetail, TaskStore } from "@fusion/core";
+import type { RunMutationContext, TaskDetail, TaskStore } from "@fusion/core";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveCompleteColumnFor } from "./lifecycle-columns.js";
 import { runContextForTotal } from "./run-context-for.js";
@@ -108,10 +108,27 @@ export async function ensureWorkflowMergeBoundaryTask(
     workflowMoveMetadata: metadata,
   };
   const storeWithMove = deps.store as typeof deps.store & {
-    moveTask?: (id: string, column: string, options?: unknown) => Promise<TaskDetail | undefined>;
+    /*
+    FNXC:Identity 2026-08-14-05:32:
+    The local structural type carries the context parameter so this move is attributed like every
+    other write in this file. It was the one call here that still used the context-free shape, so the
+    merge-boundary move audited as `system`/`unknown` while the log entries on either side of it
+    carried the real actor.
+    */
+    moveTask?: (
+      id: string,
+      column: string,
+      options?: unknown,
+      context?: RunMutationContext,
+    ) => Promise<TaskDetail | undefined>;
   };
   if (typeof storeWithMove.moveTask === "function") {
-    const moved = await storeWithMove.moveTask(live.id, targetColumn, moveOptions);
+    const moved = await storeWithMove.moveTask(
+      live.id,
+      targetColumn,
+      moveOptions,
+      runContextForTotal(deps.getRunContextFor, live.id),
+    );
     await deps.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     return moved ?? { ...live, column: targetColumn };
   }
