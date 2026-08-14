@@ -36,11 +36,15 @@ export interface TaskStep {
  * EventEmitters, and custom thenables, all of which the engine is full of — so the explicit field is
  * the backstop that turns a lost context into a type error instead of a silent fail-open.
  *
- * `actor` is REQUIRED. Making the field required is this unit's job; making the `runContext?`
- * PARAMETER required across the ~70 mutating store methods is U18's, and the two are split
- * deliberately so a large mechanical diff does not hide inside a semantic one. Until U18 lands, a
- * call site that passes no context at all still passes no context — the required field only
- * constrains the sites that construct one.
+ * `actor` is OPTIONAL **in this chunk only**, and is tightened to required in the final chunk of the
+ * split (5/5). The field being required is what forces every constructor of a context to supply an
+ * actor — but that is atomic across the whole workspace: engine, dashboard and CLI all build these
+ * objects, so flipping it here would red every intermediate PR in the stack and hide real review
+ * signal behind hundreds of expected type errors. Optional-then-required keeps each PR independently
+ * green while ending in exactly the same place.
+ *
+ * Making the `runContext?` PARAMETER required across the ~70 mutating store methods is U18's job;
+ * the two are split deliberately so a large mechanical diff does not hide inside a semantic one.
  */
 export interface RunMutationContext {
   /** The heartbeat run ID that initiated this mutation. */
@@ -54,8 +58,10 @@ export interface RunMutationContext {
    * actor it is acting for (R5/R28). While `identity.enabled` is off this is the bootstrap actor,
    * which is what makes a pre-enablement write distinguishable from a post-enablement one in audit
    * (KTD22: attribution runs unconditionally; only `can()` short-circuits).
+   *
+   * Optional here, required from 5/5 — see the note above.
    */
-  actor: ActorContext;
+  actor?: ActorContext;
 }
 
 export interface TaskLogEntry {
