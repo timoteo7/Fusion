@@ -14,11 +14,23 @@ import {
 } from "../worktree/worktree-pool.js";
 import { ActiveSessionWorktreeRemovalError } from "../worktree/worktree-backend.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
+import type { RunMutationContext } from "@fusion/core";
 
 export type RemoveOwnWorktreeDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   rootDir: string;
   store: {
-    logEntry: (taskId: string, action: string, outcome?: string) => Promise<unknown>;
+    /*
+  FNXC:Identity 2026-08-12-01:20 (U18/KTD2 — the seam restates the required context):
+  This narrowed store re-declared `logEntry` with NO context parameter, so it did not inherit the
+  canonical/deprecated overload pair and would keep accepting unattributed writes even after every
+  call site was converted — a hole the census cannot see. Mirror the CANONICAL arity instead.
+  Do not relax it back to quiet a caller.
+  */
+  logEntry: (taskId: string, action: string, outcome: string | undefined, runContext: RunMutationContext) => Promise<unknown>;
   };
   reconcileSelfOwnedBeforeRemove: (worktreePath: string, taskId: string) => Promise<void>;
   hasActiveWorktreeBinding: (taskId: string, path: string) => boolean;
@@ -71,8 +83,7 @@ export async function removeOwnWorktreeWithReconcile(
         await deps.store.logEntry(
           input.taskId,
           "Reconciled stale self-owned active-session registration (post-throw)",
-          input.worktreePath,
-        );
+          input.worktreePath, runContextForTotal(deps.getRunContextFor, input.taskId));
         await removeWorktree(removeArgs);
         return;
       }

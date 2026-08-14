@@ -81,6 +81,7 @@ import {
   type WorkflowStepOutcome,
 } from "./workflow-step-verdict.js";
 import { resolveDiffBaseRef } from "./worktree-git-refs.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const execAsync = promisify(exec);
 
@@ -171,7 +172,7 @@ export async function executeWorkflowStep(
         workflowReviewSpecArtifact = await deps.readTaskArtifact(task.id, "PROMPT.md");
       } catch (error) {
         const diagnostic = `PROMPT.md could not be read because task storage failed; ${workflowStep.name} must retry without replanning. ${error instanceof Error ? error.message : String(error)}`;
-        await deps.store.logEntry(task.id, `[pre-merge] ${workflowStep.name} artifact read failed: ${diagnostic}`);
+        await deps.store.logEntry(task.id, `[pre-merge] ${workflowStep.name} artifact read failed: ${diagnostic}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         return {
           success: false,
           error: diagnostic,
@@ -191,8 +192,7 @@ export async function executeWorkflowStep(
       const diagnostic = `PROMPT.md could not be loaded; ${workflowStep.name} cannot approve without the authoritative task contract.`;
       await deps.store.logEntry(
         task.id,
-        `[pre-merge] ${workflowStep.name} refused to run without PROMPT.md: ${diagnostic}`,
-      );
+        `[pre-merge] ${workflowStep.name} refused to run without PROMPT.md: ${diagnostic}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
       return {
         success: false,
         revisionRequested: true,
@@ -216,8 +216,7 @@ export async function executeWorkflowStep(
         const output = `REVISE: ${diagnostic}`;
         await deps.store.logEntry(
           task.id,
-          `[pre-merge] Plan Review deterministic external-integration evidence check requested revision: ${diagnostic}`,
-        );
+          `[pre-merge] Plan Review deterministic external-integration evidence check requested revision: ${diagnostic}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         return {
           success: false,
           revisionRequested: true,
@@ -555,11 +554,10 @@ export async function executeWorkflowStep(
       ) {
         await deps.store.logEntry(
           task.id,
-          `[skill-load] Workflow step '${workflowStep.name}' requests skill '${workflowStep.skillName}' but it cannot be discovered from configured plugin body directories or FUSION_CE_SKILLS_DIR; the step runs with role-fallback skills only.`,
-        );
+          `[skill-load] Workflow step '${workflowStep.name}' requests skill '${workflowStep.skillName}' but it cannot be discovered from configured plugin body directories or FUSION_CE_SKILLS_DIR; the step runs with role-fallback skills only.`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
       }
       const logBrowserVerificationActivity = async (message: string) => {
-        await deps.store.logEntry(task.id, message);
+        await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         await deps.store.appendAgentLog(task.id, message, "status", undefined, "reviewer");
       };
       if (workflowStep.requiresBrowser === true) {
@@ -605,8 +603,7 @@ export async function executeWorkflowStep(
       if (toolMode === "readonly" && readonlyCustomTools.denied.length > 0) {
         await deps.store.logEntry(
           task.id,
-          `[readonly-violation] Workflow step '${workflowStep.name}' dropped denied custom tools: ${readonlyCustomTools.denied.join(", ")}`,
-        );
+          `[readonly-violation] Workflow step '${workflowStep.name}' dropped denied custom tools: ${readonlyCustomTools.denied.join(", ")}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
       }
 
       /*
@@ -670,8 +667,7 @@ export async function executeWorkflowStep(
       executorLog.debug(`${task.id}: workflow step '${workflowStep.name}' using model ${workflowModelDetails}`);
       await deps.store.logEntry(
         task.id,
-        `Workflow step '${workflowStep.name}' using model: ${workflowModelDetails}`,
-      );
+        `Workflow step '${workflowStep.name}' using model: ${workflowModelDetails}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
       deps.setActiveWorkflowStepSession(task.id, session, worktreePath, createSeenSteeringIds(task));
       // FNXC:TaskTiming 2026-07-30-21:40: graph-owned Plan Review is the only
       // post-spec planning lane. Start before prompting and finalize in finally before any replan handoff.
@@ -680,7 +676,7 @@ export async function executeWorkflowStep(
         deps.activePlanningWorkflowSessions.add(task.id);
         const planningStart = startPlanningSegment(task);
         try {
-          if (planningStart.planningStartedAt) await deps.store.updateTask(task.id, planningStart);
+          if (planningStart.planningStartedAt) await deps.store.updateTask(task.id, planningStart, runContextForTotal(deps.getRunContextFor, task.id));
         } catch (error) {
           deps.activePlanningWorkflowSessions.delete(task.id);
           throw error;
@@ -763,8 +759,7 @@ export async function executeWorkflowStep(
           executorLog.warn(`${task.id}: workflow step '${workflowStep.name}' (${attemptLabel}) timed out after ${timeoutMs}ms — disposing session`);
           await deps.store.logEntry(
             task.id,
-            `Workflow step '${workflowStep.name}' ${attemptLabel === "primary" ? "primary" : "fallback"} model timed out after ${Math.round(timeoutMs / 1000)}s — aborting session`,
-          );
+            `Workflow step '${workflowStep.name}' ${attemptLabel === "primary" ? "primary" : "fallback"} model timed out after ${Math.round(timeoutMs / 1000)}s — aborting session`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: timed out`);
           }
@@ -812,8 +807,7 @@ export async function executeWorkflowStep(
           if (gated?.downgraded) {
             await deps.store.logEntry(
               task.id,
-              `[pre-merge] ${workflowStep.name} returned REVISE with no finding at or above "${reviewBlockingSeverity}" — recorded as APPROVE_WITH_NOTES; ${gated.advisory.length} advisory finding(s) handed to the implementer.`,
-            );
+              `[pre-merge] ${workflowStep.name} returned REVISE with no finding at or above "${reviewBlockingSeverity}" — recorded as APPROVE_WITH_NOTES; ${gated.advisory.length} advisory finding(s) handed to the implementer.`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
             // Non-fatal: losing the advisory carry-forward must never fail the step itself.
             await injectReviewAdvisoryNotes(deps.store, task, workflowStep.name, gated.advisory).catch((err: unknown) => {
               const msg = err instanceof Error ? err.message : String(err);
@@ -841,8 +835,7 @@ export async function executeWorkflowStep(
           // hard gate block — see runGraphCustomNode's outcome mapping.
           await deps.store.logEntry(
             task.id,
-            `[pre-merge] Workflow step '${workflowStep.name}' produced malformed output (no parseable verdict) — recorded as non-blocking advisory`,
-          );
+            `[pre-merge] Workflow step '${workflowStep.name}' produced malformed output (no parseable verdict) — recorded as non-blocking advisory`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: malformed output`);
           }
@@ -870,8 +863,7 @@ export async function executeWorkflowStep(
           const deniedTool = violation.toolName || "unknown";
           await deps.store.logEntry(
             task.id,
-            `[readonly-violation] Workflow step '${workflowStep.name}' attempted denied tool '${deniedTool}'`,
-          );
+            `[readonly-violation] Workflow step '${workflowStep.name}' attempted denied tool '${deniedTool}'`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: readonly violation`);
           }
@@ -889,7 +881,7 @@ export async function executeWorkflowStep(
             const livePlanningTask = await deps.store.getTask(task.id);
             if (livePlanningTask) {
               const planningEnd = finalizePlanningSegment(livePlanningTask);
-              if (planningEnd.planningStartedAt === null) await deps.store.updateTask(task.id, planningEnd);
+              if (planningEnd.planningStartedAt === null) await deps.store.updateTask(task.id, planningEnd, runContextForTotal(deps.getRunContextFor, task.id));
             }
           } finally {
             // Finalize before releasing Plan Review ownership so triage can only
@@ -926,16 +918,14 @@ export async function executeWorkflowStep(
         if (!retryMalformed) return retryOutcome;
         await deps.store.logEntry(
           task.id,
-          `Workflow step '${workflowStep.name}' produced malformed output on both the primary attempt and one self-retry — no fallback model configured (set ${fallbackSettingsHint})`,
-        );
+          `Workflow step '${workflowStep.name}' produced malformed output on both the primary attempt and one self-retry — no fallback model configured (set ${fallbackSettingsHint})`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         return retryOutcome;
       }
       const reason = primaryOutcome.timedOut ? "timed out" : "produced malformed output";
       executorLog.warn(`${task.id}: workflow step '${workflowStep.name}' ${reason} and no fallback model is configured`);
       await deps.store.logEntry(
         task.id,
-        `Workflow step '${workflowStep.name}' ${reason} — no fallback model configured (set ${fallbackSettingsHint})`,
-      );
+        `Workflow step '${workflowStep.name}' ${reason} — no fallback model configured (set ${fallbackSettingsHint})`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
       return primaryOutcome;
     }
 

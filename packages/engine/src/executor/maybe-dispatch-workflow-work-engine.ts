@@ -7,8 +7,12 @@ import type { Task, TaskDetail, TaskStore, WorkflowIr, WorkflowWorkEngineDispatc
 import { getWorkflowExtensionRegistry, resolveWorkflowIrForTask } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import { generateSyntheticRunId } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type MaybeDispatchWorkflowWorkEngineDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
 };
 
@@ -49,30 +53,29 @@ export async function maybeDispatchWorkflowWorkEngine(
       const message = error instanceof Error ? error.message : String(error);
       executorLog.warn(`${task.id}: workflow work-engine ${extensionId} failed: ${message}`);
       if (extension.fallback === "degradeToDefault") continue;
-      await deps.store.logEntry(task.id, `Workflow work engine ${extensionId} failed`, message);
+      await deps.store.logEntry(task.id, `Workflow work engine ${extensionId} failed`, message, runContextForTotal(deps.getRunContextFor, task.id));
       await deps.store.updateTask(task.id, {
         status: extension.fallback === "parkNeedsAttention" ? "queued" : "failed",
         error: message,
-      });
+      }, runContextForTotal(deps.getRunContextFor, task.id));
       return true;
     }
 
     if (result.kind === "not-claimed") continue;
     if (result.kind === "degraded-to-default") {
       executorLog.warn(`${task.id}: workflow work-engine ${extensionId} degraded to default: ${result.reason}`);
-      await deps.store.logEntry(task.id, `Workflow work engine ${extensionId} degraded to default`, result.reason);
+      await deps.store.logEntry(task.id, `Workflow work engine ${extensionId} degraded to default`, result.reason, runContextForTotal(deps.getRunContextFor, task.id));
       continue;
     }
     if (result.kind === "parked") {
-      await deps.store.logEntry(task.id, result.message, result.reason);
-      await deps.store.updateTask(task.id, { status: "queued", error: result.reason });
+      await deps.store.logEntry(task.id, result.message, result.reason, runContextForTotal(deps.getRunContextFor, task.id));
+      await deps.store.updateTask(task.id, { status: "queued", error: result.reason }, runContextForTotal(deps.getRunContextFor, task.id));
       return true;
     }
 
     await deps.store.logEntry(
       task.id,
-      result.message ?? `Workflow work engine ${extensionId} claimed execution`,
-    );
+      result.message ?? `Workflow work engine ${extensionId} claimed execution`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     try {
       await deps.store.recordRunAuditEvent?.({
         taskId: task.id,

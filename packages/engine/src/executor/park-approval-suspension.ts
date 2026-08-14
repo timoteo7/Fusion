@@ -8,6 +8,7 @@
 import type { TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ParkApprovalSuspensionDeps = {
   store: TaskStore;
@@ -27,7 +28,7 @@ export async function parkApprovalSuspension(
     taskId,
     `Execution suspended for approval — ${surface} disposed; task remains in progress for decision resume`,
     undefined,
-    deps.getRunContextFor(taskId),
+    runContextForTotal(deps.getRunContextFor, taskId),
   );
   executorLog.log(`${taskId}: approval suspension parked after ${surface} disposal`);
   return true;

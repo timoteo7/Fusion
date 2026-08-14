@@ -7,6 +7,8 @@ import { Type, type Static } from "@earendil-works/pi-ai";
 import type { TaskStore } from "@fusion/core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 const taskAddDepParams = Type.Object({
   task_id: Type.String({ description: "The ID of the task to depend on (e.g. \"KB-001\")" }),
@@ -14,6 +16,8 @@ const taskAddDepParams = Type.Object({
 });
 
 export type TaskAddDepToolDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   depAborted: Set<string>;
   getActiveSession: (taskId: string) => { session: { dispose: () => void } } | undefined;
@@ -86,8 +90,8 @@ export function createTaskAddDepTool(deps: TaskAddDepToolDeps, taskId: string): 
       }
 
       // Add the dependency
-      await store.updateTask(taskId, { dependencies: [...existing, targetId] });
-      await store.logEntry(taskId, `Added dependency on ${targetId} — stopping execution for re-planning`);
+      await store.updateTask(taskId, { dependencies: [...existing, targetId] }, runContextForTotal(deps.getRunContextFor, taskId));
+      await store.logEntry(taskId, `Added dependency on ${targetId} — stopping execution for re-planning`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
 
       // Trigger abort flow (same pattern as pausedAborted)
       deps.depAborted.add(taskId);

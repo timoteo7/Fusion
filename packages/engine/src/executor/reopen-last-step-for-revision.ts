@@ -6,11 +6,14 @@
  * Code Review / Browser Verification REVISE bounces must reopen the step that can actually make the requested code change, not only a trailing Documentation & Delivery or Testing & Verification step. Otherwise the graph rerun can complete a trivial terminal step, re-evaluate the optional group against unchanged code, and loop or strand pending work. Reopen the trailing verification/delivery suffix plus the nearest preceding implementation step so both in-progress and in-review bounce sources re-launch execution on actionable work before optional-step re-evaluation.
  */
 import type { Task, TaskStore } from "@fusion/core";
+import type { RunMutationContext } from "@fusion/core";
 
 export async function reopenLastStepForRevision(
   store: TaskStore,
   taskId: string,
   task: Task,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making this write; REQUIRED so a future unwired caller is a compile error rather than a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<{ index: number; name: string; indexes: number[] } | null> {
   const steps = task.steps;
   if (steps.length === 0) return null;
@@ -24,7 +27,7 @@ export async function reopenLastStepForRevision(
   }
 
   if (lastNonPendingIndex === -1) {
-    await store.updateTask(taskId, { currentStep: 0 });
+    await store.updateTask(taskId, { currentStep: 0 }, runContext);
     return null;
   }
 
@@ -55,6 +58,6 @@ export async function reopenLastStepForRevision(
     }
   }
   const currentStep = indexes[0] ?? lastNonPendingIndex;
-  await store.updateTask(taskId, { currentStep });
+  await store.updateTask(taskId, { currentStep }, runContext);
   return { index: currentStep, name: steps[currentStep].name, indexes };
 }

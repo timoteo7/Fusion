@@ -20,6 +20,7 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const execAsync = promisify(exec);
 
@@ -122,7 +123,7 @@ export async function reconcileStepsFromGitHistory(
       taskId,
       `Reconciled Step ${stepIndex} as done from git history (resume)`,
       undefined,
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     );
     executorLog.log(`${taskId}: reconciled Step ${stepIndex} as done from git history`);
   }
@@ -132,7 +133,7 @@ export async function reconcileStepsFromGitHistory(
     const updated = await deps.store.getTask(taskId);
     const lowestPending = updated.steps.findIndex((s) => s.status === "pending" || s.status === "in-progress");
     if (lowestPending >= 0 && lowestPending !== updated.currentStep) {
-      await deps.store.updateTask(taskId, { currentStep: lowestPending });
+      await deps.store.updateTask(taskId, { currentStep: lowestPending }, runContextForTotal(deps.getRunContextFor, taskId));
       executorLog.log(`${taskId}: set currentStep to ${lowestPending} after step reconciliation`);
     }
   }

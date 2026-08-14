@@ -14,6 +14,7 @@ import type { EngineRunContext } from "../util/run-audit.js";
 import { RemovalReason, removeWorktree } from "../worktree/worktree-pool.js";
 import { resolveExternalExecutionCheckoutRoute } from "../execution/external-execution-checkout.js";
 import { preExecutionWorktreeHasWork } from "./worktree-git-refs.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ReleasePreExecutionWorktreeDeps = {
   store: TaskStore;
@@ -56,8 +57,8 @@ export async function releasePreExecutionWorktree(
       });
     }
     deps.activeWorktrees.get(taskId)?.delete(live.worktree);
-    await deps.store.updateTask(taskId, { worktree: null, branch: null, baseCommitSha: null, sessionFile: null }, deps.getRunContextFor(taskId));
-    await deps.store.logEntry(taskId, `Released the pre-execution worktree (${reason}) — it will be re-acquired when planning or execution resumes`, undefined, deps.getRunContextFor(taskId)).catch(() => undefined);
+    await deps.store.updateTask(taskId, { worktree: null, branch: null, baseCommitSha: null, sessionFile: null }, runContextForTotal(deps.getRunContextFor, taskId));
+    await deps.store.logEntry(taskId, `Released the pre-execution worktree (${reason}) — it will be re-acquired when planning or execution resumes`, undefined, runContextForTotal(deps.getRunContextFor, taskId)).catch(() => undefined);
     executorLog.log(`${taskId}: released pre-execution worktree ${live.worktree} (${reason})`);
     return true;
   } catch (error) {

@@ -24,6 +24,7 @@ import { resolveDiffBaseRef } from "./worktree-git-refs.js";
 import { evaluatePromptDerivedNoCommitEligibility } from "./prompt-derived-eligibility.js";
 import { getNoCommitEligibilityReason } from "./no-commit-eligibility.js";
 import { resolveAuthoritativeExternalExecutionRoute } from "./resolve-authoritative-external-execution-route.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const execAsync = promisify(exec);
 
@@ -283,9 +284,9 @@ export async function verifyWorktreeInvariants(
         if (!externalExecutionRoute.configured && allowReanchor && observedTopLevel !== expectedRoot && isInsideWorktreesDir(deps.rootDir, observedTopLevel, settings)) {
           const reanchor = await detectNestedWorktreeRoot(deps.rootDir, worktreePath, settings);
           if (reanchor.reanchored) {
-            await deps.store.updateTask(task.id, { worktree: reanchor.root });
+            await deps.store.updateTask(task.id, { worktree: reanchor.root }, runContextForTotal(deps.getRunContextFor, task.id));
             executorLog.log(`${task.id}: re-anchored nested task.worktree ${worktreePath} -> ${reanchor.root}`);
-            await deps.store.logEntry(task.id, `Re-anchored nested task.worktree from ${worktreePath} to ${reanchor.root}`, undefined, deps.getRunContextFor(task.id));
+            await deps.store.logEntry(task.id, `Re-anchored nested task.worktree from ${worktreePath} to ${reanchor.root}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
             await deps.emitWorktreeReanchoredAudit(task.id, worktreePath, reanchor.root, "verify-worktree-invariants");
             return verifyWorktreeInvariants(deps, task, reanchor.root, false, options);
           }
@@ -377,7 +378,7 @@ export async function verifyWorktreeInvariants(
         task.id,
         `fn_task_done no_commits guard skipped (${noCommitEligibilityReason})`,
         undefined,
-        deps.getRunContextFor(task.id),
+        runContextForTotal(deps.getRunContextFor, task.id),
       );
     } catch (error) {
       executorLog.warn(

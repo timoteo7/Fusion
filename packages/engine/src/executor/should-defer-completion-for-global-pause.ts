@@ -7,6 +7,7 @@
 import type { TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ShouldDeferCompletionForGlobalPauseDeps = {
   store: TaskStore;
@@ -30,7 +31,7 @@ export async function shouldDeferCompletionForGlobalPause(
     taskId,
     `Completion handoff deferred — global pause active (${context})`,
     undefined,
-    deps.getRunContextFor(taskId),
+    runContextForTotal(deps.getRunContextFor, taskId),
   ).catch(() => undefined);
   return true;
 }

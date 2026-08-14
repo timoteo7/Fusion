@@ -9,6 +9,7 @@ import type { TaskStore } from "@fusion/core";
 import { getTaskMergeBlocker } from "@fusion/core";
 import type { EngineRunContext } from "../util/run-audit.js";
 import type { ResumeLanes } from "./resolve-resume-lanes.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type FinalizeAlreadyReviewedTaskDeps = {
   store: TaskStore;
@@ -39,7 +40,7 @@ export async function finalizeAlreadyReviewedTask(
     reviewColumns: new Set([resumeReviewLane ?? "in-review"]),
   });
   if (blocker) {
-    await deps.store.logEntry(taskId, "Task already in-review; merge deferred", blocker, deps.getRunContextFor(taskId));
+    await deps.store.logEntry(taskId, "Task already in-review; merge deferred", blocker, runContextForTotal(deps.getRunContextFor, taskId));
     return "blocked";
   }
 
@@ -47,7 +48,7 @@ export async function finalizeAlreadyReviewedTask(
     taskId,
     "Task already in-review after completion — finalizing merge",
     undefined,
-    deps.getRunContextFor(taskId),
+    runContextForTotal(deps.getRunContextFor, taskId),
   );
   await deps.store.mergeTask(taskId);
   return "merged";

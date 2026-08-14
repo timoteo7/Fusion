@@ -11,8 +11,12 @@ import type { TaskStore } from "@fusion/core";
 import { resolveWipTargetForTask } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type WorkflowRerunBounceDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   workflowRerunPending: Set<string>;
   getExecutionPauseLabel: () => Promise<string | null>;
@@ -77,9 +81,9 @@ export async function performWorkflowRerunBounce(
         await deps.store.moveTask(taskId, await resolveReboundColumnFor(deps.store, taskId), {
           preserveResumeState: true,
           preserveWorktree: true,
-        });
+        }, runContextForTotal(deps.getRunContextFor, taskId));
       } else {
-        await deps.store.moveTask(taskId, await resolveReboundColumnFor(deps.store, taskId), { preserveWorktree: true });
+        await deps.store.moveTask(taskId, await resolveReboundColumnFor(deps.store, taskId), { preserveWorktree: true }, runContextForTotal(deps.getRunContextFor, taskId));
       }
       // Restore worktree + executionStartedAt unconditionally to match
       // the original bounce contract: even with preserveWorktree the
@@ -90,7 +94,7 @@ export async function performWorkflowRerunBounce(
       await deps.store.updateTask(taskId, {
         ...(persistWorktreePath ? { worktree: worktreePath } : {}),
         executionStartedAt: originalExecutionStartedAt ?? null,
-      });
+      }, runContextForTotal(deps.getRunContextFor, taskId));
       const pauseLabelAfterTodo = await deps.getExecutionPauseLabel();
       if (pauseLabelAfterTodo) {
         executorLog.log(`${taskId}: workflow rerun parked in todo — ${pauseLabelAfterTodo} became active during bounce`);
@@ -99,12 +103,12 @@ export async function performWorkflowRerunBounce(
       // Now in `todo` (non-mergeable) — safe to clear prior gate failures.
       await deps.clearTerminalStepFailuresForRetry(taskId);
       /* FNXC:WorkflowResolvedColumns 2026-07-30-21:40: census-invisible moveTask DESTINATION — a call argument, not a comparison. The SOURCE guard four lines up already resolves via resolveReboundColumnFor; leaving the destination literal is a split brain inside one function. */
-      await deps.store.moveTask(taskId, await resolveWipTargetForTask(deps.store, taskId));
+      await deps.store.moveTask(taskId, await resolveWipTargetForTask(deps.store, taskId), undefined, runContextForTotal(deps.getRunContextFor, taskId));
       return "bounced";
     }
 
     if (latestTask.column === await resolveReboundColumnFor(deps.store, taskId)) {
-      if (persistWorktreePath) await deps.store.updateTask(taskId, { worktree: worktreePath });
+      if (persistWorktreePath) await deps.store.updateTask(taskId, { worktree: worktreePath }, runContextForTotal(deps.getRunContextFor, taskId));
       const pauseLabelBeforeResume = await deps.getExecutionPauseLabel();
       if (pauseLabelBeforeResume) {
         executorLog.log(`${taskId}: workflow rerun parked in todo — ${pauseLabelBeforeResume} became active before resume`);
@@ -113,7 +117,7 @@ export async function performWorkflowRerunBounce(
       // Already in `todo` (non-mergeable) — safe to clear prior gate failures.
       await deps.clearTerminalStepFailuresForRetry(taskId);
       /* FNXC:WorkflowResolvedColumns 2026-07-30-21:40: census-invisible moveTask DESTINATION — a call argument, not a comparison. The SOURCE guard four lines up already resolves via resolveReboundColumnFor; leaving the destination literal is a split brain inside one function. */
-      await deps.store.moveTask(taskId, await resolveWipTargetForTask(deps.store, taskId));
+      await deps.store.moveTask(taskId, await resolveWipTargetForTask(deps.store, taskId), undefined, runContextForTotal(deps.getRunContextFor, taskId));
       return "bounced";
     }
 

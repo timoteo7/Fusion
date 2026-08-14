@@ -9,6 +9,7 @@ import type { TaskDetail, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveTerminalColumnsFor, resolveReboundColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RouteResetParsePinMismatchDeps = {
   store: TaskStore;
@@ -47,14 +48,14 @@ export async function routeResetParsePinMismatchToRetry(
     status: null,
     error: null,
     graphResumeRetryCount: 0,
-  }, deps.getRunContextFor(live.id));
+  }, runContextForTotal(deps.getRunContextFor, live.id));
   const reboundColumn = await resolveReboundColumnFor(deps.store, live.id);
   if (live.column !== reboundColumn) {
-    await deps.store.moveTask(live.id, reboundColumn, { preserveProgress: false });
+    await deps.store.moveTask(live.id, reboundColumn, { preserveProgress: false }, runContextForTotal(deps.getRunContextFor, live.id));
   }
   const message = "Auto-recovered: cleared stale workflow parse pins after reset/retry — task requeued before execution";
   executorLog.warn(`${live.id}: ${message}`);
-  await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
+  await deps.store.logEntry(live.id, message, undefined, runContextForTotal(deps.getRunContextFor, live.id));
   await deps.persistTokenUsage(live.id);
   return true;
 }

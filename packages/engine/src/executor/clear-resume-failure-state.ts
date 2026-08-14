@@ -9,8 +9,12 @@
  * so a task can end up actively executing while still labeled "queued" in the UI.
  */
 import type { Task, TaskStore } from "@fusion/core";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type ClearResumeFailureStateDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
 };
 
@@ -30,6 +34,6 @@ export async function clearResumeFailureState(
     updates.blockedBy = null;
   }
   if (Object.keys(updates).length > 0) {
-    await deps.store.updateTask(task.id, updates);
+    await deps.store.updateTask(task.id, updates, runContextForTotal(deps.getRunContextFor, task.id));
   }
 }

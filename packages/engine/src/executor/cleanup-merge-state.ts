@@ -7,6 +7,7 @@ import type { Task, TaskStore } from "@fusion/core";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { isTaskWorkComplete } from "./task-predicates.js";
 import { preservePreExecutionWorkflowStepResults } from "./workflow-step-satisfaction.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type CleanupMergeStateDeps = {
   store: TaskStore;
@@ -31,7 +32,7 @@ export async function cleanupMergeStateForReverification(
     error: null,
     verificationFailureCount: options?.preserveVerificationFailureCount ? task.verificationFailureCount ?? 0 : 0,
     workflowStepResults: preservedWorkflowStepResults,
-  });
+  }, runContextForTotal(deps.getRunContextFor, task.id));
 
   const refreshedTask = await deps.store.getTask(task.id);
   const steps = refreshedTask.steps ?? [];
@@ -60,11 +61,11 @@ export async function cleanupMergeStateForReverification(
           }
         }
         const earliestIndex = Math.min(...Array.from(resetIndexes));
-        await deps.store.updateTask(task.id, { currentStep: earliestIndex });
+        await deps.store.updateTask(task.id, { currentStep: earliestIndex }, runContextForTotal(deps.getRunContextFor, task.id));
       }
     }
   }
 
-  await deps.store.logEntry(task.id, logMessage, undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, logMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
   return deps.store.getTask(task.id);
 }

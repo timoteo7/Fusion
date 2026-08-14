@@ -11,6 +11,7 @@ import type { EngineRunContext } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
 import { resolveTerminalColumnsFor } from "./lifecycle-columns.js";
 import { hasNonTerminalWorkflowSteps } from "./workflow-step-satisfaction.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RouteImplementationIncompleteMergeGraphFailureDeps = {
   store: TaskStore;
@@ -45,7 +46,7 @@ export async function routeImplementationIncompleteMergeGraphFailure(
       await deps.store.updateTask(live.id, {
         paused: false,
         pausedReason: null,
-      }, deps.getRunContextFor(live.id));
+      }, runContextForTotal(deps.getRunContextFor, live.id));
       resumeLive = { ...live, paused: false, pausedReason: undefined };
     }
     if (hasNonTerminalWorkflowSteps(resumeLive) && await deps.routeGraphFailureToExecutionResume(resumeLive, failedNode, "implementation-incomplete")) {
@@ -55,9 +56,9 @@ export async function routeImplementationIncompleteMergeGraphFailure(
     deps.activeWorktrees.delete(live.id);
     const message = `Workflow graph merge blocked at node '${failedNode}': implementation incomplete with no executable proof to resume — failing instead of retrying merge`;
     executorLog.warn(`${live.id}: ${message}`);
-    await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, message, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     if (!(await resolveTerminalColumnsFor(deps.store, live.id)).includes(live.column) && live.error == null) {
-      await deps.store.updateTask(live.id, { error: message, status: "failed" }, deps.getRunContextFor(live.id));
+      await deps.store.updateTask(live.id, { error: message, status: "failed" }, runContextForTotal(deps.getRunContextFor, live.id));
     }
     await deps.persistTokenUsage(live.id);
     return true;

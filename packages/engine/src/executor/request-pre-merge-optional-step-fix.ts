@@ -55,6 +55,7 @@ import {
 } from "../plan-review-feedback-history.js";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RequestPreMergeOptionalStepFixInfo = {
   stepName: string;
@@ -132,7 +133,7 @@ export async function requestPreMergeOptionalStepFix(
       taskId,
       "Pre-merge remediation not scheduled — operator task hold",
       `Step/node: ${info.nodeId ?? info.stepName}\nReason: ${reason}`,
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     );
     return false;
   }
@@ -168,7 +169,7 @@ export async function requestPreMergeOptionalStepFix(
         taskId,
         "Plan Review provider failure — task kept in place",
         `Plan Review failed without a REVISE verdict due to a provider, model, transport, or abort condition. The task remains in ${liveTask.column}; no automatic replan was scheduled.\n\nDiagnostic:\n${info.feedback}`,
-        deps.getRunContextFor(taskId),
+        runContextForTotal(deps.getRunContextFor, taskId),
       );
       return false;
     }
@@ -267,13 +268,13 @@ export async function requestPreMergeOptionalStepFix(
     }
     const totalFixCount = (liveTask.postReviewFixCount ?? 0) + 1;
     const budgetLabel = budget.unbounded ? "unbounded" : String(budget.max);
-    await deps.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, deps.getRunContextFor(taskId));
+    await deps.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, runContextForTotal(deps.getRunContextFor, taskId));
     deps.clearPausedAborted(taskId);
     await deps.store.logEntry(
       taskId,
       "AI spec revision requested",
       formatPlanReviewRevisionFeedback(revisionKey, info.status, feedback),
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     );
     /*
     FNXC:PlanReviewReplan 2026-07-12-23:20:
@@ -286,7 +287,7 @@ export async function requestPreMergeOptionalStepFix(
       taskId,
       `Plan Review failed — moved to ${replanColumn} for automatic replan (attempt ${nextCount}/${budgetLabel})`,
       optionalStepRevisionLogOutcome(feedback, revisionKey),
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     );
     deps.workflowLifecycleMovesInFlight.add(taskId);
     try {
@@ -300,7 +301,7 @@ export async function requestPreMergeOptionalStepFix(
       recoveryRetryCount: null,
       nextRecoveryAt: null,
       graphResumeRetryCount: 0,
-    }, deps.getRunContextFor(taskId));
+    }, runContextForTotal(deps.getRunContextFor, taskId));
     return true;
   }
 
@@ -341,12 +342,12 @@ export async function requestPreMergeOptionalStepFix(
   const nextCount = currentCount + 1;
   const totalFixCount = (liveTask.postReviewFixCount ?? 0) + 1;
   const budgetLabel = budget.unbounded ? "unbounded" : String(budget.max);
-  await deps.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, deps.getRunContextFor(taskId));
+  await deps.store.updateTask(taskId, { postReviewFixCount: totalFixCount }, runContextForTotal(deps.getRunContextFor, taskId));
   await deps.store.logEntry(
     taskId,
     `Pre-merge optional workflow step requested executor fixes (attempt ${nextCount}/${budgetLabel})`,
     optionalStepRevisionLogOutcome(`Step: ${info.stepName}\nStatus: ${info.status}\nFeedback:\n${info.feedback}`, revisionKey),
-    deps.getRunContextFor(taskId),
+    runContextForTotal(deps.getRunContextFor, taskId),
   );
   await deps.sendTaskBackForFix(
     liveTask,

@@ -8,6 +8,7 @@ import { executorLog } from "../logger.js";
 import { createRunAuditor, generateSyntheticRunId, type EngineRunContext, type RunAuditor } from "../util/run-audit.js";
 import { configuredCommandErrorMessage } from "./configured-command.js";
 import { createConfiguredCommandAbortError } from "./task-predicates.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RunRawCliCommandDeps = {
   store: TaskStore;
@@ -33,7 +34,7 @@ export async function runRawCliCommand(
   extraEnv?: NodeJS.ProcessEnv,
 ): Promise<{ success: boolean; output?: string; error?: string }> {
   executorLog.log(`${task.id}: workflow node '${label}' executing approved CLI command: ${command}`);
-  await deps.store.logEntry(task.id, `Workflow node '${label}' executing CLI command: ${command}`, undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, `Workflow node '${label}' executing CLI command: ${command}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
   const abort = new AbortController();
   deps.registerConfiguredCommandController(task.id, abort);
   try {

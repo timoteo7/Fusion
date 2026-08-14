@@ -26,6 +26,8 @@ import {
 import type { WorkflowAgentCapacity } from "../agents/workflow-agent-capacity.js";
 import type { WorkflowNodeResult } from "../workflows/workflow-graph-executor.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type ActiveWorkflowAuthority = {
   agentId: string;
@@ -38,6 +40,8 @@ export type ActiveWorkflowAuthority = {
 };
 
 export type WorkflowPrincipalBeforeNodeDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   options: { agentStore?: AgentStore | null; [k: string]: unknown };
   workflowAgentCapacity: WorkflowAgentCapacity;
@@ -342,8 +346,7 @@ if (!durableWorkItemId) {
     );
     await deps.store.logEntry(
       nodeTask.id,
-      `Workflow principal fence write failed at node '${node.id}' — ${detail.slice(0, 300)}${cause}`,
-    ).catch(() => undefined);
+      `Workflow principal fence write failed at node '${node.id}' — ${detail.slice(0, 300)}${cause}`, undefined, runContextForTotal(deps.getRunContextFor, nodeTask.id)).catch(() => undefined);
     void deps.workflowAgentCapacity.release(attemptId, deps.options.agentStore.workflowProjectId ?? deps.store.getRootDir());
     return { outcome: "failure" as const, value: `workflow-principal-fence-unavailable:${routed.route.role}` };
   }

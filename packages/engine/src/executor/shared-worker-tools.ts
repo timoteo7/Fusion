@@ -41,6 +41,7 @@ import {
   createWorkflowSettingsTool as sharedCreateWorkflowSettingsTool,
   createTraitListTool as sharedCreateTraitListTool,
 } from "../agent-tools.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type SharedWorkerToolsDeps = {
   store: TaskStore;
@@ -50,7 +51,7 @@ export type SharedWorkerToolsDeps = {
 };
 
 export function createTaskLogTool(deps: SharedWorkerToolsDeps, taskId: string): ToolDefinition {
-  return sharedCreateTaskLogTool(deps.store, taskId);
+  return sharedCreateTaskLogTool(deps.store, taskId, runContextForTotal(deps.getRunContextFor, taskId));
 }
 
 export function createTaskLogsReadTool(deps: SharedWorkerToolsDeps, taskId: string): ToolDefinition {
@@ -85,11 +86,11 @@ export function createTaskDocumentReadTool(deps: SharedWorkerToolsDeps, taskId: 
 }
 
 export function createTaskPromptWriteTool(deps: SharedWorkerToolsDeps, taskId: string): ToolDefinition {
-  return sharedCreateTaskPromptWriteTool(deps.store, taskId, deps.getRunContextFor(taskId));
+  return sharedCreateTaskPromptWriteTool(deps.store, taskId, runContextForTotal(deps.getRunContextFor, taskId));
 }
 
 export function createTaskFileScopeAddTool(deps: SharedWorkerToolsDeps, taskId: string): ToolDefinition {
-  return sharedCreateTaskFileScopeAddTool(deps.store, taskId, deps.getRunContextFor(taskId));
+  return sharedCreateTaskFileScopeAddTool(deps.store, taskId, runContextForTotal(deps.getRunContextFor, taskId));
 }
 
 export function createArtifactRegisterTool(

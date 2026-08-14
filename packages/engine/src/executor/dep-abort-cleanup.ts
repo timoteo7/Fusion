@@ -11,10 +11,14 @@ import { RemovalReason } from "../worktree/worktree-pool.js";
 import { executorLog } from "../logger.js";
 import { resolveExternalExecutionCheckoutRoute } from "../execution/external-execution-checkout.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 const execAsync = promisify(exec);
 
 export type DepAbortCleanupDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   rootDir: string;
   store: TaskStore;
   activeWorktrees: Map<string, unknown>;
@@ -76,7 +80,7 @@ export async function handleDepAbortCleanup(
   deps.activeWorktrees.delete(taskId);
 
   // Update task: clear worktree and status, move to triage
-  await deps.store.updateTask(taskId, { worktree: null, status: null });
+  await deps.store.updateTask(taskId, { worktree: null, status: null }, runContextForTotal(deps.getRunContextFor, taskId));
   /*
   FNXC:WorkflowLifecycleColumns 2026-07-29-15:10 (P0 audit after the Planning-column merge):
   This wrote the LITERAL `triage`. The default coding lineage no longer declares that column —
@@ -90,6 +94,6 @@ export async function handleDepAbortCleanup(
   Resolve the rebound target from the task's own workflow (hold -> intake -> first declared
   column), the same helper the other ~16 executor rebounds already use.
   */
-  await deps.store.moveTask(taskId, await resolveReboundColumnFor(deps.store, taskId));
-  await deps.store.logEntry(taskId, "Execution stopped — work discarded, requeued for re-planning");
+  await deps.store.moveTask(taskId, await resolveReboundColumnFor(deps.store, taskId), undefined, runContextForTotal(deps.getRunContextFor, taskId));
+  await deps.store.logEntry(taskId, "Execution stopped — work discarded, requeued for re-planning", undefined, runContextForTotal(deps.getRunContextFor, taskId));
 }

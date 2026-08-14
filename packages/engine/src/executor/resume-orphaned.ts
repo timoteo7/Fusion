@@ -14,10 +14,14 @@ import { setImmediate as setImmediateCb } from "node:timers";
 import { executorLog } from "../logger.js";
 import { getResumeOrphanDelayMs } from "./resume-orphan-delay.js";
 import { isNoProgressNoTaskDoneFailure, isTaskWorkComplete } from "./task-predicates.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 const yieldEventLoop = (): Promise<void> => new Promise((resolve) => setImmediateCb(resolve));
 
 export type ResumeOrphanedDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   executing: Set<string>;
   recoveringCompleted: Set<string>;
@@ -98,7 +102,7 @@ export async function resumeOrphaned(deps: ResumeOrphanedDeps): Promise<void> {
     executorLog.log(`Resuming ${task.id}: ${task.title || task.description.slice(0, 60)}`);
     try {
       await deps.clearResumeFailureState(task);
-      await deps.store.logEntry(task.id, "Resumed after engine restart");
+      await deps.store.logEntry(task.id, "Resumed after engine restart", undefined, runContextForTotal(deps.getRunContextFor, task.id));
       await deps.recoverApprovedStepsOnResume(task.id);
     } catch (err) {
       executorLog.error(`Failed to write resume log for ${task.id}:`, err);

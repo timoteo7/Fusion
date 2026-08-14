@@ -8,6 +8,7 @@ import { computeRecoveryDecision, formatDelay, MAX_RECOVERY_RETRIES } from "../h
 import { moveTaskToReplanColumn, resolveReplanTargetColumn } from "../execution/replan-target.js";
 import { generateSyntheticRunId, type EngineRunContext } from "../util/run-audit.js";
 import { resolveTerminalColumnsFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RequiredArtifactRecoveryDeps = {
   store: TaskStore;
@@ -86,13 +87,13 @@ export async function recoverMissingRequiredArtifacts(
     const liveTask = await deps.store.getTask(task.id).catch(() => null);
     if (!liveTask || await deps.isRequiredArtifactRecoveryProtected(liveTask)) return;
     const error = `REQUIRED_ARTIFACT_RECOVERY_EXHAUSTED: ${artifactKeys.join(", ")} remained missing after ${MAX_RECOVERY_RETRIES} automatic planning retries.`;
-    await deps.store.logEntry(task.id, error, undefined, context);
+    await deps.store.logEntry(task.id, error, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.store.updateTask(task.id, {
       status: "failed",
       error,
       recoveryRetryCount: null,
       nextRecoveryAt: null,
-    }, context);
+    }, runContextForTotal(deps.getRunContextFor, task.id));
     return;
   }
 
@@ -101,8 +102,7 @@ export async function recoverMissingRequiredArtifacts(
     task.id,
     `Required workflow artifact missing — moved to ${replanColumn} for automatic planning recovery (attempt ${attempt}/${MAX_RECOVERY_RETRIES} in ${formatDelay(decision.delayMs)})`,
     `Missing artifact keys: ${artifactKeys.join(", ")}`,
-    context,
-  );
+    runContextForTotal(deps.getRunContextFor, task.id));
   deps.workflowLifecycleMovesInFlight.add(task.id);
   try {
     const liveTask = await deps.store.getTask(task.id).catch(() => null);
@@ -117,5 +117,5 @@ export async function recoverMissingRequiredArtifacts(
     recoveryRetryCount: decision.nextState.recoveryRetryCount,
     nextRecoveryAt: decision.nextState.nextRecoveryAt,
     graphResumeRetryCount: 0,
-  }, context);
+  }, runContextForTotal(deps.getRunContextFor, task.id));
 }

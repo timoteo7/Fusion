@@ -14,8 +14,12 @@ import { executingTaskLock } from "../agents/active-session-registry.js";
 import { RemovalReason, removeWorktree } from "../worktree/worktree-pool.js";
 import { resolveExternalExecutionCheckoutRoute } from "../execution/external-execution-checkout.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type MarkStuckAbortedDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   rootDir: string;
   workspaceConfig: unknown;
@@ -108,13 +112,11 @@ export function markStuckAborted(
         if (deps.workspaceConfig && !worktreePath) {
           await deps.store.logEntry(
             taskId,
-            `workspace task ${taskId}: no singular worktree to force-requeue (per-repo teardown is Phase B)`,
-          );
+            `workspace task ${taskId}: no singular worktree to force-requeue (per-repo teardown is Phase B)`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
         }
         await deps.store.logEntry(
           taskId,
-          `Force-kill cleanup starting after stuck-kill unwind timeout — reaping in-flight surfaces and worktree`,
-        );
+          `Force-kill cleanup starting after stuck-kill unwind timeout — reaping in-flight surfaces and worktree`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
 
         // Spawned children must be terminated before the canonical reaper clears
         // spawnedAgents bookkeeping; otherwise child agent sessions would be orphaned.
@@ -154,7 +156,7 @@ export function markStuckAborted(
             cleanupFailed = true;
             const cleanupErrMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
             executorLog.warn(`${taskId}: worktree removal failed during force-requeue cleanup (${worktreePath}): ${cleanupErrMessage}`);
-            await deps.store.logEntry(taskId, `Force-kill cleanup failed to remove worktree ${worktreePath}: ${cleanupErrMessage}`);
+            await deps.store.logEntry(taskId, `Force-kill cleanup failed to remove worktree ${worktreePath}: ${cleanupErrMessage}`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
           }
         }
 
@@ -162,15 +164,14 @@ export function markStuckAborted(
 
         await deps.store.logEntry(
           taskId,
-          `Force-requeued after stuck-kill: executor did not unwind within ${FORCE_REQUEUE_GRACE_MS / 1000}s (hung subprocess)${preserveProgress ? " — progress preserved" : ""}`,
-        );
+          `Force-requeued after stuck-kill: executor did not unwind within ${FORCE_REQUEUE_GRACE_MS / 1000}s (hung subprocess)${preserveProgress ? " — progress preserved" : ""}`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
         await deps.store.updateTask(taskId, {
           status: "queued",
           error: null,
           worktree: null,
           branch: null,
-        });
-        await deps.store.moveTask(taskId, await resolveReboundColumnFor(deps.store, taskId), preserveProgress ? { preserveProgress: true } : undefined);
+        }, runContextForTotal(deps.getRunContextFor, taskId));
+        await deps.store.moveTask(taskId, await resolveReboundColumnFor(deps.store, taskId), preserveProgress ? { preserveProgress: true } : undefined, runContextForTotal(deps.getRunContextFor, taskId));
         // Remove from executing only after the hung surfaces and worktree have
         // been reaped, preventing a scheduler re-dispatch onto stale resources.
         deps.executing.delete(taskId);
@@ -181,13 +182,12 @@ export function markStuckAborted(
           taskId,
           cleanupFailed
             ? "Force-kill cleanup completed with non-fatal worktree removal failure — task requeued"
-            : "Force-kill cleanup completed — in-flight surfaces reaped and task requeued",
-        );
+            : "Force-kill cleanup completed — in-flight surfaces reaped and task requeued", undefined, runContextForTotal(deps.getRunContextFor, taskId));
         executorLog.log(`${taskId} force-requeued to todo after stuck-kill cleanup`);
       } catch (err: unknown) {
         const errorMessage = err instanceof Error ? err.message : String(err);
         executorLog.error(`Failed to force-requeue stuck task ${taskId}: ${errorMessage}`);
-        await deps.store.logEntry(taskId, `Force-kill cleanup failed during stuck-kill force-requeue: ${errorMessage}`).catch(() => undefined);
+        await deps.store.logEntry(taskId, `Force-kill cleanup failed during stuck-kill force-requeue: ${errorMessage}`, undefined, runContextForTotal(deps.getRunContextFor, taskId)).catch(() => undefined);
       }
     }, FORCE_REQUEUE_GRACE_MS);
   }

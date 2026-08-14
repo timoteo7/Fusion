@@ -5,11 +5,19 @@
  */
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import type { RunMutationContext } from "@fusion/core";
 
 const execAsync = promisify(exec);
 
 export type StaleBranchCleanupStore = {
-  logEntry: (taskId: string, action: string, outcome?: string) => Promise<unknown>;
+  /*
+  FNXC:Identity 2026-08-12-01:20 (U18/KTD2 — the seam restates the required context):
+  This narrowed store re-declared `logEntry` with NO context parameter, so it did not inherit the
+  canonical/deprecated overload pair and would keep accepting unattributed writes even after every
+  call site was converted — a hole the census cannot see. Mirror the CANONICAL arity instead.
+  Do not relax it back to quiet a caller.
+  */
+  logEntry: (taskId: string, action: string, outcome: string | undefined, runContext: RunMutationContext) => Promise<unknown>;
   clearStaleExecutionStartBranchReferences: (branches: string[], excludingTaskId?: string) => Promise<unknown>;
 };
 
@@ -31,11 +39,13 @@ export async function cleanupStaleBranch(
   store: StaleBranchCleanupStore,
   branch: string,
   taskId: string,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making these writes; REQUIRED so an unwired caller is a compile error, not a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<boolean> {
   // Step 1: Prune stale worktree metadata that may hold a lock on the branch
   try {
     await execAsync("git worktree prune", { cwd: rootDir });
-    await store.logEntry(taskId, `Pruned stale worktree metadata`, branch);
+    await store.logEntry(taskId, `Pruned stale worktree metadata`, branch, runContext);
   } catch {
     // Prune is best-effort — continue even if it fails
   }
@@ -45,7 +55,7 @@ export async function cleanupStaleBranch(
     await execAsync(`git branch -D "${branch}"`, {
       cwd: rootDir,
     });
-    await store.logEntry(taskId, `Removed stale branch`, branch);
+    await store.logEntry(taskId, `Removed stale branch`, branch, runContext);
     // FN-2165 regression guard: null baseBranch on any task that stored this branch
     try { await store.clearStaleExecutionStartBranchReferences([branch], taskId); } catch { /* best-effort */ }
     return true;
@@ -54,8 +64,7 @@ export async function cleanupStaleBranch(
     await store.logEntry(
       taskId,
       `git branch -D failed for stale branch, trying update-ref`,
-      `${branch}: ${branchDeleteErrorMessage}`,
-    );
+      `${branch}: ${branchDeleteErrorMessage}`, runContext);
   }
 
   // Step 3: Force-remove the reference directly
@@ -64,7 +73,7 @@ export async function cleanupStaleBranch(
     await execAsync(`git update-ref -d "${refPath}"`, {
       cwd: rootDir,
     });
-    await store.logEntry(taskId, `Force-removed stale branch reference via update-ref`, refPath);
+    await store.logEntry(taskId, `Force-removed stale branch reference via update-ref`, refPath, runContext);
     // FN-2165 regression guard: null baseBranch on any task that stored this branch
     try { await store.clearStaleExecutionStartBranchReferences([branch], taskId); } catch { /* best-effort */ }
     return true;
@@ -73,8 +82,7 @@ export async function cleanupStaleBranch(
     await store.logEntry(
       taskId,
       `Failed to remove stale branch reference`,
-      `${branch}: ${updateRefErrorMessage}`,
-    );
+      `${branch}: ${updateRefErrorMessage}`, runContext);
     return false;
   }
 }

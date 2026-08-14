@@ -14,6 +14,7 @@
 import type { TaskStore } from "@fusion/core";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { clearTerminalWorkflowStepFailures } from "./workflow-step-failures.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ClearTerminalStepFailuresForRetryDeps = {
   store: TaskStore;
@@ -28,6 +29,6 @@ export async function clearTerminalStepFailuresForRetry(
   if (!live) return;
   const cleared = clearTerminalWorkflowStepFailures(live.workflowStepResults);
   if (cleared !== live.workflowStepResults) {
-    await deps.store.updateTask(taskId, { workflowStepResults: cleared }, deps.getRunContextFor(taskId));
+    await deps.store.updateTask(taskId, { workflowStepResults: cleared }, runContextForTotal(deps.getRunContextFor, taskId));
   }
 }

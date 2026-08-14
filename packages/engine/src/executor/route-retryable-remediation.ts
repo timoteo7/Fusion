@@ -14,6 +14,7 @@ import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveTerminalColumnsFor } from "./lifecycle-columns.js";
 import { latestFailedPreMergeWorkflowStep } from "./graph-failure-pure.js";
 import { optionalStepRevisionLogOutcome } from "./optional-step-revision.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RouteRetryableRemediationDeps = {
   store: TaskStore;
@@ -49,12 +50,12 @@ export async function routeRetryableRemediationGraphFailureToPreMergeFix(
 
   const nextCount = budget.attempts + 1;
   const totalFixCount = (live.postReviewFixCount ?? 0) + 1;
-  await deps.store.updateTask(live.id, { postReviewFixCount: totalFixCount }, deps.getRunContextFor(live.id));
+  await deps.store.updateTask(live.id, { postReviewFixCount: totalFixCount }, runContextForTotal(deps.getRunContextFor, live.id));
   await deps.store.logEntry(
     live.id,
     `Auto-recovered retryable remediation node '${failedNode ?? "unknown"}' for failed pre-merge workflow step (attempt ${nextCount}/${budget.label})`,
     optionalStepRevisionLogOutcome(`Step: ${budget.stepName ?? budget.key}${failureValue ? `\nGraph value: ${failureValue}` : ""}`, budget.key),
-    deps.getRunContextFor(live.id),
+    runContextForTotal(deps.getRunContextFor, live.id),
   );
   const sentBack = await deps.recoverFailedPreMergeWorkflowStep(live);
   if (!sentBack) return false;

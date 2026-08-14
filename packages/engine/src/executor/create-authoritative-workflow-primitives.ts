@@ -32,6 +32,7 @@ import { finalizeProvenAutoMergeTask } from "../merge/auto-merge-finalization.js
 import { createRunAuditor, type EngineRunContext } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
 import { resolveExternalExecutionCheckoutRoute } from "../execution/external-execution-checkout.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirror TaskExecutor method surface without re-typing the class
 type AnyFn = (...args: any[]) => any;
@@ -63,7 +64,7 @@ export function createAuthoritativeWorkflowPrimitivesFromExecutor(
     const logAudit = async (taskId: string | undefined, input: AuditPrimitiveInput): Promise<void> => {
       if (!taskId) return;
       try {
-        await deps.store.logEntry(taskId, input.message, input.metadata ? JSON.stringify(input.metadata) : undefined);
+        await deps.store.logEntry(taskId, input.message, input.metadata ? JSON.stringify(input.metadata) : undefined, runContextForTotal(deps.getRunContextFor, taskId));
       } catch {
         // Audit is diagnostic-only and must not affect workflow execution.
       }
@@ -230,6 +231,8 @@ export function createAuthoritativeWorkflowPrimitivesFromExecutor(
         return await resetStepToBaseline(
           {
             store: deps.store,
+            // FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the RETHINK rewind is attributed to the run that requested it.
+            runContext: runContextForTotal(deps.getRunContextFor, task.id),
             worktreePath,
             sessionRef: { current: null },
             reviewType: "code",
@@ -292,7 +295,7 @@ export function createAuthoritativeWorkflowPrimitivesFromExecutor(
       // results into `task.workflowStepResults` directly (U2). No `runWorkflowStep`
       // primitive remains in `WorkflowRuntimePrimitives`.
       updateSteps: async (_ctx, task, steps) => {
-        await deps.store.updateTask(task.id, { steps });
+        await deps.store.updateTask(task.id, { steps }, runContextForTotal(deps.getRunContextFor, task.id));
         return { outcome: "success", value: "steps-updated", data: { count: steps.length } };
       },
       transitionTask: async (_ctx, task, input) => {
@@ -344,7 +347,7 @@ export function createAuthoritativeWorkflowPrimitivesFromExecutor(
         }
         if (input.status !== undefined && input.status !== null) patch.status = input.status;
         if (Object.keys(patch).length > 0) {
-          await taskStore.updateTask(task.id, patch);
+          await taskStore.updateTask(task.id, patch, runContextForTotal(deps.getRunContextFor, task.id));
         }
         return { outcome: "success", value: input.reason };
       },
@@ -378,7 +381,7 @@ export function createAuthoritativeWorkflowPrimitivesFromExecutor(
             mergeTask.id,
             `Workflow merge blocked before requester: ${missingImplementationProof}`,
             undefined,
-            deps.getRunContextFor(mergeTask.id),
+            runContextForTotal(deps.getRunContextFor, mergeTask.id),
           );
           return {
             outcome: "failure",
@@ -391,7 +394,7 @@ export function createAuthoritativeWorkflowPrimitivesFromExecutor(
             mergeTask.id,
             "Workflow merge blocked before requester: implementation steps are incomplete",
             undefined,
-            deps.getRunContextFor(mergeTask.id),
+            runContextForTotal(deps.getRunContextFor, mergeTask.id),
           );
           return {
             outcome: "failure",
@@ -487,7 +490,7 @@ export function createAuthoritativeWorkflowPrimitivesFromExecutor(
         await deps.store.updateTask(task.id, {
           paused: true,
           pausedReason: input.reason,
-        } as Partial<TaskDetail>);
+        } as Partial<TaskDetail>, runContextForTotal(deps.getRunContextFor, task.id));
         return { outcome: "success", value: "aborted" };
       },
       audit: async (ctx: WorkflowPrimitiveContext, input) => {

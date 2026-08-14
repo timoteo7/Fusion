@@ -13,6 +13,7 @@ import {
   resolveReboundColumnFor,
   resolveTerminalColumnsFor,
 } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type CompletionFinalizationDeps = {
   store: TaskStore;
@@ -77,7 +78,7 @@ export async function parkCompletedBlockedTask(
       preserveWorktree: true,
       moveSource: "engine",
       recoveryRehome: true,
-    });
+    }, runContextForTotal(deps.getRunContextFor, task.id));
   }
   await deps.store.updateTask(task.id, {
     paused: true,
@@ -86,9 +87,9 @@ export async function parkCompletedBlockedTask(
     error: null,
     executeRequeueLoopCount: null,
     executeRequeueLoopSignature: null,
-  }, deps.getRunContextFor(task.id));
+  }, runContextForTotal(deps.getRunContextFor, task.id));
   executorLog.log(`${task.id}: ${message}`);
-  await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
   await deps.store.recordRunAuditEvent?.({
     taskId: task.id,
     agentId: "executor",

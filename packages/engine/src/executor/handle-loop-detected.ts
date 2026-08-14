@@ -10,6 +10,8 @@ import type { TaskStore } from "@fusion/core";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { compactSessionContext } from "../pi.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 /** Upper bound for in-process loop recovery before falling through to kill/requeue. */
 export const LOOP_COMPACTION_TIMEOUT_MS = 60_000;
@@ -22,6 +24,8 @@ export type StuckTaskEventLike = {
 };
 
 export type HandleLoopDetectedDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   activeSessions: Map<string, { session: AgentSession }>;
   loopRecoveryState: Map<string, LoopRecoveryState>;
@@ -53,7 +57,7 @@ export async function handleLoopDetected(
   // Attempt compaction
   const attempt = (state?.attempts ?? 0) + 1;
   executorLog.log(`${taskId} loop detected (attempt ${attempt}) — attempting compact-and-resume`);
-  await deps.store.logEntry(taskId, `Loop detected (${event.activitySinceProgress} events since last progress) — attempting compact-and-resume (attempt ${attempt})`);
+  await deps.store.logEntry(taskId, `Loop detected (${event.activitySinceProgress} events since last progress) — attempting compact-and-resume (attempt ${attempt})`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
 
   let compactionTimedOut = false;
   let compactionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -85,18 +89,18 @@ export async function handleLoopDetected(
       ? `Context compaction timed out after ${LOOP_COMPACTION_TIMEOUT_MS / 1000}s`
       : "Context compaction failed or unavailable";
     executorLog.log(`${taskId} ${reason.toLowerCase()} — falling back to kill/requeue`);
-    await deps.store.logEntry(taskId, `${reason} — falling back to kill/requeue`);
+    await deps.store.logEntry(taskId, `${reason} — falling back to kill/requeue`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
     return false;
   }
 
   if (deps.activeSessions.get(taskId)?.session !== activeEntry.session) {
     executorLog.log(`${taskId} compaction completed after session changed — falling back to kill/requeue`);
-    await deps.store.logEntry(taskId, "Context compaction completed after session changed — falling back to kill/requeue");
+    await deps.store.logEntry(taskId, "Context compaction completed after session changed — falling back to kill/requeue", undefined, runContextForTotal(deps.getRunContextFor, taskId));
     return false;
   }
 
   executorLog.log(`${taskId} compaction succeeded (freed ${compactResult.tokensBefore} tokens) — setting recovery-pending`);
-  await deps.store.logEntry(taskId, `Context compacted successfully — will resume with fresh context`);
+  await deps.store.logEntry(taskId, `Context compacted successfully — will resume with fresh context`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
 
   // FN-5168: once loop recovery has fired in this execute() lifecycle,
   // ignored fn_task_update rebuffs can be promoted to no-progress churn.

@@ -24,6 +24,7 @@ import { StepSessionExecutor } from "../execution/step-session-executor.js";
 import type { PausedAbortProvenance } from "./paused-abort-provenance.js";
 import type { ActiveExecutorSessionState, TaskExecutorOptions } from "./task-executor-options.js";
 import type { WorkflowAgentCapacity } from "../agents/workflow-agent-capacity.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export abstract class TaskExecutorState {
   /**
@@ -108,6 +109,13 @@ export abstract class TaskExecutorState {
   protected _modelRegistry?: Promise<ModelRegistry>;
   protected _approvalRequestStore?: ApprovalRequestStore;
   protected currentRunContexts = new Map<string, RunMutationContext>();
+  /*
+  FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C):
+  The TOTAL form of the run carrier — the live per-task run when there is one, the executor lane
+  otherwise. `getRunContextFor` above stays PARTIAL on purpose: it is the liveness probe ("is there a
+  live run?"), and collapsing the two would turn those probes into unconditional truths.
+  */
+  protected runContextFor(taskId: string, fallbackAgentId?: string | null) { return runContextForTotal((id: string) => this.currentRunContexts.get(id), taskId, fallbackAgentId); }
   protected outerConcurrencyClaims = new Set<string>();
   protected graphToolFailureRunCursors = new Map<string, number>();
   protected graphStepSessionPinned = new Set<string>();

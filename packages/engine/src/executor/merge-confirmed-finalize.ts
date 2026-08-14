@@ -13,6 +13,7 @@ import { finalizeProvenAutoMergeTask } from "../merge/auto-merge-finalization.js
 import { executorLog } from "../logger.js";
 import { createRunAuditor, generateSyntheticRunId, type EngineRunContext } from "../util/run-audit.js";
 import { resolveCompleteColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type MergeConfirmedFinalizeDeps = {
   rootDir: string;
@@ -32,7 +33,7 @@ export async function finalizeMergeConfirmedWorkflowGraphTask(
     taskId,
     `Workflow graph observed confirmed merge while task was '${live.column}' — finalizing to done (${reason})`,
     undefined,
-    deps.getRunContextFor(taskId),
+    runContextForTotal(deps.getRunContextFor, taskId),
   );
   const finalization = await finalizeProvenAutoMergeTask({
     store: deps.store,
@@ -65,7 +66,7 @@ export async function finalizeMergeConfirmedWorkflowGraphTask(
       taskId,
       `Workflow graph merge-confirmed finalization blocked — ${finalization.reason ?? "unknown"}`,
       undefined,
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     );
     if (finalization.reason === "task has incomplete steps" && live.mergeDetails?.noOpMerge === true && !live.mergeDetails?.commitSha) {
       return false;

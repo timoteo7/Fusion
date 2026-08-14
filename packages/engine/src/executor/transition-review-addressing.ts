@@ -7,6 +7,7 @@
  * NOT a board column — resolving it to a workflow role would be nonsense.
  */
 import type { TaskStore } from "@fusion/core";
+import type { RunMutationContext } from "@fusion/core";
 
 export type ReviewAddressingStatus = "queued" | "in-progress" | "addressed" | "failed";
 
@@ -15,6 +16,8 @@ export async function transitionReviewAddressing(
   taskId: string,
   from: ReviewAddressingStatus[],
   to: ReviewAddressingStatus,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making this write; REQUIRED so a future unwired caller is a compile error rather than a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<void> {
   const task = await store.getTask(taskId);
   const reviewState = task.reviewState;
@@ -54,5 +57,5 @@ export async function transitionReviewAddressing(
       ...reviewState,
       addressing,
     },
-  });
+  }, runContext);
 }

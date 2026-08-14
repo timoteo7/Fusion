@@ -12,6 +12,8 @@ import {
   sanitizeFailureReason,
 } from "../project/proactive-status.js";
 import { graphActiveContextKey } from "./task-predicates.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type ForeachActiveContextLike = {
   instanceId: string;
@@ -22,6 +24,8 @@ export type ForeachActiveContextLike = {
 };
 
 export type GraphRethinkResetDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the run requesting the RETHINK rewind. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   rootDir: string;
   store: TaskStore;
   graphStepRunOnce: Map<string, Promise<unknown>>;
@@ -75,6 +79,8 @@ export async function applyGraphRethinkReset(
     await resetStepToBaseline(
       {
         store: deps.store,
+        // FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the RETHINK rewind is attributed to the run that requested it.
+        runContext: runContextForTotal(deps.getRunContextFor, taskId),
         worktreePath,
         // No single session ref for graph-owned step-sessions — rewind is skipped
         // when checkpointId resolves but no session is current (KTD-2 partial path).

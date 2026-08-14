@@ -38,6 +38,7 @@ import {
 } from "../project/proactive-status.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { executorLog, reviewerLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const WORKFLOW_THINKING_LEVEL_SET: ReadonlySet<string> = new Set(THINKING_LEVELS);
 
@@ -213,7 +214,7 @@ export function createAuthoritativeWorkflowSeams(
             mergeTask.id,
             `Workflow merge blocked before requester: ${missingImplementationProof}`,
             undefined,
-            deps.getRunContextFor(mergeTask.id),
+            runContextForTotal(deps.getRunContextFor, mergeTask.id),
           );
           return { outcome: "failure", value: "implementation-incomplete" };
         }
@@ -442,8 +443,7 @@ export function createAuthoritativeWorkflowSeams(
         await deps.store.logEntry(
           seamTask.id,
           `${config.type} step-review Step ${stepIndex}: ${review.verdict}${config.advisory ? " (advisory)" : ""}`,
-          review.summary,
-        );
+          review.summary, runContextForTotal(deps.getRunContextFor, seamTask.id));
         const narration = config.type === "plan" && review.verdict === "APPROVE"
           ? buildPlanVerifiedMessage()
           : review.verdict === "UNAVAILABLE"
@@ -467,8 +467,7 @@ export function createAuthoritativeWorkflowSeams(
               await deps.updateStepGraph(seamTask.id, stepIndex, "done");
               await deps.store.logEntry(
                 seamTask.id,
-                `Step ${stepIndex} (${stepName}) marked done by step-review APPROVE (graph)`,
-              );
+                `Step ${stepIndex} (${stepName}) marked done by step-review APPROVE (graph)`, undefined, runContextForTotal(deps.getRunContextFor, seamTask.id));
             }
           } catch (err) {
             reviewerLog.warn(

@@ -6,6 +6,7 @@
  */
 import type { AgentStore, TaskStore } from "@fusion/core";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RenewTaskLeaseDeps = {
   store: TaskStore;
@@ -32,7 +33,7 @@ export async function renewTaskLease(
         leaseEpoch,
         renewedAt,
       },
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     );
     return;
   }

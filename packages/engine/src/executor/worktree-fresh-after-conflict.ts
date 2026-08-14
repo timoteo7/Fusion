@@ -7,6 +7,9 @@ import type { Settings } from "@fusion/core";
 import { generateWorktreeName } from "../worktree/worktree-names.js";
 import { resolveTaskWorktreePath } from "../worktree/worktree-paths.js";
 import { extractWorktreeConflictInfo } from "./worktree-conflict-info.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
+import type { RunMutationContext } from "@fusion/core";
 
 export type TryCreateWorktreeFn = (
   branch: string,
@@ -20,9 +23,18 @@ export type TryCreateWorktreeFn = (
 ) => Promise<{ path: string; branch: string }>;
 
 export type FreshAfterConflictDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   rootDir: string;
   store: {
-    logEntry: (taskId: string, action: string, outcome?: string) => Promise<unknown>;
+    /*
+  FNXC:Identity 2026-08-12-01:20 (U18/KTD2 — the seam restates the required context):
+  This narrowed store re-declared `logEntry` with NO context parameter, so it did not inherit the
+  canonical/deprecated overload pair and would keep accepting unattributed writes even after every
+  call site was converted — a hole the census cannot see. Mirror the CANONICAL arity instead.
+  Do not relax it back to quiet a caller.
+  */
+  logEntry: (taskId: string, action: string, outcome: string | undefined, runContext: RunMutationContext) => Promise<unknown>;
   };
   tryCreateWorktree: TryCreateWorktreeFn;
 };
@@ -52,8 +64,7 @@ export async function tryFreshWorktreeAfterLiveConflict(
       await deps.store.logEntry(
         taskId,
         `Preserved active conflicting worktree and retrying with fresh worktree branch ${suffixedBranch}`,
-        `${conflictPath} -> ${newPath}`,
-      );
+        `${conflictPath} -> ${newPath}`, runContextForTotal(deps.getRunContextFor, taskId));
       /*
        * FNXC:ExecutorWorktree 2026-07-01-00:00:
        * Active-session cleanup refusal must allocate a fresh worktree/branch instead of bubbling automatic cleanup failure. Removing the live conflicting path violates the FN-4811 invariant, so bounded sibling branches preserve the owner while letting the requesting task continue.

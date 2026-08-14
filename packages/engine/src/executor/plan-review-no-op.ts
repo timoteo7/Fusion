@@ -12,6 +12,7 @@ import { resolveWipTargetForTask } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveReboundColumnFor, resolveTerminalColumnsFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 import { dispatchAcceptedCompletionRecommendationNotice } from "./completion-recommendation-notice.js";
 
 export type FinalizeAcceptedNoOpCompletionDeps = {
@@ -53,15 +54,17 @@ export async function finalizeAcceptedNoOpCompletion(
   }
   if (rejectIfPaused && (live.paused || live.userPaused)) return { completed: false, hardPauseActive: false };
 
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): probe stays partial for `?.runId`; writes take the TOTAL form. */
   const runContext = deps.getRunContextFor(task.id);
+  const writeContext = runContextForTotal(deps.getRunContextFor, task.id);
   const restoreNoCommitsExpected = async (): Promise<void> => {
     if (live.noCommitsExpected !== true) {
-      await deps.store.updateTask(task.id, { noCommitsExpected: false }).catch(() => undefined);
+      await deps.store.updateTask(task.id, { noCommitsExpected: false }, runContextForTotal(deps.getRunContextFor, task.id)).catch(() => undefined);
     }
   };
   try {
     if (await isRejectedCloseState()) return { completed: false, hardPauseActive: false };
-    await deps.store.updateTask(task.id, { noCommitsExpected: true });
+    await deps.store.updateTask(task.id, { noCommitsExpected: true }, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.store.logEntry(
       task.id,
       `Verified ${marker.kind} completion sentinel accepted; no commits expected for terminal handoff`,
@@ -73,7 +76,7 @@ export async function finalizeAcceptedNoOpCompletion(
         runId: runContext?.runId,
         agentId: runContext?.agentId,
       }),
-      runContext,
+      writeContext,
     );
     const recordActivity = (deps.store as typeof deps.store & {
       recordActivity?: (entry: {
@@ -122,13 +125,13 @@ export async function finalizeAcceptedNoOpCompletion(
     const hasRunWorkflowSteps = (currentTask.workflowStepResults?.length ?? 0) > 0;
     const rerunSuffix = `---\nRerun after workflow step revision:\n${summary}`;
     if (existingSummary && hasRunWorkflowSteps && !existingSummary.endsWith(rerunSuffix)) {
-      await deps.store.updateTask(task.id, { summary: `${currentTask.summary}\n\n${rerunSuffix}` });
-      await deps.store.logEntry(task.id, "fn_task_done summary appended to existing summary (workflow-step rerun)", undefined, runContext);
+      await deps.store.updateTask(task.id, { summary: `${currentTask.summary}\n\n${rerunSuffix}` }, runContextForTotal(deps.getRunContextFor, task.id));
+      await deps.store.logEntry(task.id, "fn_task_done summary appended to existing summary (workflow-step rerun)", undefined, writeContext);
     } else if (!existingSummary || !hasRunWorkflowSteps) {
-      await deps.store.updateTask(task.id, { summary });
+      await deps.store.updateTask(task.id, { summary }, runContextForTotal(deps.getRunContextFor, task.id));
     }
     if (recommendations !== undefined) {
-      await deps.store.updateTask(task.id, { recommendations });
+      await deps.store.updateTask(task.id, { recommendations }, runContextForTotal(deps.getRunContextFor, task.id));
     }
     const settings = await deps.store.getSettings();
     const hardPauseActive = Boolean(settings.globalPause);
@@ -140,8 +143,8 @@ export async function finalizeAcceptedNoOpCompletion(
       ...(rejectIfPaused ? {} : { paused: false, pausedByAgentId: null }),
       status: null,
       bulkCompletionRefusalAt: null,
-    }, runContext);
-    await deps.store.logEntry(task.id, "Task marked done by agent", undefined, runContext);
+    }, writeContext);
+    await deps.store.logEntry(task.id, "Task marked done by agent", undefined, writeContext);
     const refreshed = await deps.store.getTask(task.id);
     if (
       !refreshed
@@ -155,7 +158,7 @@ export async function finalizeAcceptedNoOpCompletion(
     let latestColumn = refreshed.column;
     if (latestColumn === await resolveReboundColumnFor(deps.store, task.id)) {
       const wipTarget = await resolveWipTargetForTask(deps.store, task.id);
-      await deps.store.moveTask(task.id, wipTarget);
+      await deps.store.moveTask(task.id, wipTarget, undefined, runContextForTotal(deps.getRunContextFor, task.id));
       latestColumn = wipTarget;
     }
     const beforeWatchdog = await deps.store.getTask(task.id);
@@ -190,8 +193,7 @@ export async function finalizeAcceptedNoOpCompletion(
     await restoreNoCommitsExpected();
     await deps.store.logEntry(
       task.id,
-      `Plan Review CLOSE_NO_OP terminalization failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
+      `Plan Review CLOSE_NO_OP terminalization failed: ${error instanceof Error ? error.message : String(error)}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     return { completed: false, hardPauseActive: false };
   }
 }

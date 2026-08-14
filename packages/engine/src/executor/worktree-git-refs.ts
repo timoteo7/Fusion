@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import type { Task } from "@fusion/core";
 import { resolveCapturedBaseCommitSha } from "../execution/base-commit-capture.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { RunMutationContext } from "@fusion/core";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -94,7 +96,8 @@ export async function resolveDiffBaseRef(worktreePath: string, baseCommitSha?: s
 }
 
 export type CaptureBaseCommitShaStore = {
-  updateTask: (taskId: string, patch: { baseCommitSha: string }) => Promise<unknown>;
+  /* FNXC:Identity 2026-08-12-01:20 (U18/KTD2): seam restated at the CANONICAL updateTask arity so it cannot absorb an unattributed write. */
+  updateTask: (taskId: string, patch: { baseCommitSha: string }, runContext: RunMutationContext) => Promise<unknown>;
 };
 
 /**
@@ -107,6 +110,8 @@ export async function captureBaseCommitSha(
   worktreePath: string,
   audit: { git: (event: { type: "commit:create"; target: string; metadata: Record<string, unknown> }) => Promise<void> },
   options: { isResume: boolean } = { isResume: false },
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run capturing this base SHA. */
+  runContext?: RunMutationContext,
 ): Promise<void> {
   try {
     // Preserve an existing baseCommitSha only on RESUME of the same
@@ -141,7 +146,7 @@ export async function captureBaseCommitSha(
       throw new Error("could not resolve base commit SHA");
     }
 
-    await store.updateTask(task.id, { baseCommitSha });
+    await store.updateTask(task.id, { baseCommitSha }, runContextForTotal(undefined, task.id, runContext?.agentId));
     /*
     FNXC:EngineDiagnostics 2026-08-03-05:54:
     Base-SHA capture is per-task setup bookkeeping (also in run-audit). Worktree created stays info.

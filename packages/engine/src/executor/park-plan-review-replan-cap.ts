@@ -15,6 +15,7 @@
 import type { Task, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ParkPlanReviewReplanCapDeps = {
   store: TaskStore;
@@ -32,7 +33,7 @@ export async function parkPlanReviewReplanCapExhausted(
     taskId,
     "Plan Review replan cap reached — escalating to manual approval",
     `The Plan Review gate requested a planning revision ${currentCount} times without converging (cap ${capLabel}). To avoid an endless plan → Plan Review REVISE → replan loop, the task is routed to awaiting-approval for a human decision instead of replanning again. Latest Plan Review feedback:\n${feedback}`,
-    deps.getRunContextFor(taskId),
+    runContextForTotal(deps.getRunContextFor, taskId),
   );
   // awaitingApprovalReason is written through a Record<string, unknown> (matching
   // the manual plan-approval hold + the deleted triage cap-park) so the distinct
@@ -44,7 +45,7 @@ export async function parkPlanReviewReplanCapExhausted(
     recoveryRetryCount: null,
     nextRecoveryAt: null,
   };
-  await deps.store.updateTask(taskId, escalationUpdates as Partial<Task>, deps.getRunContextFor(taskId));
+  await deps.store.updateTask(taskId, escalationUpdates as Partial<Task>, runContextForTotal(deps.getRunContextFor, taskId));
   executorLog.warn(
     `${taskId}: Plan Review replan cap (${capLabel}) reached after ${currentCount} attempts — escalating to awaiting-approval`,
   );

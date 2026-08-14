@@ -6,6 +6,7 @@
 import type { TaskDetail, TaskStore } from "@fusion/core";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveCompleteColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type WorkflowMergeBoundaryProof = {
   hasForeachStepExecute: boolean;
@@ -73,7 +74,7 @@ export async function ensureWorkflowMergeBoundaryTask(
       : !mergeProof.allResultsTerminal
         ? `non-terminal pre-merge node result ${mergeProof.nonTerminalResult?.workflowStepId ?? "unknown"} (${mergeProof.nonTerminalResult?.status ?? "unknown"})`
         : `foreach step instances incomplete at merge boundary: missing ${mergeProof.missingInstanceIds.join(", ")}`;
-    await deps.store.logEntry(live.id, `Workflow merge boundary blocked: ${reason}`, undefined, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, `Workflow merge boundary blocked: ${reason}`, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     return live;
   }
 
@@ -89,14 +90,14 @@ export async function ensureWorkflowMergeBoundaryTask(
         steps: completedSteps,
         currentStep: Math.max(0, completedSteps.length - 1),
       } as Partial<TaskDetail>,
-      deps.getRunContextFor(live.id),
+      runContextForTotal(deps.getRunContextFor, live.id),
     );
     live = (updated as TaskDetail | undefined) ?? { ...live, steps: completedSteps, currentStep: Math.max(0, completedSteps.length - 1) };
     await deps.store.logEntry(
       live.id,
       "Workflow merge boundary completed graph-native task checklist before requesting merge",
       undefined,
-      deps.getRunContextFor(live.id),
+      runContextForTotal(deps.getRunContextFor, live.id),
     );
   }
   if (alreadyAtMergeColumn) return live;
@@ -111,10 +112,10 @@ export async function ensureWorkflowMergeBoundaryTask(
   };
   if (typeof storeWithMove.moveTask === "function") {
     const moved = await storeWithMove.moveTask(live.id, targetColumn, moveOptions);
-    await deps.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     return moved ?? { ...live, column: targetColumn };
   }
-  await deps.store.updateTask(live.id, { column: targetColumn } as Partial<TaskDetail>, deps.getRunContextFor(live.id));
-  await deps.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, deps.getRunContextFor(live.id));
+  await deps.store.updateTask(live.id, { column: targetColumn } as Partial<TaskDetail>, runContextForTotal(deps.getRunContextFor, live.id));
+  await deps.store.logEntry(live.id, `Workflow merge boundary moved task to ${targetColumn} before requesting merge`, undefined, runContextForTotal(deps.getRunContextFor, live.id));
   return { ...live, column: targetColumn };
 }

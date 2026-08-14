@@ -13,6 +13,7 @@ import {
 } from "../execution/verification-utils.js";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type DeterministicVerificationDeps = {
   store: TaskStore;
@@ -43,7 +44,7 @@ export async function runExecutorDeterministicVerification(
     task.id,
     `[verification] Running deterministic verification (${parts.join(", ")})`,
     undefined,
-    deps.getRunContextFor(task.id),
+    runContextForTotal(deps.getRunContextFor, task.id),
   );
 
   const result: VerificationResult = { allPassed: true };
@@ -83,7 +84,7 @@ export async function runExecutorDeterministicVerification(
     task.id,
     `[verification] Deterministic verification passed`,
     undefined,
-    deps.getRunContextFor(task.id),
+    runContextForTotal(deps.getRunContextFor, task.id),
   );
   return result;
 }

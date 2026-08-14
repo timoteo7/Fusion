@@ -7,6 +7,7 @@ import type { Task, TaskStore } from "@fusion/core";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ExecuteReviewHandoffDeps = {
   store: TaskStore;
@@ -31,7 +32,7 @@ export async function executeReviewHandoff(
       task.id,
       "Review handoff requested by agent — moving to in-review for user review",
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
 
     await deps.store.updateTask(
@@ -40,7 +41,7 @@ export async function executeReviewHandoff(
         status: "awaiting-user-review",
         assigneeUserId: "requesting-user",
       },
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
 
     await deps.persistTokenUsage(task.id);

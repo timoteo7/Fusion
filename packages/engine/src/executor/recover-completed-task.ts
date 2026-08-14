@@ -19,6 +19,7 @@ import {
   areEnabledPreMergeWorkflowStepsSatisfied,
   hasUnsatisfiedExplicitEnabledWorkflowSteps,
 } from "./workflow-step-satisfaction.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RecoverCompletedTaskDeps = {
   store: TaskStore;
@@ -108,7 +109,7 @@ export async function recoverCompletedTask(
         task.id,
         "Auto-promotion withheld: steps were skipped after a bulk-step-completion refusal with no accepted fn_task_done — requires reviewer or operator sign-off",
         undefined,
-        deps.getRunContextFor(task.id),
+        runContextForTotal(deps.getRunContextFor, task.id),
       ).catch(() => undefined);
       return false;
     }
@@ -154,7 +155,7 @@ export async function recoverCompletedTask(
     if (recoveryWorktreePath && existsSync(recoveryWorktreePath)) {
       const modifiedFiles = await deps.captureModifiedFiles(recoveryWorktreePath, authoritativeRecoveryTask.baseCommitSha, task.id, undefined, "recovery");
       if (modifiedFiles.length > 0) {
-        await deps.store.updateTask(task.id, { modifiedFiles });
+        await deps.store.updateTask(task.id, { modifiedFiles }, runContextForTotal(deps.getRunContextFor, task.id));
         executorLog.log(`${task.id}: recovered ${modifiedFiles.length} modified files`);
       }
 
@@ -213,8 +214,7 @@ export async function recoverCompletedTask(
           deps.clearCompletedTaskWatchdog(task.id);
           await deps.store.logEntry(
             task.id,
-            `Auto-recovered: stranded completed task re-dispatched through the workflow graph — the graph re-ran pending workflow steps (recording results) and owns the in-review / back-for-fix transition`,
-          ).catch(() => undefined);
+            `Auto-recovered: stranded completed task re-dispatched through the workflow graph — the graph re-ran pending workflow steps (recording results) and owns the in-review / back-for-fix transition`, undefined, runContextForTotal(deps.getRunContextFor, task.id)).catch(() => undefined);
           executorLog.log(`✓ ${task.id} auto-recovered completed task via workflow-graph re-entry`);
           return true;
       } else if (task.executionMode === "fast") {
@@ -272,7 +272,7 @@ export async function recoverCompletedTask(
     if (promotedFromPlannerColumn && plannerLanes.wip === undefined) {
       const message = `Auto-recovery withheld: completed work is in '${originColumn}' but this workflow declares no WIP column to promote it to`;
       executorLog.warn(`${task.id}: ${message}`);
-      await deps.store.logEntry(task.id, message).catch(() => undefined);
+      await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id)).catch(() => undefined);
       return false;
     }
     let completionTask = task;
@@ -301,17 +301,17 @@ export async function recoverCompletedTask(
           preserveProgress: true,
           preserveWorktree: true,
           preserveResumeState: true,
-        });
+        }, runContextForTotal(deps.getRunContextFor, task.id));
       }
       // Non-undefined: the guard above returned early when this workflow declares no WIP lane.
-      completionTask = await deps.store.moveTask(task.id, plannerLanes.wip as string);
+      completionTask = await deps.store.moveTask(task.id, plannerLanes.wip as string, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     }
     await deps.handoffTaskToReview(completionTask, "completed-task-recovered");
     if (promotedFromPlannerColumn) {
       deps.recoveringCompleted.delete(task.id);
     }
     deps.clearCompletedTaskWatchdog(task.id);
-    await deps.store.logEntry(task.id, `Auto-recovered: task work was complete but stranded in ${originColumn} — moved to in-review`);
+    await deps.store.logEntry(task.id, `Auto-recovered: task work was complete but stranded in ${originColumn} — moved to in-review`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     executorLog.log(`✓ ${task.id} auto-recovered completed task → in-review`);
     deps.signalTaskComplete(task);
     return true;

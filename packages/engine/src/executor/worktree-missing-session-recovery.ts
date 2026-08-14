@@ -30,6 +30,7 @@ import {
   isTransientMissingTaskJsonError,
   TRANSIENT_WORKTREE_TASK_JSON_ENOENT_PATTERN,
 } from "./requeue-loop.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type MissingSessionRecoveryDeps = {
   rootDir: string;
@@ -112,14 +113,14 @@ export async function recoverMissingWorktreeSessionStartFailure(
       task.id,
       `Worktree session-start auto-recovery exhausted (${recovery.retries}/${MAX_WORKTREE_SESSION_RETRIES}); task left for human inspection`,
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
   } else {
     await deps.store.logEntry(
       task.id,
       `Worktree was ${classification} at session start; requeued to todo for clean retry (attempt ${recovery.retries}/${MAX_WORKTREE_SESSION_RETRIES})`,
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
   }
   return recovery.outcome === "escalate-exhausted" ? "escalate-exhausted" : "requeue-todo";

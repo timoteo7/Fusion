@@ -49,6 +49,7 @@ import {
   admitWorkflowPrincipalBeforeNode,
   type ActiveWorkflowAuthority,
 } from "./workflow-principal-before-node.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirror TaskExecutor method/map surface
 type AnyFn = (...args: any[]) => any;
@@ -185,11 +186,11 @@ export async function persistWorkflowStepResult(
         const accepted = await deps.store.updateTask(taskId, {
           workflowStepResults: acceptedResult,
           approvedPlanFingerprint: fingerprint,
-        }, deps.getRunContextFor(taskId));
+        }, runContextForTotal(deps.getRunContextFor, taskId));
         await deps.store.reconcileSpecDriftWhilePlanningLocked(accepted);
       });
     } else {
-      await deps.store.updateTask(taskId, { workflowStepResults: existing }, deps.getRunContextFor(taskId));
+      await deps.store.updateTask(taskId, { workflowStepResults: existing }, runContextForTotal(deps.getRunContextFor, taskId));
     }
   } catch {
     // Result recording is additive visibility — never affect the graph run.
@@ -270,7 +271,7 @@ export async function executeWorkflowGraph(
           : 0;
         deps.graphToolFailureRunCursors.set(task.id, cursor);
         if (typeof deps.store.updateTask === "function") {
-          await deps.store.updateTask(task.id, { toolFailureDetectorLogCursor: cursor }, deps.getRunContextFor(task.id));
+          await deps.store.updateTask(task.id, { toolFailureDetectorLogCursor: cursor }, runContextForTotal(deps.getRunContextFor, task.id));
         }
       }
       let selection: { workflowId: string; stepIds: string[] } | undefined;
@@ -440,6 +441,7 @@ export async function executeWorkflowGraph(
           admitWorkflowPrincipalBeforeNode(
             {
               store: deps.store,
+              getRunContextFor: deps.getRunContextFor,
               options: deps.options,
               workflowAgentCapacity: deps.workflowAgentCapacity,
               activeWorkflowAuthorities: deps.activeWorkflowAuthorities,
@@ -507,7 +509,7 @@ export async function executeWorkflowGraph(
         // the re-running agent can read. Best-effort; logging failures swallowed.
         logTaskEntry: (summary: string, detail?: string) => {
           void deps.store
-            .logEntry(task.id, summary, detail, deps.getRunContextFor(task.id))
+            .logEntry(task.id, summary, detail, runContextForTotal(deps.getRunContextFor, task.id))
             .catch(() => {});
         },
         /*
@@ -518,7 +520,7 @@ export async function executeWorkflowGraph(
         unified progress bar (getUnifiedTaskProgress) reflects graph-run steps —
         NO new table/type/store method. Upsert by `workflowStepId === node.id`
         (replace-if-present else append) through the existing
-        `store.updateTask({workflowStepResults})` path. Fail-soft: degrade to a
+        `store.updateTask({workflowStepResults}, undefined, runContextForTotal(deps.getRunContextFor, {workflowStepResults}))` path. Fail-soft: degrade to a
         no-op when the store lacks updateTask, and swallow read/write errors (the
         executor wrapper also swallows) so result recording never affects the run.
         */
@@ -655,7 +657,7 @@ export async function executeWorkflowGraph(
           } else {
             executorLog.warn(holdMessage);
           }
-          await deps.store.logEntry(task.id, `Workflow stage held — ${principalHoldReason}`).catch(() => undefined);
+          await deps.store.logEntry(task.id, `Workflow stage held — ${principalHoldReason}`, undefined, runContextForTotal(deps.getRunContextFor, task.id)).catch(() => undefined);
         }
         if (
           continuation
@@ -759,7 +761,7 @@ export async function executeWorkflowGraph(
         }
         await deps.advanceNoMergeWorkflowToCompleteColumn(live as TaskDetail);
         if ((live.graphResumeRetryCount ?? 0) !== 0 || (live.consecutiveToolFailureRetryCount ?? 0) !== 0) {
-          await deps.store.updateTask(task.id, { graphResumeRetryCount: 0, consecutiveToolFailureRetryCount: 0, executorEscalationAttempted: false, toolFailureDetectorLogCursor: null, toolFailureRetryExhaustedAuditEmitted: false }, deps.getRunContextFor(task.id));
+          await deps.store.updateTask(task.id, { graphResumeRetryCount: 0, consecutiveToolFailureRetryCount: 0, executorEscalationAttempted: false, toolFailureDetectorLogCursor: null, toolFailureRetryExhaustedAuditEmitted: false }, runContextForTotal(deps.getRunContextFor, task.id));
         }
       }
       return;

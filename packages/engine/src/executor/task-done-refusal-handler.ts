@@ -9,6 +9,7 @@ import type { EngineRunContext } from "../util/run-audit.js";
 import { evaluateTaskDoneRefusal } from "./task-done-refusal.js";
 import { skipBypassTaintUpdateForRefusal } from "./completion-predicates.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 /** Maximum todo requeues after exhausting in-session fn_task_done retries. */
 export const MAX_TASK_DONE_REQUEUE_RETRIES = 3;
@@ -27,7 +28,7 @@ export async function handleImplicitTaskDoneRefusal(
   task: Task,
   refusal: Extract<ReturnType<typeof evaluateTaskDoneRefusal>, { ok: false }>,
 ): Promise<void> {
-  await deps.store.logEntry(task.id, refusal.message, undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, refusal.message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
   executorLog.error(`${task.id}: fn_task_done refused (${refusal.refusalClass}) — ${refusal.reason} (implicit completion)`);
 
   const taintUpdate = skipBypassTaintUpdateForRefusal(refusal);
@@ -44,15 +45,15 @@ export async function handleImplicitTaskDoneRefusal(
       worktree: null,
       branch: null,
       sessionFile: null,
-    });
+    }, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.store.logEntry(
       task.id,
       `${refusal.message} — requeued to todo immediately (${nextRequeueCount}/${MAX_TASK_DONE_REQUEUE_RETRIES})`,
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
     deps.markGraphExecuteSelfRequeued(task.id);
-    await deps.store.moveTask(task.id, await resolveReboundColumnFor(deps.store, task.id), { preserveProgress: true });
+    await deps.store.moveTask(task.id, await resolveReboundColumnFor(deps.store, task.id), { preserveProgress: true }, runContextForTotal(deps.getRunContextFor, task.id));
   } else {
     await deps.store.updateTask(task.id, {
       status: "failed",
@@ -63,8 +64,8 @@ export async function handleImplicitTaskDoneRefusal(
       worktree: null,
       branch: null,
       sessionFile: null,
-    });
-    await deps.store.logEntry(task.id, `${refusal.message} — execution failed because implicit fn_task_done was refused`, undefined, deps.getRunContextFor(task.id));
+    }, runContextForTotal(deps.getRunContextFor, task.id));
+    await deps.store.logEntry(task.id, `${refusal.message} — execution failed because implicit fn_task_done was refused`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.persistTokenUsage(task.id);
   }
 

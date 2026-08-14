@@ -17,6 +17,8 @@ import type { ToolDefinition, AgentSession } from "@earendil-works/pi-coding-age
 import type { ReviewVerdict } from "../execution/reviewer.js";
 import type { StuckTaskDetector } from "../healing/stuck-task-detector.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 const STEP_STATUSES: StepStatus[] = ["pending", "in-progress", "done", "skipped"];
 
@@ -39,6 +41,8 @@ const taskUpdateParams = Type.Object({
 });
 
 export type CreateTaskUpdateToolDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   resolveTaskCustomFieldDefs: (taskId: string) => Promise<WorkflowFieldDefinition[] | undefined>;
   loopRecoveryState: Map<string, { attempts: number; pending: boolean }>;
@@ -165,7 +169,7 @@ export function createTaskUpdateTool(
                 details: {},
               };
             }
-            await store.updateTask(taskId, { dependencies });
+            await store.updateTask(taskId, { dependencies }, runContextForTotal(deps.getRunContextFor, taskId));
             return {
               content: [{ type: "text" as const, text: `Dependencies updated.` }],
               details: {},
@@ -258,7 +262,7 @@ export function createTaskUpdateTool(
           }
 
           // Update dependencies
-          await store.updateTask(taskId, { dependencies });
+          await store.updateTask(taskId, { dependencies }, runContextForTotal(deps.getRunContextFor, taskId));
         }
 
         const task = await store.updateStep(taskId, stepIndex, status as StepStatus);

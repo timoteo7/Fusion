@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import type { Settings, TaskDetail, TaskStore, WorkflowIrNode } from "@fusion/core";
 import type { WorkflowNodePreparationRequirement } from "../workflows/workflow-graph-executor.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type PrepareGraphNodeExecutionDeps = {
   store: TaskStore;
@@ -47,7 +48,7 @@ export async function prepareGraphNodeExecution(
       live.id,
       `Workflow node '${node.id}' assigned worktree is missing — reacquiring before node execution`,
       live.worktree,
-      deps.getRunContextFor(live.id),
+      runContextForTotal(deps.getRunContextFor, live.id),
     );
   }
   await deps.ensureGraphCustomNodeWorktree(taskForAcquisition, settings, node.id, executionCodeNode);

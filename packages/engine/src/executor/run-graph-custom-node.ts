@@ -33,6 +33,7 @@ import {
 } from "./workflow-step-verdict.js";
 import { parseAwaitInputSentinel } from "./await-input-parse.js";
 import { buildAgentPersona } from "./agent-binding-pure.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const WORKFLOW_THINKING_LEVEL_SET: ReadonlySet<string> = new Set(THINKING_LEVELS);
 
@@ -111,11 +112,11 @@ export async function runGraphCustomNode(
           });
       if (replies.length === 0) {
         // Unpaused without a post-watermark reply — re-park and keep waiting.
-        await deps.store.updateTask(live.id, { status: "awaiting-user-input", paused: true }, deps.getRunContextFor(live.id));
+        await deps.store.updateTask(live.id, { status: "awaiting-user-input", paused: true }, runContextForTotal(deps.getRunContextFor, live.id));
         return { outcome: "failure", value: "awaiting-user-input" };
       }
-      await deps.store.updateTask(live.id, { status: null, pausedReason: null }, deps.getRunContextFor(live.id));
-      await deps.store.logEntry(live.id, `Workflow input received for step '${node.id}' — resuming`, undefined, deps.getRunContextFor(live.id));
+      await deps.store.updateTask(live.id, { status: null, pausedReason: null }, runContextForTotal(deps.getRunContextFor, live.id));
+      await deps.store.logEntry(live.id, `Workflow input received for step '${node.id}' — resuming`, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     }
 
     const executorKind = typeof cfg.executor === "string" ? cfg.executor : "model";
@@ -162,7 +163,7 @@ export async function runGraphCustomNode(
         live.id,
         `Fast mode — custom graph node '${node.id}' skipped`,
         undefined,
-        deps.getRunContextFor(live.id),
+        runContextForTotal(deps.getRunContextFor, live.id),
       );
       return { outcome: "success", value: "workflow-step-skipped" };
     }
@@ -226,7 +227,7 @@ export async function runGraphCustomNode(
             live.id,
             `Plan Review worktree ${executionTarget.worktree} is missing on disk — re-acquiring a task worktree instead of running in the shared checkout`,
             undefined,
-            deps.getRunContextFor(live.id),
+            runContextForTotal(deps.getRunContextFor, live.id),
           );
         }
         const acquisitionTask = recordedWorktreeMissing
@@ -275,7 +276,7 @@ export async function runGraphCustomNode(
           live.id,
           `Workflow node '${node.id}': column agent '${columnAgentId}' (${columnAgentMode}) not applied — raw CLI execution runs no session`,
           undefined,
-          deps.getRunContextFor(live.id),
+          runContextForTotal(deps.getRunContextFor, live.id),
         );
       } else {
         const adopted = await deps.adoptColumnAgentForNode(node, live, columnAgentId, columnAgentMode);
@@ -311,7 +312,7 @@ export async function runGraphCustomNode(
           const persona = buildAgentPersona(agent);
           if (persona) prompt = `${persona}\n\n${prompt}`;
         } else {
-          await deps.store.logEntry(live.id, `Workflow node '${node.id}': agent '${cfg.agentId}' not found — using default model`, undefined, deps.getRunContextFor(live.id));
+          await deps.store.logEntry(live.id, `Workflow node '${node.id}': agent '${cfg.agentId}' not found — using default model`, undefined, runContextForTotal(deps.getRunContextFor, live.id));
         }
       } catch {
         // Agent lookup is best-effort; fall back to the default model.
@@ -356,7 +357,7 @@ export async function runGraphCustomNode(
         // status reset in runAwaitInputNode).
         const approvalMarker = `workflow-cli-approval:${node.id}`;
         if ((live.pausedReason ?? "").startsWith(approvalMarker)) {
-          await deps.store.updateTask(live.id, { status: null, pausedReason: null }, deps.getRunContextFor(live.id));
+          await deps.store.updateTask(live.id, { status: null, pausedReason: null }, runContextForTotal(deps.getRunContextFor, live.id));
         }
         const env = prompt ? { ...process.env, FUSION_NODE_PROMPT: prompt } : undefined;
         const out = await deps.runRawCliCommand(
@@ -475,12 +476,12 @@ export async function runGraphCustomNode(
         live.id,
         `Workflow step '${node.id}' is waiting for your input: ${awaitQuestion}`,
         undefined,
-        deps.getRunContextFor(live.id),
+        runContextForTotal(deps.getRunContextFor, live.id),
       );
       await deps.store.updateTask(
         live.id,
         { status: "awaiting-user-input", paused: true, pausedReason: `${skillAwaitMarker}@${Date.now()}: ${awaitQuestion}` },
-        deps.getRunContextFor(live.id),
+        runContextForTotal(deps.getRunContextFor, live.id),
       );
       return { outcome: "failure", value: "awaiting-user-input" };
     }

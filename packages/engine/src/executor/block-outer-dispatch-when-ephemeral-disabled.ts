@@ -13,6 +13,7 @@ import type { EngineRunContext } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
 import { clearDispatchBlockedLogState, logDispatchBlockedOnce } from "./dispatch-block-log.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type BlockOuterDispatchWhenEphemeralDisabledDeps = {
   store: TaskStore;
@@ -57,14 +58,14 @@ export async function blockOuterDispatchWhenEphemeralDisabled(
         preserveResumeState: true,
         moveSource: "engine",
         recoveryRehome: true,
-      });
+      }, runContextForTotal(deps.getRunContextFor, liveTask.id));
     }
-    await deps.store.updateTask(liveTask.id, { status: "queued" }, deps.getRunContextFor(liveTask.id));
+    await deps.store.updateTask(liveTask.id, { status: "queued" }, runContextForTotal(deps.getRunContextFor, liveTask.id));
     await deps.store.logEntry(
       liveTask.id,
       "queued — ephemeral agents disabled; no permanent executor assigned",
       "Executor pre-dispatch ephemeral gate blocked workflow/authoritative execution.",
-      deps.getRunContextFor(liveTask.id),
+      runContextForTotal(deps.getRunContextFor, liveTask.id),
     );
     logDispatchBlockedOnce(
       executorLog,

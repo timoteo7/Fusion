@@ -11,6 +11,7 @@ import type { PausedAbortProvenance } from "./paused-abort-provenance.js";
 import { generateSyntheticRunId, type EngineRunContext } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
 import type { ResumeLanes } from "./resolve-resume-lanes.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const MAX_TRANSIENT_GRAPH_RESUME_RETRIES = 2;
 const TRANSIENT_GRAPH_RESUME_RETRY_BACKOFF_MS = process.env.VITEST || process.env.NODE_ENV === "test" ? 0 : 1_000;
@@ -55,9 +56,9 @@ export async function reenterPausedAbortedWorkflowNode(
     deps.activeWorktrees.delete(live.id);
     const message = `Workflow graph node '${nodeId}' was interrupted by engine pause/resume — re-entering workflow graph (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
     executorLog.log(`${live.id}: ${message}`);
-    await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
-    await deps.store.logEntry(live.id, `Auto-recovered: re-entering paused-aborted workflow graph node '${nodeId}' — failure notification suppressed`, undefined, deps.getRunContextFor(live.id));
-    await deps.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, message, undefined, runContextForTotal(deps.getRunContextFor, live.id));
+    await deps.store.logEntry(live.id, `Auto-recovered: re-entering paused-aborted workflow graph node '${nodeId}' — failure notification suppressed`, undefined, runContextForTotal(deps.getRunContextFor, live.id));
+    await deps.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, runContextForTotal(deps.getRunContextFor, live.id));
     try {
       await deps.store.recordRunAuditEvent?.({
         taskId: live.id,

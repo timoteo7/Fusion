@@ -10,6 +10,7 @@ import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { isTaskAlreadyCompleteForNonContinuableSession } from "./completion-predicates.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type NonContinuableSessionDeps = {
   store: TaskStore;
@@ -40,10 +41,10 @@ export async function handleNonContinuableSessionError(
 
   const diagnosticMessage = "Post-done session continuation suppressed — session not continuable (last role assistant); task work already complete, leaving clean in-review";
   executorLog.warn(`${task.id} ${diagnosticMessage}`);
-  await deps.store.logEntry(task.id, diagnosticMessage, errorMessage, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, diagnosticMessage, errorMessage, runContextForTotal(deps.getRunContextFor, task.id));
 
   if (liveTask.status === "failed" || liveTask.error) {
-    await deps.store.updateTask(task.id, { status: null, error: null });
+    await deps.store.updateTask(task.id, { status: null, error: null }, runContextForTotal(deps.getRunContextFor, task.id));
   }
 
   await deps.persistTokenUsage(task.id);
@@ -96,22 +97,22 @@ export async function handleNonContinuableSessionRetry(
     const attempt = decision.nextState.recoveryRetryCount;
     const delay = formatDelay(decision.delayMs);
     executorLog.warn(`⚡ ${task.id} non-continuable session — fresh-session retry ${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}`);
-    await deps.store.logEntry(task.id, `Non-continuable session — fresh-session retry (${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, deps.getRunContextFor(task.id));
+    await deps.store.logEntry(task.id, `Non-continuable session — fresh-session retry (${attempt}/${MAX_RECOVERY_RETRIES} in ${delay}): ${errorMessage}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.store.updateTask(task.id, {
       recoveryRetryCount: decision.nextState.recoveryRetryCount,
       nextRecoveryAt: decision.nextState.nextRecoveryAt,
       sessionFile: null,
-    });
+    }, runContextForTotal(deps.getRunContextFor, task.id));
     deps.markGraphExecuteSelfRequeued(task.id);
-    await deps.store.moveTask(task.id, await resolveReboundColumnFor(deps.store, task.id), { preserveResumeState: true });
+    await deps.store.moveTask(task.id, await resolveReboundColumnFor(deps.store, task.id), { preserveResumeState: true }, runContextForTotal(deps.getRunContextFor, task.id));
     return true;
   }
 
   executorLog.error(`✗ ${task.id} non-continuable session fresh-session retries exhausted (${MAX_RECOVERY_RETRIES} attempts): ${errorMessage}`);
-  await deps.store.logEntry(task.id, `Non-continuable session fresh-session retries exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, `Non-continuable session fresh-session retries exhausted after ${MAX_RECOVERY_RETRIES} attempts: ${errorMessage}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
   await deps.store.updateTask(task.id, {
     recoveryRetryCount: null,
     nextRecoveryAt: null,
-  });
+  }, runContextForTotal(deps.getRunContextFor, task.id));
   return false;
 }

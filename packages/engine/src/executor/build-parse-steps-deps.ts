@@ -9,8 +9,12 @@ import type { TaskStep, TaskStore } from "@fusion/core";
 import type { ParseStepsHandlerDeps } from "../workflows/workflow-node-handlers.js";
 import type { WorkflowStepInstanceState } from "../workflows/workflow-graph-foreach.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type BuildParseStepsDepsDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   readTaskArtifact: (taskId: string, key: string) => Promise<string | undefined>;
 };
@@ -22,7 +26,7 @@ export function buildParseStepsDeps(
   return {
     readArtifact: (task, key): Promise<string | undefined> => deps.readTaskArtifact(task.id, key),
     writeSteps: async (task, steps: TaskStep[]): Promise<void> => {
-      await deps.store.updateTask(task.id, { steps });
+      await deps.store.updateTask(task.id, { steps }, runContextForTotal(deps.getRunContextFor, task.id));
     },
     hasExpandedForeach: async (task): Promise<boolean> => {
       const store = deps.store as unknown as {

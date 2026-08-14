@@ -5,7 +5,7 @@
  * FNXC:WorkflowLifecycle 2026-07-01-16:20:
  * Breadcrumb task-log writes on the abort/pause/finalize paths are best-effort diagnostics and must
  * NEVER break control flow. FN-7335 wired store.logEntry() straight into the SYNCHRONOUS
- * markPausedAborted() as `void this.store.logEntry(...).catch(...)`; when store.logEntry is
+ * markPausedAborted() as `void this.store.logEntry(..., undefined, undefined, runContextForTotal(deps.getRunContextFor, ...)).catch(...)`; when store.logEntry is
  * absent/throws synchronously (undefined method, store closed mid-abort, corrupted pager) the call
  * throws a TypeError BEFORE the promise exists, so the trailing .catch() never runs and the
  * exception unwinds out of markPausedAborted — aborting hard-cancel/pause and stranding the
@@ -15,6 +15,7 @@
 import type { TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type SafeLogEntryDeps = {
   store: TaskStore;
@@ -27,7 +28,7 @@ export function safeLogEntry(
   message: string,
 ): void {
   try {
-    const result = deps.store.logEntry(taskId, message, undefined, deps.getRunContextFor(taskId));
+    const result = deps.store.logEntry(taskId, message, undefined, runContextForTotal(deps.getRunContextFor, taskId));
     void Promise.resolve(result).catch((error) => {
       executorLog.warn(`${taskId}: failed to write task-log breadcrumb: ${error instanceof Error ? error.message : String(error)}`);
     });

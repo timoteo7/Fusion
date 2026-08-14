@@ -24,6 +24,7 @@ import {
 } from "@fusion/core";
 import { buildAgentGatedActionSummary } from "../agents/permanent-agent-gating.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type BuildPermanentAgentGatingContextDeps = {
   store: TaskStore;
@@ -89,11 +90,10 @@ export function buildPermanentAgentGatingContext(
       if (!taskId) return;
       deps.approvalSuspended.add(taskId);
       try {
-        await deps.store.pauseTask(taskId, true, deps.getRunContextFor(taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
+        await deps.store.pauseTask(taskId, true, runContextForTotal(deps.getRunContextFor, taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
         await deps.store.logEntry(
           taskId,
-          `Approval required for ${toolName}. Request ${approvalRequestId} created; task paused awaiting decision.`,
-        );
+          `Approval required for ${toolName}. Request ${approvalRequestId} created; task paused awaiting decision.`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
       } catch (error) {
         deps.approvalSuspended.delete(taskId);
         throw error;

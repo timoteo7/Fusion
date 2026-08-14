@@ -34,10 +34,13 @@ import {
 } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import { generateSyntheticRunId } from "../util/run-audit.js";
+import type { RunMutationContext } from "@fusion/core";
 
 export async function advanceNoMergeWorkflowToCompleteColumn(
   store: TaskStore,
   task: TaskDetail,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making this write; REQUIRED so a future unwired caller is a compile error rather than a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<void> {
   let ir: WorkflowIr;
   try {
@@ -71,7 +74,7 @@ export async function advanceNoMergeWorkflowToCompleteColumn(
       bypassGuards: true,
       preserveProgress: true,
       workflowMoveMetadata: { fromColumn: task.column, reason: "no-merge-workflow-completed" },
-    });
+    }, runContext);
   } catch (err) {
     executorLog.warn(
       `[workflow-graph] ${task.id} completed a no-merge workflow but could not advance to '${completeColumn}': ${err instanceof Error ? err.message : String(err)}`,

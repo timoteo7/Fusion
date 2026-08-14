@@ -22,6 +22,7 @@ import { resolveEffectiveAgent } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { extractOwnSettings } from "./agent-binding-pure.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ResolveSeamColumnAgentDeps = {
   store: TaskStore;
@@ -67,7 +68,7 @@ export async function resolveSeamColumnAgent(
         task.id,
         `Workflow seam node '${governingNodeId}': column agent '${effective.agentId}' not found — falling back to assigned-agent resolution`,
         undefined,
-        deps.getRunContextFor(task.id),
+        runContextForTotal(deps.getRunContextFor, task.id),
       );
     } catch (logErr: unknown) {
       executorLog.warn(`${task.id}: failed to log column-agent fallback: ${logErr instanceof Error ? logErr.message : String(logErr)}`);
@@ -79,7 +80,7 @@ export async function resolveSeamColumnAgent(
       task.id,
       `Workflow seam node '${governingNodeId}': running as column agent '${effective.agentId}' (${binding.mode})`,
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
   } catch (logErr: unknown) {
     executorLog.warn(`${task.id}: failed to log column-agent adoption: ${logErr instanceof Error ? logErr.message : String(logErr)}`);

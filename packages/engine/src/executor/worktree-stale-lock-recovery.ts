@@ -14,6 +14,7 @@ import {
 import { recoverStaleRegistration } from "../worktree/worktree-stale-registration.js";
 import { createRunAuditor } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type StaleLockAuditEvent =
   | "worktree:stale-lock-detected"
@@ -94,7 +95,7 @@ export async function recoverIndexLockIfStale(
         taskId,
         `Recovered stale worktree index.lock and retrying`,
         resolvePath(deps.rootDir, lockPath),
-        deps.getRunContextFor(taskId),
+        runContextForTotal(deps.getRunContextFor, taskId),
       );
       return true;
     }
@@ -142,7 +143,7 @@ export async function recoverExecutorStaleRegistration(
       taskId,
       "Recovered stale worktree registration and retrying",
       staleRegistrationPath,
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     );
     return true;
   }

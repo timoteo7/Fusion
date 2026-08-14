@@ -11,10 +11,13 @@
  */
 import type { TaskDetail, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
+import type { RunMutationContext } from "@fusion/core";
 
 export async function recoverApprovedStepsOnResume(
   store: TaskStore,
   taskId: string,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making this write; REQUIRED so a future unwired caller is a compile error rather than a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<void> {
   let detail: TaskDetail;
   try {
@@ -54,8 +57,7 @@ export async function recoverApprovedStepsOnResume(
       try {
         await store.logEntry(
           taskId,
-          `Step ${i} (${stepName}) recovered as done on resume — code review had already approved before the engine stopped`,
-        );
+          `Step ${i} (${stepName}) recovered as done on resume — code review had already approved before the engine stopped`, undefined, runContext);
         await store.updateStep(taskId, i, "done");
         recovered++;
       } catch (err) {

@@ -13,6 +13,7 @@ import { classifyTaskWorktree } from "../worktree/worktree-pool.js";
 import { formatError } from "../logger.js";
 import type { EngineRunContext, RunAuditor } from "../util/run-audit.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type BootstrapMisbindingRecoveryDeps = {
   rootDir: string;
@@ -44,11 +45,11 @@ export async function tryBootstrapMisbindingRecovery(
     ? await classifyTaskWorktree(deps.rootDir, worktreePath)
     : { ok: false as const };
   if (!worktreePath || !worktreeClassification.ok) {
-    await deps.store.logEntry(task.id, `[recovery] bootstrap misbinding detected but worktree unavailable for re-anchor: ${worktreePath ?? "none"}`, undefined, deps.getRunContextFor(task.id));
+    await deps.store.logEntry(task.id, `[recovery] bootstrap misbinding detected but worktree unavailable for re-anchor: ${worktreePath ?? "none"}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     return false;
   }
 
-  await deps.store.logEntry(task.id, `[recovery] bootstrap-time branch misbinding detected on ${contamination.branchName}: 0 own commits, re-anchoring to ${contamination.baseSha}`, undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, `[recovery] bootstrap-time branch misbinding detected on ${contamination.branchName}: 0 own commits, re-anchoring to ${contamination.baseSha}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
 
   try {
     const reanchor = await reanchorBranchToBase({
@@ -75,12 +76,12 @@ export async function tryBootstrapMisbindingRecovery(
       error: null,
       paused: false,
       pausedReason: null,
-    });
+    }, runContextForTotal(deps.getRunContextFor, task.id));
     deps.markGraphExecuteSelfRequeued(task.id);
-    await deps.store.moveTask(task.id, await resolveReboundColumnFor(deps.store, task.id), { preserveResumeState: false, preserveWorktree: true });
+    await deps.store.moveTask(task.id, await resolveReboundColumnFor(deps.store, task.id), { preserveResumeState: false, preserveWorktree: true }, runContextForTotal(deps.getRunContextFor, task.id));
     return true;
   } catch (error) {
-    await deps.store.logEntry(task.id, `[recovery] bootstrap re-anchor failed; falling back to contamination safety path: ${formatError(error)}`, undefined, deps.getRunContextFor(task.id));
+    await deps.store.logEntry(task.id, `[recovery] bootstrap re-anchor failed; falling back to contamination safety path: ${formatError(error)}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     return false;
   }
 }

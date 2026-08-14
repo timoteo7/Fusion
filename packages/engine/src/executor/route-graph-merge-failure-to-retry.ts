@@ -12,6 +12,7 @@ import { isGenericAbortProvenance } from "./paused-abort-provenance.js";
 import { graphFailureValue } from "./graph-failure-pure.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RouteGraphMergeFailureToRetryDeps = {
   store: TaskStore;
@@ -36,7 +37,7 @@ export async function routeGraphMergeFailureToRetry(
     const failedNode = result.visitedNodeIds[result.visitedNodeIds.length - 1] ?? "unknown";
     const message = `Workflow graph merge failure at node '${failedNode}' routed to bounded auto-merge retry${abortProvenance === "merge-seam" ? " after merge-seam abort" : isGenericAbortProvenance(abortProvenance) || abortProvenance === undefined ? " after benign pause/resume abort" : ""}`;
     executorLog.warn(`${live.id}: ${message}`);
-    await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, message, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     try {
       const mergeTask = await deps.ensureWorkflowMergeBoundaryTask(live, {
         reason: "workflow-merge-retry-boundary",

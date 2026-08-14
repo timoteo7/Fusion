@@ -15,6 +15,7 @@ import type { Task, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { isTaskWorkComplete } from "./task-predicates.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type UnpauseResumeDeps = {
   store: TaskStore;
@@ -96,8 +97,8 @@ export async function dispatchUnpauseResume(
         resumeLimboCount: 0,
         resumeLimboTipSha: null,
         resumeLimboStepSignature: null,
-      });
-      await deps.store.logEntry(task.id, "Resuming execution after unpause", undefined, deps.getRunContextFor(task.id));
+      }, runContextForTotal(deps.getRunContextFor, task.id));
+      await deps.store.logEntry(task.id, "Resuming execution after unpause", undefined, runContextForTotal(deps.getRunContextFor, task.id));
       await deps.recoverApprovedStepsOnResume(task.id);
     } catch (clearErr) {
       executorLog.warn(`${task.id} clearResumeFailureState failed during unpause: ${clearErr instanceof Error ? clearErr.message : String(clearErr)}`);

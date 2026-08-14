@@ -11,6 +11,7 @@ import {
   truncateWorkflowScriptOutput,
 } from "./configured-command.js";
 import { createConfiguredCommandAbortError } from "./task-predicates.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RunConfiguredCommandFn = (
   command: string,
@@ -43,12 +44,12 @@ export async function executeScriptWorkflowStep(
   if (!scriptCommand) {
     const available = settings.scripts ? Object.keys(settings.scripts).join(", ") : "none";
     const msg = `Script '${scriptName}' not found in project settings. Available scripts: ${available}`;
-    await deps.store.logEntry(task.id, msg);
+    await deps.store.logEntry(task.id, msg, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     return { success: false, error: msg };
   }
 
   executorLog.log(`${task.id}: workflow step '${workflowStep.name}' executing script '${scriptName}': ${scriptCommand}`);
-  await deps.store.logEntry(task.id, `Workflow step '${workflowStep.name}' executing script '${scriptName}': ${scriptCommand}`);
+  await deps.store.logEntry(task.id, `Workflow step '${workflowStep.name}' executing script '${scriptName}': ${scriptCommand}`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
 
   const scriptAbortController = new AbortController();
   deps.registerConfiguredCommandController(task.id, scriptAbortController);

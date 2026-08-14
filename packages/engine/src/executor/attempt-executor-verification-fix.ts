@@ -30,6 +30,7 @@ import { executorLog } from "../logger.js";
 import { createRunAuditor, type EngineRunContext } from "../util/run-audit.js";
 import type { PluginRunner } from "../plugins/plugin-runner.js";
 import type { AgentStore } from "@fusion/core";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type AttemptExecutorVerificationFixDeps = {
   store: TaskStore;
@@ -162,7 +163,7 @@ Do not refactor, rename broadly, or make opportunistic improvements.
       task.id,
       `Executor verification fix agent started (model: ${describeModel(session)}, attempt ${retryNumber}/${maxRetries})`,
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
     await deps.store.appendAgentLog(
       task.id,
@@ -210,7 +211,7 @@ ${failureContext.output.slice(0, VERIFICATION_LOG_MAX_CHARS)}
         task.id,
         `Re-running deterministic verification (attempt ${retryNumber}/${maxRetries})`,
         undefined,
-        deps.getRunContextFor(task.id),
+        runContextForTotal(deps.getRunContextFor, task.id),
       );
       await deps.store.appendAgentLog(
         task.id,
@@ -233,7 +234,7 @@ ${failureContext.output.slice(0, VERIFICATION_LOG_MAX_CHARS)}
       task.id,
       `Executor verification fix agent encountered an error`,
       errorMessage,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
     await deps.store.appendAgentLog(
       task.id,

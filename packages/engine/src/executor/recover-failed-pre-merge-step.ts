@@ -32,6 +32,7 @@ import type { Task, TaskStore, WorkflowStepResult as CoreWorkflowStepResult } fr
 import { hasPreMergeRemediationAutoMergeHold } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RecoverFailedPreMergeStepDeps = {
   store: TaskStore;
@@ -76,7 +77,7 @@ export async function recoverFailedPreMergeWorkflowStep(
         task.id,
         "Failed pre-merge step recovery not scheduled — operator task hold",
         `Reason: ${reason}`,
-        deps.getRunContextFor?.(task.id),
+        runContextForTotal(deps.getRunContextFor, task.id),
       );
       return false;
     }
@@ -108,7 +109,7 @@ export async function recoverFailedPreMergeWorkflowStep(
         task.id,
         "Failed pre-merge step recovery not scheduled — revision budget zero/invalid",
         `Step: ${stepName}\nAttempts: ${budget.attempts}\nMax: ${String(budget.max)}`,
-        deps.getRunContextFor?.(task.id),
+        runContextForTotal(deps.getRunContextFor, task.id),
       );
       return false;
     }
@@ -118,7 +119,7 @@ export async function recoverFailedPreMergeWorkflowStep(
         task.id,
         "Failed pre-merge step recovery not scheduled — revision budget exhausted",
         `Step: ${stepName}\nAttempts: ${budget.attempts}\nMax: ${String(budget.max)}`,
-        deps.getRunContextFor?.(task.id),
+        runContextForTotal(deps.getRunContextFor, task.id),
       );
       return false;
     }

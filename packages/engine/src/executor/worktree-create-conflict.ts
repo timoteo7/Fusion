@@ -15,13 +15,25 @@ import { resolveIntegrationBranch } from "../merge/integration-branch.js";
 import { executorLog } from "../logger.js";
 import { extractWorktreeConflictInfo } from "./worktree-conflict-info.js";
 import { assertWorktreePathNotNested, isRegisteredWorktree, NonRetryableWorktreeError } from "./worktree-registry-helpers.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
+import type { RunMutationContext } from "@fusion/core";
 
 const execAsync = promisify(exec);
 
 export type WorktreeCreateConflictDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   rootDir: string;
   store: {
-    logEntry: (taskId: string, action: string, outcome?: string) => Promise<unknown>;
+    /*
+  FNXC:Identity 2026-08-12-01:20 (U18/KTD2 — the seam restates the required context):
+  This narrowed store re-declared `logEntry` with NO context parameter, so it did not inherit the
+  canonical/deprecated overload pair and would keep accepting unattributed writes even after every
+  call site was converted — a hole the census cannot see. Mirror the CANONICAL arity instead.
+  Do not relax it back to quiet a caller.
+  */
+  logEntry: (taskId: string, action: string, outcome: string | undefined, runContext: RunMutationContext) => Promise<unknown>;
   };
   maxWorktreeRetries: number;
   recoverIndexLockIfStale: (taskId: string, path: string, conflictInfo: { lockPath?: string; message?: string }) => Promise<boolean>;
@@ -83,7 +95,7 @@ export async function tryCreateWorktree(
   // at a worktree directory instead of the main repo — produces paths like
   // `.worktrees/green-finch/.worktrees/amber-panda` that bloat the filesystem
   // and confuse every tool that walks git state.
-  await assertWorktreePathNotNested(deps.rootDir, deps.store, path, taskId);
+  await assertWorktreePathNotNested(deps.rootDir, deps.store, path, taskId, runContextForTotal(deps.getRunContextFor, taskId));
 
   const installGuardOrCleanup = async () => {
     try {
@@ -113,8 +125,7 @@ export async function tryCreateWorktree(
     if (!isRegistered) {
       await deps.store.logEntry(
         taskId,
-        `Removing existing directory (not a registered worktree): ${path}`,
-      );
+        `Removing existing directory (not a registered worktree): ${path}`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
       try {
         await rm(path, { recursive: true, force: true });
       } catch (e: unknown) {
@@ -169,7 +180,7 @@ export async function tryCreateWorktree(
     await createWithBranch(branch);
     executorLog.log(`Worktree created: ${path}${startPoint ? ` (from ${startPoint})` : ""}`);
     if (attemptNumber > 0) {
-      await deps.store.logEntry(taskId, `Worktree created on attempt ${attemptNumber + 1}`, path);
+      await deps.store.logEntry(taskId, `Worktree created on attempt ${attemptNumber + 1}`, path, runContextForTotal(deps.getRunContextFor, taskId));
     }
     await installGuardOrCleanup();
     return { path, branch };
@@ -233,7 +244,7 @@ export async function tryCreateWorktree(
       }
       const branchCleaned = await deps.cleanupStaleBranch(branch, taskId);
       if (branchCleaned) {
-        await deps.store.logEntry(taskId, `Removed stale branch reference, retrying`);
+        await deps.store.logEntry(taskId, `Removed stale branch reference, retrying`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
         return deps.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, recoveryDepth + 1, allowSiblingBranchRename, settings);
       }
       throw new Error(
@@ -315,7 +326,7 @@ export async function tryCreateWorktree(
         }
         const branchCleaned = await deps.cleanupStaleBranch(branch, taskId);
         if (branchCleaned) {
-          await deps.store.logEntry(taskId, `Cleaned up stale reference in fallback, retrying`);
+          await deps.store.logEntry(taskId, `Cleaned up stale reference in fallback, retrying`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
           return deps.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, recoveryDepth + 1, allowSiblingBranchRename, settings);
         }
       }
@@ -383,8 +394,7 @@ export async function handleWorktreeConflict(
     await deps.store.logEntry(
       taskId,
       `[recovery] reclaimed existing worktree for ${taskId} at ${livePath} (${inspection.taskAttributedCommitCount} commits preserved)`,
-      inspection.tipSha,
-    );
+      inspection.tipSha, runContextForTotal(deps.getRunContextFor, taskId));
     return { path: livePath, branch };
   }
 
@@ -395,8 +405,7 @@ export async function handleWorktreeConflict(
     await deps.store.logEntry(
       taskId,
       `[recovery] reclaimed existing worktree for ${taskId} at ${livePath} (0 commits preserved)`,
-      inspection.tipSha,
-    );
+      inspection.tipSha, runContextForTotal(deps.getRunContextFor, taskId));
     return { path: livePath, branch };
   }
 
@@ -404,7 +413,7 @@ export async function handleWorktreeConflict(
     if (inspection.kind === "stale" || inspection.kind === "stale-resolved" || inspection.kind === "tip-already-merged") {
       const cleanupSuccess = await deps.cleanupConflictingWorktree(conflictPath, branch, taskId);
       if (cleanupSuccess) {
-        await deps.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path);
+        await deps.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path, runContextForTotal(deps.getRunContextFor, taskId));
         return deps.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, 0, allowSiblingBranchRename, settings);
       }
       // FN-4811: When git classifies a worktree as stale but the DB liveness gate refuses
@@ -417,7 +426,7 @@ export async function handleWorktreeConflict(
     if (inspection.kind === "live-foreign") {
       const cleanupSuccess = await deps.cleanupConflictingWorktree(inspection.livePath, branch, taskId);
       if (cleanupSuccess) {
-        await deps.store.logEntry(taskId, `Removed foreign conflicting worktree and retrying`, inspection.livePath);
+        await deps.store.logEntry(taskId, `Removed foreign conflicting worktree and retrying`, inspection.livePath, runContextForTotal(deps.getRunContextFor, taskId));
         return deps.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, 0, allowSiblingBranchRename, settings);
       }
       // FN-4811: Cleanup was refused because the foreign worktree is actively bound to a
@@ -436,7 +445,7 @@ export async function handleWorktreeConflict(
 
   const cleanupSuccess = await deps.cleanupConflictingWorktree(conflictPath, branch, taskId);
   if (cleanupSuccess) {
-    await deps.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path);
+    await deps.store.logEntry(taskId, `Cleaned up conflicting worktree, retrying`, path, runContextForTotal(deps.getRunContextFor, taskId));
     return deps.tryCreateWorktree(branch, path, taskId, startPoint, attemptNumber, 0, allowSiblingBranchRename, settings);
   }
 

@@ -65,12 +65,14 @@ export type WorktreeCreateConflictDepsSource = {
   cleanupConflictingWorktree: WorktreeCreateConflictDeps["cleanupConflictingWorktree"];
   normalizeReclaimableWorktreePath: WorktreeCreateConflictDeps["normalizeReclaimableWorktreePath"];
   isLiveCleanupRefusal: WorktreeCreateConflictDeps["isLiveCleanupRefusal"];
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
 };
 
 export function buildWorktreeCreateConflictDeps(src: WorktreeCreateConflictDepsSource): WorktreeCreateConflictDeps {
   return {
     rootDir: src.rootDir,
     store: src.store,
+    getRunContextFor: src.getRunContextFor,
     maxWorktreeRetries: src.maxWorktreeRetries,
     recoverIndexLockIfStale: src.recoverIndexLockIfStale,
     recoverStaleRegistration: src.recoverStaleRegistration,

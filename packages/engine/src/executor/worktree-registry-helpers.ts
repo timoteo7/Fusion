@@ -10,6 +10,7 @@ import {
   getRegisteredWorktreePaths,
   isRegisteredGitWorktree,
 } from "../worktree/worktree-pool.js";
+import type { RunMutationContext } from "@fusion/core";
 
 const execAsync = promisify(exec);
 
@@ -28,9 +29,12 @@ export async function isRegisteredWorktree(rootDir: string, path: string): Promi
  */
 export async function assertWorktreePathNotNested(
   rootDir: string,
-  store: { logEntry: (taskId: string, action: string, outcome?: string) => Promise<unknown> },
+  /* FNXC:Identity 2026-08-12-01:20 (U18/KTD2): seam restated at the CANONICAL logEntry arity. */
+  store: { logEntry: (taskId: string, action: string, outcome: string | undefined, runContext: RunMutationContext) => Promise<unknown> },
   path: string,
   taskId: string,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making these writes; REQUIRED so an unwired caller is a compile error, not a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<void> {
   const target = resolvePath(path);
   const rootResolved = resolvePath(rootDir);
@@ -44,8 +48,7 @@ export async function assertWorktreePathNotNested(
       await store.logEntry(
         taskId,
         `Refusing to create nested worktree`,
-        `target ${target} is inside registered worktree ${wt}`,
-      );
+        `target ${target} is inside registered worktree ${wt}`, runContext);
       throw new NonRetryableWorktreeError(
         `Refusing to create worktree at ${target}: path is nested inside existing worktree ${wt}. ` +
         `This usually means the executor was launched with rootDir pointing at a worktree instead of the main repo.`,

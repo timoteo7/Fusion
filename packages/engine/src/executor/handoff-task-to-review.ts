@@ -20,6 +20,7 @@ import { isMergeRequestContractShadowEnabled } from "@fusion/core";
 import { ensureWorkflowCompletionSummary } from "../workflows/workflow-completion-summary.js";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirror TaskExecutor method surface
 type AnyFn = (...args: any[]) => any;
@@ -39,10 +40,11 @@ export async function handoffTaskToReview(
   const agentId = deps.getRunContextFor(task.id)?.agentId;
   await deps.generateCompletionFeatureVideo(task);
   if (reason.startsWith("workflow-")) {
+    /* FNXC:Identity 2026-08-12-01:20 (U18/KTD2): derived — the executor holds a real per-task run here (the same run that produced `runId`/`agentId` above). */
     await ensureWorkflowCompletionSummary(deps.store, task as TaskDetail, {
       reason,
       runId,
-    }).catch((error: unknown) => {
+    }, runContextForTotal(deps.getRunContextFor, task.id)).catch((error: unknown) => {
       executorLog.warn(`${task.id}: failed to record workflow completion summary: ${error instanceof Error ? error.message : String(error)}`);
     });
   }

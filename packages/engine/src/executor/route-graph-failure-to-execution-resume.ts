@@ -23,6 +23,7 @@ import { resolveReboundColumnFor, resolveTerminalColumnsFor } from "./lifecycle-
 import { hasNonTerminalWorkflowSteps } from "./workflow-step-satisfaction.js";
 import { isMergeGraphFailure } from "./graph-failure-pure.js";
 import type { ResumeLanes } from "./resolve-resume-lanes.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type RouteGraphFailureToExecutionResumeDeps = {
   store: TaskStore;
@@ -129,18 +130,18 @@ export async function routeGraphFailureToExecutionResume(
       ? `Workflow graph failed at node '${failedNode}'${failureValue ? ` (${failureValue})` : ""} with incomplete steps — moved back to todo for execution resume`
       : `Workflow graph failed at node '${failedNode}'${failureValue ? ` (${failureValue})` : ""} before a clean review handoff — moved back to todo for workflow retry`;
     executorLog.warn(`${live.id}: ${message}`);
-    await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, message, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     await deps.store.updateTask(live.id, {
       status: null,
       error: null,
-    }, deps.getRunContextFor(live.id));
+    }, runContextForTotal(deps.getRunContextFor, live.id));
     const reboundColumn = await resolveReboundColumnFor(deps.store, live.id);
     if (live.column !== reboundColumn) {
       await deps.store.moveTask(live.id, reboundColumn, {
         preserveProgress: true,
         moveSource: "engine",
         recoveryRehome: true,
-      });
+      }, runContextForTotal(deps.getRunContextFor, live.id));
     }
     // FNXC:ReviewLeniency 2026-07-02-02:10: clear prior terminal failure results
     // (incl. optional gate nodes like code-review) AFTER the task is in `todo`

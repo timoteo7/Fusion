@@ -43,6 +43,7 @@ import { isCurrentReviewerNodeOverride } from "../agents/workflow-agent-router.j
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import type { ActiveWorkflowAuthority } from "./workflow-principal-before-node.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type BuildActionGateContextDeps = {
   store: TaskStore;
@@ -165,7 +166,7 @@ export function buildActionGateContext(
       if (taskId) {
         deps.approvalSuspended.add(taskId);
         try {
-          await deps.store.pauseTask(taskId, true, deps.getRunContextFor(taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
+          await deps.store.pauseTask(taskId, true, runContextForTotal(deps.getRunContextFor, taskId), { pausedByAgentId: actorId, pausedReason: AWAITING_APPROVAL_PAUSE_REASON });
         } catch (error) {
           deps.approvalSuspended.delete(taskId);
           throw error;
@@ -174,7 +175,7 @@ export function buildActionGateContext(
           taskId,
           `Approval required for ${decision.toolName}. Request ${approvalRequestId} created; task and agent paused awaiting decision.`,
           undefined,
-          deps.getRunContextFor(taskId),
+          runContextForTotal(deps.getRunContextFor, taskId),
         );
         void deps.awaitAbortInFlightTaskWork(taskId, `awaiting-approval:${decision.toolName}`).catch((error) => {
           executorLog.warn(`${taskId}: failed to suspend in-flight session while awaiting approval: ${error instanceof Error ? error.message : String(error)}`);

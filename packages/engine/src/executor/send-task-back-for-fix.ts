@@ -9,6 +9,7 @@
 import type { Task, TaskStore, WorkflowReviewFinding } from "@fusion/core";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveAuthoritativeExternalExecutionRoute } from "./resolve-authoritative-external-execution-route.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type SendTaskBackForFixDeps = {
   store: TaskStore;
@@ -78,8 +79,7 @@ export async function sendTaskBackForFix(
   // 2. Log an entry explaining the task was sent back
   await deps.store.logEntry(
     taskId,
-    `${reason} — moved back to in-progress for remediation`,
-  );
+    `${reason} — moved back to in-progress for remediation`, undefined, runContextForTotal(deps.getRunContextFor, taskId));
 
   /*
    * FNXC:CodeReviewRetryBudget 2026-07-22-00:00:
@@ -127,7 +127,7 @@ export async function sendTaskBackForFix(
     error: null,
     ...(preserveResumeState ? {} : { sessionFile: null }),
     workflowStepRetries: 0,
-  });
+  }, runContextForTotal(deps.getRunContextFor, taskId));
 
   // 6. Schedule the move after the guard unwinds (per guard-unwind requirement)
   deps.scheduleWorkflowRerun(

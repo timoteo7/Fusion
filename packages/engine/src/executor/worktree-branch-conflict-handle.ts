@@ -23,6 +23,7 @@ import {
   formatBranchConflictAgentLog,
   formatBranchConflictLifecycleLog,
 } from "./branch-conflict-format.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const execAsync = promisify(exec);
 
@@ -55,14 +56,14 @@ export async function reclaimExistingWorktree(
 ): Promise<void> {
   const targetPath = preservedWorktreeTargetPathForTask(task.id, livePath, settings, deps.rootDir);
   const normalizedPath = await deps.normalizeReclaimableWorktreePath(livePath, targetPath, task.id, settings);
-  await deps.store.updateTask(task.id, { worktree: normalizedPath, branch });
+  await deps.store.updateTask(task.id, { worktree: normalizedPath, branch }, runContextForTotal(deps.getRunContextFor, task.id));
   const latestTask = await deps.store.getTask(task.id);
   const baseRef = await resolveDiffBaseRef(normalizedPath, latestTask.baseCommitSha);
   if (baseRef) {
     await assertCleanBranchAtBase(deps.rootDir, branch, baseRef, task.id);
   }
   const message = `[recovery] reclaimed existing worktree for ${task.id} at ${normalizedPath} (${count} commits preserved, tip ${tipSha.slice(0, 12)})`;
-  await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
   await deps.store.appendAgentLog(task.id, "Branch conflict auto-recovery", "status", message, "executor");
 }
 
@@ -79,7 +80,7 @@ export async function handleBranchConflict(
   if (activeOwner !== null) {
     const refusalMessage = `[FN-4811] Branch conflict on ${error.branchName} deferred: conflicting worktree ${error.conflictingWorktreePath} is actively owned by ${activeOwner}`;
     executorLog.warn(refusalMessage);
-    await deps.store.logEntry(task.id, refusalMessage, undefined, deps.getRunContextFor(task.id));
+    await deps.store.logEntry(task.id, refusalMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     return "sticky";
   }
   const settings = await mergeEffectiveSettings(deps.store, task, await deps.store.getSettings());
@@ -96,9 +97,9 @@ export async function handleBranchConflict(
   });
 
   if (inspection.kind === "stale-resolved") {
-    await deps.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null });
+    await deps.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null }, runContextForTotal(deps.getRunContextFor, task.id));
     const message = `[recovery] ${task.id} stage-A: pruned stale admin entry for ${error.branchName}`;
-    await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+    await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.store.appendAgentLog(task.id, "Branch conflict auto-recovery", "status", message, "executor");
     return "retry";
   }
@@ -125,9 +126,9 @@ export async function handleBranchConflict(
     } catch {
       // best-effort
     }
-    await deps.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null });
+    await deps.store.updateTask(task.id, { worktree: null, branch: null, baseCommitSha: null }, runContextForTotal(deps.getRunContextFor, task.id));
     const message = `[recovery] ${task.id} stage-A: tip-already-merged cleanup for ${error.branchName} (${inspection.tipSha.slice(0, 12)} on ${inspection.integrationRef})`;
-    await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+    await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.store.appendAgentLog(task.id, "Branch conflict auto-recovery", "status", message, "executor");
     return "retry";
   }
@@ -164,7 +165,7 @@ export async function handleBranchConflict(
 
   const conflictMessage = `Task branch conflict: ${error.branchName} is already checked out at ${error.conflictingWorktreePath}. ` +
     `Resolve the local branch/worktree conflict with git tooling (inspect/reclaim or discard) before retrying.`;
-  await deps.store.logEntry(task.id, formatBranchConflictLifecycleLog(task.id, error), undefined, deps.getRunContextFor(task.id));
+  await deps.store.logEntry(task.id, formatBranchConflictLifecycleLog(task.id, error), undefined, runContextForTotal(deps.getRunContextFor, task.id));
   await deps.store.appendAgentLog(task.id, "Branch conflict recovery required", "tool_error", formatBranchConflictAgentLog(task.id, error), "executor");
   const autoRecoveryDispatcher = deps.getAutoRecoveryDispatcher(deps.createRunAuditor(deps.getRunContextFor(task.id)));
   const decision = await autoRecoveryDispatcher.dispatch({
@@ -191,7 +192,7 @@ export async function handleBranchConflict(
       worktree: error.conflictingWorktreePath,
       paused: true,
       pausedReason: "branch-conflict-unrecoverable",
-    });
+    }, runContextForTotal(deps.getRunContextFor, task.id));
     await deps.persistTokenUsage(task.id);
     executorLog.warn(`✗ ${task.id} branch conflict sticky failure: ${error.branchName} @ ${error.conflictingWorktreePath}`);
     deps.onError?.(task, error);

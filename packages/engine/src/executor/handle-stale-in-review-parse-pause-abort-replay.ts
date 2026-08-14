@@ -19,6 +19,7 @@ import type { ResumeLanes } from "./resolve-resume-lanes.js";
 import { generateSyntheticRunId, type EngineRunContext } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
 import { WORKFLOW_NODE_ENGINE_PAUSE_ABORT_KIND } from "../workflows/workflow-graph-executor.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const MAX_TRANSIENT_GRAPH_RESUME_RETRIES = 2;
 const TRANSIENT_GRAPH_RESUME_RETRY_BACKOFF_MS = process.env.VITEST || process.env.NODE_ENV === "test" ? 0 : 1_000;
@@ -93,9 +94,9 @@ export async function handleStaleInReviewParsePauseAbortReplay(
     deps.activeWorktrees.delete(live.id);
     const message = `Workflow graph parse node pause/resume replay surfaced after task was already in-review — auto-retrying workflow graph (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
     executorLog.log(`${live.id}: ${message}`);
-    await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
-    await deps.store.logEntry(live.id, "Auto-recovered: retrying stale in-review parse pause/resume replay — failure notification suppressed", undefined, deps.getRunContextFor(live.id));
-    await deps.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, message, undefined, runContextForTotal(deps.getRunContextFor, live.id));
+    await deps.store.logEntry(live.id, "Auto-recovered: retrying stale in-review parse pause/resume replay — failure notification suppressed", undefined, runContextForTotal(deps.getRunContextFor, live.id));
+    await deps.store.updateTask(live.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, runContextForTotal(deps.getRunContextFor, live.id));
     try {
       await deps.store.recordRunAuditEvent?.({
         taskId: live.id,

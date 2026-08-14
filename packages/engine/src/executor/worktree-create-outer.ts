@@ -14,11 +14,14 @@ import { resolveIntegrationBranch } from "../merge/integration-branch.js";
 import { executorLog } from "../logger.js";
 import { quoteShellArg } from "./shell-quote.js";
 import { NonRetryableWorktreeError } from "./worktree-registry-helpers.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 const execAsync = promisify(exec);
 
 export type WorktreeOuterStore = {
-  updateTask: (taskId: string, patch: Record<string, unknown>) => Promise<unknown>;
+  /* FNXC:Identity 2026-08-12-01:20 (U18/KTD2): seam restated at the CANONICAL updateTask arity. */
+  updateTask: (taskId: string, patch: Record<string, unknown>, runContext: RunMutationContext) => Promise<unknown>;
   getSettings: () => Promise<Settings | Partial<Settings>>;
   /** Mirrors TaskStore.logEntry so safe breadcrumbs match main (action, outcome?, runContext?). */
   logEntry: (
@@ -30,6 +33,8 @@ export type WorktreeOuterStore = {
 };
 
 export type WorktreeOuterCreateDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   rootDir: string;
   store: WorktreeOuterStore;
   maxWorktreeRetries: number;
@@ -77,6 +82,8 @@ export async function resolveWorktreeStartPoint(
   store: Pick<WorktreeOuterStore, "logEntry">,
   startPoint: string,
   taskId: string,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making these writes; REQUIRED so an unwired caller is a compile error, not a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<string | null> {
   const command = isAbsolute(startPoint) && existsSync(startPoint)
     ? `git -C "${startPoint}" rev-parse --verify HEAD^{commit}`
@@ -90,8 +97,7 @@ export async function resolveWorktreeStartPoint(
     await store.logEntry(
       taskId,
       `Worktree base ref "${startPoint}" is missing — falling back to default base`,
-      errorMessage,
-    );
+      errorMessage, runContext);
     return null;
   }
 }
@@ -110,6 +116,8 @@ export async function squashImportDepIntoWorktree(
   taskId: string,
   depTip: string,
   label: string,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making these writes; REQUIRED so an unwired caller is a compile error, not a silent unattributed write. */
+  runContext: RunMutationContext,
 ): Promise<void> {
   // No-op when dep is already represented in the worktree's history.
   try {
@@ -172,8 +180,7 @@ export async function squashImportDepIntoWorktree(
 
   await store.logEntry(
     taskId,
-    `Squash-imported dependency content from ${label} into worktree (single import commit instead of inheriting raw commits)`,
-  );
+    `Squash-imported dependency content from ${label} into worktree (single import commit instead of inheriting raw commits)`, undefined, runContext);
 }
 
 /**
@@ -200,6 +207,8 @@ export async function rebaseNewWorktreeOntoRemote(
   branch: string,
   taskId: string,
   settingsOverride?: Settings,
+  /** FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage C): the run making these writes; REQUIRED so an unwired caller is a compile error, not a silent unattributed write. */
+  runContext?: RunMutationContext,
 ): Promise<void> {
   let settings: Settings | Partial<Settings> | undefined = settingsOverride;
   if (!settings) {
@@ -218,7 +227,7 @@ export async function rebaseNewWorktreeOntoRemote(
   */
   const safeLog = (action: string) => {
     try {
-      void Promise.resolve(store.logEntry(taskId, action, undefined, undefined)).catch(() => undefined);
+      void Promise.resolve(store.logEntry(taskId, action, undefined, runContext)).catch(() => undefined);
     } catch {
       // best-effort breadcrumb
     }
@@ -305,7 +314,7 @@ export async function createWorktree(
       // Stored baseBranch no longer exists (e.g., upstream dep merged and branch
       // deleted while this task sat queued/stuck). Clear it on the task so any
       // subsequent retry branches from the default base, and proceed from HEAD.
-      await deps.store.updateTask(taskId, { executionStartBranch: null });
+      await deps.store.updateTask(taskId, { executionStartBranch: null }, runContextForTotal(deps.getRunContextFor, taskId));
     } else {
       resolvedStartPoint = resolved;
     }
@@ -383,8 +392,7 @@ export async function createWorktree(
         await deps.store.logEntry(
           taskId,
           `Worktree creation failed after ${deps.maxWorktreeRetries} attempts`,
-          errorMessage,
-        );
+          errorMessage, runContextForTotal(deps.getRunContextFor, taskId));
         if (isBranchConflict) {
           throw error;
         }

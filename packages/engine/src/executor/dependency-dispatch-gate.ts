@@ -12,6 +12,7 @@ import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
 import { clearDispatchBlockedLogState, logDispatchBlockedOnce } from "./dispatch-block-log.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type DependencyDispatchGateDeps = {
   store: TaskStore;
@@ -54,7 +55,7 @@ export async function blockOuterDispatchWhenDependenciesUnmet(
       preserveResumeState: true,
       moveSource: "engine",
       recoveryRehome: true,
-    });
+    }, runContextForTotal(deps.getRunContextFor, liveTask.id));
   }
   /*
   FNXC:DependencyGating 2026-08-07-12:10:
@@ -69,15 +70,15 @@ export async function blockOuterDispatchWhenDependenciesUnmet(
       overlapBlockedBy: liveTask.overlapBlockedBy ?? null,
       action: `queued — unmet dependencies: ${unmetDeps.join(", ")}`,
       outcome: "Executor pre-dispatch dependency gate blocked workflow/authoritative execution.",
-      runContext: deps.getRunContextFor(liveTask.id),
+      runContext: runContextForTotal(deps.getRunContextFor, liveTask.id),
     });
   } else {
-    await deps.store.updateTask(liveTask.id, { status: "queued", blockedBy: unmetDeps[0] }, deps.getRunContextFor(liveTask.id));
+    await deps.store.updateTask(liveTask.id, { status: "queued", blockedBy: unmetDeps[0] }, runContextForTotal(deps.getRunContextFor, liveTask.id));
     await deps.store.logEntry(
       liveTask.id,
       `queued — unmet dependencies: ${unmetDeps.join(", ")}`,
       "Executor pre-dispatch dependency gate blocked workflow/authoritative execution.",
-      deps.getRunContextFor(liveTask.id),
+      runContextForTotal(deps.getRunContextFor, liveTask.id),
     );
   }
   logDispatchBlockedOnce(

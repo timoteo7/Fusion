@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { Task, TaskStore, WorkflowIr } from "@fusion/core";
 import {
+  PERMISSION_DENIED_ERROR_CODE,
   nonExecutableDuplicateRedirectReason,
   resolveExplicitDuplicateMarker,
   resolveConsecutiveToolFailureRetryBackoffMs,
@@ -57,12 +58,71 @@ import {
   isTerminalMergeGraphFailureValue,
 } from "./task-predicates.js";
 import type { PausedAbortProvenance } from "./paused-abort-provenance.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const MAX_TRANSIENT_GRAPH_RESUME_RETRIES = 2;
 const TRANSIENT_GRAPH_RESUME_RETRY_BACKOFF_MS = process.env.VITEST || process.env.NODE_ENV === "test" ? 0 : 1_000;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirror TaskExecutor method/map surface
 type AnyFn = (...args: any[]) => any;
+
+/*
+FNXC:Authorization 2026-08-09-03:04:
+`handleGraphFailure` replaces a terminal node failure with a generic
+"Workflow graph terminated with failure at node '<n>'" string, which ERASES the reason the node
+actually failed. For most failures that is acceptable — the node's own diagnostics are logged
+separately and the generic text names the node an operator should inspect. For a permission
+denial it is not: the whole point of the denial is the sentence "actor X is not permitted to Y",
+and an operator staring at "terminated with failure at node 'execute'" has no way to learn that
+the run failed because of authorization rather than a broken worktree, a model error, or a bug.
+
+Recover it from the graph context rather than from the thrown error, because there is no thrown
+error left by the time we get here: `executeNodeWithRetries` flattens every node exception to
+`error.message` under `node:<id>:error` and, since 2026-08-09, carries the typed `code` under
+`node:<id>:errorCode`. The code is what we key on — never the message text.
+
+Deliberately narrow. Any failure WITHOUT the permission-denied code keeps the existing generic
+message byte-for-byte, so this is a carve-out for one typed error and not a change to how graph
+failures are reported in general.
+*/
+const PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX = ":errorCode";
+
+function resolveGraphPermissionDenialMessage(
+  context: Record<string, unknown> | undefined,
+  failedNode: string | undefined,
+): string | undefined {
+  if (!context) return undefined;
+
+  const readDenial = (nodeId: string): string | undefined => {
+    if (context[`node:${nodeId}${PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX}`] !== PERMISSION_DENIED_ERROR_CODE) {
+      return undefined;
+    }
+    const message = context[`node:${nodeId}:error`];
+    return typeof message === "string" && message.trim() ? message : undefined;
+  };
+
+  // Prefer the node the graph actually terminated on.
+  if (failedNode) {
+    const exact = readDenial(failedNode);
+    if (exact) return exact;
+  }
+
+  /*
+  FNXC:Authorization 2026-08-09-03:04:
+  `visitedNodeIds` records the graph node id while a materialized template/foreach instance
+  patches context under its own instance id, so the exact key can legitimately miss. Fall back to
+  any denial-coded key rather than dropping the message — the same exact-then-scan shape the
+  node diagnostic resolver already uses for `:error`.
+  */
+  for (const [key, value] of Object.entries(context)) {
+    if (!key.endsWith(PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX)) continue;
+    if (value !== PERMISSION_DENIED_ERROR_CODE) continue;
+    const message = context[`${key.slice(0, -PERMISSION_DENIED_NODE_ERROR_CODE_SUFFIX.length)}:error`];
+    if (typeof message === "string" && message.trim()) return message;
+  }
+
+  return undefined;
+}
 
 export type HandleGraphFailureDeps = {
   store: TaskStore;
@@ -160,7 +220,7 @@ export async function handleGraphFailure(
         deps.activeWorktrees.delete(task.id);
         const blockedParkHonored = `Workflow graph run ended after an honest blocked park (${live.error}) — honoring park, not requeueing, retrying, or clearing state`;
         executorLog.log(`${task.id}: ${blockedParkHonored}`);
-        await deps.store.logEntry(task.id, blockedParkHonored, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, blockedParkHonored, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         await deps.persistTokenUsage(task.id);
         return;
       }
@@ -182,7 +242,7 @@ export async function handleGraphFailure(
         deps.activeWorktrees.delete(task.id);
         const mergerParkHonored = `Workflow graph run ended after merger parked task with blocker (${live.error}) — honoring park, not retrying or resuming merge`;
         executorLog.log(`${task.id}: ${mergerParkHonored}`);
-        await deps.store.logEntry(task.id, mergerParkHonored, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, mergerParkHonored, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         await deps.persistTokenUsage(task.id);
         return;
       }
@@ -202,9 +262,9 @@ export async function handleGraphFailure(
       if (result.context?.[WORKFLOW_DRIFT_PARK_CONTEXT_KEY] === true) {
         const driftMessage = "Workflow drift park: the workflow definition changed under this run (pinned node/column no longer in the current IR). Stale IR pin cleared — requeue the task to re-resolve the current workflow and continue.";
         executorLog.warn(`${task.id}: ${driftMessage}`);
-        await deps.store.logEntry(task.id, driftMessage, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, driftMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         if (live.status == null && live.error == null) {
-          await deps.store.updateTask(task.id, { error: driftMessage, status: "failed" }, deps.getRunContextFor(task.id));
+          await deps.store.updateTask(task.id, { error: driftMessage, status: "failed" }, runContextForTotal(deps.getRunContextFor, task.id));
         }
         await deps.persistTokenUsage(task.id);
         return;
@@ -234,8 +294,8 @@ export async function handleGraphFailure(
         if (priorRetries < MAX_TRANSIENT_GRAPH_RESUME_RETRIES) {
           const nextRetries = priorRetries + 1;
           const message = `Worktree base refresh blocked execution (${refreshKind}) — retrying in place (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
-          await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
-          await deps.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
+          await deps.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, runContextForTotal(deps.getRunContextFor, task.id));
           const scheduleRetry = () => {
             deps.execute(live).catch((err: unknown) =>
               executorLog.error(`Failed worktree base refresh retry for ${task.id}:`, err),
@@ -248,7 +308,7 @@ export async function handleGraphFailure(
             task.id,
             `Worktree base refresh remains blocked (${refreshKind}) — retry budget exhausted; task remains held`,
             undefined,
-            deps.getRunContextFor(task.id),
+            runContextForTotal(deps.getRunContextFor, task.id),
           );
         }
         await deps.persistTokenUsage(task.id);
@@ -276,8 +336,8 @@ export async function handleGraphFailure(
         if (priorRetries < MAX_TRANSIENT_GRAPH_RESUME_RETRIES) {
           const nextRetries = priorRetries + 1;
           const message = `Required workflow artifact could not be read — retrying in place (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
-          await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
-          await deps.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
+          await deps.store.updateTask(task.id, { graphResumeRetryCount: nextRetries }, runContextForTotal(deps.getRunContextFor, task.id));
           const scheduleRetry = () => {
             void (async () => {
               try {
@@ -296,7 +356,7 @@ export async function handleGraphFailure(
             task.id,
             "Required workflow artifact read retry budget exhausted — task remains held in its current state",
             undefined,
-            deps.getRunContextFor(task.id),
+            runContextForTotal(deps.getRunContextFor, task.id),
           );
         }
         await deps.persistTokenUsage(task.id);
@@ -314,10 +374,10 @@ export async function handleGraphFailure(
           const nextRetries = priorRetries + 1;
           const message = `Plan Review provider failure — retrying in place (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES})`;
           executorLog.warn(`${task.id}: ${message}`);
-          await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           await deps.store.updateTask(task.id, {
             graphResumeRetryCount: nextRetries,
-          }, deps.getRunContextFor(task.id));
+          }, runContextForTotal(deps.getRunContextFor, task.id));
           const scheduleRetry = () => {
             deps.execute(live).catch((err: unknown) =>
               executorLog.error(`Failed Plan Review provider retry for ${task.id}:`, err),
@@ -328,7 +388,7 @@ export async function handleGraphFailure(
         } else {
           const message = "Plan Review provider retry budget exhausted — task remains held in its current state";
           executorLog.warn(`${task.id}: ${message}`);
-          await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         }
         await deps.persistTokenUsage(task.id);
         return;
@@ -459,10 +519,10 @@ export async function handleGraphFailure(
         deps.activeWorktrees.delete(task.id);
         const manualHoldBenign = "Workflow graph run ended at manual merge hold with auto-merge off — benign, in-review manual-hold state preserved for Merge & Close";
         executorLog.log(`${task.id}: ${manualHoldBenign}`);
-        await deps.store.logEntry(task.id, manualHoldBenign, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, manualHoldBenign, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         if (live.status != null || live.error != null) {
-          await deps.store.logEntry(task.id, "Auto-recovered: cleared stale auto-merge-off manual merge hold pause-abort failure — failure notification suppressed", undefined, deps.getRunContextFor(task.id));
-          await deps.store.updateTask(task.id, { status: null, error: null }, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, "Auto-recovered: cleared stale auto-merge-off manual merge hold pause-abort failure — failure notification suppressed", undefined, runContextForTotal(deps.getRunContextFor, task.id));
+          await deps.store.updateTask(task.id, { status: null, error: null }, runContextForTotal(deps.getRunContextFor, task.id));
         }
         await deps.persistTokenUsage(task.id);
         return;
@@ -472,7 +532,7 @@ export async function handleGraphFailure(
         deps.activeWorktrees.delete(task.id);
         const inReviewBenign = "Workflow graph run ended during engine pause/resume while already in-review — benign, in-review state preserved";
         executorLog.log(`${task.id}: ${inReviewBenign}`);
-        await deps.store.logEntry(task.id, inReviewBenign, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, inReviewBenign, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         await deps.persistTokenUsage(task.id);
         return;
       }
@@ -568,15 +628,15 @@ export async function handleGraphFailure(
                 const nextRetries = priorRetries + 1;
                 const retryMessage = `Workflow graph run ended during ${pauseProvenance} — auto-continuing the agent session (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES}) instead of re-queueing to todo`;
                 executorLog.log(`${task.id}: ${retryMessage}`);
-                await deps.store.logEntry(task.id, retryMessage, undefined, deps.getRunContextFor(task.id));
+                await deps.store.logEntry(task.id, retryMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
                 // Emit the Auto-recovered marker BEFORE clearing status so the
                 // status-clearing updateTask's task:updated event already carries
                 // the recovery log — NotificationService.maybeSuppressTransientFailedNotification
                 // (recoveredStatus path) then proactively cancels any pending
                 // failure timer rather than relying on the race-contingent
                 // fire-time re-check.
-                await deps.store.logEntry(task.id, "Auto-recovered: engine-internal pause/resume abort — retrying agent session, failure notification suppressed", undefined, deps.getRunContextFor(task.id));
-                await deps.store.updateTask(task.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, deps.getRunContextFor(task.id));
+                await deps.store.logEntry(task.id, "Auto-recovered: engine-internal pause/resume abort — retrying agent session, failure notification suppressed", undefined, runContextForTotal(deps.getRunContextFor, task.id));
+                await deps.store.updateTask(task.id, { graphResumeRetryCount: nextRetries, status: null, error: null }, runContextForTotal(deps.getRunContextFor, task.id));
                 await deps.persistTokenUsage(task.id);
                 const scheduleRetry = () => {
                   // Re-fetch at fire time: the snapshot is up to
@@ -634,7 +694,7 @@ export async function handleGraphFailure(
               ? `Workflow graph run ended during ${pauseProvenance} with task parked in todo — benign, paused awaiting explicit unpause`
               : `Workflow graph run ended during ${pauseProvenance} with task re-queued to todo — benign, cleared for normal scheduling`;
             executorLog.log(`${task.id}: ${todoBenign}`);
-            await deps.store.logEntry(task.id, todoBenign, undefined, deps.getRunContextFor(task.id));
+            await deps.store.logEntry(task.id, todoBenign, undefined, runContextForTotal(deps.getRunContextFor, task.id));
             // FNXC:WorkflowLifecycle 2026-06-20-19:58: reconcile a stale
             // persisted failure with the benign reclassification. A pause-abort
             // parked `status:"failed"` on an earlier non-todo observation stays
@@ -655,8 +715,8 @@ export async function handleGraphFailure(
             // project-engine.ts). Scoped to the actual-clear path so the common
             // no-failure benign re-queue is not mislabeled as a recovery.
             if (live.status != null || live.error != null) {
-              await deps.store.updateTask(task.id, { status: null, error: null }, deps.getRunContextFor(task.id));
-              await deps.store.logEntry(task.id, "Auto-recovered: cleared stale pause-abort failure on todo re-queue — failure notification suppressed", undefined, deps.getRunContextFor(task.id));
+              await deps.store.updateTask(task.id, { status: null, error: null }, runContextForTotal(deps.getRunContextFor, task.id));
+              await deps.store.logEntry(task.id, "Auto-recovered: cleared stale pause-abort failure on todo re-queue — failure notification suppressed", undefined, runContextForTotal(deps.getRunContextFor, task.id));
             }
             await deps.persistTokenUsage(task.id);
             return;
@@ -684,7 +744,7 @@ export async function handleGraphFailure(
             deps.activeWorktrees.delete(task.id);
             const doneBenign = `Workflow graph run ended during ${pauseProvenance} after the task already completed ('${live.column}') — benign, no action needed`;
             executorLog.log(`${task.id}: ${doneBenign}`);
-            await deps.store.logEntry(task.id, doneBenign, undefined, deps.getRunContextFor(task.id));
+            await deps.store.logEntry(task.id, doneBenign, undefined, runContextForTotal(deps.getRunContextFor, task.id));
             await deps.persistTokenUsage(task.id);
             return;
           }
@@ -694,16 +754,16 @@ export async function handleGraphFailure(
           // predicate cannot drift out of sync with this text (PR #1687 review).
           const message = `${PAUSE_ABORT_PARK_ERROR_MARKER} ${pauseProvenance} in '${live.column}' at node '${failedNode}' — ${PAUSE_ABORT_PARK_OPERATOR_MARKER}; retry or explicitly unpause/resume after inspecting the task`;
           executorLog.warn(`${task.id}: ${message}`);
-          await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           if (live.status == null && live.error == null) {
-            await deps.store.updateTask(task.id, { error: message, status: "failed" }, deps.getRunContextFor(task.id));
+            await deps.store.updateTask(task.id, { error: message, status: "failed" }, runContextForTotal(deps.getRunContextFor, task.id));
           }
           await deps.persistTokenUsage(task.id);
           return;
         }
         const benignMessage = "Workflow graph run ended while task is paused — pause state preserved";
         executorLog.log(`${task.id}: ${benignMessage} (${pauseProvenance})`);
-        await deps.store.logEntry(task.id, benignMessage, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, benignMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         return;
       }
       const failedNode = result.visitedNodeIds[result.visitedNodeIds.length - 1];
@@ -738,7 +798,7 @@ export async function handleGraphFailure(
             await deps.store.updateTask(live.id, {
               status: "needs-replan",
               error: null,
-            }, deps.getRunContextFor(live.id));
+            }, runContextForTotal(deps.getRunContextFor, live.id));
             const feedback = marker
               ? `Execution parse rejected non-executable duplicate redirect (DUPLICATE: ${marker.canonicalId}). Write a full plan body; do not re-emit only DUPLICATE: ${marker.canonicalId}.`
               : `Execution parse rejected conflicting duplicate redirects (${redirectReason}). Correct the title or PROMPT.md before writing a full plan body.`;
@@ -746,13 +806,13 @@ export async function handleGraphFailure(
               live.id,
               "AI spec revision requested",
               feedback,
-              deps.getRunContextFor(live.id),
+              runContextForTotal(deps.getRunContextFor, live.id),
             );
             await deps.store.logEntry(
               live.id,
               `Parse node failed on duplicate redirect — rebounded to ${replanColumn} for re-specification`,
               redirectReason,
-              deps.getRunContextFor(live.id),
+              runContextForTotal(deps.getRunContextFor, live.id),
             );
             executorLog.warn(`${live.id}: ${redirectReason} — replan instead of failed park`);
             deps.activeWorktrees.delete(live.id);
@@ -830,7 +890,7 @@ export async function handleGraphFailure(
       if (graphRunReportedPendingReview(result, failureValue)) {
         const compatMessage = "Implementation stopped on a pending review — parking in review (this workflow does not route the review-pending outcome)";
         executorLog.log(`${task.id}: ${compatMessage}`);
-        await deps.store.logEntry(task.id, compatMessage, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, compatMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         await deps.handoffTaskToReview(live, "executor-exit-while-review-pending");
         await deps.persistTokenUsage(task.id);
         return;
@@ -863,12 +923,12 @@ export async function handleGraphFailure(
           await deps.store.updateTask(task.id, {
             executeRequeueLoopCount: nextCount,
             executeRequeueLoopSignature: signature,
-          }, deps.getRunContextFor(task.id));
+          }, runContextForTotal(deps.getRunContextFor, task.id));
         }
         if (nextCount === EXECUTE_REQUEUE_LOOP_VISIBLE_THRESHOLD) {
           const warningMessage = `Execution dispatch loop building: ${nextCount}/${MAX_EXECUTE_REQUEUE_LOOP_CYCLES} no-progress execute re-queues`;
           executorLog.warn(`${task.id}: ${warningMessage}`);
-          await deps.store.logEntry(task.id, warningMessage, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, warningMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         }
         const canTerminalizeExecuteLoop = live.userPaused !== true
           && live.paused !== true
@@ -880,7 +940,7 @@ export async function handleGraphFailure(
             error: terminalError,
             executeRequeueLoopCount: nextCount,
             executeRequeueLoopSignature: signature,
-          }, deps.getRunContextFor(task.id));
+          }, runContextForTotal(deps.getRunContextFor, task.id));
           await deps.store.recordRunAuditEvent?.({
             taskId: task.id,
             agentId: "executor",
@@ -897,13 +957,13 @@ export async function handleGraphFailure(
             },
           });
           executorLog.warn(`${task.id}: ${terminalError}`);
-          await deps.store.logEntry(task.id, terminalError, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, terminalError, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           await deps.persistTokenUsage(task.id);
           return;
         }
         const benignMessage = `Workflow graph execute node ended after executor re-queued task to todo (${failureValue ?? "no-value"}) — executor recovery preserved`;
         executorLog.log(`${task.id}: ${benignMessage}`);
-        await deps.store.logEntry(task.id, benignMessage, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, benignMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         await deps.persistTokenUsage(task.id);
         return;
       }
@@ -918,9 +978,9 @@ export async function handleGraphFailure(
       if (mergeGraphFailure && isTerminalMergeGraphFailureValue(failureValue) && !(await resolveTerminalColumnsFor(deps.store, live.id)).includes(live.column)) {
         const message = `Workflow graph terminal merge failure at node '${failedNode ?? "unknown"}' (${failureValue}) — operator action required`;
         executorLog.warn(`${task.id}: ${message}`);
-        await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         if (live.status == null && live.error == null) {
-          await deps.store.updateTask(task.id, { error: message, status: "failed" }, deps.getRunContextFor(task.id));
+          await deps.store.updateTask(task.id, { error: message, status: "failed" }, runContextForTotal(deps.getRunContextFor, task.id));
         }
         await deps.persistTokenUsage(task.id);
         return;
@@ -944,7 +1004,7 @@ export async function handleGraphFailure(
       if (wipColumn !== undefined && live.column !== wipColumn) {
         const benignMessage = `Workflow graph run ended after task already advanced to '${live.column}' — no further action needed`;
         executorLog.log(`${task.id}: ${benignMessage}`);
-        await deps.store.logEntry(task.id, benignMessage, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, benignMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         return;
       }
       if (isAwaitingGraphFailureValue(failureValue)) {
@@ -954,9 +1014,9 @@ export async function handleGraphFailure(
         */
         const benignMessage = `Workflow graph run ended awaiting ${failureValue === "awaiting-cli-approval" ? "CLI approval" : "user input"} at node '${failedNode ?? "unknown"}' — awaiting state preserved`;
         executorLog.log(`${task.id}: ${benignMessage}`);
-        await deps.store.logEntry(task.id, benignMessage, undefined, deps.getRunContextFor(task.id));
+        await deps.store.logEntry(task.id, benignMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
         if (live.status !== failureValue || !live.paused) {
-          await deps.store.updateTask(task.id, { status: failureValue, paused: true }, deps.getRunContextFor(task.id));
+          await deps.store.updateTask(task.id, { status: failureValue, paused: true }, runContextForTotal(deps.getRunContextFor, task.id));
         }
         return;
       }
@@ -966,12 +1026,12 @@ export async function handleGraphFailure(
           const nextRetries = priorRetries + 1;
           const benignMessage = `Transient resume-after-restart graph failure — auto-retrying (${nextRetries}/${MAX_TRANSIENT_GRAPH_RESUME_RETRIES}) instead of parking`;
           executorLog.warn(`${task.id}: ${benignMessage}`);
-          await deps.store.logEntry(task.id, benignMessage, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, benignMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           await deps.store.updateTask(task.id, {
             graphResumeRetryCount: nextRetries,
             status: null,
             error: null,
-          }, deps.getRunContextFor(task.id));
+          }, runContextForTotal(deps.getRunContextFor, task.id));
           const scheduleRetry = () => {
             deps.execute(live).catch((err: unknown) =>
               executorLog.error(`Failed transient graph resume retry for ${task.id}:`, err),
@@ -1003,12 +1063,15 @@ export async function handleGraphFailure(
           const kind = isRemediation ? "remediation" : "execute";
           const benignMessage = `Workflow graph ended at ${kind} node '${failedNode ?? "unknown"}' while a live agent session is still executing — not flagging as failed; live session preserved`;
           executorLog.warn(`${task.id}: ${benignMessage}`);
-          await deps.store.logEntry(task.id, benignMessage, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, benignMessage, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           await deps.persistTokenUsage(task.id);
           return;
         }
       }
-      const message = `Workflow graph terminated with failure at node '${failedNode ?? "unknown"}'`;
+      // FNXC:Authorization 2026-08-09-03:04: a typed permission denial keeps its own sentence;
+      // every other failure keeps the generic node-named message unchanged.
+      const message = resolveGraphPermissionDenialMessage(result.context, failedNode)
+        ?? `Workflow graph terminated with failure at node '${failedNode ?? "unknown"}'`;
       const settings = await deps.store.getSettings();
       const maxToolFailureRetries = resolveMaxConsecutiveToolFailureRetries(settings);
       if (maxToolFailureRetries > 0 && isExecuteFamilyNode && !live.paused && !live.userPaused && !live.deletedAt && live.column === wipColumn) {
@@ -1018,8 +1081,8 @@ export async function handleGraphFailure(
         if (await deps.hasTrailingConsecutiveToolFailures(task.id, cursor, threshold)) {
           const claim = await deps.store.claimNextToolFailureRetry(task.id, cursor!, maxToolFailureRetries);
           if (claim.outcome === "claimed") {
-            await deps.store.updateTask(task.id, { status: null, error: null }, deps.getRunContextFor(task.id));
-            await deps.store.logEntry(task.id, `Consecutive tool-call failures — auto-retrying same model (${claim.attempt}/${maxToolFailureRetries}) instead of parking`, undefined, deps.getRunContextFor(task.id));
+            await deps.store.updateTask(task.id, { status: null, error: null }, runContextForTotal(deps.getRunContextFor, task.id));
+            await deps.store.logEntry(task.id, `Consecutive tool-call failures — auto-retrying same model (${claim.attempt}/${maxToolFailureRetries}) instead of parking`, undefined, runContextForTotal(deps.getRunContextFor, task.id));
             await deps.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("tool-failure-retry", task.id), domain: "database", mutationType: "task:execution-tool-failure-retry", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", attempt: claim.attempt, maxAttempts: maxToolFailureRetries, consecutiveToolFailures: threshold, mode: "same-model" } });
             const schedule = () => { void (async () => { const resume = await deps.store.getTask(task.id); if (resume && !resume.deletedAt && !resume.paused && !resume.userPaused && resume.column === wipColumn) await deps.execute(resume); })().catch((error) => executorLog.error(`${task.id}: tool-failure retry failed`, error)); };
             const delay = resolveConsecutiveToolFailureRetryBackoffMs(settings);
@@ -1046,7 +1109,7 @@ export async function handleGraphFailure(
           const nodeTargetRequeueColumn = escalationTarget.nodeId !== undefined ? holdColumn : undefined;
           const hasNodeTarget = escalationTarget.nodeId !== undefined && nodeTargetRequeueColumn !== undefined;
           if (escalationTarget.nodeId !== undefined && nodeTargetRequeueColumn === undefined) {
-            await deps.store.logEntry(task.id, "Node escalation downgraded to an in-place retry — this task's workflow declares no column to requeue into", undefined, deps.getRunContextFor(task.id));
+            await deps.store.logEntry(task.id, "Node escalation downgraded to an in-place retry — this task's workflow declares no column to requeue into", undefined, runContextForTotal(deps.getRunContextFor, task.id));
           }
           let claimedEscalation = false;
           let priorEscalationRetryCount = 0;
@@ -1074,9 +1137,9 @@ export async function handleGraphFailure(
               status: null,
               error: null,
             };
-          }, deps.getRunContextFor(task.id));
+          }, runContextForTotal(deps.getRunContextFor, task.id));
           if (claimedEscalation) {
-            await deps.store.logEntry(task.id, "Same-model retries exhausted — escalating to alternate model/node (one attempt) instead of parking", undefined, deps.getRunContextFor(task.id));
+            await deps.store.logEntry(task.id, "Same-model retries exhausted — escalating to alternate model/node (one attempt) instead of parking", undefined, runContextForTotal(deps.getRunContextFor, task.id));
             await deps.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("escalation-retry", task.id), domain: "database", mutationType: "task:execution-escalation-retry", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", hasModelTarget, hasNodeTarget, priorConsecutiveToolFailureRetryCount: priorEscalationRetryCount } });
             if (!hasNodeTarget) {
               const scheduleEscalation = () => { void (async () => { const resumeTask = await deps.store.getTask(task.id); if (resumeTask && !resumeTask.deletedAt && !resumeTask.paused && !resumeTask.userPaused && resumeTask.column === wipColumn) await deps.execute(resumeTask); })().catch((error) => executorLog.error(`${task.id}: escalation retry failed`, error)); };
@@ -1114,7 +1177,7 @@ export async function handleGraphFailure(
             escalationHadModelTarget = current.modelProvider != null && current.modelId != null;
             escalationHadNodeTarget = current.nodeId != null;
             return { error: message, status: "failed" };
-          }, deps.getRunContextFor(task.id));
+          }, runContextForTotal(deps.getRunContextFor, task.id));
           if (!cursorOwnedTerminalPark) return;
           if (await deps.store.markToolFailureRetryExhaustedAudit(task.id)) {
             await deps.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("tool-failure-retry-exhausted", task.id), domain: "database", mutationType: "task:execution-tool-failure-retry-exhausted", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", attempts: maxToolFailureRetries, limit: maxToolFailureRetries, outcome: "terminal-park" } });
@@ -1123,7 +1186,7 @@ export async function handleGraphFailure(
             await deps.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("escalation-exhausted", task.id), domain: "database", mutationType: "task:execution-escalation-exhausted", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", hadModelTarget: escalationHadModelTarget, hadNodeTarget: escalationHadNodeTarget } });
           }
           executorLog.warn(`${task.id}: ${message}`);
-          await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+          await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
           await deps.persistTokenUsage(task.id);
           return;
         }
@@ -1153,17 +1216,17 @@ export async function handleGraphFailure(
           escalationHadModelTarget = current.modelProvider != null && current.modelId != null;
           escalationHadNodeTarget = current.nodeId != null;
           return { error: message, status: "failed" };
-        }, deps.getRunContextFor(task.id));
+        }, runContextForTotal(deps.getRunContextFor, task.id));
         if (!escalationTerminalParked) return;
         await deps.store.recordRunAuditEvent?.({ taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("escalation-exhausted", task.id), domain: "database", mutationType: "task:execution-escalation-exhausted", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", hadModelTarget: escalationHadModelTarget, hadNodeTarget: escalationHadNodeTarget } });
       } else {
         // status "failed" doubles as the self-healing exemption: review-task
         // revival sweeps skip tasks carrying a non-null status, preventing the
         // FN-5704-style loop of re-running the graph from scratch.
-        await deps.store.updateTask(task.id, { error: message, status: "failed" }, deps.getRunContextFor(task.id));
+        await deps.store.updateTask(task.id, { error: message, status: "failed" }, runContextForTotal(deps.getRunContextFor, task.id));
       }
       executorLog.warn(`${task.id}: ${message}`);
-      await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+      await deps.store.logEntry(task.id, message, undefined, runContextForTotal(deps.getRunContextFor, task.id));
       await deps.persistTokenUsage(task.id);
     } catch (err) {
       executorLog.error(

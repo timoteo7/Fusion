@@ -6,8 +6,12 @@
 import type { Task, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import { isTaskWorkComplete } from "./task-predicates.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type CompletedTaskWatchdogDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   completedTaskWatchdogs: Map<string, ReturnType<typeof setTimeout>>;
   recoveringCompleted: Set<string>;
@@ -77,15 +81,13 @@ export function scheduleCompletedTaskWatchdog(
       );
       await deps.store.logEntry(
         taskId,
-        `Watchdog: task remained in-progress ${deps.completedTaskWatchdogMs / 1000}s after ${trigger} — attempting direct recovery to in-review`,
-      ).catch(() => undefined);
+        `Watchdog: task remained in-progress ${deps.completedTaskWatchdogMs / 1000}s after ${trigger} — attempting direct recovery to in-review`, undefined, runContextForTotal(deps.getRunContextFor, taskId)).catch(() => undefined);
 
       const recovered = await deps.recoverCompletedTask(currentTask);
       if (!recovered) {
         await deps.store.logEntry(
           taskId,
-          "Watchdog recovery attempt could not finalize completed task — leaving for follow-up recovery",
-        ).catch(() => undefined);
+          "Watchdog recovery attempt could not finalize completed task — leaving for follow-up recovery", undefined, runContextForTotal(deps.getRunContextFor, taskId)).catch(() => undefined);
       }
     } finally {
       deps.recoveringCompleted.delete(taskId);

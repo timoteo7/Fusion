@@ -14,13 +14,25 @@ import {
   RemovalReason,
 } from "../worktree/worktree-pool.js";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
+import type { RunMutationContext } from "@fusion/core";
 
 const execAsync = promisify(exec);
 
 export type CleanupConflictingWorktreeDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   rootDir: string;
   store: {
-    logEntry: (taskId: string, action: string, outcome?: string) => Promise<unknown>;
+    /*
+  FNXC:Identity 2026-08-12-01:20 (U18/KTD2 — the seam restates the required context):
+  This narrowed store re-declared `logEntry` with NO context parameter, so it did not inherit the
+  canonical/deprecated overload pair and would keep accepting unattributed writes even after every
+  call site was converted — a hole the census cannot see. Mirror the CANONICAL arity instead.
+  Do not relax it back to quiet a caller.
+  */
+  logEntry: (taskId: string, action: string, outcome: string | undefined, runContext: RunMutationContext) => Promise<unknown>;
     getSettings: () => Promise<Settings>;
     clearStaleExecutionStartBranchReferences: (branches: string[], excludingTaskId?: string) => Promise<unknown>;
   };
@@ -51,7 +63,7 @@ export async function cleanupConflictingWorktree(
   if (activeOwner !== null) {
     const refusalMessage = `[FN-4811] Refused to remove worktree ${worktreePath}: actively owned by ${activeOwner} (requested by ${taskId})`;
     executorLog.warn(refusalMessage);
-    await deps.store.logEntry(taskId, `Refused to remove conflicting worktree — actively owned by another task`, `${worktreePath} (owner: ${activeOwner})`);
+    await deps.store.logEntry(taskId, `Refused to remove conflicting worktree — actively owned by another task`, `${worktreePath} (owner: ${activeOwner})`, runContextForTotal(deps.getRunContextFor, taskId));
     return false;
   }
 
@@ -61,7 +73,7 @@ export async function cleanupConflictingWorktree(
       await execAsync(`git worktree unlock "${worktreePath}"`, {
         cwd: deps.rootDir,
       });
-      await deps.store.logEntry(taskId, `Unlocked worktree`, worktreePath);
+      await deps.store.logEntry(taskId, `Unlocked worktree`, worktreePath, runContextForTotal(deps.getRunContextFor, taskId));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       executorLog.warn(`${taskId}: failed to unlock conflicting worktree ${worktreePath} before cleanup: ${msg}`);
@@ -75,14 +87,14 @@ export async function cleanupConflictingWorktree(
       taskId,
       reason: RemovalReason.ExecutorDispose,
     });
-    await deps.store.logEntry(taskId, `Removed conflicting worktree`, worktreePath);
+    await deps.store.logEntry(taskId, `Removed conflicting worktree`, worktreePath, runContextForTotal(deps.getRunContextFor, taskId));
 
     // Delete the branch if it exists
     try {
       await execAsync(`git branch -D "${branch}"`, {
         cwd: deps.rootDir,
       });
-      await deps.store.logEntry(taskId, `Deleted branch`, branch);
+      await deps.store.logEntry(taskId, `Deleted branch`, branch, runContextForTotal(deps.getRunContextFor, taskId));
       // FN-2165 regression guard: null baseBranch on any task that stored this branch
       await deps.store.clearStaleExecutionStartBranchReferences([branch], taskId);
     } catch (err: unknown) {
@@ -146,8 +158,7 @@ export async function cleanupConflictingWorktree(
         await deps.store.logEntry(
           taskId,
           `Refused stale-path cleanup — path is not a safe orphan (registered=${stillRegistered}, owner=${activeOwner ?? "none"})`,
-          worktreePath,
-        );
+          worktreePath, runContextForTotal(deps.getRunContextFor, taskId));
         return false;
       }
       try {
@@ -179,15 +190,13 @@ export async function cleanupConflictingWorktree(
       await deps.store.logEntry(
         taskId,
         `Cleaned up stale conflicting worktree (no live worktree at path — pruned admin entry and removed orphan directory)`,
-        worktreePath,
-      );
+        worktreePath, runContextForTotal(deps.getRunContextFor, taskId));
       return true;
     }
     await deps.store.logEntry(
       taskId,
       `Failed to clean up conflicting worktree`,
-      `${worktreePath}: ${errorMessage}`,
-    );
+      `${worktreePath}: ${errorMessage}`, runContextForTotal(deps.getRunContextFor, taskId));
     return false;
   }
 }

@@ -23,6 +23,7 @@ import {
   extractSessionTokenUsage,
   tokenUsageWithModelSnapshot,
 } from "./token-usage-pure.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 const tokenCacheMetricsLog = createLogger("token-cache-metrics");
 
@@ -47,7 +48,7 @@ export async function persistTaskTokenUsage(
   taskId: string,
   tokenUsage: TaskTokenUsage,
 ): Promise<void> {
-  const runContext = deps.getRunContextFor(taskId);
+  const runContext = runContextForTotal(deps.getRunContextFor, taskId);
   await deps.store.updateTask(taskId, { tokenUsage }, runContext);
   await enforceTaskTokenBudgetForPersist(deps.store, taskId, runContext);
 }

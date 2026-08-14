@@ -10,6 +10,7 @@
 import type { Task, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type ShouldDeferWorkflowStepCompletionDeps = {
   store: TaskStore;
@@ -40,7 +41,7 @@ export async function shouldDeferWorkflowStepCompletion(
       taskId,
       `Completion handoff deferred — task paused (${context})`,
       undefined,
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     ).catch(() => undefined);
     return true;
   }
@@ -52,7 +53,7 @@ export async function shouldDeferWorkflowStepCompletion(
       taskId,
       `Completion handoff deferred — task no longer active (${context})`,
       undefined,
-      deps.getRunContextFor(taskId),
+      runContextForTotal(deps.getRunContextFor, taskId),
     ).catch(() => undefined);
     return true;
   }

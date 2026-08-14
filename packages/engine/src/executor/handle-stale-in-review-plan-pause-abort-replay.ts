@@ -16,6 +16,7 @@ import type { ResumeLanes } from "./resolve-resume-lanes.js";
 import { generateSyntheticRunId, type EngineRunContext } from "../util/run-audit.js";
 import { executorLog } from "../logger.js";
 import { WORKFLOW_NODE_ENGINE_PAUSE_ABORT_KIND } from "../workflows/workflow-graph-executor.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type HandleStaleInReviewPlanPauseAbortReplayDeps = {
   store: TaskStore;
@@ -72,10 +73,10 @@ export async function handleStaleInReviewPlanPauseAbortReplay(
     deps.activeWorktrees.delete(live.id);
     const message = "Workflow graph plan node pause/resume replay surfaced after task was already in-review — stale replay ignored, in-review state preserved";
     executorLog.log(`${live.id}: ${message}`);
-    await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
+    await deps.store.logEntry(live.id, message, undefined, runContextForTotal(deps.getRunContextFor, live.id));
     if (staleParkedFailure) {
-      await deps.store.updateTask(live.id, { status: null, error: null }, deps.getRunContextFor(live.id));
-      await deps.store.logEntry(live.id, "Auto-recovered: cleared stale in-review plan pause/resume replay failure — failure notification suppressed", undefined, deps.getRunContextFor(live.id));
+      await deps.store.updateTask(live.id, { status: null, error: null }, runContextForTotal(deps.getRunContextFor, live.id));
+      await deps.store.logEntry(live.id, "Auto-recovered: cleared stale in-review plan pause/resume replay failure — failure notification suppressed", undefined, runContextForTotal(deps.getRunContextFor, live.id));
     }
     try {
       await deps.store.recordRunAuditEvent?.({

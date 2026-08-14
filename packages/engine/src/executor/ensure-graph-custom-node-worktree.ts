@@ -16,6 +16,7 @@ import { acquireTaskWorktree } from "../worktree/worktree-acquisition.js";
 import { captureBaseCommitSha } from "./worktree-git-refs.js";
 import { createConfiguredCommandAbortError } from "./task-predicates.js";
 import type { WorktreePool } from "../worktree/worktree-pool.js";
+import { runContextForTotal } from "./run-context-for.js";
 
 export type EnsureGraphCustomNodeWorktreeDeps = {
   store: TaskStore;
@@ -76,7 +77,7 @@ export async function ensureGraphCustomNodeWorktree(
       task.id,
       `Workflow node '${nodeId}' requires a task worktree — acquiring worktree before node execution`,
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
     const acquisition = await acquireTaskWorktree({
       task,
@@ -86,7 +87,7 @@ export async function ensureGraphCustomNodeWorktree(
       pool: deps.pool,
       logger: executorLog,
       audit,
-      runContext: deps.getRunContextFor(task.id),
+      runContext: runContextForTotal(deps.getRunContextFor, task.id),
       runInitCommand: true,
       createWorktree: deps.createWorktree,
       createWorktreeBackendKind: "native",
@@ -121,7 +122,7 @@ export async function ensureGraphCustomNodeWorktree(
       task.id,
       `Workflow node '${nodeId}' failed to acquire task worktree: ${message}`,
       undefined,
-      deps.getRunContextFor(task.id),
+      runContextForTotal(deps.getRunContextFor, task.id),
     );
     throw error;
   } finally {

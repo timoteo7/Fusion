@@ -10,8 +10,12 @@
  */
 import type { Task, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
+import { runContextForTotal } from "./run-context-for.js";
+import type { EngineRunContext } from "../util/run-audit.js";
 
 export type WorkflowRerunWatchdogDeps = {
+  /* FNXC:Identity 2026-08-12-01:20 (U18 Stage C): the live per-task run, so this module's store writes are attributed to it rather than to the bare executor lane. */
+  getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   store: TaskStore;
   workflowRerunWatchdogs: Map<string, ReturnType<typeof setTimeout>>;
   workflowRerunWatchdogMs: number;
@@ -86,8 +90,7 @@ export function scheduleWorkflowRerun(
     await deps.store.logEntry(
       taskId,
       `Watchdog: workflow rerun handoff stalled for ${deps.workflowRerunWatchdogMs / 1000}s ` +
-      `(still ${currentTask.column}) — retrying once`,
-    ).catch(() => undefined);
+      `(still ${currentTask.column}) — retrying once`, undefined, runContextForTotal(deps.getRunContextFor, taskId)).catch(() => undefined);
 
     try {
       const outcome = await deps.performWorkflowRerunBounce(taskId, worktreePath, preserveResumeState, persistWorktreePath);
@@ -102,8 +105,7 @@ export function scheduleWorkflowRerun(
         );
         await deps.store.logEntry(
           taskId,
-          `Workflow rerun watchdog retry skipped — original bounce still in flight after ${deps.workflowRerunWatchdogMs / 1000}s; task may be stuck`,
-        ).catch(() => undefined);
+          `Workflow rerun watchdog retry skipped — original bounce still in flight after ${deps.workflowRerunWatchdogMs / 1000}s; task may be stuck`, undefined, runContextForTotal(deps.getRunContextFor, taskId)).catch(() => undefined);
       } else {
         executorLog.log(`${taskId}: workflow rerun watchdog retry deferred while pause is active`);
       }
