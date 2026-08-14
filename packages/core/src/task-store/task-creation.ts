@@ -159,7 +159,7 @@ export async function createTaskBackendImpl(store: TaskStore, input: TaskCreateI
     successful prior proposal into a failed retry or emit a second owner signal.
     */
     if (input.proposalClaimId) {
-      const existing = (await store.listTasks()).find((task) => task.proposalClaimId === input.proposalClaimId);
+      const existing = await store.findTaskByProposalClaimId(input.proposalClaimId);
       if (existing) {
         options?.onProposalClaimConflict?.(existing);
         return existing;
@@ -855,7 +855,7 @@ export async function _createTaskInternalBackendImpl(store: TaskStore, input: Ta
       workflow materialization. Other unique violations remain task-ID errors.
       */
       if (input.proposalClaimId && isTaskIdConflictError(error)) {
-        const existing = (await store.listTasks()).find((candidate) => candidate.proposalClaimId === input.proposalClaimId);
+        const existing = await store.findTaskByProposalClaimId(input.proposalClaimId);
         if (existing) {
           options?.onProposalClaimConflict?.(existing);
           return existing;
@@ -926,7 +926,7 @@ export async function createTaskWithReservedIdImpl(store: TaskStore, input: Task
       to its project-scoped partial index, so this replay read must not touch the
       removed SQLite backend before the shared insert boundary handles a race.
       */
-      const existing = (await store.listTasks()).find((task) => task.proposalClaimId === input.proposalClaimId);
+      const existing = await store.findTaskByProposalClaimId(input.proposalClaimId);
       if (existing) return existing;
     }
 
@@ -1054,7 +1054,7 @@ export async function createTaskWithReservedIdImpl(store: TaskStore, input: Task
       // materialized above would orphan with no task/selection pointing at them.
       await store.cleanupOrphanedMaterializedSteps(pendingWorkflowSelection?.stepIds);
       if (input.proposalClaimId && isTaskIdConflictError(err)) {
-        const existing = (await store.listTasks()).find((candidate) => candidate.proposalClaimId === input.proposalClaimId);
+        const existing = await store.findTaskByProposalClaimId(input.proposalClaimId);
         if (existing) return existing;
       }
       throw err;
@@ -1349,7 +1349,7 @@ export async function resolveSameAgentDuplicateIntake(store: TaskStore, task: Ta
     const nowMs = Date.now();
     const settings = await store.getSettings();
     const stickyWindowDays = Math.max(0, settings.tombstoneStickyWindowDays ?? 7);
-    const allCandidates = await store.listTasks({ slim: true, includeArchived: true, includeDeleted: true });
+    const allCandidates = await store.listTasksBySourceLineage({ sourceAgentId, sourceParentTaskId });
     const matches = findSameAgentDuplicates(
       { title: input.title ?? task.title, description: input.description, sourceParentTaskId },
       allCandidates.flatMap<SameAgentDuplicateCandidate>((candidate) => {

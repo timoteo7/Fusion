@@ -38,13 +38,13 @@ export function renderComputerUseGuide(
 macOS is first-class. Other platforms report \`supported: false\` from capabilities and actions fail with \`UNSUPPORTED_PLATFORM\`; stop rather than retrying.
 
 ## The snapshot → act → snapshot loop
-Capture state, act on that snapshot, then capture again after navigation, focus changes, scrolling, or rendering.
+Capture state, act on that snapshot, then capture again. A successful action consumes its capture, so the next element action requires a fresh \`fn computer get-app-state\`; re-capture after focus changes, navigation, scrolling, or re-rendering.
 
 ## App selection precedence
 Targets resolve by exact bundle id, then exact unambiguous app name, then \`pid:<n>\`. Ambiguous names return \`AMBIGUOUS_APP\`.
 
 ## Element indexes are snapshot-scoped and sparse
-Indexes are valid only for their capture and can be sparse. Never derive an index from an element count; \`--snapshot-id\` fences a capture and stale fences return \`SNAPSHOT_STALE\`.
+Indexes are valid only for their capture and can be sparse. Read them from \`snapshot.elements[].index\`; never derive one from \`elementCount\`, position, or bounds. \`--snapshot-id\` fences a capture, stale fences return \`SNAPSHOT_STALE\` including \`consumed-by-action\`, and successful action results report \`snapshotConsumed: true\`.
 
 ## Command reference
 ${commands}

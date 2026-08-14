@@ -83,11 +83,13 @@ export type MilestoneStatus = (typeof MILESTONE_STATUSES)[number];
 export const ROLLUP_OWNED_MILESTONE_STATUSES = ["planning", "active", "complete"] as const satisfies readonly MilestoneStatus[];
 
 /*
-FNXC:MissionStatusRollup 2026-08-11-04:27:
+FNXC:MissionStatusRollup 2026-08-13-21:59:
 Every automatic rollup writer—the recompute helpers in both stores and AsyncMissionStore's
 in-transaction terminal-task reconcile—may move a row only between statuses it can derive.
 blocked/archived are operator or system intent from pause, stop, PATCH, and fn_mission_set_status;
 only explicit resumeMission, clearMissionBlockedStatus, or autopilot completion clears them.
+`mission-rollup-status-writer-ratchet.test.ts` inventories the first-party writer set so a new
+computed mission or milestone writer cannot bypass this predicate unnoticed.
 */
 export function shouldApplyRecomputedStatus<T extends string>(
   current: T,

@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
@@ -10,6 +10,7 @@ import {
   type AppRef,
   type Element,
   type SnapshotRecord,
+  type SnapshotStaleReason,
   type WindowRef,
 } from "./contract.js";
 
@@ -69,7 +70,7 @@ export class ComputerSnapshotStore {
     return join(this.projectRoot, ".fusion", "computer-use", "latest");
   }
 
-  async persist(input: PersistSnapshotInput): Promise<SnapshotRecord> {
+  async persist(input: PersistSnapshotInput, alreadyFenced = false): Promise<SnapshotRecord> {
     const capturedAt = input.capturedAt ?? this.now().toISOString();
     const expiresAt = input.expiresAt ?? new Date(Date.parse(capturedAt) + this.ttlMs).toISOString();
     const targetKey = targetKeyForApp(input.app);
@@ -88,9 +89,40 @@ export class ComputerSnapshotStore {
     await mkdir(this.snapshotsDirectory, { recursive: true });
     await mkdir(this.latestDirectory, { recursive: true });
     await writeJsonAtomically(this.snapshotPath(record.snapshotId), record);
-    await writeJsonAtomically(this.latestPath(targetKey), { snapshotId: record.snapshotId });
+    const writeLatest = async () => { await writeJsonAtomically(this.latestPath(targetKey), { snapshotId: record.snapshotId }); };
+    if (alreadyFenced) await writeLatest();
+    else await this.mutateLatestPointer(targetKey, writeLatest);
     await this.prune({ preserveSnapshotId: record.snapshotId });
     return record;
+  }
+
+  /**
+   * FNXC:ComputerUse 2026-08-13-22:02:
+   * A successful action consumes only this app's latest pointer, retaining the record for clear
+   * stale details and pruning. The next element replay must capture a new accessibility tree.
+   */
+  async consume(app: AppRef, expectedSnapshotId?: string, alreadyFenced = false): Promise<boolean> {
+    const targetKey = targetKeyForApp(app);
+    let consumed = false;
+    const consumeLatest = async () => {
+      const latest = await this.readLatest(targetKey);
+      if (!latest || (expectedSnapshotId !== undefined && latest.snapshotId !== expectedSnapshotId)) return;
+      await writeJsonAtomically(this.latestPath(targetKey), { snapshotId: latest.snapshotId, consumedAt: this.now().toISOString() });
+      consumed = true;
+    };
+    if (alreadyFenced) await consumeLatest();
+    else await this.mutateLatestPointer(targetKey, consumeLatest);
+    return consumed;
+  }
+
+  /**
+   * FNXC:ComputerUse 2026-08-14-00:35:
+   * Capture acquisition and element replay share this app fence, not merely their pointer writes.
+   * This prevents an action resolved from S or a tree captured before it from racing to re-arm S.
+   */
+  async withAppFence<T>(app: AppRef, operation: () => Promise<T>): Promise<T> {
+    await mkdir(this.latestDirectory, { recursive: true });
+    return withDirectoryLock(`${this.latestPath(targetKeyForApp(app))}.lock`, operation);
   }
 
   /** Read the current record for the resolved app and enforce the C9 fence order. */
@@ -112,6 +144,15 @@ export class ComputerSnapshotStore {
 
     if (input.snapshotId && latest.snapshotId !== input.snapshotId) {
       throw snapshotStale("superseded", input.snapshotId);
+    }
+    /*
+     * FNXC:ComputerUse 2026-08-13-22:02:
+     * Resolve checks consumption after supersession so an explicit old ID preserves the published
+     * superseded diagnosis. A consumed latest pointer fails closed before expiry because its sparse
+     * indexes may already name different live elements after the preceding action.
+     */
+    if (latest.consumedAt !== undefined) {
+      throw snapshotStale("consumed-by-action", latest.snapshotId);
     }
     if (this.now().getTime() >= Date.parse(record.expiresAt)) {
       throw snapshotStale("expired", record.snapshotId);
@@ -165,6 +206,16 @@ export class ComputerSnapshotStore {
     }
   }
 
+  /**
+   * FNXC:ComputerUse 2026-08-13-22:29:
+   * Latest-pointer updates from separate CLI processes must serialize. An action that resolved S
+   * must not overwrite a later get-app-state capture N, so consumption checks its expected ID only
+   * while holding the same per-app lock that persist uses to re-arm the pointer.
+   */
+  private async mutateLatestPointer(targetKey: string, mutation: () => Promise<void>): Promise<void> {
+    await this.withAppFence({ bundleId: targetKey.startsWith("bundle:") ? targetKey.slice("bundle:".length) : null, name: "snapshot-pointer", pid: targetKey.startsWith("pid:") ? Number(targetKey.slice("pid:".length)) : 0 }, mutation);
+  }
+
   private snapshotPath(snapshotId: string): string {
     return join(this.snapshotsDirectory, `${snapshotId}.json`);
   }
@@ -173,7 +224,7 @@ export class ComputerSnapshotStore {
     return join(this.latestDirectory, `${targetKeySlug(targetKey)}.json`);
   }
 
-  private async readLatest(targetKey: string): Promise<{ snapshotId: string } | undefined> {
+  private async readLatest(targetKey: string): Promise<LatestPointer | undefined> {
     const value = await readJson(this.latestPath(targetKey));
     return isLatestPointer(value) ? value : undefined;
   }
@@ -207,7 +258,7 @@ function snapshotRequired(): ComputerUseError {
   );
 }
 
-function snapshotStale(reason: "not-found" | "superseded" | "expired" | "pid-changed" | "window-mismatch", snapshotId: string): ComputerUseError {
+function snapshotStale(reason: SnapshotStaleReason, snapshotId: string): ComputerUseError {
   return new ComputerUseError(
     "SNAPSHOT_STALE",
     `Snapshot ${snapshotId} is ${reason}; re-run fn computer get-app-state.`,
@@ -238,8 +289,52 @@ async function readDirectory(path: string): Promise<string[]> {
   }
 }
 
-function isLatestPointer(value: unknown): value is { snapshotId: string } {
-  return !!value && typeof value === "object" && typeof (value as { snapshotId?: unknown }).snapshotId === "string";
+const POINTER_LOCK_RETRY_MS = 5;
+const POINTER_LOCK_STALE_MS = 60_000;
+const LOCK_HEARTBEAT_MS = 1_000;
+
+/**
+ * FNXC:ComputerUse 2026-08-14-00:35:
+ * An app fence lives through OS work, so its heartbeat—not a fixed maximum action duration—proves
+ * liveness. Stale locks are atomically quarantined and token-checked on release: a crashed holder
+ * cannot block forever, and a recovered holder cannot delete a successor's lock after a PID reuse.
+ */
+async function withDirectoryLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
+  const ownerPath = join(lockPath, "owner.json");
+  const token = randomBytes(16).toString("hex");
+  for (;;) {
+    try {
+      await mkdir(lockPath);
+      await writeJsonAtomically(ownerPath, { token, pid: process.pid });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const lockInfo = await stat(lockPath).catch(() => undefined);
+      const age = lockInfo === undefined ? Number.NaN : Date.now() - lockInfo.mtimeMs;
+      if (Number.isFinite(age) && age > POINTER_LOCK_STALE_MS) {
+        const quarantined = `${lockPath}.stale-${randomBytes(8).toString("hex")}`;
+        try { await rename(lockPath, quarantined); await rm(quarantined, { recursive: true, force: true }); continue; }
+        catch { continue; }
+      }
+      await new Promise<void>((resolveRetry) => setTimeout(resolveRetry, POINTER_LOCK_RETRY_MS));
+    }
+  }
+  const heartbeat = setInterval(() => { void utimes(lockPath, new Date(), new Date()).catch(() => undefined); }, LOCK_HEARTBEAT_MS);
+  try {
+    return await operation();
+  } finally {
+    clearInterval(heartbeat);
+    const owner = await readJson(ownerPath) as { token?: unknown } | undefined;
+    if (owner?.token === token) await rm(lockPath, { recursive: true, force: true });
+  }
+}
+
+interface LatestPointer { snapshotId: string; consumedAt?: string; }
+
+function isLatestPointer(value: unknown): value is LatestPointer {
+  if (!value || typeof value !== "object") return false;
+  const pointer = value as { snapshotId?: unknown; consumedAt?: unknown };
+  return typeof pointer.snapshotId === "string" && (pointer.consumedAt === undefined || typeof pointer.consumedAt === "string");
 }
 
 function isSnapshotRecord(value: unknown): value is SnapshotRecord {

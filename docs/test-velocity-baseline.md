@@ -4,8 +4,8 @@
 
 ## Latest baseline
 
-- Cycle: **2026-W32**
-- Captured at: **2026-08-04T03:10:46.073Z**
+- Cycle: **2026-W33**
+- Captured at: **2026-08-13T01:59:18.032Z**
 - Timing snapshot: `scripts/test-timings.json` captured at **2026-07-24T13:09:41.412Z**
 - Quarantine ledger: `scripts/lib/test-quarantine.json`
 
@@ -13,10 +13,10 @@
 
 | Metric | Current | Delta vs previous |
 |---|---:|---:|
-| Merge gate wall-time (`pnpm test:gate`) | 14.6s | +5.4s |
-| Boot smoke wall-time (`pnpm smoke:boot`) | 18.1s | -305ms |
-| Changed-only test wall-time (`pnpm test`) | 22.4s | +7.5s |
-| Quarantine / flake count | 1 | -1 |
+| Merge gate wall-time (`pnpm test:gate`) | 11.0s | -3.6s |
+| Boot smoke wall-time (`pnpm smoke:boot`) | 26.7s | +8.5s |
+| Changed-only test wall-time (`pnpm test`) | 17.6s | -4.9s |
+| Quarantine / flake count | 0 | 0 |
 | Deletion-due quarantines | 0 | n/a |
 
 ## Measurement failures
@@ -25,7 +25,7 @@
 
 ## Timing snapshot notes
 
-- No stale or missing timing metadata detected in the rendered slowest-file rows.
+- Timing snapshot is 19 days old; verify slowest-file attribution before treating the table as the current culprit.
 
 ## Slowest 20 test files
 
@@ -56,7 +56,7 @@
 
 | Age bucket | Count |
 |---|---:|
-| 0-6 days | 1 |
+| 0-6 days | 0 |
 | 7-13 days | 0 |
 | deletion due (>=14 days) | 0 |
 | unknown/future | 0 |
@@ -71,16 +71,16 @@
 
 | Row | Captured at | Gate | Boot smoke | `pnpm test` | Quarantine count |
 |---|---|---:|---:|---:|---:|
-| Previous | 2026-07-22T22:40:53.357Z | 9.1s | 18.5s | 14.9s | 2 |
-| Latest | 2026-08-04T03:10:46.073Z | 14.6s | 18.1s | 22.4s | 1 |
-| Delta | — | +5.4s | -305ms | +7.5s | -1 |
+| Previous | 2026-08-04T03:10:46.073Z | 14.6s | 18.1s | 22.4s | 0 |
+| Latest | 2026-08-13T01:59:18.032Z | 11.0s | 26.7s | 17.6s | 0 |
+| Delta | — | -3.6s | +8.5s | -4.9s | 0 |
 
 _Future weekly rows append to `scripts/test-velocity-history.json`; compare the latest row against the previous row before posting to #leads._
 
 ## Post to #leads
 
 ```text
-FN-6612 weekly test velocity: gate 14.6s (+5.4s), boot smoke 18.1s (-305ms), pnpm test 22.4s (+7.5s), quarantine ledger 1 (-1). Slowest file: packages/dashboard/app/components/__tests__/SettingsModal.general.test.tsx at 2m 01s. Deletion-due quarantines: 0.
+FN-6612 weekly test velocity: gate 11.0s (-3.6s), boot smoke 26.7s (+8.5s), pnpm test 17.6s (-4.9s), quarantine ledger 0 (0). Slowest file: packages/dashboard/app/components/__tests__/SettingsModal.general.test.tsx at 2m 01s. Deletion-due quarantines: 0.
 ```
 
 ## How to refresh

@@ -359,6 +359,16 @@ export type PlanningHandoffOutcome = "released" | "parked" | "withheld";
  *  `finalizeApprovedTask` for why this is a report object and not a return value. */
 export interface PlanningHandoffReport {
   outcome: PlanningHandoffOutcome;
+  /*
+  FNXC:PlanningHandoffAtomicity 2026-08-13-03:49:
+  The durable work item this planning session ran under. The runtime's
+  specification-complete reaction passes it to the Plan Review seeder so the
+  successor install can atomically retire this exact predecessor row instead of
+  bailing on it: triage announces completion BEFORE its finally block transitions
+  the row to succeeded, so without this id the seeder saw its own caller as an
+  "active continuation" and silently stranded the card for self-healing to repair.
+  */
+  planningWorkItemId?: string;
 }
 
 
@@ -3599,7 +3609,7 @@ export class TriageProcessor {
 
           // FNXC:TriagePlanningRetry 2026-08-03-00:20: A duplicate remains a separate closure
           // path, but fallback-authored or inherited markers cannot bypass clean-attempt admission.
-          const duplicateReport: PlanningHandoffReport = { outcome: "parked" };
+          const duplicateReport: PlanningHandoffReport = { outcome: "parked", planningWorkItemId };
           if (await this.tryFinalizeExplicitDuplicateMarker(task, written, settings, {
             isReplan,
             feedback,
@@ -3622,6 +3632,7 @@ export class TriageProcessor {
             isReplan,
             feedback,
           });
+          finalizeReport.planningWorkItemId = planningWorkItemId;
           this.options.onSpecifyComplete?.(task, finalizeReport);
         } finally {
           this.activeSessions.delete(task.id);

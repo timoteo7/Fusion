@@ -316,6 +316,9 @@ export const tasks = projectSchema.table("tasks", {
   the gate is a full tasks-table scan. Sparse: most rows have NULL parent.
   */
   index("idxTasksSourceParentTaskId").on(t.sourceParentTaskId),
+  /* FNXC:TaskRecommendations 2026-08-13-22:23: duplicate intake filters source
+   * lineage on recommendation/agent creates; this sparse index avoids a task-table scan. */
+  index("idxTasksProjectSourceAgentId").on(t.projectId, t.sourceAgentId).where(sql`${t.sourceAgentId} IS NOT NULL`),
   // FNXC:EphemeralAgentTaskCreation 2026-07-30-12:00: proposal retries share one stable key, so the database—not a read-before-create race—enforces at-most-once materialization.
   uniqueIndex("uqTasksProjectProposalClaimId").on(t.projectId, t.proposalClaimId).where(sql`${t.proposalClaimId} IS NOT NULL`),
   /*

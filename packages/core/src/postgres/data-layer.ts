@@ -160,7 +160,7 @@ export interface AsyncDataLayer {
    * FNXC:IdentityGrantEscalation 2026-08-09-03:04:
    * The owner connection, for the few writes the RUNTIME role is deliberately not allowed to make.
    *
-   * Exists because of migration 0059: `project.actor_role_grants` decides who holds authority, and
+   * Exists because of migration 0060: `project.actor_role_grants` decides who holds authority, and
    * the runtime role's write privilege on it was a grant-yourself-a-role path for any plugin holding
    * `getAsyncLayer()` (the same pooled runtime connection). Revoking that privilege closes the
    * escalation, which leaves core needing a handle plugins never receive.

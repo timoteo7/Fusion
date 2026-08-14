@@ -2341,7 +2341,7 @@ export function TerminalModal({ isOpen, onClose, initialCommand, initialCommandG
 
   /*
   FNXC:TerminalFooter 2026-07-11-20:20:
-  FN-7829 moves the single terminal action-control cluster (reconnect/restart, font-size, Clear, Shortcuts toggle, Preferences toggle, connection status, exit code, help text, and the non-mobile pin/pop-out toggles) into the bottom `.terminal-status-bar` footer at every breakpoint. The header never renders `.terminal-actions`; keeping this as one shared fragment rendered in exactly one footer location prevents handler drift across desktop, tablet, mobile, floating, docked, pinned-below, and embedded modes.
+  FN-7829 keeps the single terminal action-control cluster (reconnect/restart, font-size, Clear, Shortcuts toggle, Preferences toggle, connection status, exit code, and help text) in the bottom `.terminal-status-bar` footer at every breakpoint. Pin/pop-out use their own single header fragment beside close; the header still never renders `.terminal-actions`, preventing handler drift across all presentation modes.
   */
   const terminalActionControls = (
     <>
@@ -2399,30 +2399,36 @@ export function TerminalModal({ isOpen, onClose, initialCommand, initialCommandG
         {connectionStatus === "disconnected" && t("terminal.statusDisconnected", "Disconnected")}
       </span>
       {exitCode !== null && <span className="terminal-exit-code" data-testid="terminal-exit-code">{t("terminal.exitLabel", "Exit: {{code}}", { code: exitCode })}</span>}
-      {!embedded && !isMobileTerminal && (
-        <button
-          className="terminal-clear-btn terminal-clear-btn--shortcut terminal-clear-btn--icon"
-          onClick={handleToggleBelowMode}
-          data-testid="terminal-pin-toggle"
-          title={isBelowMode ? t("terminal.unpinTerminal", "Unpin terminal (overlay content)") : t("terminal.pinTerminal", "Pin terminal (push content)")}
-          aria-label={isBelowMode ? t("terminal.unpinTerminal", "Unpin terminal (overlay content)") : t("terminal.pinTerminal", "Pin terminal (push content)")}
-          aria-pressed={isBelowMode}
-        >
-          {isBelowMode ? <PinOff size={14} /> : <Pin size={14} />}
-        </button>
-      )}
-      {!embedded && !isMobileTerminal && (
-        <button
-          className="terminal-clear-btn terminal-clear-btn--shortcut terminal-clear-btn--icon"
-          onClick={handleToggleDisplayMode}
-          data-testid="terminal-popout-toggle"
-          title={displayMode === "floating" ? t("terminal.dockTerminal", "Dock terminal") : t("terminal.popOutTerminal", "Pop out terminal")}
-          aria-label={displayMode === "floating" ? t("terminal.dockTerminal", "Dock terminal") : t("terminal.popOutTerminal", "Pop out terminal")}
-          aria-pressed={displayMode === "floating"}
-        >
-          {displayMode === "floating" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-        </button>
-      )}
+    </>
+  );
+
+  /*
+  FNXC:TerminalModalControls 2026-08-13-08:13:
+  The operator requires pin and pop-out toggles in the top toolbar immediately left of close.
+  Keep this shared fragment at one header render site; mobile and embedded terminals render neither.
+  */
+  const terminalDisplayModeControls = (
+    <>
+      <button
+        className="terminal-clear-btn terminal-clear-btn--shortcut terminal-clear-btn--icon"
+        onClick={handleToggleBelowMode}
+        data-testid="terminal-pin-toggle"
+        title={isBelowMode ? t("terminal.unpinTerminal", "Unpin terminal (overlay content)") : t("terminal.pinTerminal", "Pin terminal (push content)")}
+        aria-label={isBelowMode ? t("terminal.unpinTerminal", "Unpin terminal (overlay content)") : t("terminal.pinTerminal", "Pin terminal (push content)")}
+        aria-pressed={isBelowMode}
+      >
+        {isBelowMode ? <PinOff size={14} /> : <Pin size={14} />}
+      </button>
+      <button
+        className="terminal-clear-btn terminal-clear-btn--shortcut terminal-clear-btn--icon"
+        onClick={handleToggleDisplayMode}
+        data-testid="terminal-popout-toggle"
+        title={displayMode === "floating" ? t("terminal.dockTerminal", "Dock terminal") : t("terminal.popOutTerminal", "Pop out terminal")}
+        aria-label={displayMode === "floating" ? t("terminal.dockTerminal", "Dock terminal") : t("terminal.popOutTerminal", "Pop out terminal")}
+        aria-pressed={displayMode === "floating"}
+      >
+        {displayMode === "floating" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+      </button>
     </>
   );
 
@@ -2711,12 +2717,15 @@ export function TerminalModal({ isOpen, onClose, initialCommand, initialCommandG
           {/*
           FNXC:TerminalModalControls 2026-08-03-00:21:
           Every non-embedded terminal has exactly one modal-close control, rendered after the
-          tab region (including its new-terminal affordance), optional workspace picker, and
-          status title. Keeping one shared final render site makes the close-after-plus,
-          far-right contract structural for desktop, tablet, ResizeObserver overflow, and mobile.
+          tab region (including its new-terminal affordance), optional workspace picker, status
+          title, and non-mobile pin/pop-out controls. Keeping one shared final render site makes
+          the close-after-plus, far-right contract structural for desktop, tablet,
+          ResizeObserver overflow, and mobile.
           Mobile keeps the corner class so its explicit flex order remains last; embedded terminals
           intentionally render no modal-close control because their parent owns dismissal.
           */}
+          {!embedded && !isMobileTerminal && terminalDisplayModeControls}
+
           {!embedded && (
             <button
               className={`terminal-close${isMobileTerminal ? " terminal-close--corner" : ""}`}
@@ -3146,7 +3155,7 @@ export function TerminalModal({ isOpen, onClose, initialCommand, initialCommandG
 
         {/*
         FNXC:TerminalFooter 2026-07-11-20:20:
-        FN-7829 renders the shared `terminalActionControls` fragment in this bottom footer at every breakpoint, including true desktop and embedded terminals, so font-size/Clear/Shortcuts/Preferences/connection-status/exit-code plus the non-mobile pin/pop-out toggles stay reachable without crowding the header. This is the only render site for the cluster.
+        FN-7829 renders the shared `terminalActionControls` fragment in this bottom footer at every breakpoint, including true desktop and embedded terminals, so font-size/Clear/Shortcuts/Preferences/connection-status/exit-code stay reachable. Pin/pop-out render once in the non-mobile header beside close; this remains the only footer render site for the action cluster.
         */}
         <div className="terminal-status-bar" data-testid="terminal-footer-actions">
           {terminalActionControls}

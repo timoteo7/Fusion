@@ -1041,6 +1041,12 @@ export interface ProjectSettings {
    * explicit opt-out; executor validation enforces the 0..20 integer boundary.
    */
   maxRecommendationsPerTask?: number;
+  /**
+   * FNXC:TaskRecommendations 2026-08-13-03:56:
+   * The operator requested an on/off switch for recommendation mailbox notices. This controls
+   * best-effort observability only; disabling it never changes recommendation capture or storage.
+   */
+  recommendationMailboxNoticeEnabled?: boolean;
   /** Hard stop: when true, all automated agent activity is **immediately**
    *  terminated — active triage, execution, and merge agent sessions are
    *  killed, and the scheduler stops dispatching new work. Acts as a

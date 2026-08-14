@@ -25,6 +25,24 @@ function consistent(graph: KnowledgeGraph, manifest: GraphManifest): boolean {
   if (allFileNodes.length !== fileNodes.size || fileNodes.size !== Object.keys(manifest.files).length) return false;
   if ([...fileNodes].some(([path, node]) => node.id !== `file:${path}` || !manifest.files[path])) return false;
   if (graph.nodes.some(node => node.owner === "file" && !manifest.files[node.ownerPath])) return false;
+  /*
+  FNXC:KnowledgeGraph 2026-08-12-14:26:
+  buildKnowledgeGraph synthesizes imports and re-exports from persisted references for every hash-reused
+  file. Validate the extractor's owner and uniqueness invariants first, or a fabricated relation survives
+  indefinitely without a re-parse to correct it.
+  */
+  if (Object.entries(manifest.files).some(([path, entry]) => {
+    const refs = entry.importRefs;
+    if (!refs) return false;
+    if (!/\.tsx?$/.test(path)) return true;
+    const identities = new Set<string>();
+    return refs.some(ref => {
+      const identity = `${ref.kind}\0${ref.specifier}\0${ref.line}\0${ref.column}`;
+      if (identities.has(identity)) return true;
+      identities.add(identity);
+      return false;
+    });
+  })) return false;
 
   // Artifact JSON is an untrusted incremental cache. Checking only ownerPath permits a corrupt
   // symbol/doc/rationale id (or a cross-file source anchor) to survive every no-op rebuild.

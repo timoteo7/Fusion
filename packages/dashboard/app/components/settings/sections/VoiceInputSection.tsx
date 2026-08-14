@@ -31,11 +31,16 @@ function isVoiceStatus(value: unknown): value is VoiceStatus {
  * silently rewriting a preference that may become usable after runtime recovery.
  * Model controls stay in SettingsFieldRow slots to retain the shared settings-row
  * contract instead of introducing a parallel panel or row variant.
+ *
+ * FNXC:VoiceInput 2026-08-13-23:04:
+ * Healthy CommonJS runtimes now self-correct during probing. Re-check remains for
+ * residual repair-then-recover cases and refreshes status without enabling voice.
  */
 export function VoiceInputSection({ form, setForm }: SectionBaseProps) {
   const { t } = useTranslation("app");
   const [status, setStatus] = useState<VoiceStatus | null>(null);
   const [statusUnavailable, setStatusUnavailable] = useState(false);
+  const [recheckingRuntime, setRecheckingRuntime] = useState(false);
   const mounted = useRef(true);
 
   const loadStatus = useCallback(async () => {
@@ -97,6 +102,13 @@ export function VoiceInputSection({ form, setForm }: SectionBaseProps) {
   const performModelAction = async (path: string, method: "POST" | "DELETE") => {
     try { await api(path, { method }); } finally { await loadStatus(); }
   };
+  const performRuntimeRecheck = async () => {
+    setRecheckingRuntime(true);
+    try { await api("/voice/runtime/recheck", { method: "POST" }); } catch {} finally {
+      await loadStatus();
+      if (mounted.current) setRecheckingRuntime(false);
+    }
+  };
   return <section className="voice-input-section" data-testid="voice-input-section">
     <h4 className="settings-section-heading">{t("settings.voiceInput.title", "Voice Input")}</h4>
     <div data-effective-enabled={effectiveEnabled ? "true" : "false"}>
@@ -134,6 +146,7 @@ export function VoiceInputSection({ form, setForm }: SectionBaseProps) {
       <div className="voice-input-section__actions" data-testid="voice-input-model-actions">
         {!statusUnavailable && (modelStatus === "not-installed" || modelStatus === "error") && <button type="button" className="btn btn-secondary" onClick={() => void performModelAction("/voice/model/download", "POST")}>{t("settings.voiceInput.download", "Download")}</button>}
         {!statusUnavailable && modelStatus === "installed" && <button type="button" className="btn btn-secondary" onClick={() => void performModelAction("/voice/model", "DELETE")}>{t("settings.voiceInput.remove", "Remove")}</button>}
+        {!statusUnavailable && modelReady && runtimeUnavailable && <button type="button" className="btn btn-secondary" disabled={recheckingRuntime} onClick={() => void performRuntimeRecheck()}>{t(recheckingRuntime ? "settings.voiceInput.recheckingRuntime" : "settings.voiceInput.recheckRuntime", recheckingRuntime ? "Re-checking runtime…" : "Re-check runtime")}</button>}
       </div>
     </SettingsFieldRow>
   </section>;

@@ -190,6 +190,53 @@ describe("useTasks", () => {
     expect(result.current.tasks[0]?.releaseGate).toBeUndefined();
   });
 
+  it("prunes two release verdicts at their individual earliest expiries", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const now = new Date().toISOString();
+    const later = new Date(Date.now() + 10_000).toISOString();
+    const gate = (evaluatedAt: string) => ({
+      promoteBlocked: false, unplannedForExecution: false, blockedOnApproval: false, reason: null,
+      readyAtCapacityBoundary: false, evaluatedAt, evaluatedForUpdatedAt: now,
+    });
+    mockFetchTasks.mockResolvedValue([
+      createMockTask({ id: "FN-EARLY", updatedAt: now, releaseGate: gate(now) }),
+      createMockTask({ id: "FN-LATE", updatedAt: now, releaseGate: gate(later) }),
+    ]);
+
+    const { result } = renderHook(() => useTasks({ sseEnabled: false }));
+    await waitFor(() => expect(result.current.tasks).toHaveLength(2));
+    act(() => vi.advanceTimersByTime(30_001));
+    expect(result.current.tasks.find((task) => task.id === "FN-EARLY")?.releaseGate).toBeUndefined();
+    expect(result.current.tasks.find((task) => task.id === "FN-LATE")?.releaseGate).toBeDefined();
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(result.current.tasks.find((task) => task.id === "FN-LATE")?.releaseGate).toBeUndefined();
+  });
+
+  it("drops a cached release verdict during synchronous hydration", () => {
+    mockReadCache.mockReturnValueOnce([createMockTask({ id: "FN-CACHED", releaseGate: {
+      promoteBlocked: false, unplannedForExecution: false, blockedOnApproval: false, reason: null,
+      readyAtCapacityBoundary: false, evaluatedAt: "2026-08-13T22:02:00.000Z",
+    } })]);
+    const { result } = renderHook(() => useTasks({ projectId: "proj-1", sseEnabled: false }));
+
+    expect(result.current.tasks[0]).not.toHaveProperty("releaseGate");
+  });
+
+  it("rejects a REST verdict evaluated for an older task row before rendering it", async () => {
+    mockFetchTasks.mockResolvedValueOnce([createMockTask({
+      id: "FN-STALE-REST", updatedAt: "2026-08-13T22:02:01.000Z",
+      releaseGate: {
+        promoteBlocked: false, unplannedForExecution: false, blockedOnApproval: false, reason: null,
+        readyAtCapacityBoundary: false, evaluatedAt: "2026-08-13T22:02:00.000Z",
+        evaluatedForUpdatedAt: "2026-08-13T22:02:00.000Z",
+      },
+    })]);
+
+    const { result } = renderHook(() => useTasks({ sseEnabled: false }));
+    await waitFor(() => expect(result.current.tasks).toHaveLength(1));
+    expect(result.current.tasks[0]).not.toHaveProperty("releaseGate");
+  });
+
   it("hydrates per-project cached tasks synchronously", () => {
     mockReadCache.mockReturnValueOnce([createMockTask({ id: "FN-CACHED" })]);
     const { result } = renderHook(() => useTasks({ projectId: "proj-1" }));
@@ -307,6 +354,18 @@ describe("useTasks", () => {
     ) as { savedAt?: number; data?: unknown };
     expect(typeof raw.savedAt).toBe("number");
     expect(Array.isArray(raw.data)).toBe(true);
+  });
+
+  it("strips a release verdict before persisting the board snapshot", async () => {
+    mockFetchTasks.mockResolvedValueOnce([createMockTask({ id: "FN-CACHE-GATE", releaseGate: {
+      promoteBlocked: false, unplannedForExecution: false, blockedOnApproval: false, reason: null,
+      readyAtCapacityBoundary: false, evaluatedAt: new Date().toISOString(), evaluatedForUpdatedAt: "2026-01-01T00:00:00Z",
+    } })]);
+
+    renderHook(() => useTasks({ projectId: "proj-1", sseEnabled: false }));
+    await waitFor(() => expect(mockWriteCache).toHaveBeenCalled());
+    const cached = mockWriteCache.mock.calls.at(-1)?.[1] as Task[];
+    expect(cached[0]).not.toHaveProperty("releaseGate");
   });
 
   it("caps task cache writes to first 500 entries", async () => {
@@ -821,6 +880,36 @@ describe("useTasks", () => {
       expect(result.current.tasks[0].id).toBe("FN-002");
     });
 
+    it("strips unproven release verdicts from created and reconnect-gap SSE upserts", async () => {
+      mockFetchTasks.mockResolvedValueOnce([]);
+      const { result } = renderHook(() => useTasks());
+
+      await waitFor(() => {
+        expect(MockEventSource.instances).toHaveLength(1);
+      });
+
+      const evaluatedAt = "2026-08-13T22:23:00.000Z";
+      const withUnprovenVerdict = (id: string) => createMockTask({
+        id,
+        updatedAt: evaluatedAt,
+        releaseGate: {
+          promoteBlocked: false, unplannedForExecution: false, blockedOnApproval: false, reason: null,
+          readyAtCapacityBoundary: false, evaluatedAt, evaluatedForUpdatedAt: evaluatedAt,
+        },
+      });
+
+      act(() => {
+        MockEventSource.instances[0]._emit("task:created", withUnprovenVerdict("FN-SSE-CREATED"));
+        MockEventSource.instances[0]._emit("task:moved", {
+          task: withUnprovenVerdict("FN-SSE-MOVED"), from: "todo", to: "in-progress",
+        });
+        MockEventSource.instances[0]._emit("task:updated", withUnprovenVerdict("FN-SSE-UPDATED"));
+      });
+
+      expect(result.current.tasks).toHaveLength(3);
+      expect(result.current.tasks.every((task) => task.releaseGate === undefined)).toBe(true);
+    });
+
     it("passes custom column ids through and normalizes structurally invalid columns from SSE created events", async () => {
       // FNXC:ColumnNormalization 2026-07-24-00:20: see the initial-fetch variant — post-b2a7425c7,
       // string column ids are custom-workflow-valid; only non-string/empty falls back to triage.
@@ -1087,6 +1176,32 @@ describe("useTasks", () => {
   });
 
   describe("SSE event: task:updated", () => {
+    it("drops a carried verdict when SSE changes visible evidence or advances the row clock", async () => {
+      const evaluatedAt = new Date().toISOString();
+      const initial = createMockTask({
+        id: "FN-RELEASE-SSE", updatedAt: evaluatedAt, status: null,
+        releaseGate: {
+          promoteBlocked: false, unplannedForExecution: false, blockedOnApproval: false, reason: null,
+          readyAtCapacityBoundary: false, evaluatedAt, evaluatedForUpdatedAt: evaluatedAt,
+        },
+      });
+      mockFetchTasks.mockResolvedValueOnce([initial]);
+      const { result } = renderHook(() => useTasks());
+      await waitFor(() => expect(result.current.tasks[0]?.releaseGate).toBeDefined());
+      await waitFor(() => expect(MockEventSource.instances).toHaveLength(1));
+
+      act(() => MockEventSource.instances[0]._emit("task:updated", { ...initial, status: "planning" }));
+      expect(result.current.tasks[0]?.releaseGate).toBeUndefined();
+
+      mockFetchTasks.mockResolvedValueOnce([initial]);
+      await act(async () => { await result.current.refreshTasks(); });
+      expect(result.current.tasks[0]?.releaseGate).toBeDefined();
+      act(() => MockEventSource.instances[0]._emit("task:updated", {
+        ...initial, updatedAt: "2026-12-31T00:00:00.000Z",
+      }));
+      expect(result.current.tasks[0]?.releaseGate).toBeUndefined();
+    });
+
     it("updates task fields", async () => {
       const initialTask = createMockTask({
         id: "FN-001",

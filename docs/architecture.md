@@ -2023,6 +2023,7 @@ Fusion adds an operator-first API surface to diagnose and expedite refinement ta
 
 | Method | Path | Description |
 |---|---|---|
+| GET | `/api/tasks/recommendations` | List completed-task recommendations scoped to complete-role columns. Row-paginated with `limit`/`offset` (maximum 200) and returns `hasMore` plus `totalRowCount`. |
 | GET | `/api/tasks/stranded-refinements` | List stranded refinement diagnostics (`sourceType=task_refine`, `column=triage`, `paused!=true`) with reasons and recommendation. Supports `?freshnessMinutes=` (1-1440). |
 | GET | `/api/tasks/:id/stranded-refinement` | Return one refinement diagnostic row plus PROMPT.md presence and dependency-resolution status. |
 | POST | `/api/tasks/:id/expedite-refinement` | Request bounded expedite for a triage refinement. Clears `nextRecoveryAt` for stale/backoff rows; returns `requiresOperatorAction` for `awaiting-approval`/`failed`/`stuck-killed` without mutating status. |

@@ -103,6 +103,22 @@ function normalizeTask(task: Task): Task {
   };
 }
 
+/*
+FNXC:PromoteVisibility 2026-08-13-22:23:
+Only GET /api/tasks pairs a release verdict with the complete hold-lane evidence used to evaluate it.
+SSE is a store-derived lifecycle channel, so remove any verdict defensively before every SSE path,
+including reconnect-gap upserts; a producer regression must resolve to the conservative fallback.
+*/
+function stripTransientReleaseGate(task: Task): Task {
+  if (!Object.prototype.hasOwnProperty.call(task, "releaseGate")) return task;
+  const { releaseGate: _transientReleaseGate, ...taskWithoutReleaseGate } = task;
+  return taskWithoutReleaseGate as Task;
+}
+
+function normalizeNonBoardTask(task: Task): Task {
+  return normalizeTask(stripTransientReleaseGate(task));
+}
+
 function isSoftDeleted(task: Task): boolean {
   return Boolean(task.deletedAt);
 }
@@ -753,15 +769,23 @@ export function useTasks(options?: UseTasksOptions) {
       if (fetchVersionRef.current !== requestVersion || projectId !== requestProjectId) {
         return;
       }
-      const normalizedFetchedTasks = filterActiveTasks(fetchedTasks.map(normalizeTask));
-      for (const task of normalizedFetchedTasks) {
-        if (task.releaseGate !== undefined) {
-          releaseGateProvenanceRef.current.set(task.id, {
-            fingerprint: releaseGateEvidenceFingerprint(task),
-            capturedAt: Date.now(),
-          });
+      const fetchedAt = Date.now();
+      const normalizedFetchedTasks = filterActiveTasks(fetchedTasks.map(normalizeTask)).map((task) => {
+        if (task.releaseGate === undefined) return task;
+        const provenance = { fingerprint: releaseGateEvidenceFingerprint(task), capturedAt: fetchedAt };
+        /*
+        FNXC:PromoteVisibility 2026-08-13-22:02:
+        A first-seen REST row has no current snapshot to merge against. Validate its verdict before
+        render too, so a response evaluated for an older row never flashes an enabled Promote action.
+        */
+        if (!isReleaseGateVerdictFresh(task.releaseGate, task, provenance, fetchedAt)) {
+          releaseGateProvenanceRef.current.delete(task.id);
+          const { releaseGate: _staleReleaseGate, ...taskWithoutReleaseGate } = task;
+          return taskWithoutReleaseGate as Task;
         }
-      }
+        releaseGateProvenanceRef.current.set(task.id, provenance);
+        return task;
+      });
       /*
       FNXC:ArchivePagination 2026-07-08-01:30:
       A generic refresh (SSE reconnect resync, tab-visibility regain, delete-
@@ -973,7 +997,7 @@ export function useTasks(options?: UseTasksOptions) {
   const archivedTasksRef = useRef<Task[]>([]);
 
   const mergeArchivedPage = useCallback((page: Task[]) => {
-    const normalizedPage = page.map(normalizeTask);
+    const normalizedPage = page.map(normalizeNonBoardTask);
     const knownArchivedIds = new Set(archivedTasksRef.current.map((task) => task.id));
     const newArchived = normalizedPage.filter((task) => !knownArchivedIds.has(task.id));
     if (newArchived.length > 0) {
@@ -1045,7 +1069,7 @@ export function useTasks(options?: UseTasksOptions) {
         loggedTaskCacheHitProjects.add(projectId);
         console.info("[swr-cache] hit tasks=", cachedTasks.length, "projectId=", projectId);
       }
-      setTasks(filterActiveTasks(cachedTasks.map(normalizeTask)));
+      setTasks(filterActiveTasks(cachedTasks.map(normalizeNonBoardTask)));
       /*
       FNXC:MobileTabDiscard 2026-07-26-14:18:
       A project switch replaces `tasks` with the new project's snapshot, so the freshness clock must
@@ -1182,7 +1206,7 @@ export function useTasks(options?: UseTasksOptions) {
         traceDroppedStaleEvent();
         return;
       }
-      const task = normalizeTask(JSON.parse(e.data) as Task);
+      const task = normalizeTask(stripTransientReleaseGate(JSON.parse(e.data) as Task));
       recordLiveMutation(task, isSoftDeleted(task));
       if (searchQueryRef.current) {
         void refreshTasksRef.current({ searchQueryOverride: searchQueryRef.current });
@@ -1223,7 +1247,7 @@ export function useTasks(options?: UseTasksOptions) {
       }
       // #1403: the move event carries `ColumnId` (custom column ids admitted).
       const { task, to }: { task: Task; from: ColumnId; to: ColumnId } = JSON.parse(e.data);
-      const normalizedTask = normalizeTask(task);
+      const normalizedTask = normalizeTask(stripTransientReleaseGate(task));
       if (isSoftDeleted(normalizedTask)) {
         recordLiveMutation(normalizedTask, true);
         applyLiveTasks((prev) => prev.filter((candidate) => candidate.id !== normalizedTask.id));
@@ -1264,7 +1288,7 @@ export function useTasks(options?: UseTasksOptions) {
         void refreshTasksRef.current({ searchQueryOverride: searchQueryRef.current });
         return;
       }
-      const incoming = normalizeTask(JSON.parse(e.data) as Task);
+      const incoming = normalizeTask(stripTransientReleaseGate(JSON.parse(e.data) as Task));
       recordLiveMutation(incoming, isSoftDeleted(incoming));
       if (isSoftDeleted(incoming)) {
         // FN-5135: treat deletedAt-bearing task:updated payloads as delete-equivalent.
@@ -1296,7 +1320,7 @@ export function useTasks(options?: UseTasksOptions) {
         void refreshTasksRef.current({ searchQueryOverride: searchQueryRef.current });
         return;
       }
-      const task = normalizeTask(JSON.parse(e.data) as Task);
+      const task = normalizeTask(stripTransientReleaseGate(JSON.parse(e.data) as Task));
       recordLiveMutation(task, true);
       applyLiveTasks((prev) => prev.filter((t) => t.id !== task.id));
     };
@@ -1311,7 +1335,7 @@ export function useTasks(options?: UseTasksOptions) {
         return;
       }
       const { task }: { task: Task } = JSON.parse(e.data);
-      const normalizedTask = normalizeTask(task);
+      const normalizedTask = normalizeTask(stripTransientReleaseGate(task));
       if (isSoftDeleted(normalizedTask)) {
         recordLiveMutation(normalizedTask, true);
         applyLiveTasks((prev) => prev.filter((candidate) => candidate.id !== normalizedTask.id));
@@ -1381,7 +1405,7 @@ export function useTasks(options?: UseTasksOptions) {
   }, [projectId, sseEnabled, revalidateAfterResume]);
 
   const createTask = useCallback(async (input: TaskCreateInput): Promise<Task> => {
-    const task = normalizeTask(await api.createTask(input, projectId));
+    const task = normalizeNonBoardTask(await api.createTask(input, projectId));
     setTasks((prev) => {
       if (prev.some((t) => t.id === task.id)) return prev;
       return [...prev, task];
@@ -1394,7 +1418,7 @@ export function useTasks(options?: UseTasksOptions) {
     column: ColumnId,
     optionsOrPosition?: { preserveProgress?: boolean } | number,
   ): Promise<Task> => {
-    return normalizeTask(await api.moveTask(id, column, projectId, optionsOrPosition));
+    return normalizeNonBoardTask(await api.moveTask(id, column, projectId, optionsOrPosition));
   }, [projectId]);
 
   /*
@@ -1405,7 +1429,7 @@ export function useTasks(options?: UseTasksOptions) {
   hosts cannot diverge after pause or unpause.
   */
   const reconcileConfirmedTask = useCallback((confirmedTask: Task): Task => {
-    const normalizedConfirmedRow = normalizeTask(confirmedTask);
+    const normalizedConfirmedRow = normalizeNonBoardTask(confirmedTask);
     // Preserve cleared lifecycle fields as own `undefined` properties so every downstream
     // snapshot host can distinguish the confirmed deletion from an unrelated sparse update.
     const confirmedRow: Task = {
@@ -1471,7 +1495,7 @@ export function useTasks(options?: UseTasksOptions) {
       allowResurrection?: boolean;
     },
   ): Promise<Task> => {
-    const deletedTask = normalizeTask(await api.deleteTask(id, projectId, options));
+    const deletedTask = normalizeNonBoardTask(await api.deleteTask(id, projectId, options));
     /*
     FNXC:TaskDeletion 2026-06-29-18:52:
     Local deletes must update the shared useTasks array immediately because the Board and right-dock Tasks list both render from this state and should not wait for SSE or a refetch after the API confirms deletion.
@@ -1510,7 +1534,7 @@ export function useTasks(options?: UseTasksOptions) {
   }, [projectId]);
 
   const retryTask = useCallback(async (id: string): Promise<Task> => {
-    const retriedTask = normalizeTask(await api.retryTask(id, projectId));
+    const retriedTask = normalizeNonBoardTask(await api.retryTask(id, projectId));
     /*
     FNXC:DashboardTaskRetry 2026-06-30-12:57:
     Manual retry success is a user-visible state boundary. Replace matching rows in shared hook state and the project SWR cache as soon as the retry API returns so Board/List/detail/right-dock retry affordances do not depend on later SSE, polling, remount, or route re-entry to clear stale failed/stuck state.
@@ -1556,7 +1580,7 @@ export function useTasks(options?: UseTasksOptions) {
   failed-step indicator after the operator receives server confirmation.
   */
   const bypassReview = useCallback(async (id: string, reason: string): Promise<Task> => {
-    const bypassedTask = normalizeTask(await api.bypassReview(id, reason, projectId));
+    const bypassedTask = normalizeNonBoardTask(await api.bypassReview(id, reason, projectId));
     fetchVersionRef.current++;
 
     const projectUpdatedTasks = (currentTasks: Task[]) => currentTasks.map((task) => (task.id === id ? bypassedTask : task));
@@ -1589,11 +1613,11 @@ export function useTasks(options?: UseTasksOptions) {
   }, [projectId]);
 
   const resetTask = useCallback(async (id: string): Promise<Task> => {
-    return normalizeTask(await api.resetTask(id, projectId));
+    return normalizeNonBoardTask(await api.resetTask(id, projectId));
   }, [projectId]);
 
   const duplicateTask = useCallback(async (id: string): Promise<Task> => {
-    const task = normalizeTask(await api.duplicateTask(id, projectId));
+    const task = normalizeNonBoardTask(await api.duplicateTask(id, projectId));
     setTasks((prev) => {
       if (prev.some((t) => t.id === task.id)) return prev;
       return [...prev, task];
@@ -1617,7 +1641,7 @@ export function useTasks(options?: UseTasksOptions) {
     }
 
     try {
-      const updatedTask = normalizeTask(await api.updateTask(id, updates, projectId));
+      const updatedTask = normalizeNonBoardTask(await api.updateTask(id, updates, projectId));
       setTasks((prev) =>
         prev.map((t) => (t.id === id ? updatedTask : t))
       );
@@ -1636,7 +1660,7 @@ export function useTasks(options?: UseTasksOptions) {
     id: string,
     options?: { removeLineageReferences?: boolean },
   ): Promise<Task> => {
-    const task = normalizeTask(await api.archiveTask(id, projectId, options));
+    const task = normalizeNonBoardTask(await api.archiveTask(id, projectId, options));
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? task : t))
     );
@@ -1644,7 +1668,7 @@ export function useTasks(options?: UseTasksOptions) {
   }, [projectId]);
 
   const unarchiveTask = useCallback(async (id: string): Promise<Task> => {
-    const task = normalizeTask(await api.unarchiveTask(id, projectId));
+    const task = normalizeNonBoardTask(await api.unarchiveTask(id, projectId));
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? task : t))
     );
@@ -1672,7 +1696,7 @@ export function useTasks(options?: UseTasksOptions) {
 
   const archiveAllDone = useCallback(async (): Promise<Task[]> => {
     const archived = await api.archiveAllDone(projectId);
-    const normalized = archived.map(normalizeTask);
+    const normalized = archived.map(normalizeNonBoardTask);
     setTasks((prev) =>
       prev.map((t) => {
         const updated = normalized.find((archived) => archived.id === t.id);
@@ -1692,7 +1716,7 @@ export function useTasks(options?: UseTasksOptions) {
       return;
     }
 
-    const normalizedTasks = filterActiveTasks(incomingTasks.map(normalizeTask));
+    const normalizedTasks = filterActiveTasks(incomingTasks.map(normalizeNonBoardTask));
     setTasks((prev) => {
       let next = prev;
 

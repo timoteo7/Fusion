@@ -44,6 +44,15 @@ describe("release-gate freshness", () => {
     expect(isReleaseGateVerdictFresh(verdict, task, provenance, now)).toBe(true);
     expect(isReleaseGateVerdictFresh(verdict, { ...task, status: "planning" }, provenance, now)).toBe(false);
     expect(isReleaseGateVerdictFresh(verdict, { ...task, updatedAt: "2026-08-11T20:00:00.001Z" }, provenance, now)).toBe(false);
+    expect(isReleaseGateVerdictFresh(verdict, task, provenance, now + RELEASE_GATE_VERDICT_MAX_AGE_MS)).toBe(true);
     expect(isReleaseGateVerdictFresh(verdict, task, provenance, now + RELEASE_GATE_VERDICT_MAX_AGE_MS + 1)).toBe(false);
+  });
+
+  it("requires local provenance, a parseable timestamp, and the evaluated row clock", () => {
+    const provenance = { fingerprint: releaseGateEvidenceFingerprint(task), capturedAt: 0 };
+    const now = Date.parse(verdict.evaluatedAt);
+    expect(isReleaseGateVerdictFresh(verdict, task, undefined, now)).toBe(false);
+    expect(isReleaseGateVerdictFresh({ ...verdict, evaluatedAt: "not-a-date" }, task, provenance, now)).toBe(false);
+    expect(isReleaseGateVerdictFresh({ ...verdict, evaluatedForUpdatedAt: undefined }, task, provenance, now)).toBe(false);
   });
 });

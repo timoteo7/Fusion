@@ -54,6 +54,53 @@ describe("VoiceInputSection", () => {
     expect(screen.queryByRole("button", { name: /Download|Remove/ })).not.toBeInTheDocument();
   });
 
+  it.each(["runtime-incompatible", "runtime-platform-load-failed", "runtime-module-missing"])('renders a re-check action for an installed %s runtime', async (unavailableReason) => {
+    renderSection({ model: { status: "installed" }, runtime: { status: "unavailable", unavailableReason } });
+    expect(await screen.findByRole("button", { name: "Re-check runtime" })).toBeInTheDocument();
+  });
+
+  it("hides runtime re-check when the model, status, or runtime is not actionable", async () => {
+    const cases = [
+      available("installed"),
+      { model: { status: "not-installed" }, runtime: { status: "unavailable", unavailableReason: "model-not-installed" } },
+      {},
+    ];
+    for (const status of cases) {
+      const view = renderSection(status);
+      await screen.findByLabelText("Enable voice input");
+      expect(screen.queryByRole("button", { name: /Re-check runtime/ })).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it("re-checks the runtime and refreshes Settings status", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ model: { status: "installed" }, runtime: { status: "unavailable", unavailableReason: "runtime-incompatible" } }))
+      .mockResolvedValueOnce(response({ model: { status: "installed" }, runtime: { status: "available" } }))
+      .mockResolvedValueOnce(response(available("installed")));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<VoiceInputSection form={{} as SettingsFormState} setForm={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Re-check runtime" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/voice/runtime/recheck", expect.objectContaining({ method: "POST" })));
+    await waitFor(() => expect(screen.getByLabelText("Enable voice input")).toBeEnabled());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("restores the re-check action after a rejected request", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ model: { status: "installed" }, runtime: { status: "unavailable", unavailableReason: "runtime-module-missing" } }))
+      .mockRejectedValueOnce(new Error("recheck failed"))
+      .mockResolvedValueOnce(response({ model: { status: "installed" }, runtime: { status: "unavailable", unavailableReason: "runtime-module-missing" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<VoiceInputSection form={{} as SettingsFormState} setForm={vi.fn()} />);
+
+    const button = await screen.findByRole("button", { name: "Re-check runtime" });
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Re-check runtime" })).toBeEnabled());
+    expect(screen.getByTestId("voice-input-runtime-unavailable")).toBeInTheDocument();
+  });
+
   it("fails closed for unavailable runtime without rewriting a persisted preference", async () => {
     const { setForm } = renderSection({ model: { status: "installed" }, runtime: { status: "unavailable", unavailableReason: "runtime-module-missing" } }, { voiceInput: { enabled: true } });
     const toggle = await screen.findByLabelText("Enable voice input");

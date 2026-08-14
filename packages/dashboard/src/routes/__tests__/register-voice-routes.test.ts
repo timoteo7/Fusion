@@ -58,6 +58,36 @@ describe("voice route authorization split", () => {
     });
   });
 
+  it("re-checks an unavailable installed runtime without requiring voice to be enabled or closing sessions", async () => {
+    const app = express(); const router = express.Router(); app.use(router);
+    const resetRuntime = vi.fn();
+    const close = vi.fn();
+    let available = true;
+    let enabled = true;
+    const service = {
+      getRuntimeStatus: async () => available ? { status: "available" as const } : { status: "unavailable" as const, unavailableReason: "runtime-module-missing" },
+      resetRuntime: () => { resetRuntime(); available = true; },
+      createSession: async () => ({ acceptChunk: () => ({ partial: "ok" }), finish: () => ({ text: "ok" }), close }),
+    };
+    createRegisterVoiceRoutes({
+      manager: { getState: async () => ({ status: "installed" as const, installedPath: "/model" }), peekState: () => ({ status: "installed" as const, installedPath: "/model" }), scheduleDownload: () => ({ accepted: true as const, state: { status: "installed" as const } }), remove: async () => {}, download: async () => ({ status: "installed" as const }), subscribe: () => () => {} },
+      service,
+    })({ router, getScopedStore: async () => ({ getSettings: async () => ({ voiceInput: { enabled } }), getGlobalSettingsStore: () => ({ getSettings: async () => ({}) }) }), getProjectIdFromRequest: () => "recheck-project" } as unknown as ApiRoutesContext);
+    const server = app.listen(0); servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const request = (path: string, init?: RequestInit) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${path}`, init);
+
+    const session = await request("/voice/session", { method: "POST" });
+    expect(session.status).toBe(201);
+    available = false;
+    enabled = false;
+    const recheck = await request("/voice/runtime/recheck", { method: "POST" });
+    expect(recheck.status).toBe(200);
+    await expect(recheck.json()).resolves.toMatchObject({ enabled: false, model: { status: "installed" }, runtime: { status: "available" } });
+    expect(resetRuntime).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("keeps an ordered partial/final session in its owning project through cleanup", async () => {
     const app = express(); const router = express.Router(); app.use(router);
     const acceptChunk = vi.fn((_audio: Buffer, options: { final: boolean }) => options.final ? { text: "final transcript" } : { partial: "partial transcript" });

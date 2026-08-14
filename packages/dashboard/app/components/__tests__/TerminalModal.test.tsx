@@ -47,6 +47,23 @@ function defineMetric(element: Element, property: "clientWidth" | "scrollWidth",
   Object.defineProperty(element, property, { configurable: true, value });
 }
 
+function expectTerminalDisplayModeControlsBeforeClose(): void {
+  const header = document.querySelector<HTMLElement>(".terminal-header");
+  expect(header).not.toBeNull();
+
+  const pinToggle = screen.getByTestId("terminal-pin-toggle");
+  const popoutToggle = screen.getByTestId("terminal-popout-toggle");
+  const closeButton = screen.getByTestId("terminal-close-btn");
+
+  for (const control of [pinToggle, popoutToggle]) {
+    expect(control.parentElement).toBe(header);
+    expect(control.compareDocumentPosition(closeButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+  expect(popoutToggle.nextElementSibling).toBe(closeButton);
+  expect(header!.querySelector(".terminal-actions")).toBeNull();
+}
+
 function expectTerminalCloseAfterNewTerminal(newTerminalTestId: string): void {
   const header = document.querySelector<HTMLElement>(".terminal-header");
   expect(header).not.toBeNull();
@@ -521,6 +538,8 @@ describe("TerminalModal", () => {
     expect(screen.queryByTestId("terminal-popout-toggle")).toBeNull();
     expect(screen.queryByTestId("terminal-pin-toggle")).toBeNull();
     expect(screen.queryByTestId("terminal-drag-grip")).toBeNull();
+    expect(screen.queryByTestId("terminal-actions")).toBeNull();
+    expect(container.querySelector(".terminal-header .terminal-actions")).toBeNull();
     expect(screen.getByTestId("terminal-tabs")).toBeTruthy();
     expect(mockUseTerminalSessions).toHaveBeenCalledWith("proj-123", {
       storageScope: "task:FN-7813",
@@ -987,6 +1006,13 @@ describe("TerminalModal", () => {
       expect(screen.queryByTestId("terminal-drag-grip")).toBeNull();
       expect(screen.getByTestId("floating-window-resize-se")).toBeInTheDocument();
     });
+
+    const floatingWindow = screen.getByTestId("floating-window-terminal-popout-toggle-test") as HTMLElement & {
+      setPointerCapture: (pointerId: number) => void;
+    };
+    floatingWindow.setPointerCapture = vi.fn();
+    fireEvent.pointerDown(screen.getByTestId("terminal-popout-toggle"), { pointerId: 73, clientX: 100, clientY: 100 });
+    expect(floatingWindow.setPointerCapture).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId("terminal-popout-toggle"));
 
@@ -4592,7 +4618,7 @@ describe("TerminalModal — mobile layout contract", () => {
     });
   });
 
-  it("footer actions show connection state on true desktop with no header actions shell", async () => {
+  it("puts desktop display-mode controls immediately before close while footer retains actions", async () => {
     const previousInnerWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", { value: 1280, configurable: true });
 
@@ -4613,16 +4639,55 @@ describe("TerminalModal — mobile layout contract", () => {
 
         expect(connectionStatus?.textContent).toBe("Disconnected");
         expect(footer.querySelector(".terminal-shortcuts--header")).toBeNull();
-        for (const control of [clearBtn, shortcutToggle, preferencesToggle, fontSizeValue, pinToggle, popoutToggle]) {
+        for (const control of [clearBtn, shortcutToggle, preferencesToggle, fontSizeValue]) {
           expect(footer.contains(control)).toBe(true);
           expect(header?.contains(control)).toBe(false);
         }
+        for (const control of [pinToggle, popoutToggle]) {
+          expect(footer.contains(control)).toBe(false);
+          expect(header?.contains(control)).toBe(true);
+        }
         expect(screen.queryByTestId("terminal-actions")).toBeNull();
+        expect(screen.queryByTestId("terminal-workspace-picker")).toBeNull();
+        expectTerminalDisplayModeControlsBeforeClose();
         expect(header?.contains(screen.getByTestId("terminal-close-btn"))).toBe(true);
         expect(header?.contains(screen.getByTestId("terminal-tabs"))).toBe(true);
       });
     } finally {
       Object.defineProperty(window, "innerWidth", { value: previousInnerWidth, configurable: true });
+    }
+  });
+
+  it.each([
+    ["desktop", 1280],
+    ["tablet", 900],
+  ])("keeps populated %s workspace picker before header display-mode controls", async (_label, width) => {
+    const previousInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    fireEvent(window, new Event("resize"));
+    mockUseWorkspaces.mockReturnValue({
+      projectName: "kb",
+      workspaces: [
+        { id: "FN-9026", label: "FN-9026", title: "Terminal toolbar ordering", worktree: "/repo/.worktrees/FN-9026", kind: "task" },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    try {
+      render(<TerminalModal isOpen={true} onClose={mockOnClose} />);
+
+      await waitFor(() => {
+        const header = document.querySelector<HTMLElement>(".terminal-header");
+        const workspacePicker = screen.getByTestId("terminal-workspace-picker");
+        expect(header?.contains(workspacePicker)).toBe(true);
+        expectTerminalDisplayModeControlsBeforeClose();
+        expect(workspacePicker.compareDocumentPosition(screen.getByTestId("terminal-pin-toggle")) & Node.DOCUMENT_POSITION_FOLLOWING)
+          .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+    } finally {
+      Object.defineProperty(window, "innerWidth", { value: previousInnerWidth, configurable: true });
+      fireEvent(window, new Event("resize"));
     }
   });
 
@@ -4682,6 +4747,7 @@ describe("TerminalModal — mobile layout contract", () => {
 
         // No empty .terminal-actions shell renders in the mobile header, and non-mobile display toggles stay omitted.
         expect(header?.querySelector(".terminal-actions")).toBeNull();
+        expect(screen.queryByTestId("terminal-actions")).toBeNull();
         expect(screen.queryByTestId("terminal-pin-toggle")).toBeNull();
         expect(screen.queryByTestId("terminal-popout-toggle")).toBeNull();
 
@@ -4727,11 +4793,9 @@ describe("TerminalModal — mobile layout contract", () => {
     }
   });
 
-  it("renders terminal action controls in a tablet footer, not the header, and keeps pin/pop-out toggles (FN-7684)", async () => {
-    // FN-7684: tablet width (769-1024px) must relocate the same shared
-    // terminalActionControls fragment into the footer, exactly as FN-7560
-    // did for mobile — but unlike mobile, tablet keeps the desktop pin/
-    // pop-out toggles and the desktop tab strip / workspace picker.
+  it("puts tablet display-mode controls immediately before close while footer retains actions", async () => {
+    // Tablets retain the desktop pin/pop-out presentation modes and tab strip,
+    // while their remaining action controls stay in the shared footer fragment.
     const previousInnerWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", { value: 900, configurable: true });
     fireEvent(window, new Event("resize"));
@@ -4750,27 +4814,26 @@ describe("TerminalModal — mobile layout contract", () => {
         const pinToggle = screen.getByTestId("terminal-pin-toggle");
         const popoutToggle = screen.getByTestId("terminal-popout-toggle");
 
-        // Controls live inside the footer region, including the desktop-only
-        // pin/pop-out toggles (tablet keeps docked/floating/pinned-below modes)...
+        // Footer controls remain in the single shared footer fragment.
         expect(footer.contains(clearBtn)).toBe(true);
         expect(footer.contains(shortcutToggle)).toBe(true);
         expect(footer.contains(preferencesToggle)).toBe(true);
         expect(footer.contains(fontSizeValue)).toBe(true);
-        expect(footer.contains(pinToggle)).toBe(true);
-        expect(footer.contains(popoutToggle)).toBe(true);
 
-        // ...and NOT inside the header.
         const header = document.querySelector(".terminal-header");
         expect(header).toBeTruthy();
-        expect(header?.contains(clearBtn)).toBe(false);
-        expect(header?.contains(shortcutToggle)).toBe(false);
-        expect(header?.contains(preferencesToggle)).toBe(false);
-        expect(header?.contains(fontSizeValue)).toBe(false);
-        expect(header?.contains(pinToggle)).toBe(false);
-        expect(header?.contains(popoutToggle)).toBe(false);
+        for (const control of [clearBtn, shortcutToggle, preferencesToggle, fontSizeValue]) {
+          expect(header?.contains(control)).toBe(false);
+        }
+        for (const control of [pinToggle, popoutToggle]) {
+          expect(footer.contains(control)).toBe(false);
+          expect(header?.contains(control)).toBe(true);
+        }
+        expectTerminalDisplayModeControlsBeforeClose();
 
         // No empty .terminal-actions shell renders in the tablet header.
         expect(header?.querySelector(".terminal-actions")).toBeNull();
+        expect(screen.queryByTestId("terminal-actions")).toBeNull();
 
         // The close button, the desktop tab strip (not the mobile dropdown),
         // and the workspace picker remain in the header.

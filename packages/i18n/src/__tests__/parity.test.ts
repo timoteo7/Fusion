@@ -1,12 +1,21 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SUPPORTED_LOCALES } from "@fusion/core";
 import { describe, expect, it } from "vitest";
 import { findParityViolations, type CatalogObject, type NamespaceCatalogs } from "../parity.js";
 
 const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
+const repoRoot = join(packageRoot, "..", "..");
 const localesRoot = join(packageRoot, "locales");
+
+function listSupportedLocales() {
+  const configText = readFileSync(join(repoRoot, "i18next.config.ts"), "utf8");
+  const localesMatch = configText.match(/locales:\s*\[([^\]]+)\]/m);
+  if (!localesMatch) {
+    throw new Error("Unable to read locales from i18next.config.ts");
+  }
+  return [...localesMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
 
 function listNamespaces() {
   return readdirSync(join(localesRoot, "en"), { withFileTypes: true })
@@ -24,13 +33,24 @@ function readCatalogs(locale: string, namespaces = listNamespaces()): NamespaceC
 }
 
 describe("i18n key parity", () => {
-  it("passes for the live catalogs across all supported locales and en namespaces", () => {
-    expect([...SUPPORTED_LOCALES]).toEqual(["en", "zh-CN", "zh-TW", "fr", "es", "ko", "pt-BR"]);
+  /*
+   * FNXC:i18n-ParityGate 2026-08-13-22:06:
+   * FN-9036 pins githubNativeAutoMerge catalog structure across configured secondary locales so a regression is caught by package tests rather than only i18n:status.
+   * The configured locale list is parsed with the same contract as the parity gate, keeping future locale additions covered automatically.
+   */
+  it("passes for live catalogs and pins GitHub native auto-merge keys across configured locales", () => {
+    const supportedLocales = listSupportedLocales();
+    const secondaryLocales = supportedLocales.filter((locale) => locale !== "en");
+    expect(supportedLocales).toEqual(["en", "zh-CN", "zh-TW", "fr", "es", "ko", "pt-BR"]);
     expect(listNamespaces()).toEqual(["app", "cli", "common", "errors"]);
 
     const enCatalogs = readCatalogs("en");
-    for (const locale of SUPPORTED_LOCALES) {
+    for (const locale of secondaryLocales) {
       expect(findParityViolations(enCatalogs, readCatalogs(locale), { locale })).toEqual([]);
+
+      const mergeSettings = readCatalog(locale, "app").settings?.merge;
+      expect(mergeSettings).toHaveProperty("githubNativeAutoMerge");
+      expect(mergeSettings).toHaveProperty("githubNativeAutoMergeHelp");
     }
   });
 

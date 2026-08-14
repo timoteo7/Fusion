@@ -40,6 +40,8 @@ function createStore(overrides: Record<string, unknown> = {}) {
     taskCache: new Map(),
     getSettings: vi.fn().mockResolvedValue({ autoArchiveDuplicateTasksEnabled: false, tombstoneStickyWindowDays: 7 }),
     listTasks: vi.fn().mockResolvedValue([]),
+    listTasksBySourceLineage: vi.fn().mockResolvedValue([]),
+    listWorkflowDefinitions: vi.fn().mockResolvedValue([]),
     logEntry: vi.fn().mockResolvedValue(undefined),
     recordActivity: vi.fn().mockResolvedValue(undefined),
     updateTask: vi.fn().mockResolvedValue(undefined),
@@ -62,6 +64,7 @@ describe("same-agent duplicate intake policy (FN-8401)", () => {
     await resolveSameAgentDuplicateIntake(store as any, noProvenance as any, noProvenance as any);
 
     expect(store.listTasks).not.toHaveBeenCalled();
+    expect(store.listTasksBySourceLineage).not.toHaveBeenCalled();
     expect(store.moveTask).not.toHaveBeenCalled();
     expect(store.updateTask).not.toHaveBeenCalled();
   });
@@ -69,7 +72,7 @@ describe("same-agent duplicate intake policy (FN-8401)", () => {
   it("flags the new live duplicate in place and never deletes its sibling by default", async () => {
     const sibling = task("FN-SIBLING", { createdAt: new Date(Date.now() - 60_000).toISOString() });
     const created = task("FN-NEW");
-    const store = createStore({ listTasks: vi.fn().mockResolvedValue([created, sibling]) });
+    const store = createStore({ listTasksBySourceLineage: vi.fn().mockResolvedValue([created, sibling]) });
 
     /*
     FNXC:SameAgentDuplicateIntake 2026-07-19-16:33:
@@ -78,6 +81,9 @@ describe("same-agent duplicate intake policy (FN-8401)", () => {
     */
     await _maybeAutoArchiveSameAgentDuplicateBackendImpl(store as any, created as any, created as any);
 
+    // Pre-fix performed a board scan; provenance creates must use the narrow lineage read.
+    expect(store.listTasks).not.toHaveBeenCalled();
+    expect(store.listTasksBySourceLineage).toHaveBeenCalledWith({ sourceAgentId: "agent-intake", sourceParentTaskId: null });
     /*
     FNXC:Identity 2026-08-09-03:04 (U18):
     The mutation context is asserted positionally rather than waved through, so the day U9/U11/U13
@@ -102,7 +108,7 @@ describe("same-agent duplicate intake policy (FN-8401)", () => {
     const created = task("FN-NEW");
     const store = createStore({
       getSettings: vi.fn().mockResolvedValue({ autoArchiveDuplicateTasksEnabled: true, tombstoneStickyWindowDays: 7 }),
-      listTasks: vi.fn().mockResolvedValue([created, sibling]),
+      listTasksBySourceLineage: vi.fn().mockResolvedValue([created, sibling]),
     });
 
     await resolveSameAgentDuplicateIntake(store as any, created as any, created as any);
@@ -117,7 +123,7 @@ describe("same-agent duplicate intake policy (FN-8401)", () => {
     const deletedAt = new Date(Date.now() - 60_000).toISOString();
     const tombstone = task("FN-TOMBSTONE", { deletedAt, allowResurrection: false });
     const created = task("FN-NEW");
-    const store = createStore({ backendMode: true, listTasks: vi.fn().mockResolvedValue([created, tombstone]) });
+    const store = createStore({ backendMode: true, listTasksBySourceLineage: vi.fn().mockResolvedValue([created, tombstone]) });
 
     await expect(resolveSameAgentDuplicateIntake(store as any, created as any, created as any))
       .rejects.toBeInstanceOf(TombstonedTaskResurrectionError);
@@ -127,7 +133,7 @@ describe("same-agent duplicate intake policy (FN-8401)", () => {
     Soft deletes move to `archived`; sticky tombstones require both flags so
     same-agent recreation is rejected on every persistence backend.
     */
-    expect(store.listTasks).toHaveBeenCalledWith({ slim: true, includeArchived: true, includeDeleted: true });
+    expect(store.listTasksBySourceLineage).toHaveBeenCalledWith({ sourceAgentId: "agent-intake", sourceParentTaskId: null });
     expect(recordRunAuditEventAsync).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       taskId: "FN-NEW", mutationType: "intake:resurrection-blocked",
     }));

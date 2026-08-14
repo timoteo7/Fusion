@@ -35,6 +35,7 @@ export type {
 export {
   fetchTasks,
   fetchArchivedTasks,
+  fetchTaskRecommendations,
   fetchTaskDetail,
   fetchTaskPrompt,
   fetchTaskRuntimeFallback,
@@ -50,6 +51,7 @@ export {
 import type {
   DeleteTaskOptions,
   ArchiveTaskOptions,
+  TaskRecommendationsResponse,
   TaskRuntimeFallbackResponse,
   TaskPromptResponse,
   UpdateTaskReviewRequest,
@@ -67,6 +69,7 @@ import type {
 export type {
   DeleteTaskOptions,
   ArchiveTaskOptions,
+  TaskRecommendationsResponse,
   TaskRuntimeFallbackResponse,
   TaskPromptResponse,
   UpdateTaskReviewRequest,
@@ -269,7 +272,22 @@ export type {
   MemoryRetrievalTestResult,
   QmdInstallResult,
 } from "./system/memory.js";
-
+export {
+  fetchKnowledgeGraphStatus,
+  queryKnowledgeGraphNodes,
+  fetchKnowledgeGraphNode,
+  fetchKnowledgeGraphNeighbors,
+  fetchKnowledgeGraphPath,
+  buildKnowledgeGraphArtifacts,
+} from "./system/knowledge-graph.js";
+export type {
+  KnowledgeGraphStatus,
+  KnowledgeGraphNode,
+  KnowledgeGraphEdge,
+  KnowledgeGraphNeighbor,
+  KnowledgeGraphNodeQuery,
+  KnowledgeGraphPathResult,
+} from "./system/knowledge-graph.js";
 
 // Re-export skills types so hooks/components keep stable import paths via this barrel.
 import type {
@@ -911,6 +929,7 @@ export type {
   BackupCreateResponse,
   BackupInfo,
   BackupListResponse,
+  BackupScheduleStatus,
   CompaniesCatalogResponse,
   CompanyEntry,
   SettingsExportData,

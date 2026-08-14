@@ -3225,7 +3225,16 @@
     "unarchiveLabel": "이 인사이트 보관 해제",
     "unarchiveTitle": "이 인사이트 보관 해제",
     "unarchiving": "\"{{title}}\" 보관 해제 중...",
-    "usePlanningDefault": "계획 기본값 사용"
+    "usePlanningDefault": "계획 기본값 사용",
+    "recommendations": {
+      "title": "",
+      "count": "",
+      "source": "",
+      "loadMore": "",
+      "loadingMore": "",
+      "loadMoreFailed": "",
+      "truncated": ""
+    }
   },
   "interview": {
     "addContextDirection": "추가 컨텍스트나 방향을 입력하세요...",
@@ -3599,7 +3608,20 @@
     "testSearchHint": "에이전트가 사용하는 동일한 qmd 기반 memory_search 경로를 실행합니다.",
     "title": "메모리",
     "totalInsights": "총 인사이트",
-    "workingMemoryLabel": "작업 메모리"
+    "workingMemoryLabel": "작업 메모리",
+    "tabGraph": "Knowledge Graph",
+    "graphLoading": "Loading knowledge graph…",
+    "graphUnavailable": "Graph unavailable",
+    "graphBuild": "Build graph",
+    "graphNodes": "nodes",
+    "graphEdges": "edges",
+    "graphForce": "Force rebuild",
+    "graphRebuilding": "Rebuilding…",
+    "graphRebuild": "Rebuild",
+    "graphFilters": "Graph filters",
+    "graphClearFilters": "Clear filters",
+    "graphResults": "results",
+    "graphNoResults": "No matching nodes."
   },
   "merge": {
     "advanced": "고급",
@@ -5812,7 +5834,6 @@
       "backupDirectory": "",
       "backupNow": "지금 백업",
       "backups": "",
-      "backupS": "",
       "backupScheduleCron": "",
       "creating": "생성 중…",
       "cronExpressionForBackupTimingDefault02": "",
@@ -5840,11 +5861,23 @@
       "projectOnlyFusionMemory": "",
       "retentionCount": "",
       "totalSize": "",
-      "view": "",
       "whenEnabledProjectAndAgentMemoryFilesAre": "",
       "whenEnabledTheDatabaseIsBackedUpAutomatically": "",
       "createFailed": "",
-      "memoryBackupScopeHint": ""
+      "memoryBackupScopeHint": "",
+      "scheduleStatus": "",
+      "status": "",
+      "on": "",
+      "off": "",
+      "cron": "",
+      "nextRun": "",
+      "lastRun": "",
+      "succeeded": "",
+      "failed": "",
+      "lastOutput": "",
+      "runCount": "",
+      "scheduleNotRegistered": "",
+      "noBackupsYet": ""
     },
     "clearToDefault": "",
     "cliAgents": {
@@ -6030,7 +6063,9 @@
       "refinementTaskWorkflow": "",
       "refinementTaskWorkflowHelp": "",
       "maxRecommendationsPerTask": "",
-      "maxRecommendationsPerTaskHelp": ""
+      "maxRecommendationsPerTaskHelp": "",
+      "recommendationMailboxNoticeEnabled": "",
+      "recommendationMailboxNoticeEnabledHelp": ""
     },
     "globalGeneral": {
       "andShowsUpdateNoticesInTheCLIAnd": "",
@@ -6381,7 +6416,9 @@
       "sameAsIntegrationBranchDefault": "",
       "pushTargetBranchHelp": "",
       "requiredChecks": "",
-      "requiredChecksHelp": ""
+      "requiredChecksHelp": "",
+      "githubNativeAutoMerge": "GitHub 기본 자동 병합 사용",
+      "githubNativeAutoMergeHelp": "GitHub는 병합하기 전에 전체 규칙 세트가 충족될 때까지 기다립니다. 리포지토리에서 자동 병합을 허용해야 하며, 사용할 수 없으면 Fusion은 안전하게 실패합니다. 기본값: 비활성화됨."
     },
     "mergeManually": "수동으로 병합",
     "mobileNav": {
@@ -6500,7 +6537,9 @@
       "webhookFormatHint": "",
       "agentClarification": "",
       "agentClarificationEnable": "",
-      "agentClarificationHint": ""
+      "agentClarificationHint": "",
+      "wedgeNotificationSettleMs": "터미널 교착 상태 안정화 대기 시간(밀리초)",
+      "wedgeNotificationSettleMsHelp": "운영자에게 알리기 전에 터미널 실패가 지속되어야 하는 시간입니다. 0 = 즉시 알림. 기본값: 300000(5분)."
     },
     "plugins": {
       "fusionPlugins": "",
@@ -6965,7 +7004,9 @@
       "modelFailed": "",
       "runtimeModuleMissing": "",
       "runtimePlatformLoadFailed": "",
-      "runtimeIncompatible": ""
+      "runtimeIncompatible": "The installed voice runtime is incompatible. Repair it, then re-check the runtime.",
+      "recheckRuntime": "Re-check runtime",
+      "recheckingRuntime": "Re-checking runtime…"
     }
   },
   "setup": {

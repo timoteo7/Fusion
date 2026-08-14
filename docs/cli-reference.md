@@ -6,7 +6,7 @@ Fusion’s command-line interface is exposed through the `fn` command.
 
 ## `fn computer` — local desktop automation
 
-`fn computer` discovers and operates local desktop application windows through a **snapshot → act → snapshot** loop. It is supported on macOS only; other platforms report an honest unsupported capability. Every command supports `--json` and returns the versioned computer-use envelope. See the full [Computer Use reference](./computer-use.md) for setup, permissions, output shapes, snapshot safety, and error handling.
+`fn computer` discovers and operates local desktop application windows through an enforced **snapshot → act → snapshot** loop: each successful action consumes its capture, so a fresh `get-app-state` is required before the next element action. It is supported on macOS only; other platforms report an honest unsupported capability. Every command supports `--json` and returns the versioned computer-use envelope. See the full [Computer Use reference](./computer-use.md) for setup, permissions, output shapes, snapshot safety, and error handling.
 
 ```bash
 fn computer capabilities --json

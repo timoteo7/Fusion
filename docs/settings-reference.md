@@ -54,10 +54,13 @@ See [Signals Connectors](./signals-connectors.md) for setup, signing, payload, a
 while disabled. `model` defaults to registry identifier `"parakeet-v3"` and `language` to `"en"`;
 unsupported values are rejected and never become URLs or paths. An installed model is not by itself
 sufficient: Project Settings enables the toggle only after the optional `sherpa-onnx-node` runtime
-loads successfully. A missing module, platform-addon load failure, or incompatible runtime leaves
-voice disabled with a recovery message; install or reinstall a supported Fusion package for the
-current platform, then reopen Settings. The optional sherpa runtime and user-scoped cache degrade to
-unavailable safely. Downloads are on demand and require a pinned SHA-256;
+loads successfully. The runtime probe unwraps `sherpa-onnx-node`'s CommonJS binding, so
+`runtime-incompatible` now indicates a genuinely broken addon rather than a healthy package's ESM
+namespace shape. A missing module, platform-addon load failure, or incompatible runtime leaves voice
+disabled with a recovery message. After repairing an install, use **Re-check runtime** in Settings to
+retry a previously failed import without restarting; Node retains successfully resolved native modules,
+so a resolved-but-broken addon still requires a Fusion restart. The optional sherpa runtime and
+user-scoped cache degrade to unavailable safely. Downloads are on demand and require a pinned SHA-256;
 unpinned assets refuse download. The default asset is upstream `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2`
 (~465 MB), verified against its pinned SHA-256 before installation. Status polling reports
 `queued`/`downloading`; deleting fences an in-flight download. Voice chunks alone allow 2 MiB JSON,
@@ -473,6 +476,7 @@ Security-sensitive file-browser escape hatches are project-only. `allowAbsoluteF
 | `enginePaused` | `boolean` | `false` | Soft pause: stop dispatching new work while letting active sessions finish. While paused (including shared pause windows with `globalPause`), stuck-task polling/timers are suspended so paused wall-clock time does not count against `taskStuckTimeoutMs`. Clearing pause state resumes runtime scheduling and gives tracked active sessions a fresh stuck-task grace window before normal detection resumes; when `autoMerge` is enabled, eligible `in-review` tasks are re-swept into the auto-merge queue (paused/blocked/failed review tasks remain skipped). |
 | `maxConcurrent` | `number` | `2` | Max concurrency for top-level working agents per project across planning, execution, and review/merge. Nested helper agents remain parent-internal and may temporarily exceed this displayed count. Editable from Settings, Command Center, and Engine Control. |
 | `maxRecommendationsPerTask` | `number` | `3` | Project-scoped maximum accepted completion recommendations per task. Integers **0–20** only; `0` disables recommendation capture and `1–20` bounds task-ready out-of-scope suggestions. |
+| `recommendationMailboxNoticeEnabled` | `boolean` | `true` | Send a best-effort, non-blocking mailbox notice after accepted completion captures a non-empty recommendation set. Disabling it suppresses only the notice; recommendation capture and storage are unchanged. |
 | `maxConcurrentVerifications` | `number` | `1` | Max concurrent verification subprocesses (`fn_run_verification`, merge test/build commands) process-wide. Caps stacked monorepo typecheck/build so concurrent tasks do not peg host CPU. Range **1–8** (clamped at runtime and in Settings). Editable from Settings → Scheduling. Each project engine registers its cap; the effective process limit is the **minimum** of registered project caps. |
 | `maxTriageConcurrent` | `number` | `2` | Legacy persisted value; ignored. Planning shares `maxConcurrent` and no Max Triage control is displayed. |
 | `globalMaxConcurrent` | `number` | `4` | System-wide max concurrent agents across all projects. |
@@ -751,6 +755,10 @@ GitLab configuration examples: leave both URL fields blank for GitLab.com (`http
 | `autoBackupDir` | `string` | `".fusion/backups"` | Relative directory beneath the global Fusion directory. |
 
 > **Scope:** Database Backups are global because PostgreSQL is one shared cluster. Settings → Database Backups writes one global policy and stores its default dumps under `~/.fusion/backups`; Memory Backups remain project-scoped. Existing project overrides should be reviewed during upgrade before removing them.
+
+Settings → Database Backups shows the newest backup inventory (filename, creation time, and size) along with automatic-schedule evidence: enabled state, cron expression, next and last run, most recent result, and run count. An empty inventory and listing error are shown explicitly. If an enabled policy has no registered shared routine, the screen warns that restarting Fusion or saving the backup settings will reconcile it.
+
+Fusion reconciles the shared Database Backup routine during engine startup. Saving unchanged backup settings preserves the existing next-run timestamp, so frequent global-settings saves cannot indefinitely postpone an otherwise due backup.
 
 Database backups work with both external PostgreSQL and Fusion's default embedded PostgreSQL deployment. `fn backup` and the built-in **Database Backup** cron/routine use `pg_dump` and `pg_restore`; install PostgreSQL client tools or configure their paths so both executables are available on `PATH`. They are not bundled with `embedded-postgres`.
 

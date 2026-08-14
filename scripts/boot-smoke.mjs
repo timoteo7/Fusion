@@ -28,10 +28,11 @@
  * captured child stderr on stdout for CI logs.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -57,6 +58,61 @@ const SHUTDOWN_TIMEOUT_MS = 15_000;
 // Ephemeral-port TOCTOU: retry the whole boot with a fresh port when the
 // child loses the bind race (EADDRINUSE).
 const BOOT_ATTEMPTS = 3;
+const TIMINGS_ENABLED = process.env.BOOT_SMOKE_TIMINGS === "1";
+
+/*
+ * FNXC:BootSmoke 2026-08-13-02:23:
+ * FN-9020 measured the post-W32 boot-smoke regression phase by phase. `fn init`
+ * and `fn --help` are independent CLI processes, so serializing them charged both
+ * imports to every gate run without adding proof. Start them together, wait for
+ * both original assertions, then boot serve only after init has written its marker.
+ * The optional timings flag keeps normal merge-gate output unchanged while leaving
+ * future regressions attributable without a wall-clock test threshold.
+ */
+export function createBootSmokePhasePlan({ attempt = 1, dataDir = "cold" } = {}) {
+  return [
+    { name: "help", assertion: "help-exits-0-and-mentions-serve", concurrency: "preflight" },
+    { name: "init", assertion: "init-settles-and-writes-project-marker", concurrency: "preflight", dataDir },
+    { name: "serve", assertion: "health-200", dependsOn: ["init"], attempt },
+    { name: "shutdown", assertion: "sigterm-delivered-and-clean-exit", dependsOn: ["serve"] },
+  ];
+}
+
+/*
+ * FNXC:BootSmoke 2026-08-13-02:32:
+ * FN-9020 requires the phase plan to control production scheduling, not merely
+ * describe it for tests. Dispatch every independent preflight before awaiting
+ * either result; a serialized await would restore the avoidable CLI-import cost
+ * while retaining all four smoke assertions.
+ */
+export async function runPreflightPhasePlan(plan, runPhase) {
+  const preflight = plan.filter((phase) => phase.concurrency === "preflight");
+  return Object.fromEntries(await Promise.all(
+    preflight.map(async (phase) => [phase.name, await runPhase(phase)]),
+  ));
+}
+
+/** Construct the isolated child environment without retaining ambient database or port state. */
+export function createChildEnv(baseEnv, isolatedHome) {
+  return {
+    ...baseEnv,
+    HOME: isolatedHome,
+    FUSION_SKIP_ONBOARDING: "1",
+    DATABASE_URL: undefined,
+    FUSION_NO_EMBEDDED_PG: undefined,
+    PORT: undefined,
+  };
+}
+
+/** Return the deterministic init assertion failure, or null when its liveness proof holds. */
+export function classifyInitFailure(init, projectMarkerExists) {
+  const output = `${init.stdout ?? ""}${init.stderr ?? ""}`;
+  if (init.error) return "process-error";
+  if (init.status !== 0) return "non-zero-exit";
+  if (/Detected unsettled top-level await/.test(output)) return "unsettled-top-level-await";
+  if (!projectMarkerExists) return "missing-project-marker";
+  return null;
+}
 
 function parsePortList(raw) {
   return String(raw ?? "")
@@ -110,6 +166,23 @@ async function getEphemeralPort() {
   throw new Error("could not obtain a non-reserved ephemeral port");
 }
 
+function createPhaseTimer() {
+  const timings = {};
+  return {
+    async measure(name, run) {
+      const startedAt = performance.now();
+      try {
+        return await run();
+      } finally {
+        timings[name] = Math.round(performance.now() - startedAt);
+      }
+    },
+    report(attempt) {
+      if (TIMINGS_ENABLED) console.log(`boot-smoke: timings attempt ${attempt} ${JSON.stringify(timings)}`);
+    },
+  };
+}
+
 function fail(message, stderr = "") {
   console.error(`boot-smoke: FAIL — ${message}`);
   if (stderr.trim()) {
@@ -140,20 +213,7 @@ async function pollHealth(port, deadline) {
 }
 
 async function main() {
-  // 1. CLI answers --help.
-  const help = spawnSync(process.execPath, [cliBin, "--help"], {
-    encoding: "utf8",
-    timeout: 30_000,
-  });
-  if (help.status !== 0) {
-    fail(`\`fn --help\` exited ${help.status ?? `signal ${help.signal}`}`, help.stderr ?? "");
-  }
-  if (!/serve/i.test(help.stdout ?? "")) {
-    fail("`fn --help` output does not mention the serve command", help.stderr ?? "");
-  }
-  console.log("boot-smoke: `fn --help` OK");
-
-  // 2. Real server boot on an ephemeral port with isolated HOME/project state.
+  // Real server boot on an ephemeral port with isolated HOME/project state.
   // The ephemeral-port probe is inherently TOCTOU (probe closes before the
   // server binds), so an EADDRINUSE loss on a busy machine retries with a
   // fresh port instead of failing the gate.
@@ -183,53 +243,84 @@ async function main() {
  * Returns "retry-port" when the child lost the ephemeral-port race
  * (EADDRINUSE); calls fail() (which exits) on any real failure.
  */
+/** Spawn a bounded CLI preflight command while collecting the output its assertion needs. */
+async function runCli(command, args, options) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliBin, ...args], {
+      ...options,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timeout;
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    child.stdout.on("data", (data) => (stdout += data));
+    child.stderr.on("data", (data) => (stderr += data));
+    child.once("error", (error) => settle({ error, status: null, signal: null, stdout, stderr }));
+    child.once("exit", (status, signal) => settle({ error: null, status, signal, stdout, stderr }));
+    timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      settle({ error: new Error(`${command} timed out`), status: null, signal: "SIGKILL", stdout, stderr });
+    }, options.timeout);
+  });
+}
+
 async function bootAndVerify(attempt, registerCleanup) {
+  const timer = createPhaseTimer();
   const port = await getEphemeralPort();
   const isolatedHome = mkdtempSync(path.join(tmpdir(), "fusion-boot-smoke-home-"));
   const isolatedProject = mkdtempSync(path.join(tmpdir(), "fusion-boot-smoke-project-"));
   let stderrBuf = "";
-  const childEnv = {
-    ...process.env,
-    HOME: isolatedHome,
-    FUSION_SKIP_ONBOARDING: "1",
-    // FNXC:BackendFlip 2026-06-26-14:55:
-    // Force the smoke to exercise the embedded PostgreSQL backend. Unset
-    // DATABASE_URL so a developer's external DB connection never leaks in
-    // (the smoke must prove the zero-config embedded path boots). Unset
-    // FUSION_NO_EMBEDDED_PG so the smoke cannot be opted out by an
-    // inherited env var — the embedded default is what the gate must prove.
-    DATABASE_URL: undefined,
-    FUSION_NO_EMBEDDED_PG: undefined,
-    // Make sure nothing inherits a PORT that fights the explicit flag.
-    PORT: undefined,
-  };
+  // FNXC:BackendFlip 2026-06-26-14:55:
+  // Force the smoke to exercise the embedded PostgreSQL backend. Unset
+  // DATABASE_URL so a developer's external DB connection never leaks in
+  // (the smoke must prove the zero-config embedded path boots). Unset
+  // FUSION_NO_EMBEDDED_PG so the smoke cannot be opted out by an
+  // inherited env var — the embedded default is what the gate must prove.
+  const childEnv = createChildEnv(process.env, isolatedHome);
 
   registerCleanup(() => {
     removeTempDir(isolatedHome);
     removeTempDir(isolatedProject);
   });
 
-  /*
-   * FNXC:CliAwaitLiveness 2026-08-11-09:30:
-   * CI already uses Node 24; it missed FN-8954 because help-only smoke never
-   * ran `fn init`. Share this attempt's isolated HOME with serve so cold initdb
-   * is paid once while the check detects exit 13 before project registration.
-   */
-  const init = spawnSync(process.execPath, [cliBin, "init", "--name", "boot-smoke", "--path", isolatedProject], {
-    cwd: isolatedProject,
-    env: childEnv,
-    encoding: "utf8",
-    timeout: HEALTH_TIMEOUT_MS,
-  });
-  const initOutput = `${init.stdout ?? ""}${init.stderr ?? ""}`;
-  if (init.error || init.status !== 0 || /Detected unsettled top-level await/.test(initOutput)) {
-    fail(
-      `\`fn init\` exited ${init.status ?? `signal ${init.signal ?? "timeout"}`}`,
-      `${init.error?.message ? `${init.error.message}\n` : ""}${initOutput}`,
-    );
+  // Both preflight commands must settle, but neither consumes the other's state.
+  // Keep init's isolated HOME for serve; only their process startup overlaps.
+  const preflightRuns = await runPreflightPhasePlan(
+    createBootSmokePhasePlan({ attempt }),
+    (phase) => {
+      if (phase.name === "help") {
+        return timer.measure(phase.name, () => runCli("fn --help", ["--help"], { timeout: 30_000 }));
+      }
+      return timer.measure(phase.name, () => runCli("fn init", ["init", "--name", "boot-smoke", "--path", isolatedProject], {
+        cwd: isolatedProject,
+        env: childEnv,
+        timeout: HEALTH_TIMEOUT_MS,
+      }));
+    },
+  );
+  const { help, init } = preflightRuns;
+  if (help.error || help.status !== 0) {
+    fail(`\`fn --help\` exited ${help.status ?? `signal ${help.signal ?? "timeout"}`}`, `${help.error?.message ? `${help.error.message}\n` : ""}${help.stderr ?? ""}`);
   }
-  if (!existsSync(path.join(isolatedProject, ".fusion", "project.json"))) {
-    fail("`fn init` did not write .fusion/project.json", initOutput);
+  if (!/serve/i.test(help.stdout ?? "")) {
+    fail("`fn --help` output does not mention the serve command", help.stderr ?? "");
+  }
+  console.log("boot-smoke: `fn --help` OK");
+
+  const initOutput = `${init.stdout ?? ""}${init.stderr ?? ""}`;
+  const initFailure = classifyInitFailure(init, existsSync(path.join(isolatedProject, ".fusion", "project.json")));
+  if (initFailure) {
+    const message = initFailure === "missing-project-marker"
+      ? "`fn init` did not write .fusion/project.json"
+      : `\`fn init\` exited ${init.status ?? `signal ${init.signal ?? "timeout"}`}`;
+    fail(message, `${init.error?.message ? `${init.error.message}\n` : ""}${initOutput}`);
   }
   console.log("boot-smoke: `fn init` OK");
 
@@ -272,18 +363,19 @@ async function bootAndVerify(attempt, registerCleanup) {
   });
 
   try {
-    await Promise.race([
+    await timer.measure("serve-to-health-200", () => Promise.race([
       pollHealth(port, Date.now() + HEALTH_TIMEOUT_MS),
       exitedEarly.then(({ code, signal }) => {
         throw new Error(`server exited before becoming healthy (${code ?? `signal ${signal}`})`);
       }),
-    ]);
+    ]));
   } catch (err) {
     if (/EADDRINUSE/.test(stderrBuf) && attempt < BOOT_ATTEMPTS) {
       console.log(`boot-smoke: port :${port} lost to another process (EADDRINUSE), retrying with a fresh port (attempt ${attempt}/${BOOT_ATTEMPTS})`);
       await exitedEarly; // child is already dead or dying; wait so cleanup is race-free
       removeTempDir(isolatedHome);
       removeTempDir(isolatedProject);
+      timer.report(attempt);
       return "retry-port";
     }
     fail(err.message, stderrBuf);
@@ -300,12 +392,12 @@ async function bootAndVerify(attempt, registerCleanup) {
   } catch {
     // ESRCH: server already exited — sigtermSent stays false and fails below.
   }
-  const { code, signal } = await Promise.race([
+  const { code, signal } = await timer.measure("sigterm-to-exit", () => Promise.race([
     exitedEarly,
     new Promise((resolve) =>
       setTimeout(() => resolve({ code: null, signal: "timeout" }), SHUTDOWN_TIMEOUT_MS),
     ),
-  ]);
+  ]));
   if (!sigtermSent) {
     fail(`server exited on its own after the health check (${code ?? `signal ${signal}`}) — SIGTERM shutdown could not be verified`, stderrBuf);
   }
@@ -317,6 +409,7 @@ async function bootAndVerify(attempt, registerCleanup) {
     fail(`server exited uncleanly on SIGTERM (${code ?? `signal ${signal}`})`, stderrBuf);
   }
   console.log(`boot-smoke: clean shutdown (${code ?? signal})`);
+  timer.report(attempt);
   return "ok";
 }
 

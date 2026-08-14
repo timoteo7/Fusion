@@ -300,24 +300,46 @@ router.post("/maintenance/legacy-automerge-stamps/apply", async (req, res) => {
 router.get("/backups", async (req, res) => {
   try {
     const { store: scopedStore } = await getProjectContext(req);
-    const { createBackupManager, resolveGlobalBackupRoot } = await import("@fusion/core");
+    const {
+      BACKUP_SCHEDULE_NAME,
+      GlobalRoutineStore,
+      buildBackupScheduleStatus,
+      createBackupManager,
+      resolveGlobalBackupRoot,
+    } = await import("@fusion/core");
     const settings = await scopedStore.getSettings();
-    const manager = createBackupManager(resolveGlobalBackupRoot(scopedStore), settings);
-    const backups = await manager.listBackups();
+    const asyncLayer = scopedStore.getAsyncLayer?.();
+    const routine = asyncLayer
+      ? await new GlobalRoutineStore(asyncLayer).getByName(BACKUP_SCHEDULE_NAME)
+      : undefined;
+    const schedule = buildBackupScheduleStatus(settings, routine);
 
-    // Calculate total size
-    const totalSize = backups.reduce((sum, b) => sum + b.size, 0);
-
-    res.json({
-      backups,
-      count: backups.length,
-      totalSize,
-    });
+    /*
+    FNXC:SettingsBackups 2026-08-13-23:51:
+    Backup inventory failures must not hide schedule evidence. Operators need to
+    distinguish an unavailable listing backend from an unregistered routine.
+    */
+    try {
+      const manager = createBackupManager(resolveGlobalBackupRoot(scopedStore), settings);
+      const backups = (await manager.listBackups()).sort((left, right) =>
+        Date.parse(right.createdAt) - Date.parse(left.createdAt),
+      );
+      const totalSize = backups.reduce((sum, backup) => sum + backup.size, 0);
+      res.json({ backups, count: backups.length, totalSize, schedule });
+    } catch (err: unknown) {
+      res.json({
+        backups: [],
+        count: 0,
+        totalSize: 0,
+        schedule,
+        listError: err instanceof Error ? err.message : "Unable to list backups",
+      });
+    }
   } catch (err: unknown) {
     if (err instanceof ApiError) {
       throw err;
     }
-    rethrowAsApiError(err, "Failed to list backups");
+    rethrowAsApiError(err, "Failed to load backup schedule");
   }
 });
 

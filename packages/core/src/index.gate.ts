@@ -1445,11 +1445,13 @@ export {
   runBackupCommand,
   syncBackupAutomation,
   syncBackupRoutine,
+  planBackupRoutineSync,
+  buildBackupScheduleStatus,
   BACKUP_SCHEDULE_NAME,
   resolveBackendConnectionString,
   resolveGlobalBackupRoot,
 } from "./backup/backup.js";
-export type { BackupInfo, BackupOptions, BackupFileInfo, BackupPairInfo } from "./backup/backup.js";
+export type { BackupInfo, BackupOptions, BackupFileInfo, BackupPairInfo, BackupRoutineSyncPlan, BackupScheduleStatus } from "./backup/backup.js";
 export { GlobalRoutineStore } from "./automation/global-routine-store.js";
 export { migrateBackupSettingsToGlobalOnce, planBackupSettingsMigration, resolveBackupSettingsMigrationConflict } from "./backup/backup-settings-migration.js";
 export type { BackupSettingKey } from "./backup/backup-settings-migration.js";

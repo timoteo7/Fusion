@@ -356,6 +356,46 @@ export async function readTaskRow(
  * @param id The task id to read.
  * @param options Optional: includeDeleted surfaces soft-deleted rows.
  */
+/**
+ * FNXC:TaskRecommendations 2026-08-13-22:23:
+ * Claim replay used to scan the whole task table, making recommendation creation hang.
+ * The partial (project_id, proposal_claim_id) unique index permits at most one match;
+ * project scope is load-bearing because task identity is composite across projects.
+ */
+export async function readTaskRowByProposalClaimId(
+  layer: AsyncDataLayer,
+  proposalClaimId: string,
+  options?: { includeDeleted?: boolean },
+): Promise<Record<string, unknown> | undefined> {
+  const conditions = [eq(schema.project.tasks.proposalClaimId, proposalClaimId)];
+  if (!options?.includeDeleted) conditions.push(ACTIVE_TASK_FILTER);
+  const projectScope = taskProjectScope(layer);
+  if (projectScope) conditions.push(projectScope);
+  const rows = await layer.db.select().from(schema.project.tasks).where(and(...conditions));
+  return rows[0];
+}
+
+/** Read source-lineage candidates without a board-wide scan; tombstones intentionally participate. */
+export async function readTaskRowsBySourceLineage(
+  layer: AsyncDataLayer,
+  input: { sourceAgentId?: string | null; sourceParentTaskId?: string | null },
+): Promise<Record<string, unknown>[]> {
+  const predicates = [
+    input.sourceAgentId ? eq(schema.project.tasks.sourceAgentId, input.sourceAgentId) : undefined,
+    input.sourceParentTaskId ? eq(schema.project.tasks.sourceParentTaskId, input.sourceParentTaskId) : undefined,
+  ].filter((predicate): predicate is SQL => predicate !== undefined);
+  if (predicates.length === 0) return [];
+  /* FNXC:TaskRecommendations 2026-08-13-22:23: SQL pre-narrowing is equivalent to the
+   * existing JS filter; cold archives have no lineage fields and never matched old scans. */
+  const scope = taskProjectScope(layer);
+  return layer.db.select({
+    id: schema.project.tasks.id, title: schema.project.tasks.title, description: schema.project.tasks.description,
+    column: schema.project.tasks.column, createdAt: schema.project.tasks.createdAt,
+    sourceAgentId: schema.project.tasks.sourceAgentId, sourceParentTaskId: schema.project.tasks.sourceParentTaskId,
+    deletedAt: schema.project.tasks.deletedAt, allowResurrection: schema.project.tasks.allowResurrection,
+  }).from(schema.project.tasks).where(and(scope, sql`(${predicates.reduce((left, right) => sql`${left} OR ${right}`)})`));
+}
+
 export async function readTaskRowInTransaction(
   tx: DbTransaction,
   id: string,

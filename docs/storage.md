@@ -841,3 +841,7 @@ Revision listing defaults to 100 rows and clamps `limit` to 1–500. The API acc
 Project-scoped structured recall records for durable decisions, preferences, and solutions. The table uses the composite `(project_id, id)` key, row-level security, created-at indexes, and a named `(project_id, kind, content_hash)` exact-hash backstop. `graph_node_ids` stores graph cross-references; Memory Keeper merges new IDs under a per-record advisory transaction lock, so identifiers only grow and an unchanged union does not update the row.
 
 - Knowledge-graph artifact: `<rootDir>/.fusion-knowledge/graph/` (`nodes.json`, `edges.json`, and `manifest.json`). This is deliberately outside ignored `.fusion` and may be committed at the operator's discretion.
+
+### Bounded task-intake lookups
+
+Recommendation proposal claims use the indexed `findTaskByProposalClaimId` read (`uqTasksProjectProposalClaimId`), and same-agent intake reads only matching source lineage (`idxTasksProjectSourceAgentId` and `idxTasksSourceParentTaskId`). Do not replace either read with a `listTasks()` scan. Workflow terminal flags for intake duplicate checks are derived from workflow definitions, not board rows. Guarded-intake near-duplicate checks must remain bounded to their candidates (the fallback is `limit: 50`) and must not hydrate the full board.

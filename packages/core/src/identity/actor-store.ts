@@ -183,7 +183,7 @@ export async function setActorStatus(
 ): Promise<Actor | null> {
   /*
   FNXC:IdentityGrantEscalation 2026-08-09-03:04:
-  The WHOLE transaction runs on the owner connection, not just its grant write. 0059 revoked the
+  The WHOLE transaction runs on the owner connection, not just its grant write. 0060 revoked the
   runtime role's write on `project.actor_role_grants`, so the `revokeActorRoleGrants` call below
   fails with 42501 on `transactionImmediate`; and because the privileged handle is a SEPARATE
   connection, splitting the status write from the grant revoke would give two transactions — a
@@ -329,7 +329,7 @@ export async function grantActorRole(
   handle?: QueryHandle,
 ): Promise<ActorRoleGrant> {
   if (isReservedActorId(input.actorId)) throw new ReservedActorIdError(input.actorId);
-  // Owner connection: 0059 revokes this table's write from `fusion_runtime`, the role `layer.db`
+  // Owner connection: 0060 revokes this table's write from `fusion_runtime`, the role `layer.db`
   // connects as. Safe there because `project_id` is set explicitly below — that connection bypasses
   // project isolation, so neither RLS nor the assign-project trigger would confine this row.
   const db = handle ?? layer.privilegedDb ?? layer.db;
@@ -406,7 +406,7 @@ export async function revokeActorRole(
   FNXC:IdentityGrantEscalation 2026-08-09-03:04:
   The project scope is EXPLICIT, and that is load bearing. This statement previously carried no
   project predicate and relied on the RLS policy to confine it, which worked only because it ran on
-  the runtime connection. The owner connection required here (0059 revoked the runtime role's write)
+  the runtime connection. The owner connection required here (0060 revoked the runtime role's write)
   bypasses isolation, so the unscoped statement would have quietly revoked this role for the actor in
   EVERY project — a single-project admin action going global with no error and no diff at the call
   site. Contrast {@link revokeActorRoleGrants}, which is deliberately cross-project.

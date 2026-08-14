@@ -3225,7 +3225,16 @@
     "unarchiveLabel": "取消存檔此洞察",
     "unarchiveTitle": "取消存檔此洞察",
     "unarchiving": "正在取消存檔\"{{title}}\"...",
-    "usePlanningDefault": "使用規劃預設值"
+    "usePlanningDefault": "使用規劃預設值",
+    "recommendations": {
+      "title": "",
+      "count": "",
+      "source": "",
+      "loadMore": "",
+      "loadingMore": "",
+      "loadMoreFailed": "",
+      "truncated": ""
+    }
   },
   "interview": {
     "addContextDirection": "添加任何額外的上下文或方向...",
@@ -3599,7 +3608,20 @@
     "testSearchHint": "執行與代理使用的相同 qmd 支援的 memory_search 路徑。",
     "title": "記憶",
     "totalInsights": "洞察總數",
-    "workingMemoryLabel": "工作記憶"
+    "workingMemoryLabel": "工作記憶",
+    "tabGraph": "Knowledge Graph",
+    "graphLoading": "Loading knowledge graph…",
+    "graphUnavailable": "Graph unavailable",
+    "graphBuild": "Build graph",
+    "graphNodes": "nodes",
+    "graphEdges": "edges",
+    "graphForce": "Force rebuild",
+    "graphRebuilding": "Rebuilding…",
+    "graphRebuild": "Rebuild",
+    "graphFilters": "Graph filters",
+    "graphClearFilters": "Clear filters",
+    "graphResults": "results",
+    "graphNoResults": "No matching nodes."
   },
   "merge": {
     "advanced": "進階",
@@ -5812,7 +5834,6 @@
       "backupDirectory": "",
       "backupNow": "立即備份",
       "backups": "",
-      "backupS": "",
       "backupScheduleCron": "",
       "creating": "建立中…",
       "cronExpressionForBackupTimingDefault02": "",
@@ -5840,11 +5861,23 @@
       "projectOnlyFusionMemory": "",
       "retentionCount": "",
       "totalSize": "",
-      "view": "",
       "whenEnabledProjectAndAgentMemoryFilesAre": "",
       "whenEnabledTheDatabaseIsBackedUpAutomatically": "",
       "createFailed": "",
-      "memoryBackupScopeHint": ""
+      "memoryBackupScopeHint": "",
+      "scheduleStatus": "",
+      "status": "",
+      "on": "",
+      "off": "",
+      "cron": "",
+      "nextRun": "",
+      "lastRun": "",
+      "succeeded": "",
+      "failed": "",
+      "lastOutput": "",
+      "runCount": "",
+      "scheduleNotRegistered": "",
+      "noBackupsYet": ""
     },
     "clearToDefault": "",
     "cliAgents": {
@@ -6030,7 +6063,9 @@
       "refinementTaskWorkflow": "",
       "refinementTaskWorkflowHelp": "",
       "maxRecommendationsPerTask": "",
-      "maxRecommendationsPerTaskHelp": ""
+      "maxRecommendationsPerTaskHelp": "",
+      "recommendationMailboxNoticeEnabled": "",
+      "recommendationMailboxNoticeEnabledHelp": ""
     },
     "globalGeneral": {
       "andShowsUpdateNoticesInTheCLIAnd": "",
@@ -6381,7 +6416,9 @@
       "sameAsIntegrationBranchDefault": "",
       "pushTargetBranchHelp": "",
       "requiredChecks": "",
-      "requiredChecksHelp": ""
+      "requiredChecksHelp": "",
+      "githubNativeAutoMerge": "使用 GitHub 原生自動合併",
+      "githubNativeAutoMergeHelp": "GitHub 會在合併前等待完整規則集。儲存庫必須允許自動合併；若無法使用，Fusion 會採取安全失敗。預設：停用。"
     },
     "mergeManually": "手動合併",
     "mobileNav": {
@@ -6500,7 +6537,9 @@
       "webhookFormatHint": "",
       "agentClarification": "",
       "agentClarificationEnable": "",
-      "agentClarificationHint": ""
+      "agentClarificationHint": "",
+      "wedgeNotificationSettleMs": "終端卡滯穩定等待視窗（毫秒）",
+      "wedgeNotificationSettleMsHelp": "在通知操作員前，終端失敗必須持續多久。0 = 立即通知。預設：300000（5 分鐘）。"
     },
     "plugins": {
       "fusionPlugins": "",
@@ -6965,7 +7004,9 @@
       "modelFailed": "",
       "runtimeModuleMissing": "",
       "runtimePlatformLoadFailed": "",
-      "runtimeIncompatible": ""
+      "runtimeIncompatible": "The installed voice runtime is incompatible. Repair it, then re-check the runtime.",
+      "recheckRuntime": "Re-check runtime",
+      "recheckingRuntime": "Re-checking runtime…"
     }
   },
   "setup": {

@@ -10,6 +10,10 @@ import { MacosComputerAdapter } from "../computer/adapter-macos.js";
 const projectRoot = "/not-a-real-project";
 const seam = { run: vi.fn() };
 const clock = { now: () => new Date("2026-08-11T03:34:00.000Z") };
+const testApp = { bundleId: "com.example.App", name: "App", pid: 4 };
+const testWindow = { window: { windowId: "window-7", windowIndex: 0, title: "Window", bounds: null, minimized: false }, handle: { appTarget: "App", windowId: "window-7", windowIndex: 0 } };
+const testLocator = { kind: "ax-path" as const, path: "window[0]/AXButton[3]", role: "AXButton", subrole: null, identifier: null, title: "Go" };
+const testElement = { element: { index: 3, role: "AXButton", title: "Go", value: null, label: null, enabled: true, focused: false, bounds: { x: 1, y: 2, width: 3, height: 4 }, actions: [], locator: testLocator }, handle: testLocator.path };
 
 function fakeMacosAdapter(): ComputerAdapter {
   return {
@@ -86,6 +90,38 @@ describe("computer adapter registry", () => {
     expect(locatorSeam.run.mock.calls[1]![1]).toEqual(expect.arrayContaining(["resolve-locator", "window-7", "window[0]/AXButton[3]"]));
   });
 
+  it.each([
+    ["TIMEOUT", { stdout: "", stderr: "", exitCode: 0, timedOut: true }],
+    ["PERMISSION_UNVERIFIED", { stdout: "", stderr: "not allowed assistive access", exitCode: 1, timedOut: false }],
+  ])("preserves %s from locator replay instead of reporting an unresolvable element", async (code, replay) => {
+    const locatorSeam = { run: vi.fn()
+      .mockResolvedValueOnce({ stdout: '{"accessibility":true,"screenRecording":true}', stderr: "", exitCode: 0, timedOut: false })
+      .mockResolvedValueOnce(replay) };
+    const adapter = new MacosComputerAdapter({ seam: locatorSeam, clock, projectRoot });
+    await expect(adapter.resolveLocator(testWindow, testLocator)).rejects.toMatchObject({ code });
+  });
+
+  it("preserves a missing osascript denial from locator replay", async () => {
+    const missing = Object.assign(new Error("spawn osascript ENOENT"), { code: "ENOENT" });
+    const locatorSeam = { run: vi.fn()
+      .mockResolvedValueOnce({ stdout: '{"accessibility":true,"screenRecording":true}', stderr: "", exitCode: 0, timedOut: false })
+      .mockRejectedValueOnce(missing) };
+    const adapter = new MacosComputerAdapter({ seam: locatorSeam, clock, projectRoot });
+    await expect(adapter.resolveLocator(testWindow, testLocator)).rejects.toMatchObject({ code: "PERMISSION_DENIED", details: { missingBinary: "osascript" } });
+  });
+
+  it.each([
+    ["identity drift", { element: { role: "AXTextField", locator: { path: testLocator.path, subrole: null, identifier: null } } }],
+    ["non-live element", { element: null }],
+  ])("maps locator replay %s to ELEMENT_UNRESOLVABLE without another automation call", async (_name, replay) => {
+    const locatorSeam = { run: vi.fn()
+      .mockResolvedValueOnce({ stdout: '{"accessibility":true,"screenRecording":true}', stderr: "", exitCode: 0, timedOut: false })
+      .mockResolvedValueOnce({ stdout: JSON.stringify(replay), stderr: "", exitCode: 0, timedOut: false }) };
+    const adapter = new MacosComputerAdapter({ seam: locatorSeam, clock, projectRoot });
+    await expect(adapter.resolveLocator(testWindow, testLocator)).rejects.toMatchObject({ code: "ELEMENT_UNRESOLVABLE", remediation: expect.stringContaining("get-app-state") });
+    expect(locatorSeam.run).toHaveBeenCalledTimes(2);
+  });
+
   it.each([["left", 123], ["right", 124], ["up", 126], ["down", 125]] as const)("passes %s scroll direction to the static four-way JXA mapping", async (direction, keyCode) => {
     const scrollSeam = { run: vi.fn()
       .mockResolvedValueOnce({ stdout: '{"accessibility":true,"screenRecording":true}', stderr: "", exitCode: 0, timedOut: false })
@@ -124,13 +160,60 @@ describe("computer adapter registry", () => {
     }
   });
 
-  it("reports a missing osascript as unknown permissions and blocks automation", async () => {
+  it("reports a missing osascript as unknown permissions", async () => {
     const missing = Object.assign(new Error("spawn osascript ENOENT"), { code: "ENOENT" });
     const missingSeam = { run: vi.fn().mockRejectedValue(missing) };
     const adapter = new MacosComputerAdapter({ seam: missingSeam, clock, projectRoot });
     await expect(adapter.permissions()).resolves.toMatchObject({ allGranted: false, checks: [{ id: "accessibility", status: "unknown", granted: false, probed: false }, { id: "screen-recording", status: "unknown", granted: false, probed: false }] });
+  });
+
+  it.each([
+    ["list apps", (adapter: MacosComputerAdapter) => adapter.listApps()],
+    ["list windows", (adapter: MacosComputerAdapter) => adapter.listWindows({ kind: "name", raw: "App", value: "App" })],
+    ["capture state", (adapter: MacosComputerAdapter) => adapter.captureState({ kind: "name", raw: "App", value: "App" }, { screenshot: true, restoreWindow: false })],
+    ["resolve locator", (adapter: MacosComputerAdapter) => adapter.resolveLocator(testWindow, testLocator)],
+    ["click", (adapter: MacosComputerAdapter) => adapter.click({ app: testApp, window: testWindow, element: testElement, snapshotId: "cs_0123456789" })],
+    ["set value", (adapter: MacosComputerAdapter) => adapter["set-value"]({ app: testApp, window: testWindow, element: testElement, snapshotId: "cs_0123456789", value: "value" })],
+    ["type text", (adapter: MacosComputerAdapter) => adapter["type-text"]({ app: testApp, text: "text" })],
+    ["press key", (adapter: MacosComputerAdapter) => adapter["press-key"]({ app: testApp, key: "enter" })],
+    ["scroll", (adapter: MacosComputerAdapter) => adapter.scroll({ app: testApp, direction: "down", amount: 1 })],
+    ["hotkey", (adapter: MacosComputerAdapter) => adapter.hotkey({ app: testApp, keys: ["cmd", "k"] })],
+    ["coordinate drag", (adapter: MacosComputerAdapter) => adapter.drag({ app: testApp, snapshotId: null, fromX: 1, fromY: 2, toX: 3, toY: 4 })],
+    ["element drag", (adapter: MacosComputerAdapter) => adapter.drag({ app: testApp, snapshotId: "cs_0123456789", window: testWindow, from: testElement, to: testElement })],
+  ])("blocks %s before automation when osascript is missing", async (_name, invoke) => {
+    const missing = Object.assign(new Error("spawn osascript ENOENT"), { code: "ENOENT" });
+    const missingSeam = { run: vi.fn().mockRejectedValue(missing) };
+    const adapter = new MacosComputerAdapter({ seam: missingSeam, clock, projectRoot });
+    await expect(invoke(adapter)).rejects.toMatchObject({ code: "PERMISSION_DENIED", details: { missingBinary: "osascript" } });
+    expect(missingSeam.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps osascript disappearing after a successful probe to a missing-binary denial", async () => {
+    const missing = Object.assign(new Error("spawn osascript ENOENT"), { code: "ENOENT" });
+    const lateFailureSeam = { run: vi.fn()
+      .mockResolvedValueOnce({ stdout: '{"accessibility":true,"screenRecording":true}', stderr: "", exitCode: 0, timedOut: false })
+      .mockRejectedValueOnce(missing) };
+    const adapter = new MacosComputerAdapter({ seam: lateFailureSeam, clock, projectRoot });
     await expect(adapter.listApps()).rejects.toMatchObject({ code: "PERMISSION_DENIED", details: { missingBinary: "osascript" } });
-    expect(missingSeam.run).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["timeout", { stdout: "", stderr: "", exitCode: 0, timedOut: true }],
+    ["non-zero exit", { stdout: "", stderr: "probe failed", exitCode: 1, timedOut: false }],
+    ["malformed JSON", { stdout: "not-json", stderr: "", exitCode: 0, timedOut: false }],
+  ])("keeps a %s permission probe unknown without treating it as a missing binary", async (_name, probe) => {
+    const probeSeam = { run: vi.fn()
+      .mockResolvedValueOnce(probe)
+      .mockResolvedValueOnce({ stdout: '{"apps":[]}', stderr: "", exitCode: 0, timedOut: false }) };
+    const adapter = new MacosComputerAdapter({ seam: probeSeam, clock, projectRoot });
+    await expect(adapter.listApps()).resolves.toEqual({ apps: [] });
+    expect(probeSeam.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a genuinely denied Accessibility result without a missing-binary marker", async () => {
+    const deniedSeam = { run: vi.fn().mockResolvedValue({ stdout: '{"accessibility":false,"screenRecording":true}', stderr: "", exitCode: 0, timedOut: false }) };
+    const adapter = new MacosComputerAdapter({ seam: deniedSeam, clock, projectRoot });
+    await expect(adapter.listApps()).rejects.toMatchObject({ code: "PERMISSION_DENIED", details: { permission: "accessibility" } });
   });
 
   it("rejects every unsupported operation, including both replay resolvers", async () => {

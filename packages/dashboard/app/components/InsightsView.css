@@ -671,3 +671,30 @@ Insights tablets at 769px–1024px were inheriting the desktop fixed category si
     overflow-y: auto;
   }
 }
+
+/*
+FNXC:TaskRecommendations 2026-08-13-04:41:
+The Insights recommendation pane keeps source identity and actions inside the established list layout,
+so desktop and horizontal mobile category rails expose the same reachable Load more control.
+*/
+.insights-recommendations__count,
+.insights-recommendations__source {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.insights-recommendations__item {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px), (max-height: 480px) {
+  .insights-recommendations .btn {
+    inline-size: 100%;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  .insights-recommendations__item {
+    min-inline-size: 0;
+  }
+}

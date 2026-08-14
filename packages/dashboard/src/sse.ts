@@ -196,12 +196,20 @@ export function stripTaskListHeavyFields<T>(task: T): T {
     return task;
   }
 
-  if (!("log" in task)) {
-    return task;
+  const candidate = task as Record<string, unknown>;
+  /*
+  FNXC:PromoteVisibility 2026-08-13-22:02:
+  Release-gate verdicts are response-only GET /api/tasks enrichments. Strip one defensively at the
+  SSE boundary so a future event producer cannot persist a stale Promote approval in browser state.
+  */
+  const { releaseGate: _transientReleaseGate, ...taskWithoutReleaseGate } = candidate;
+
+  if (!("log" in taskWithoutReleaseGate)) {
+    return taskWithoutReleaseGate as T;
   }
 
-  const candidate = task as Record<string, unknown>;
-  const existingTimed = candidate.timedExecutionMs;
+  const taskCandidate = taskWithoutReleaseGate as Record<string, unknown>;
+  const existingTimed = taskCandidate.timedExecutionMs;
   // Mirror the slim REST path (listTasks): aggregate `[timing] … in <N>ms`
   // log entries before stripping the log so the board card has the same
   // total-execution figure on SSE updates as on the initial fetch.
@@ -211,15 +219,15 @@ export function stripTaskListHeavyFields<T>(task: T): T {
   const timedExecutionMs =
     typeof existingTimed === "number"
       ? existingTimed
-      : sumTimedLogEntries(candidate.log);
+      : sumTimedLogEntries(taskCandidate.log);
 
   return {
-    ...task,
+    ...taskWithoutReleaseGate,
     // FN-5105/FN-5135: preserve deletedAt in SSE slim payloads for soft-delete suppression.
     log: [],
     timedExecutionMs,
-    tokenUsage: candidate.tokenUsage,
-    workflowStepResults: candidate.workflowStepResults,
+    tokenUsage: taskCandidate.tokenUsage,
+    workflowStepResults: taskCandidate.workflowStepResults,
   } as T;
 }
 
@@ -243,7 +251,7 @@ function sumTimedLogEntries(log: unknown): number {
   return total;
 }
 
-function stripTaskEventHeavyFields<T>(payload: T): T {
+export function stripTaskEventHeavyFields<T>(payload: T): T {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return payload;
   }

@@ -3225,7 +3225,16 @@
     "unarchiveLabel": "Désarchiver cet insight",
     "unarchiveTitle": "Désarchiver cet insight",
     "unarchiving": "Désarchivage de \"{{title}}\"...",
-    "usePlanningDefault": "Utiliser la valeur par défaut de planification"
+    "usePlanningDefault": "Utiliser la valeur par défaut de planification",
+    "recommendations": {
+      "title": "",
+      "count": "",
+      "source": "",
+      "loadMore": "",
+      "loadingMore": "",
+      "loadMoreFailed": "",
+      "truncated": ""
+    }
   },
   "interview": {
     "addContextDirection": "Ajouter du contexte ou des directives supplémentaires...",
@@ -3599,7 +3608,20 @@
     "testSearchHint": "Exécute le même chemin memory_search basé sur qmd qu'utilisent les agents.",
     "title": "Mémoire",
     "totalInsights": "Total des insights",
-    "workingMemoryLabel": "Mémoire de travail"
+    "workingMemoryLabel": "Mémoire de travail",
+    "tabGraph": "Knowledge Graph",
+    "graphLoading": "Loading knowledge graph…",
+    "graphUnavailable": "Graph unavailable",
+    "graphBuild": "Build graph",
+    "graphNodes": "nodes",
+    "graphEdges": "edges",
+    "graphForce": "Force rebuild",
+    "graphRebuilding": "Rebuilding…",
+    "graphRebuild": "Rebuild",
+    "graphFilters": "Graph filters",
+    "graphClearFilters": "Clear filters",
+    "graphResults": "results",
+    "graphNoResults": "No matching nodes."
   },
   "merge": {
     "advanced": "Avancé",
@@ -5812,7 +5834,6 @@
       "backupDirectory": "",
       "backupNow": "Sauvegarder maintenant",
       "backups": "",
-      "backupS": "",
       "backupScheduleCron": "",
       "creating": "Création…",
       "cronExpressionForBackupTimingDefault02": "",
@@ -5840,11 +5861,23 @@
       "projectOnlyFusionMemory": "",
       "retentionCount": "",
       "totalSize": "",
-      "view": "",
       "whenEnabledProjectAndAgentMemoryFilesAre": "",
       "whenEnabledTheDatabaseIsBackedUpAutomatically": "",
       "createFailed": "",
-      "memoryBackupScopeHint": ""
+      "memoryBackupScopeHint": "",
+      "scheduleStatus": "",
+      "status": "",
+      "on": "",
+      "off": "",
+      "cron": "",
+      "nextRun": "",
+      "lastRun": "",
+      "succeeded": "",
+      "failed": "",
+      "lastOutput": "",
+      "runCount": "",
+      "scheduleNotRegistered": "",
+      "noBackupsYet": ""
     },
     "clearToDefault": "",
     "cliAgents": {
@@ -6030,7 +6063,9 @@
       "refinementTaskWorkflow": "",
       "refinementTaskWorkflowHelp": "",
       "maxRecommendationsPerTask": "",
-      "maxRecommendationsPerTaskHelp": ""
+      "maxRecommendationsPerTaskHelp": "",
+      "recommendationMailboxNoticeEnabled": "",
+      "recommendationMailboxNoticeEnabledHelp": ""
     },
     "globalGeneral": {
       "andShowsUpdateNoticesInTheCLIAnd": "",
@@ -6381,7 +6416,9 @@
       "sameAsIntegrationBranchDefault": "",
       "pushTargetBranchHelp": "",
       "requiredChecks": "",
-      "requiredChecksHelp": ""
+      "requiredChecksHelp": "",
+      "githubNativeAutoMerge": "Utiliser la fusion automatique native de GitHub",
+      "githubNativeAutoMergeHelp": "GitHub attend l'ensemble de ses règles avant de fusionner. Le dépôt doit autoriser la fusion automatique ; Fusion échoue de manière sécurisée si elle est indisponible. Par défaut : désactivée."
     },
     "mergeManually": "Fusionner manuellement",
     "mobileNav": {
@@ -6500,7 +6537,9 @@
       "webhookFormatHint": "",
       "agentClarification": "",
       "agentClarificationEnable": "",
-      "agentClarificationHint": ""
+      "agentClarificationHint": "",
+      "wedgeNotificationSettleMs": "Fenêtre de stabilisation d'un blocage terminal (ms)",
+      "wedgeNotificationSettleMsHelp": "Durée pendant laquelle un échec terminal doit persister avant d'alerter un opérateur. 0 = notifier immédiatement. Par défaut : 300000 (5 minutes)."
     },
     "plugins": {
       "fusionPlugins": "",
@@ -6965,7 +7004,9 @@
       "modelFailed": "",
       "runtimeModuleMissing": "",
       "runtimePlatformLoadFailed": "",
-      "runtimeIncompatible": ""
+      "runtimeIncompatible": "The installed voice runtime is incompatible. Repair it, then re-check the runtime.",
+      "recheckRuntime": "Re-check runtime",
+      "recheckingRuntime": "Re-checking runtime…"
     }
   },
   "setup": {

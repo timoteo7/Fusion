@@ -93,8 +93,7 @@ describe("the intake path actually forwards the resolved flags", () => {
     const source = readFileSync(new URL("../task-store/task-creation.ts", import.meta.url), "utf8");
 
     expect(source).toContain("columnFlagsByColumnId: await resolveIntakeDuplicateColumnFlags(store, allCandidates)");
-    // Scoped to distinct columns, not one IR read per candidate row.
-    expect(source).toContain("if (seenColumns.has(candidate.column)) continue;");
+    expect(source).toContain("resolveTaskLifecycleColumns(store, candidate.id, irCache)");
   });
 
   it("mirrors the auto-archive into the row using the resolved archived lane", () => {

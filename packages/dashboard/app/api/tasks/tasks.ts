@@ -15,6 +15,7 @@ import type {
   CurrentPlanEvidence,
   DriftReport,
   SpecLock,
+  TaskRecommendationListItem,
 } from "@fusion/core";
 import { withTokenHeader } from "../../auth";
 import { api, ApiRequestError, buildApiUrl, proxyApi } from "../client/client.js";
@@ -66,6 +67,27 @@ export function fetchArchivedTasks(
   if (offset !== undefined) search.set("offset", String(offset));
   const suffix = search.size > 0 ? `?${search.toString()}` : "";
   return api<{ tasks: Task[]; total: number; hasMore: boolean }>(withProjectId(`/tasks/archived${suffix}`, projectId));
+}
+
+/** Row-paginated recommendation aggregate returned by the Insights triage route. */
+export interface TaskRecommendationsResponse {
+  items: TaskRecommendationListItem[];
+  rowOffset: number;
+  rowLimit: number;
+  returnedRowCount: number;
+  totalRowCount: number;
+  hasMore: boolean;
+}
+
+export function fetchTaskRecommendations(
+  projectId?: string,
+  options?: { limit?: number; offset?: number },
+): Promise<TaskRecommendationsResponse> {
+  const query = new URLSearchParams();
+  if (options?.limit !== undefined) query.set("limit", String(options.limit));
+  if (options?.offset !== undefined) query.set("offset", String(options.offset));
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return api<TaskRecommendationsResponse>(withProjectId(`/tasks/recommendations${suffix}`, projectId));
 }
 
 /** A Definition refresh payload deliberately excludes mutable card state. */

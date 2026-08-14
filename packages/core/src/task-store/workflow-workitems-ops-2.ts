@@ -26,12 +26,12 @@ export async function replaceActiveTaskWorkflowContinuationImpl(
     return replaceActiveTaskWorkflowContinuationAsync(store.asyncLayer!, input);
 }
 
-export async function seedStrandedPlanReviewContinuationImpl(store: TaskStore, input: WorkflowWorkItemUpsertInput & { kind: "task" }): Promise<{ seeded: boolean; reason?: "active-continuation" | "plan-review-passed"; workItemId?: string }> {
+export async function seedStrandedPlanReviewContinuationImpl(store: TaskStore, input: WorkflowWorkItemUpsertInput & { kind: "task" }, options: { retirePredecessorId?: string } = {}): Promise<{ seeded: boolean; reason?: "active-continuation" | "plan-review-passed"; workItemId?: string }> {
   /*
   FNXC:SqliteDualPathCleanup 2026-07-26-14:07:
   Stranded plan-review continuation seed is PostgreSQL-only (withTaskWorkflowSerialization). The SQLite transactionImmediate fallback is deleted.
   */
-  return seedStrandedPlanReviewContinuationAsync(store.asyncLayer!, input);
+  return seedStrandedPlanReviewContinuationAsync(store.asyncLayer!, input, options);
 }
 
 export async function transitionWorkflowWorkItemImpl(store: TaskStore, id: string, state: WorkflowWorkItemState, patch: WorkflowWorkItemTransitionPatch = {}, tx?: DbTransaction,): Promise<WorkflowWorkItem> {

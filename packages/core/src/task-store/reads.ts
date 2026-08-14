@@ -10,9 +10,9 @@ import {TaskStore, storeLog} from "../store.js";
 import {readFile} from "node:fs/promises";
 import {join} from "node:path";
 import {existsSync, statSync} from "node:fs";
-import type {Task, TaskDetail, ColumnId, ArchivedTaskEntry, TaskVerificationRequest, TaskVerificationResultSummary, TaskVerificationStatus} from "../types.js";
+import type {Task, TaskDetail, ColumnId, ArchivedTaskEntry, TaskVerificationRequest, TaskVerificationResultSummary, TaskVerificationStatus, TaskRecommendation, TaskRecommendationListItem, TaskRecommendationListPage} from "../types.js";
 import * as schema from "../postgres/schema/index.js";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import "../builtin-traits.js";
 import {allowsAutoMergeProcessing} from "../merge/task-merge.js";
 import {getInReviewStallReason, DEFAULT_STALE_MERGING_MIN_AGE_MS, type InReviewStallContext} from "../tasks/in-review-stall.js";
@@ -32,6 +32,7 @@ import {computeRetrySummary} from "../tasks/retry-summary.js";
 // answer 404 instead of 500 (see TaskNotFoundError in task-store/errors.ts).
 import {TaskNotFoundError} from "../task-store/errors.js";
 import { resolveProjectColumnsForRoles } from "../project-lane-vocabulary.js";
+import { taskProjectScope } from "../postgres/data-layer.js";
 
 /** Merge storage tiers while preserving primary-source authority and order. */
 function mergePrimaryById<T extends { id: string }>(primary: T[], secondary: T[]): T[] {
@@ -127,7 +128,7 @@ function hasFreshAgentLogActivitySinceTaskUpdate(
 }
 
 import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
-import {readTaskRow, readLiveTaskRows} from "./async/async-persistence.js";
+import {readTaskRow, readLiveTaskRows, readTaskRowByProposalClaimId, readTaskRowsBySourceLineage} from "./async/async-persistence.js";
 import {searchTasksTsvector, searchTasksLike} from "./async/async-search.js";
 import {
   getArchivedTask,
@@ -199,6 +200,22 @@ async function resolveReviewColumnsForTask(
   return columns;
 }
 
+
+/**
+ * FNXC:TaskRecommendations 2026-08-13-22:23:
+ * Claim replay is a one-row indexed lookup and intentionally skips cold storage: archive
+ * snapshots have no proposalClaimId. It also skips board-derived signal hydration because replay needs only persisted data.
+ */
+export async function findTaskByProposalClaimIdImpl(store: TaskStore, proposalClaimId: string, options?: { includeDeleted?: boolean }): Promise<Task | null> {
+  if (proposalClaimId.trim().length === 0) return null;
+  const row = await readTaskRowByProposalClaimId(store.asyncLayer!, proposalClaimId, options);
+  return row ? store.rowToTask(store.pgRowToTaskRow(row)) : null;
+}
+
+export async function listTasksBySourceLineageImpl(store: TaskStore, input: { sourceAgentId?: string | null; sourceParentTaskId?: string | null }): Promise<Task[]> {
+  const rows = await readTaskRowsBySourceLineage(store.asyncLayer!, input);
+  return rows.map((row) => store.rowToTask(store.pgRowToTaskRow(row)));
+}
 
 export async function getTaskImpl(store: TaskStore, id: string, options?: { activityLogLimit?: number; includeDeleted?: boolean }): Promise<TaskDetail> {
     return store.withTaskLock(id, async () => {
@@ -907,4 +924,47 @@ export async function getTaskVerificationRequestAsyncImpl(store: TaskStore, task
   const rows = await layer.db.select().from(schema.project.taskVerificationRequests).where(and(eq(schema.project.taskVerificationRequests.taskId, taskId), ...(projectFilter ? [projectFilter] : []))).limit(1);
   const row = rows[0];
   return row ? { taskId: row.taskId, requestId: row.requestId, status: row.status as TaskVerificationStatus, profile: row.profile as TaskVerificationRequest["profile"], command: row.command, scope: row.scope as TaskVerificationRequest["scope"], requestedBy: row.requestedBy, requestedAt: row.requestedAt, ...(row.startedAt ? { startedAt: row.startedAt } : {}), ...(row.completedAt ? { completedAt: row.completedAt } : {}), ...(row.result ? { result: row.result as TaskVerificationResultSummary } : {}), ...(row.rejectionReason ? { rejectionReason: row.rejectionReason } : {}) } : null;
+}
+
+/**
+ * FNXC:TaskRecommendations 2026-08-13-04:41:
+ * Insights needs a dedicated narrow read because its aggregate is advisory triage and must remain
+ * bounded. Rows, rather than JSONB items, are paged with updatedAt/id ordering so equal completion
+ * timestamps cannot drop or duplicate a row; offset paging is sufficient because creating a task
+ * links the recommendation without removing its source row.
+ */
+export async function listTaskRecommendationsImpl(
+  store: TaskStore,
+  options?: { completeColumns?: ReadonlySet<string>; limit?: number; offset?: number },
+): Promise<TaskRecommendationListPage> {
+  const layer = store.asyncLayer!;
+  const completeColumns = options?.completeColumns ?? await resolveProjectColumnsForRoles(store, ["complete"]);
+  const rawLimit = options?.limit;
+  const rawOffset = options?.offset;
+  const limit = typeof rawLimit === "number" && Number.isFinite(rawLimit) ? Math.min(200, Math.max(1, Math.trunc(rawLimit))) : 50;
+  const offset = typeof rawOffset === "number" && Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0;
+  const columns = [...completeColumns];
+  if (columns.length === 0) return { items: [], rowOffset: offset, rowLimit: limit, returnedRowCount: 0, totalRowCount: 0, hasMore: false };
+  const filter = and(
+    taskProjectScope(layer),
+    isNull(schema.project.tasks.deletedAt),
+    inArray(schema.project.tasks.column, columns),
+    isNotNull(schema.project.tasks.recommendations),
+    sql`jsonb_array_length(${schema.project.tasks.recommendations}) > 0`,
+  );
+  const [countRows, rows] = await Promise.all([
+    layer.db.select({ count: sql<number>`count(*)` }).from(schema.project.tasks).where(filter),
+    layer.db.select({ id: schema.project.tasks.id, title: schema.project.tasks.title, column: schema.project.tasks.column, updatedAt: schema.project.tasks.updatedAt, recommendations: schema.project.tasks.recommendations })
+      .from(schema.project.tasks).where(filter).orderBy(desc(schema.project.tasks.updatedAt), desc(schema.project.tasks.id)).limit(limit).offset(offset),
+  ]);
+  const items: TaskRecommendationListItem[] = [];
+  for (const row of rows) {
+    if (!Array.isArray(row.recommendations) || row.recommendations.length === 0) continue;
+    for (const recommendation of row.recommendations) {
+      items.push({ taskId: row.id, taskTitle: row.title ?? undefined, taskColumn: row.column, updatedAt: row.updatedAt, recommendation: recommendation as TaskRecommendation });
+    }
+  }
+  const totalRowCount = Number(countRows[0]?.count ?? 0);
+  const returnedRowCount = rows.length;
+  return { items, rowOffset: offset, rowLimit: limit, returnedRowCount, totalRowCount, hasMore: offset + returnedRowCount < totalRowCount };
 }

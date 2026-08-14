@@ -11,6 +11,7 @@ import {
   updateTask,
   createTask,
   createTaskFromRecommendation,
+  fetchTaskRecommendations,
   connectPlanningStream,
   connectSubtaskStream,
   connectMissionInterviewStream,
@@ -620,6 +621,29 @@ describe("createTaskFromRecommendation", () => {
       "/api/tasks/FN-001/recommendations/follow-up%2Fwith%3Freserved%23characters/create?projectId=project-a",
       { headers: API_JSON_HEADERS, method: "POST", body: "{}" },
     );
+  });
+});
+
+describe("fetchTaskRecommendations", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("forwards optional row paging and preserves the aggregate envelope", async () => {
+    const page = { items: [], rowOffset: 50, rowLimit: 50, returnedRowCount: 2, totalRowCount: 52, hasMore: false };
+    globalThis.fetch = vi.fn().mockReturnValue(mockFetchResponse(true, page));
+
+    await expect(fetchTaskRecommendations("project-a", { limit: 50, offset: 50 })).resolves.toEqual(page);
+    expect(globalThis.fetch).toHaveBeenCalledWith("/api/tasks/recommendations?limit=50&offset=50&projectId=project-a", { headers: API_JSON_HEADERS });
+  });
+
+  it("omits absent paging options without sending a request body", async () => {
+    globalThis.fetch = vi.fn().mockReturnValue(mockFetchResponse(true, { items: [], rowOffset: 0, rowLimit: 50, returnedRowCount: 0, totalRowCount: 0, hasMore: false }));
+
+    await fetchTaskRecommendations("project-a");
+    expect(globalThis.fetch).toHaveBeenCalledWith("/api/tasks/recommendations?projectId=project-a", { headers: API_JSON_HEADERS });
   });
 });
 

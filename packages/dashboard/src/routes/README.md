@@ -160,11 +160,14 @@ pnpm --filter @fusion/dashboard exec vitest run src/routes/__tests__/create-api-
 
 ## Voice transcription
 
-`registerVoiceRoutes` exposes `GET /voice/status`, `POST`/`DELETE /voice/model`, and dictation
-`POST /voice/session`, `POST /voice/transcribe`, and `DELETE /voice/session/:id`. Settings are
+`registerVoiceRoutes` exposes `GET /voice/status`, `POST`/`DELETE /voice/model`,
+`POST /voice/runtime/recheck`, and dictation `POST /voice/session`, `POST /voice/transcribe`, and
+`DELETE /voice/session/:id`. Re-check clears the memoized runtime attempt and returns the same
+model/runtime status shape as `GET /voice/status`; it does not close active sessions. Settings are
 resolved per request through `getScopedStore(req)` with project-over-global precedence. Voice is
-opt-in: only dictation endpoints require `voiceInput.enabled`; model inspection, download, and
-delete remain available while off because the user-scoped model cache is shared by projects.
+opt-in: only dictation endpoints require `voiceInput.enabled`; model inspection, download, delete,
+and runtime re-check remain available while off because the user-scoped model cache is shared by
+projects.
 
 Audio chunks are base64 raw 16 kHz mono signed-16-bit little-endian PCM. Chunks are ordered,
 limited to 1 MiB (2 MiB JSON body), and sessions are project-bound. Active sessions become

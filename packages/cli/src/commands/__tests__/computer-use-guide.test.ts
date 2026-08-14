@@ -20,6 +20,10 @@ describe("computer-use guide", () => {
     expect(guide).toMatch(/### fn computer press-key[\s\S]*?Rules:\n- --snapshot-id and window flags require --element-index\./);
     expect(guide).toContain("Choose exactly one form: all four coordinate flags, or both element-index flags.");
     expect(guide).toContain("Coordinate drag takes no --snapshot-id or window flags.");
+    for (const trigger of ["focus changes", "navigation", "scrolling", "re-rendering"]) expect(guide).toContain(trigger);
+    expect(guide).toContain("elementCount");
+    expect(guide).toContain("consumed-by-action");
+    expect(guide).toContain("snapshotConsumed");
   });
 
   it("is the complete rendering link after descriptor anchors establish the live surface", () => {

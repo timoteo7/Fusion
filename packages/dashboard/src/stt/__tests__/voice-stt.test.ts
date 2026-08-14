@@ -72,10 +72,43 @@ describe("voice STT graceful degradation", () => {
     await expect(service.getRuntimeStatus()).resolves.toEqual({ status: "unavailable", unavailableReason: "runtime-platform-load-failed" });
   });
 
-  it("reports a loaded but incompatible native binding as unavailable", async () => {
+  it.each([{}, { default: {} }, null])("reports an incompatible native binding shape as unavailable", async (binding) => {
     const manager = { getState: async () => ({ status: "installed" as const, installedPath: "/model" }) } as ReturnType<typeof createVoiceModelManager>;
-    const service = createParakeetService({ manager, loadBinding: async () => ({}) });
+    const service = createParakeetService({ manager, loadBinding: async () => binding as never });
     await expect(service.getRuntimeStatus()).resolves.toEqual({ status: "unavailable", unavailableReason: "runtime-incompatible" });
+  });
+
+  it("unwraps the real CommonJS namespace shape for status and sessions", async () => {
+    const stream = { acceptWaveform: vi.fn() };
+    const recognizer = { createStream: vi.fn(() => stream), decode: vi.fn(), getResult: vi.fn(() => ({ text: "fresh" })) };
+    const OfflineRecognizer = vi.fn(function () { return recognizer; });
+    const manager = { getState: async () => ({ status: "installed" as const, installedPath: "/model" }) } as ReturnType<typeof createVoiceModelManager>;
+    const service = createParakeetService({ manager, loadBinding: async () => ({ OnlineRecognizer: vi.fn(), default: { OfflineRecognizer }, "module.exports": { OfflineRecognizer } } as never) });
+
+    await expect(service.getRuntimeStatus()).resolves.toEqual({ status: "available" });
+    await expect(service.createSession({ modelId: "parakeet-v3", language: "en" })).resolves.toMatchObject({ acceptChunk: expect.any(Function) });
+    expect(OfflineRecognizer).toHaveBeenCalledOnce();
+  });
+
+  it("unwraps a module.exports-only CommonJS namespace", async () => {
+    const OfflineRecognizer = vi.fn(function () { return { createStream: () => ({ acceptWaveform: () => {} }), decode: () => {}, getResult: () => ({ text: "" }) }; });
+    const manager = { getState: async () => ({ status: "installed" as const, installedPath: "/model" }) } as ReturnType<typeof createVoiceModelManager>;
+    const service = createParakeetService({ manager, loadBinding: async () => ({ "module.exports": { OfflineRecognizer } } as never) });
+    await expect(service.getRuntimeStatus()).resolves.toEqual({ status: "available" });
+  });
+
+  it("retries a failed runtime load after reset without affecting created sessions", async () => {
+    const manager = { getState: async () => ({ status: "installed" as const, installedPath: "/model" }) } as ReturnType<typeof createVoiceModelManager>;
+    const OfflineRecognizer = vi.fn(function () { return { createStream: () => ({ acceptWaveform: () => {} }), decode: () => {}, getResult: () => ({ text: "" }) }; });
+    const loadBinding = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "ERR_MODULE_NOT_FOUND" }))
+      .mockResolvedValueOnce({ OfflineRecognizer });
+    const service = createParakeetService({ manager, loadBinding });
+
+    await expect(service.getRuntimeStatus()).resolves.toEqual({ status: "unavailable", unavailableReason: "runtime-module-missing" });
+    service.resetRuntime();
+    await expect(service.getRuntimeStatus()).resolves.toEqual({ status: "available" });
+    expect(loadBinding).toHaveBeenCalledTimes(2);
   });
 
   it("uses sherpa's OfflineRecognizer and stream API for incremental decoding", async () => {

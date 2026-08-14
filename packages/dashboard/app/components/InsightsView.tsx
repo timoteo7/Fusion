@@ -31,6 +31,7 @@ import { ViewHeader } from "./ViewHeader";
 import { isNativeStructureDragEnabled, serializeNativeStructureRef } from "../utils/nativeStructureDrag";
 import { fetchModels, updateGlobalSettings, type ModelInfo } from "../api";
 import { useInsights, type InsightSection } from "../hooks/useInsights";
+import { useTaskRecommendations } from "../hooks/useTaskRecommendations";
 import { BACKLOG_HEALTH_TITLE_PREFIXES, isBacklogHealthInsight } from "./backlog-health-filter";
 import type { InsightCategory } from "@fusion/core";
 import type { ToastType } from "../hooks/useToast";
@@ -85,6 +86,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
     archivedCount = 0,
     showArchived = false,
   } = useInsights(projectId);
+  const taskRecommendations = useTaskRecommendations(projectId);
 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusType, setStatusType] = useState<"success" | "error" | "info">("info");
@@ -202,22 +204,22 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
       .filter((section) => section.items.length > 0);
   }, [populatedSections, backlogHealthOnly]);
 
-  const [selectedCategory, setSelectedCategory] = useState<InsightCategory | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<InsightCategory | "recommendations" | null>(null);
 
   // Keep selection valid as data changes; default to first populated section.
   useEffect(() => {
+    if (selectedCategory === "recommendations" && taskRecommendations.items.length > 0) return;
     if (filteredSections.length === 0) {
-      if (selectedCategory !== null) setSelectedCategory(null);
+      if (taskRecommendations.items.length > 0) setSelectedCategory("recommendations");
+      else if (selectedCategory !== null) setSelectedCategory(null);
       return;
     }
     const stillExists = selectedCategory && filteredSections.some((s) => s.category === selectedCategory && s.items.length > 0);
-    if (!stillExists) {
-      setSelectedCategory(filteredSections[0].category);
-    }
-  }, [filteredSections, selectedCategory]);
+    if (!stillExists) setSelectedCategory(filteredSections[0]?.category ?? (taskRecommendations.items.length > 0 ? "recommendations" : null));
+  }, [filteredSections, selectedCategory, taskRecommendations.items.length]);
 
   const activeSection: InsightSection | undefined = useMemo(
-    () => filteredSections.find((s) => s.category === selectedCategory) ?? filteredSections[0],
+    () => selectedCategory === "recommendations" ? undefined : filteredSections.find((s) => s.category === selectedCategory) ?? filteredSections[0],
     [filteredSections, selectedCategory],
   );
 
@@ -375,6 +377,23 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
       </li>
     );
   };
+
+  const renderRecommendations = () => (
+    <section className="insights-section insights-recommendations" data-testid="insights-section-recommendations">
+      <div className="insights-section-header"><div className="insights-section-title"><Lightbulb size={18} className="insights-section-icon" /><h3>{t("insights.recommendations.title", "Task Recommendations")}</h3><span className="insights-section-count">{taskRecommendations.items.length}</span></div></div>
+      <p className="insights-recommendations__count">{t("insights.recommendations.count", "Showing {{shown}} of {{total}} source tasks", { shown: taskRecommendations.items.length, total: taskRecommendations.totalRowCount })}</p>
+      <ul className="insights-list">
+        {taskRecommendations.items.map((item) => {
+          const key = `${item.taskId}:${item.recommendation.id}`;
+          const action = taskRecommendations.createStates.get(key);
+          const createdTaskId = item.recommendation.createdTaskId;
+          return <li className="insight-item insights-recommendations__item" key={key} data-testid={`task-recommendation-${key}`}><div className="insight-item-header"><h4 className="insight-item-title">{item.recommendation.title}</h4><span className="insights-category-count">{item.recommendation.category}</span></div><p>{item.recommendation.description}</p><p className="insights-recommendations__source">{t("insights.recommendations.source", "Source: {{task}}", { task: item.taskTitle ? `${item.taskId} — ${item.taskTitle}` : item.taskId })}</p>{createdTaskId ? <span role="status">{t("taskDetail.recommendations.created", "Created {{taskId}}", { taskId: createdTaskId })}</span> : <div><button className="btn btn-primary" type="button" disabled={action?.running} onClick={() => void taskRecommendations.createTask(item.taskId, item.recommendation.id)}>{action?.running ? t("taskDetail.recommendations.creating", "Creating…") : action?.error ? t("taskDetail.recommendations.retry", "Retry creating task") : t("taskDetail.recommendations.create", "Create task")}</button>{action?.error && <span role="status">{t("taskDetail.recommendations.error", "Could not create task. Try again.")}</span>}</div>}</li>;
+        })}
+      </ul>
+      {taskRecommendations.truncated ? <p role="status">{t("insights.recommendations.truncated", "Showing the first 20 pages. Refresh to see the latest recommendations.")}</p> : taskRecommendations.hasMore ? <button className="btn" type="button" disabled={taskRecommendations.loadingMore} onClick={() => void taskRecommendations.loadMore()}>{taskRecommendations.loadingMore ? t("insights.recommendations.loadingMore", "Loading more…") : t("insights.recommendations.loadMore", "Load more")}</button> : null}
+      {taskRecommendations.error && !taskRecommendations.loading && <div role="status"><span>{t("insights.recommendations.loadMoreFailed", "Could not load more recommendations.")}</span><button className="btn" type="button" onClick={() => void (taskRecommendations.hasMore ? taskRecommendations.loadMore() : taskRecommendations.refresh())}>{t("actions.retry", "Retry")}</button></div>}
+    </section>
+  );
 
   const renderActiveInsights = () => {
     if (!activeSection) return null;
@@ -661,6 +680,15 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
         </div>
       )}
 
+      {/* FNXC:TaskRecommendations 2026-08-13-04:41: Initial aggregate-read failures need an in-view retry; otherwise an empty Insights state makes the new triage surface unreachable. */}
+      {taskRecommendations.error && !taskRecommendations.loading && taskRecommendations.items.length === 0 && (
+        <div className="insights-error-callout" role="status" data-testid="task-recommendations-error">
+          <AlertCircle size={16} />
+          <span>{t("insights.recommendations.loadMoreFailed", "Could not load more recommendations.")}</span>
+          <button className="btn btn-sm" type="button" onClick={() => void taskRecommendations.refresh()}>{t("actions.retry", "Retry")}</button>
+        </div>
+      )}
+
       {loading ? (
         <div className="insights-loading" data-testid="insights-loading">
           <RefreshCw size={24} className="spin" />
@@ -674,7 +702,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
             {t("actions.retry", "Retry")}
           </button>
         </div>
-      ) : totalCount === 0 ? (
+      ) : totalCount === 0 && taskRecommendations.items.length === 0 ? (
         <div className="insights-empty" data-testid="insights-empty">
           <Sparkles size={48} />
           <h3>{t("insights.noInsightsYet", "No insights yet")}</h3>
@@ -689,10 +717,11 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
           <aside className="insights-sidebar" aria-label={t("insights.categoriesLabel", "Insight categories")}>
             <ul className="insights-category-list">
               {filteredSections.map(renderCategoryItem)}
+              {taskRecommendations.items.length > 0 && <li><button type="button" className={`insights-category-item${selectedCategory === "recommendations" ? " insights-category-item--active" : ""}`} onClick={() => setSelectedCategory("recommendations")} data-testid="insights-category-recommendations"><Lightbulb size={16} className="insights-category-icon" /><span className="insights-category-label">{t("insights.recommendations.title", "Task Recommendations")}</span><span className="insights-category-count">{taskRecommendations.items.length}{taskRecommendations.hasMore ? `/${taskRecommendations.totalRowCount}` : ""}</span></button></li>}
             </ul>
           </aside>
           <div className="insights-detail">
-            {renderActiveInsights()}
+            {selectedCategory === "recommendations" ? renderRecommendations() : renderActiveInsights()}
           </div>
         </div>
       )}

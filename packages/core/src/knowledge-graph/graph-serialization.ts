@@ -62,17 +62,31 @@ const validPath = (value: unknown) => {
     return false;
   }
 };
-const validSource = (value: unknown) => !!value && typeof value === "object" && validPath((value as GraphNode["source"]).path) && Number.isInteger((value as GraphNode["source"]).line) && (value as GraphNode["source"]).line >= 1 && Number.isInteger((value as GraphNode["source"]).column) && (value as GraphNode["source"]).column >= 1;
+function hasExactKeys(value: object, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+/*
+FNXC:KnowledgeGraph 2026-08-12-14:26:
+A persisted artifact is untrusted input re-serialized verbatim by the next incremental build. Unknown
+record keys are durable foreign graph state, not harmless extras, so reject the whole cache rather than
+stripping keys and partially trusting it.
+*/
+const validSource = (value: unknown) => !!value && typeof value === "object" && hasExactKeys(value, ["path", "line", "column"])
+  && validPath((value as GraphNode["source"]).path) && Number.isInteger((value as GraphNode["source"]).line) && (value as GraphNode["source"]).line >= 1
+  && Number.isInteger((value as GraphNode["source"]).column) && (value as GraphNode["source"]).column >= 1;
 
 function validNode(value: unknown): value is GraphNode {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || !hasExactKeys(value, ["id", "kind", "name", "owner", "ownerPath", "source", "attributes"])) return false;
   const node = value as GraphNode;
   return typeof node.id === "string" && node.id.length > 0 && nodeKinds.has(node.kind) && typeof node.name === "string"
     && owners.has(node.owner) && validPath(node.ownerPath) && validSource(node.source) && hasStringMap(node.attributes);
 }
 
 function validEdge(value: unknown): value is GraphEdge {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || !hasExactKeys(value, ["id", "kind", "from", "to", "provenance", "owner", "ownerPath", "source", "attributes"])) return false;
   const edge = value as GraphEdge;
   return typeof edge.id === "string" && edge.id.length > 0 && edgeKinds.has(edge.kind) && typeof edge.from === "string" && typeof edge.to === "string"
     && (edge.provenance === "extracted" || edge.provenance === "inferred") && owners.has(edge.owner) && validPath(edge.ownerPath)
@@ -80,22 +94,18 @@ function validEdge(value: unknown): value is GraphEdge {
 }
 
 function validImportRef(value: unknown): value is ImportRef {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || !hasExactKeys(value, ["kind", "specifier", "candidates", "line", "column", "typeOnly"])) return false;
   const ref = value as ImportRef;
   return (ref.kind === "imports" || ref.kind === "re-exports") && typeof ref.specifier === "string" && Array.isArray(ref.candidates)
-    && ref.candidates.every(validPath) && Number.isInteger(ref.line) && ref.line >= 1 && Number.isInteger(ref.column) && ref.column >= 1 && typeof ref.typeOnly === "boolean";
+    && ref.candidates.length > 0 && ref.candidates.every(validPath) && new Set(ref.candidates).size === ref.candidates.length
+    && Number.isInteger(ref.line) && ref.line >= 1 && Number.isInteger(ref.column) && ref.column >= 1 && typeof ref.typeOnly === "boolean";
 }
 
 function validManifestEntry(value: unknown): value is GraphManifestEntry {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || !(hasExactKeys(value, ["hash"]) || hasExactKeys(value, ["hash", "importRefs"]))) return false;
   const entry = value as GraphManifestEntry;
   return typeof entry.hash === "string" && /^[a-f0-9]{64}$/.test(entry.hash)
     && (entry.importRefs === undefined || (Array.isArray(entry.importRefs) && entry.importRefs.every(validImportRef)));
-}
-
-function hasExactKeys(value: object, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]);
 }
 
 function validManifest(value: unknown): value is GraphManifest {

@@ -435,6 +435,8 @@ export const DEFAULT_GLOBAL_SETTINGS = {
 export const DEFAULT_PROJECT_SETTINGS = {
   // FNXC:TaskRecommendations 2026-08-08-05:02: completion follows-ups stay bounded by default; 0 disables writing them.
   maxRecommendationsPerTask: 3,
+  // FNXC:TaskRecommendations 2026-08-13-03:56: surface completed-task proposals by default; operators can suppress the notice without suppressing capture.
+  recommendationMailboxNoticeEnabled: true,
   globalPause: false,
   globalPauseReason: undefined,
   defaultWorkflowId: undefined,

@@ -221,7 +221,7 @@ export {
 } from "./agents/agent-memory-mode.js";
 export type { TaskReviewData, TaskReviewSummary, TaskReviewItem, TaskReviewVerdict, TaskReviewerType } from "./types.js";
 /* FNXC:TaskVerificationRequest 2026-07-30-00:00: FN-8296 makes the persisted verification read model available to dashboard task and Command Center surfaces without exporting a subprocess runner. */
-export type { TaskVerificationRequest, TaskVerificationResultSummary, TaskVerificationStatus, TaskVerificationProfile, TaskRecommendation, TaskRecommendationCategory } from "./types.js";
+export type { TaskVerificationRequest, TaskVerificationResultSummary, TaskVerificationStatus, TaskVerificationProfile, TaskRecommendation, TaskRecommendationCategory, TaskRecommendationListItem, TaskRecommendationListPage } from "./types.js";
 export type {
   TaskCommitAssociation,
   TaskCommitAssociationConfidence,
@@ -1622,11 +1622,13 @@ export {
   runBackupCommand,
   syncBackupAutomation,
   syncBackupRoutine,
+  planBackupRoutineSync,
+  buildBackupScheduleStatus,
   BACKUP_SCHEDULE_NAME,
   resolveBackendConnectionString,
   resolveGlobalBackupRoot,
 } from "./backup/backup.js";
-export type { BackupInfo, BackupOptions, BackupFileInfo, BackupPairInfo } from "./backup/backup.js";
+export type { BackupInfo, BackupOptions, BackupFileInfo, BackupPairInfo, BackupRoutineSyncPlan, BackupScheduleStatus } from "./backup/backup.js";
 export { GlobalRoutineStore } from "./automation/global-routine-store.js";
 export { migrateBackupSettingsToGlobalOnce, planBackupSettingsMigration, resolveBackupSettingsMigrationConflict } from "./backup/backup-settings-migration.js";
 export type { BackupSettingKey } from "./backup/backup-settings-migration.js";
@@ -2826,6 +2828,15 @@ export {
   type TaskDeleteNoticeMailbox,
   type TaskDeleteNoticeSnapshot,
 } from "./task-delete-notice.js";
+/* FNXC:TaskRecommendations 2026-08-13-03:56: engine-owned mailbox registration reaches this core-scoped best-effort accepted-completion notice seam. */
+export {
+  registerTaskRecommendationNoticeMailbox,
+  getTaskRecommendationNoticeMailbox,
+  buildTaskRecommendationNoticeContent,
+  buildTaskRecommendationNoticeIdempotencyKey,
+  notifyOperatorOfTaskRecommendations,
+  type TaskRecommendationNoticeMailbox,
+} from "./task-recommendation-notice.js";
 /*
 FNXC:SessionIdentity 2026-07-26-12:10:
 In-process principal channel between the engine (session spawner) and the bundled

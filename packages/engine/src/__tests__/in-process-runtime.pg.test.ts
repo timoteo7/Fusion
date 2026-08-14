@@ -24,6 +24,7 @@ vi.mock("@fusion/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@fusion/core")>();
   return {
     ...actual,
+    syncBackupRoutine: vi.fn(actual.syncBackupRoutine),
     createTaskStoreForBackend: async (
       options: Parameters<typeof actual.createTaskStoreForBackend>[0],
     ) => {
@@ -46,7 +47,7 @@ vi.mock("@fusion/core", async (importOriginal) => {
   };
 });
 
-import { CentralCore, listRecall, type AsyncCentralClaimStore, type RecallCaptureWriterWithTestDrain } from "@fusion/core";
+import { CentralCore, listRecall, syncBackupRoutine, type AsyncCentralClaimStore, type RecallCaptureWriterWithTestDrain } from "@fusion/core";
 import { InProcessRuntime } from "../runtimes/in-process-runtime.js";
 
 pgDescribe("InProcessRuntime PostgreSQL composition", () => {
@@ -56,6 +57,7 @@ pgDescribe("InProcessRuntime PostgreSQL composition", () => {
     Runtime composition coverage must use the controlled PostgreSQL harness so availability gating and database administration share the repository's bounded asynchronous lifecycle. Runtime and central connections must close in a finally block before the harness drops the database, including when an assertion fails early.
     */
     lifecycle.shutdownCalls = 0;
+    vi.mocked(syncBackupRoutine).mockClear();
     lifecycle.secretsStore.listEnvExportable.mockReset();
     lifecycle.secretsStoreFailure = undefined;
     lifecycle.secretsStoreGetter = undefined;
@@ -94,6 +96,17 @@ pgDescribe("InProcessRuntime PostgreSQL composition", () => {
       const layer = taskStore.getAsyncLayer();
       expect(runtime.getStatus()).toBe("active");
       expect(taskStore.isBackendMode()).toBe(true);
+      /*
+      FNXC:SettingsBackups 2026-08-13-23:51:
+      A routine row only exists after the engine reconciles persisted backup settings. Assert the
+      production startup path calls the core synchronizer with its initialized store before the
+      scheduler gets its immediate execution tick.
+      */
+      expect(syncBackupRoutine).toHaveBeenCalledOnce();
+      expect(syncBackupRoutine).toHaveBeenCalledWith(
+        (runtime as unknown as { routineStore?: unknown }).routineStore,
+        expect.objectContaining({ autoBackupEnabled: expect.anything() }),
+      );
       expect(layer?.projectId).toBe("runtime-composition");
       expect(runtime.getMissionExecutionLoop()).toBeDefined();
       const runtimeInternals = runtime as unknown as {

@@ -28,7 +28,7 @@ The dispatcher creates exactly one file node per discovered file. TypeScript and
 
 File-owned facts are replaced only when that file hash changes. Module nodes and module containment are derived from the final file set every build. Import references are persisted in the manifest and import/re-export edges are synthesized every build, so adding or deleting a target never requires parsing an unchanged importer. Relative resolution tries `.ts`, `.tsx`, then index candidates; it intentionally does not resolve aliases, packages, or expand `export *` names.
 
-Every real source position is recorded as a repository-relative path, line, and column. File and module-derived items use a `syntheticSource: "true"` attribute and a 1:1 anchor. Artifact payloads contain only content-derived values (including source FNXC stamps and hashes), never build time, host, or process metadata. Missing, malformed, mismatched, or inconsistent artifact files trigger a safe full rebuild; artifacts are written nodes, edges, then manifest so a torn write cannot validate incomplete output.
+Every real source position is recorded as a repository-relative path, line, and column. File and module-derived items use a `syntheticSource: "true"` attribute and a 1:1 anchor. Artifact payloads contain only content-derived values (including source FNXC stamps and hashes), never build time, host, or process metadata. Before reuse, persisted nodes, edges, source locations, manifest entries, and import references must be complete, exactly-shaped records; an unknown key is rejected rather than retained. Import references must also be usable extractor output: only TypeScript/TSX owners may carry them, candidates are non-empty and unique, and references cannot duplicate an extractor identity. Shape violations report `invalid-artifact`; cross-record contradictions report `inconsistent-artifact`. Either recovery reason discards the entire artifact set and triggers a complete rebuild, never partial trust. Artifacts are written nodes, edges, then manifest so a torn write cannot validate incomplete output.
 
 ## FNXC and query behavior
 
@@ -43,3 +43,13 @@ Memory capture is optional and detached. `RecallCaptureWriter.capture()` returns
 ## Non-goals
 
 This layer has no LLM calls, embeddings, vector recall, MCP tools, source-validity diagnostics, language support beyond TypeScript/TSX symbols, CommonMark parser, cross-rename identity, or capability-fabric bundle. The FR-29/FR-34 bundle format is deferred.
+
+## Dashboard navigation
+
+The dashboard's **Memory → Knowledge Graph** tab provides list-and-detail navigation without transferring the full artifact or rendering a whole-graph canvas. It shows graph status, counts, directory and provenance data; operators can rebuild the artifact explicitly (including force rebuild). Reads use a small manifest-validated artifact cache and never rebuild the graph.
+
+The tab queries capped node pages (200 nodes), node edges (200 per direction), and neighbors with direction, edge-kind, and depth controls. Node IDs are query parameters, so IDs containing `/`, `#`, `@`, or `~` remain safe to navigate. It also supports node filters for kind, path/id prefix, regular-expression name, FNXC area, symbol kind, and owner.
+
+The HTTP surface is `GET /api/knowledge/graph/status`, `/nodes`, `/node`, `/neighbors`, and `/path`, plus `POST /api/knowledge/graph/build`. Missing artifacts are a recoverable status state; query endpoints report them as 404 rather than silently returning empty results.
+
+Dashboard shortest paths use a bounded undirected BFS, not the core unbounded helper. The default is six hops, the maximum is ten hops, and at most 20,000 nodes are expanded. Results are `found`, exhaustive `not-found`, or `limit-reached`; the latter has `truncated: true` and is intentionally distinct from no path. Unknown node IDs return 404. Whole-graph force-directed/canvas rendering remains an explicit non-goal.

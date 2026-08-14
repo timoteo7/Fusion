@@ -26,4 +26,35 @@ describe("knowledge graph serialization", () => {
     expect(bytes.edges).toContain('"id": "contains|file:src/a.ts|symbol:src/a.ts#a"');
     expect(deserializeArtifacts(bytes.nodes.replace("\"schemaVersion\": 2", "\"schemaVersion\": 3"), bytes.edges, serializeManifest(manifest))).toEqual({ ok: false, reason: "version-mismatch" });
   });
+
+  it("rejects extra keys and impossible import candidate shapes instead of retaining foreign artifact state", () => {
+    const bytes = serializeGraph(graph);
+    const payload = () => ({
+      nodes: JSON.parse(bytes.nodes) as { nodes: Array<Record<string, unknown>> },
+      edges: JSON.parse(bytes.edges) as { edges: Array<Record<string, unknown>> },
+      manifest: JSON.parse(serializeManifest(manifest)) as { files: Record<string, Record<string, unknown>> },
+    });
+    const cases = [
+      (value: ReturnType<typeof payload>) => { value.nodes.nodes[0]!.foreign = true; },
+      (value: ReturnType<typeof payload>) => { value.edges.edges[0]!.foreign = true; },
+      (value: ReturnType<typeof payload>) => { (value.nodes.nodes[0]!.source as Record<string, unknown>).foreign = true; },
+      (value: ReturnType<typeof payload>) => { (value.edges.edges[0]!.source as Record<string, unknown>).foreign = true; },
+      (value: ReturnType<typeof payload>) => { value.manifest.files["src/a.ts"]!.foreign = true; },
+      (value: ReturnType<typeof payload>) => { ((value.manifest.files["src/a.ts"]!.importRefs as Array<Record<string, unknown>>)[0]!).foreign = true; },
+      (value: ReturnType<typeof payload>) => { ((value.manifest.files["src/a.ts"]!.importRefs as Array<Record<string, unknown>>)[0]!).candidates = []; },
+      (value: ReturnType<typeof payload>) => { ((value.manifest.files["src/a.ts"]!.importRefs as Array<Record<string, unknown>>)[0]!).candidates = ["src/b.ts", "src/b.ts"]; },
+    ];
+    for (const tamper of cases) {
+      const value = payload();
+      tamper(value);
+      expect(deserializeArtifacts(JSON.stringify(value.nodes), JSON.stringify(value.edges), JSON.stringify(value.manifest))).toEqual({ ok: false, reason: "invalid-artifact" });
+    }
+  });
+
+  it("accepts complete manifest entries with and without optional import references", () => {
+    const bytes = serializeGraph(graph);
+    const withoutRefs: GraphManifest = { schemaVersion: 2, extractorVersion: 1, files: { "src/a.ts": { hash: "a".repeat(64) } } };
+    expect(deserializeArtifacts(bytes.nodes, bytes.edges, serializeManifest(manifest))).toMatchObject({ ok: true });
+    expect(deserializeArtifacts(bytes.nodes, bytes.edges, serializeManifest(withoutRefs))).toMatchObject({ ok: true });
+  });
 });

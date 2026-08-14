@@ -240,10 +240,15 @@ export function createQualityRoutes(): PluginRouteDefinition[] {
           typeof settings.verificationCommandTimeoutMs === "number"
             ? settings.verificationCommandTimeoutMs
             : undefined;
+        /*
+        FNXC:Quality 2026-08-13-22:33:
+        File-scoped package resolution must use this exact execution cwd, not just projectRoot, because live and disposable QA worktrees can have different workspace metadata. The same cwd is persisted on the run and passed to the shell runner below.
+        */
         const resolved = resolvePresetCommand({
           preset,
           testCommand,
           projectRoot: rootDir,
+          cwd,
           filePaths,
           confirmFullSuite,
         });

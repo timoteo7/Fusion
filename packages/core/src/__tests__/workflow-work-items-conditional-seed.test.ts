@@ -176,6 +176,102 @@ pgTest("FN-8592 conditional stranded Plan Review seed", () => {
     expect((await store.getTask(task.id)).workflowStepResults?.[0]?.status).toBe("passed");
   });
 
+  /*
+  FNXC:PlanningHandoffAtomicity 2026-08-13-03:49:
+  THE INVARIANT: the normal planning handoff installs the successor continuation no
+  matter which side of the race commits first — the runtime's specification-complete
+  reaction or triage's finally-block terminal transition of the plan work item.
+  Before `retirePredecessorId`, the reaction side lost that race constantly (the
+  seeder saw its own still-running predecessor as an active continuation and bailed
+  silently), stranding cards for FN-8592 self-healing to repair ~10 minutes later.
+  */
+  describe("planning handoff retires its own predecessor atomically", () => {
+    function planPredecessor(taskId: string) {
+      return {
+        runId: `${taskId}:continuation:plan`,
+        taskId,
+        nodeId: "plan",
+        kind: "task" as const,
+        state: "running" as const,
+        stableWorkflowRunId: `${taskId}:workflow`,
+        continuationSequence: 0,
+        waitReason: "planning" as const,
+        sourceColumn: "todo",
+        targetColumn: "todo",
+        irHash: "ir-test",
+      };
+    }
+
+    it("retires a still-running predecessor and installs the successor in one call (reaction wins the race)", async () => {
+      const store = h.store();
+      const task = await store.createTask({ description: "handoff race owner", column: "todo" });
+      const pred = await store.upsertWorkflowWorkItem(planPredecessor(task.id));
+
+      await expect(store.seedStrandedPlanReviewContinuation(continuation(task.id, "handoff"), {
+        retirePredecessorId: pred.id,
+      })).resolves.toMatchObject({ seeded: true });
+
+      const rows = await store.listWorkflowWorkItemsForTask(task.id);
+      expect(rows).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: pred.id, state: "succeeded" }),
+        expect.objectContaining({ runId: continuation(task.id, "handoff").runId, state: "runnable" }),
+      ]));
+    });
+
+    it("still seeds when the predecessor is already terminal (finally block won the race)", async () => {
+      const store = h.store();
+      const task = await store.createTask({ description: "handoff terminal owner", column: "todo" });
+      const pred = await store.upsertWorkflowWorkItem(planPredecessor(task.id));
+      await store.transitionWorkflowWorkItem(pred.id, "succeeded", { leaseOwner: null, leaseExpiresAt: null });
+
+      await expect(store.seedStrandedPlanReviewContinuation(continuation(task.id, "handoff"), {
+        retirePredecessorId: pred.id,
+      })).resolves.toMatchObject({ seeded: true });
+    });
+
+    it("still seeds when the named predecessor row no longer exists", async () => {
+      const store = h.store();
+      const task = await store.createTask({ description: "handoff missing owner", column: "todo" });
+
+      await expect(store.seedStrandedPlanReviewContinuation(continuation(task.id, "handoff"), {
+        retirePredecessorId: "00000000-0000-0000-0000-000000000000",
+      })).resolves.toMatchObject({ seeded: true });
+    });
+
+    it("retires ONLY the named predecessor: any other active row still blocks the seed", async () => {
+      const store = h.store();
+      const task = await store.createTask({ description: "handoff blocked owner", column: "todo" });
+      const pred = await store.upsertWorkflowWorkItem(planPredecessor(task.id));
+      const other = await store.upsertWorkflowWorkItem(continuation(task.id, "other", "workflow-step"));
+
+      await expect(store.seedStrandedPlanReviewContinuation(continuation(task.id, "handoff"), {
+        retirePredecessorId: pred.id,
+      })).resolves.toEqual({ seeded: false, reason: "active-continuation" });
+
+      const rows = await store.listWorkflowWorkItemsForTask(task.id);
+      expect(rows.find((row) => row.id === other.id)?.state).toBe("runnable");
+      expect(rows.some((row) => row.runId === continuation(task.id, "handoff").runId)).toBe(false);
+      // FNXC:PlanningHandoffAtomicity 2026-08-13-04:20 (review finding):
+      // A bailed seed must mutate NOTHING — the named predecessor stays running,
+      // it is not laundered to succeeded on the way to a refusal.
+      expect(rows.find((row) => row.id === pred.id)?.state).toBe("running");
+    });
+
+    it("never retires a predecessor belonging to a different task", async () => {
+      const store = h.store();
+      const taskA = await store.createTask({ description: "handoff owner a", column: "todo" });
+      const taskB = await store.createTask({ description: "handoff owner b", column: "todo" });
+      const foreign = await store.upsertWorkflowWorkItem(planPredecessor(taskB.id));
+
+      await expect(store.seedStrandedPlanReviewContinuation(continuation(taskA.id, "handoff"), {
+        retirePredecessorId: foreign.id,
+      })).resolves.toMatchObject({ seeded: true });
+
+      const foreignRows = await store.listWorkflowWorkItemsForTask(taskB.id);
+      expect(foreignRows.find((row) => row.id === foreign.id)?.state).toBe("running");
+    });
+  });
+
   it("allows terminal continuations and non-passed Plan Review results", async () => {
     const store = h.store();
     const task = await store.createTask({ description: "terminal continuation owner", column: "todo" });

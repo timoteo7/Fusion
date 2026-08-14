@@ -141,11 +141,25 @@ export interface BackupInfo {
   path: string;
 }
 
+/** Schedule evidence returned alongside the database backup inventory. */
+export interface BackupScheduleStatus {
+  enabled: boolean;
+  cronExpression: string;
+  routineRegistered: boolean;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  lastRunSucceeded?: boolean;
+  lastRunOutput?: string;
+  runCount?: number;
+}
+
 /** Result of listing backups */
 export interface BackupListResponse {
   backups: BackupInfo[];
   count: number;
   totalSize: number;
+  schedule: BackupScheduleStatus;
+  listError?: string;
 }
 
 /** Result of creating a backup */

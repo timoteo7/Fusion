@@ -91,7 +91,11 @@ own column, so the node must be where the card rests.
   `passed` `plan-review` entry to `workflowStepResults`. A held unreviewed card is the gate working;
   that path belongs to `pre-release-plan-review.test.ts`.
 - **Pre-existing cards** sitting in Todo with a real spec and no continuation are re-seeded
-  automatically by FN-8592's stranded-hold-continuation sweep.
+  automatically by FN-8592's stranded-hold-continuation sweep. Since 2026-08-13 that sweep is a pure
+  backstop: the primary handoff retires its own planning work item atomically with the successor
+  install (`retirePredecessorId`), so routine post-planning stranding — which once made the sweep
+  the de facto handoff at a ~10-minute delay per card — is a bug, not expected behavior. See
+  [planning-handoff-race-silently-strands-plan-review](../logic-errors/planning-handoff-race-silently-strands-plan-review.md).
 - **The trace no longer starts at `start`** for a card past intake. Assertions on `visitedNodeIds`
   should expect the card's column entry point.
 - **Coding (Ideas) no longer has a private planning shape.** Its planning-node re-home is deleted —

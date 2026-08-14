@@ -20,6 +20,10 @@ vi.mock("../../hooks/useInsights", () => ({
   },
 }));
 
+vi.mock("../../hooks/useTaskRecommendations", () => ({
+  useTaskRecommendations: vi.fn(),
+}));
+
 // Mock lucide-react icons
 vi.mock("lucide-react", () => ({
   Sparkles: ({ size = 24, className = "" }: { size?: number; className?: string }) => (
@@ -79,8 +83,10 @@ vi.mock("lucide-react", () => ({
 }));
 
 import { useInsights } from "../../hooks/useInsights";
+import { useTaskRecommendations } from "../../hooks/useTaskRecommendations";
 
 const mockUseInsights = vi.mocked(useInsights);
+const mockUseTaskRecommendations = vi.mocked(useTaskRecommendations);
 
 describe("InsightsView", () => {
   const defaultProps = {
@@ -99,6 +105,19 @@ describe("InsightsView", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUseTaskRecommendations.mockReturnValue({
+      items: [],
+      loading: false,
+      loadingMore: false,
+      error: null,
+      hasMore: false,
+      totalRowCount: 0,
+      truncated: false,
+      refresh: vi.fn(),
+      loadMore: vi.fn(),
+      createTask: vi.fn(),
+      createStates: new Map(),
+    });
     mockUseInsights.mockReturnValue({
       sections: mockSections,
       loading: false,
@@ -250,6 +269,47 @@ describe("InsightsView", () => {
       expect(screen.getByTestId("insights-category-trends")).toBeInTheDocument();
       // Detail pane shows the first populated section by default
       expect(screen.getByTestId("insights-section-features")).toBeInTheDocument();
+    });
+
+    it("renders active-section insight titles newest-first in document order", () => {
+      mockUseInsights.mockReturnValue({
+        sections: [
+          {
+            ...mockSections[0],
+            items: [
+              { id: "INS-NEW", projectId: "test", title: "Newest insight", content: "", category: "features", status: "generated", fingerprint: "fp-new", provenance: { trigger: "manual" }, lastRunId: null, createdAt: "2026-03-01T00:00:00Z", updatedAt: "2026-03-01T00:00:00Z" },
+              { id: "INS-MID", projectId: "test", title: "Middle insight", content: "", category: "features", status: "generated", fingerprint: "fp-mid", provenance: { trigger: "manual" }, lastRunId: null, createdAt: "2026-02-01T00:00:00Z", updatedAt: "2026-02-01T00:00:00Z" },
+              { id: "INS-OLD", projectId: "test", title: "Oldest insight", content: "", category: "features", status: "generated", fingerprint: "fp-old", provenance: { trigger: "manual" }, lastRunId: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+            ],
+          },
+          ...mockSections.slice(1),
+        ],
+        loading: false,
+        error: null,
+        latestRun: null,
+        isRunInFlight: false,
+        runError: null,
+        refresh: vi.fn(),
+        runInsights: vi.fn(),
+        dismiss: vi.fn(),
+        createTask: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        toggleShowArchived: vi.fn(),
+        dismissStates: new Map(),
+        createTaskStates: new Map(),
+        archiveStates: new Map(),
+        unarchiveStates: new Map(),
+        totalCount: 3,
+        dismissedCount: 0,
+        archivedCount: 0,
+        showArchived: false,
+      });
+
+      const { container } = render(<InsightsView {...defaultProps} />);
+
+      expect([...container.querySelectorAll(".insight-item-title")].map((node) => node.textContent))
+        .toEqual(["Newest insight", "Middle insight", "Oldest insight"]);
     });
 
     it("should render loading state", () => {
@@ -1457,6 +1517,104 @@ describe("InsightsView", () => {
       expect(css).toMatch(/@media[^{]*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1024px\)[^{]*\{[\s\S]*?\.insights-body\s*\{[^}]*flex-direction:\s*column;[^}]*inline-size:\s*100%;[^}]*min-width:\s*0;[^}]*min-inline-size:\s*0;[^}]*overflow:\s*hidden;[^}]*\}/);
       expect(css).toMatch(/@media[^{]*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1024px\)[^{]*\{[\s\S]*?\.insights-sidebar\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*min-inline-size:\s*0;[^}]*border-right:\s*none;[^}]*border-bottom:\s*var\(--chrome-divider-width,\s*1px\)\s+solid\s+var\(--insights-divider-color\);[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*\}/);
       expect(css).toMatch(/@media[^{]*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1024px\)[^{]*\{[\s\S]*?\.insights-detail\s*\{[^}]*flex:\s*1\s+1\s+0;[^}]*min-width:\s*0;[^}]*min-inline-size:\s*0;[^}]*overflow-y:\s*auto;[^}]*\}/);
+    });
+  });
+
+  describe("task recommendations", () => {
+    const recommendations = [
+      {
+        taskId: "FN-1",
+        taskTitle: "First source",
+        recommendation: { id: "shared-id", title: "First follow-up", description: "First description", category: "improvement" },
+      },
+      {
+        taskId: "FN-2",
+        taskTitle: "Second source",
+        recommendation: { id: "shared-id", title: "Second follow-up", description: "Second description", category: "bug" },
+      },
+    ];
+
+    it("keeps recommendations reachable when insights are empty and routes creates by the composite key", async () => {
+      const createTask = vi.fn();
+      mockUseTaskRecommendations.mockReturnValue({
+        items: recommendations,
+        loading: false,
+        loadingMore: false,
+        error: null,
+        hasMore: true,
+        totalRowCount: 3,
+        truncated: false,
+        refresh: vi.fn(),
+        loadMore: vi.fn(),
+        createTask,
+        createStates: new Map(),
+      });
+
+      render(<InsightsView {...defaultProps} />);
+
+      await waitFor(() => expect(screen.getByTestId("insights-category-recommendations")).toBeInTheDocument());
+      expect(screen.queryByTestId("insights-empty")).not.toBeInTheDocument();
+      expect(screen.getByTestId("insights-section-recommendations")).toBeInTheDocument();
+      expect(screen.getByTestId("task-recommendation-FN-1:shared-id")).toBeInTheDocument();
+      expect(screen.getByTestId("task-recommendation-FN-2:shared-id")).toBeInTheDocument();
+      expect(screen.getByText("Showing 2 of 3 source tasks")).toBeInTheDocument();
+
+      fireEvent.click(screen.getAllByRole("button", { name: "Create task" })[1]!);
+      expect(createTask).toHaveBeenCalledWith("FN-2", "shared-id");
+    });
+
+    it("does not offer creates for linked recommendations and preserves retryable page errors", async () => {
+      const refresh = vi.fn();
+      const loadMore = vi.fn();
+      mockUseTaskRecommendations.mockReturnValue({
+        items: [{ ...recommendations[0], recommendation: { ...recommendations[0].recommendation, createdTaskId: "FN-created" } }],
+        loading: false,
+        loadingMore: false,
+        error: "request failed",
+        hasMore: true,
+        totalRowCount: 2,
+        truncated: false,
+        refresh,
+        loadMore,
+        createTask: vi.fn(),
+        createStates: new Map(),
+      });
+
+      render(<InsightsView {...defaultProps} />);
+
+      await waitFor(() => expect(screen.getByText("Created FN-created")).toBeInTheDocument());
+      expect(screen.queryByRole("button", { name: "Create task" })).not.toBeInTheDocument();
+      expect(screen.getByText("Could not load more recommendations.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(loadMore).toHaveBeenCalledOnce();
+    });
+
+    it("offers Load more only while another row page is available and surfaces truncation", async () => {
+      const loadMore = vi.fn();
+      mockUseTaskRecommendations.mockReturnValue({
+        items: [recommendations[0]], loading: false, loadingMore: false, error: null,
+        hasMore: true, totalRowCount: 2, truncated: false, refresh: vi.fn(), loadMore,
+        createTask: vi.fn(), createStates: new Map(),
+      });
+      const { rerender } = render(<InsightsView {...defaultProps} />);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+      expect(loadMore).toHaveBeenCalledOnce();
+
+      mockUseTaskRecommendations.mockReturnValue({
+        items: [recommendations[0]], loading: false, loadingMore: false, error: null,
+        hasMore: false, totalRowCount: 1000, truncated: true, refresh: vi.fn(), loadMore: vi.fn(),
+        createTask: vi.fn(), createStates: new Map(),
+      });
+      rerender(<InsightsView {...defaultProps} />);
+      expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+      expect(screen.getByText("Showing the first 20 pages. Refresh to see the latest recommendations.")).toBeInTheDocument();
+    });
+
+    it("keeps the Load more affordance reachable in the mobile and tablet layouts", () => {
+      const css = loadAllAppCss();
+      expect(css).toMatch(/@media[^{]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.insights-recommendations[^}]*\}/);
+      expect(css).toMatch(/@media[^{]*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1024px\)[^{]*\{[\s\S]*?\.insights-recommendations[^}]*\}/);
     });
   });
 });

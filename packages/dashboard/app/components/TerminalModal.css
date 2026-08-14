@@ -302,8 +302,8 @@ stopPropagation in renderTerminalTabStrip.
 
 /*
 FNXC:TerminalModalControls 2026-07-31-22:19:
-Tablets start docked, so the footer pop-out control needs the same touch-sized reach without
-changing its established 14px icon or footer layout. Its pseudo-element only enlarges the button
+Tablets start docked, so the header pop-out control needs the same touch-sized reach without
+changing its established 14px icon or toolbar layout. Its pseudo-element only enlarges the button
 hit area; it is not a second terminal control.
 */
 .modal.terminal-modal.terminal-modal--tablet .terminal-clear-btn.terminal-clear-btn--icon[data-testid="terminal-popout-toggle"] {

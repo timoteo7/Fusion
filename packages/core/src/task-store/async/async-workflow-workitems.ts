@@ -354,16 +354,43 @@ export async function replaceActiveTaskWorkflowContinuation(
 
 /**
  * FNXC:StrandedHoldContinuation 2026-07-26-12:00:
- * FN-8592 repairs only an idle graph: this insert-only operation checks every
- * active work-item kind and passed plan-review result after taking the shared
- * advisory lock. A false result is a race loss for an already-qualified caller;
- * it never retires a continuation or edits step results.
+ * FN-8592 repairs only an idle graph: this operation checks every active
+ * work-item kind and passed plan-review result after taking the shared
+ * advisory lock. A false result is a race loss for an already-qualified caller
+ * and mutates nothing.
+ *
+ * FNXC:PlanningHandoffAtomicity 2026-08-13-04:20:
+ * No longer strictly insert-only: on the SUCCESS path a caller-named
+ * `retirePredecessorId` row is transitioned to succeeded in the same
+ * transaction as the successor insert (see the block comment below). A bailed
+ * seed still mutates nothing — the checks run before the retirement.
  */
 export async function seedStrandedPlanReviewContinuation(
   layer: AsyncDataLayer,
   input: WorkflowWorkItemUpsertInput & { kind: "task" },
+  options: { retirePredecessorId?: string } = {},
 ): Promise<{ seeded: boolean; reason?: "active-continuation" | "plan-review-passed"; workItemId?: string }> {
   return layer.transactionImmediate(async (tx) => withTaskWorkflowSerialization(tx, layer.projectId, input.taskId, async () => {
+    /*
+    FNXC:PlanningHandoffAtomicity 2026-08-13-03:49:
+    The normal planning handoff must retire its own predecessor continuation and install the
+    successor in ONE transaction under the task lock. Before this, triage announced specification
+    completion BEFORE its finally block marked the plan work item terminal, so the seeder's
+    all-kinds idle check saw the caller's own still-running plan row, bailed with
+    "active-continuation", and the result was silently dropped — the card stranded in the hold
+    column until FN-8592 self-healing re-seeded it ~10 minutes later (529 occurrences in 18 days).
+    `retirePredecessorId` names the finished planning row: the idle check excludes it, and if the
+    seed qualifies the row is transitioned to succeeded in the same transaction as the successor
+    insert, so BOTH orderings of "announce completion" vs "finally marks terminal" converge on the
+    successor being installed. A terminal or missing predecessor is not an error — it means the
+    caller's finally won the race, which is fine.
+
+    FNXC:PlanningHandoffAtomicity 2026-08-13-04:20:
+    The retirement runs AFTER the bail checks, immediately before the successor insert (review
+    finding: retiring first meant a bailed seed still committed the predecessor's transition,
+    contradicting the "a false result mutates nothing" contract). Only the named predecessor is
+    ever retired; any OTHER active row still blocks the seed and leaves the predecessor untouched.
+    */
     // FNXC:StrandedHoldContinuation 2026-07-27-01:15:
     // FN-8592's all-kinds idle check is project-partitioned as well as task
     // partitioned. Task ids can collide across embedded-PG projects, so a
@@ -373,13 +400,27 @@ export async function seedStrandedPlanReviewContinuation(
       eq(schema.project.workflowWorkItems.taskId, input.taskId),
       inArray(schema.project.workflowWorkItems.state, [...ACTIVE_WORKFLOW_WORK_ITEM_STATES]),
     ));
-    if (active.length > 0) return { seeded: false, reason: "active-continuation" as const };
+    const blocking = options.retirePredecessorId
+      ? active.filter((row) => row.id !== options.retirePredecessorId)
+      : active;
+    if (blocking.length > 0) return { seeded: false, reason: "active-continuation" as const };
     const taskRows = await tx.select({ workflowStepResults: schema.project.tasks.workflowStepResults }).from(schema.project.tasks).where(and(
       projectScopeFor(schema.project.tasks.projectId, layer.projectId),
       eq(schema.project.tasks.id, input.taskId),
     )).limit(1);
     const results = taskRows[0]?.workflowStepResults as WorkflowStepResult[] | null | undefined;
     if (results?.some(isPlanReviewSatisfied)) return { seeded: false, reason: "plan-review-passed" as const };
+    if (options.retirePredecessorId) {
+      const predRows = await tx.select().from(schema.project.workflowWorkItems).where(and(
+        projectScopeFor(schema.project.workflowWorkItems.projectId, layer.projectId),
+        eq(schema.project.workflowWorkItems.id, options.retirePredecessorId),
+        eq(schema.project.workflowWorkItems.taskId, input.taskId),
+      )).limit(1);
+      const pred = predRows[0] as WorkflowWorkItemRow | undefined;
+      if (pred && !isTerminalWorkflowWorkItemState(normalizeWorkflowWorkItemState(pred.state))) {
+        await transitionWorkflowWorkItem(layer, pred.id, "succeeded", { leaseOwner: null, leaseExpiresAt: null, lastError: null }, tx);
+      }
+    }
     const item = await upsertWorkflowWorkItem(layer, input, tx);
     return { seeded: true, workItemId: item.id };
   }));

@@ -1,6 +1,6 @@
 /**
  * FNXC:Identity 2026-08-09-03:04:
- * U2 of the pluggable user identity plan: migration 0059 adds the actor registry, credentials,
+ * U2 of the pluggable user identity plan: migration 0060 adds the actor registry, credentials,
  * sessions, and provider links to `central`, plus project-scoped role grants to `project`.
  *
  * What these tests exist to catch:
@@ -12,7 +12,7 @@
  *   - Storing a raw session value would upgrade the accepted "local shell user reaches Postgres"
  *     residual to "impersonates any administrator over HTTP" (and the same for a backup dump).
  *   - KTD11: `project_auth_*` looks dead but has a live writer (the SQLite→Postgres cutover
- *     migrator); a missing target there is a fail-closed startup error, so it must survive 0059.
+ *     migrator); a missing target there is a fail-closed startup error, so it must survive 0060.
  */
 
 import { createHmac } from "node:crypto";
@@ -39,19 +39,20 @@ const NOW = "2026-08-09T03:04:00.000Z";
 describe("identity schema: migration identity", () => {
   /*
   FNXC:Identity 2026-08-09-03:04:
-  Renumbered 0047 -> 0059 when this branch refreshed from main. Main had already landed its own
-  0047 (task recommendations), and two migrations sharing one bookkeeping identity means whichever
+  Renumbered 0047 -> 0059 -> 0060 across two refreshes from main, each time because main had landed
+  its own migration at the number this branch held (0047 task recommendations, then 0059 task source
+  agent index). Two migrations sharing one bookkeeping identity means whichever
   check runs first records the version and marks the OTHER already-applied — so the identity tables
   would silently never be created on an upgraded database while a fresh one looked fine. A
   per-migration identity is immutable only once released; this one had not been.
   */
   it("assigns the identity schema its own immutable migration version at the current ceiling", () => {
-    expect(IDENTITY_ACTORS_VERSION).toBe("0059");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0059");
+    expect(IDENTITY_ACTORS_VERSION).toBe("0060");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0060");
   });
 });
 
-pgDescribe("identity schema: migration 0059", () => {
+pgDescribe("identity schema: migration 0060", () => {
   async function withHarness(fn: (h: PgTestHarness) => Promise<void>): Promise<void> {
     const h = await createTaskStoreForTest({ prefix: "fusion_identity" });
     try {
@@ -233,7 +234,7 @@ pgDescribe("identity schema: migration 0059", () => {
       try {
         /*
         FNXC:IdentityGrantEscalation 2026-08-09-03:04:
-        Seeded over the OWNER connection, not the runtime role, because 0059 revokes write on this
+        Seeded over the OWNER connection, not the runtime role, because 0060 revokes write on this
         table from `fusion_runtime` (that revoke is what stops a plugin granting itself a role). The
         runtime role keeps SELECT, which is the half this test is about: it asserts that RLS filters
         what each project can READ. project_id is explicit here — the owner connection runs with
@@ -270,7 +271,7 @@ pgDescribe("identity schema: migration 0059", () => {
   FNXC:IdentityGrantEscalation 2026-08-09-03:04:
   AE18 / U5 step 4. A plugin holds the same pooled `fusion_runtime` connection core does (the plugin
   gate does not deny `getAsyncLayer()`), and RLS on this table filters by project_id, never by caller
-  — so before 0059's REVOKE, a plugin could INSERT itself an `admin` grant and every downstream
+  — so before 0060's REVOKE, a plugin could INSERT itself an `admin` grant and every downstream
   `can()` check would then honestly allow it. Asserted at the ROLE boundary rather than through a
   plugin fixture: that is where the guarantee actually lives, and it holds for any caller who gets a
   raw handle, including ones no fixture anticipates.
@@ -384,7 +385,7 @@ pgDescribe("identity schema: migration 0059", () => {
 
   /*
   FNXC:IdentityGrantEscalation 2026-08-09-03:04:
-  0059's REVOKE closed the plugin escalation but also sat on every LEGITIMATE grant write, which all
+  0060's REVOKE closed the plugin escalation but also sat on every LEGITIMATE grant write, which all
   went over `layer.db` — the runtime role that just lost the privilege. That regression was invisible
   to the actor-store suite because it builds its layer on the harness's OWNER connection, so those
   writes never exercised the affected role. These tests run through a layer whose `db` really is
@@ -536,7 +537,7 @@ pgDescribe("identity schema: migration 0059", () => {
   /*
   FNXC:Identity 2026-08-09-03:04:
   KTD11 — the `project_auth_*` tables have zero TypeScript readers but a live writer in the
-  SQLite→Postgres cutover migrator, where a missing target is a fail-closed startup error. 0059 is
+  SQLite→Postgres cutover migrator, where a missing target is a fail-closed startup error. 0060 is
   additive precisely so upgrades from a legacy SQLite database are not bricked.
   */
   it("leaves the legacy project_auth_* preservation tables untouched", async () => {

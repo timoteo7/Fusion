@@ -83,6 +83,7 @@ export const PROJECT_SECTION_KEYS: Readonly<Record<string, readonly string[]>> =
     "sessionAdvisorEnabledByDefault",
     "mailAutoCleanupDays",
     "maxRecommendationsPerTask",
+    "recommendationMailboxNoticeEnabled",
     "mobileNavPrimaryItems",
     "operationalLogRetentionDays",
     "quickChatButtonMode",

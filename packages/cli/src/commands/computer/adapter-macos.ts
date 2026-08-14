@@ -27,26 +27,7 @@ export class MacosComputerAdapter implements ComputerAdapter {
   }
 
   async permissions(): Promise<PermissionsResult> {
-    const fallback = (detail: string): PermissionsResult => ({ platform: this.platform, adapterId: this.id, supported: true, allGranted: false, checks: [check("accessibility", "unknown", false, detail, REMEDIATION_ACCESSIBILITY), check("screen-recording", "unknown", false, detail, REMEDIATION_SCREEN)] });
-    let run;
-    try {
-      run = await this.context.seam.run("osascript", ["-l", "JavaScript", "-e", MACOS_PERMISSION_PREFLIGHT], { timeoutMs: COMPUTER_TIMEOUTS.permissionProbe });
-    } catch (error) {
-      /*
-       * FNXC:ComputerUse 2026-08-11-04:29:
-       * A missing osascript cannot prove either TCC grant, so permissions remains unknown. Every
-       * automation path then fails C7.4 before acting instead of exposing a spawn failure as INTERNAL.
-       */
-      return fallback(isMissingBinary(error, "osascript") ? MISSING_OSASCRIPT_DETAIL : "Permission preflight could not run.");
-    }
-    if (run.timedOut) return fallback("Permission preflight timed out.");
-    if (run.exitCode !== 0) return fallback("Permission preflight could not run.");
-    try {
-      const values = JSON.parse(run.stdout) as { accessibility: boolean; screenRecording: boolean };
-      if (typeof values.accessibility !== "boolean" || typeof values.screenRecording !== "boolean") return fallback("Permission preflight returned invalid output.");
-      const checks = [check("accessibility", values.accessibility ? "granted" : "denied", true, null, REMEDIATION_ACCESSIBILITY), check("screen-recording", values.screenRecording ? "granted" : "denied", true, null, REMEDIATION_SCREEN)];
-      return { platform: this.platform, adapterId: this.id, supported: true, allGranted: checks.every((item) => item.granted), checks };
-    } catch { return fallback("Permission preflight returned invalid output."); }
+    return (await this.probePermissions()).result;
   }
 
   async listApps(): Promise<ListAppsResult> {
@@ -155,15 +136,42 @@ export class MacosComputerAdapter implements ComputerAdapter {
       await this.callJson(["drag-coordinates", input.app.name, String(from.x), String(from.y), String(to.x), String(to.y)], COMPUTER_TIMEOUTS.action);
     } else if (input.fromX !== undefined && input.fromY !== undefined && input.toX !== undefined && input.toY !== undefined) { await this.callJson(["drag-coordinates", input.app.name, String(input.fromX), String(input.fromY), String(input.toX), String(input.toY)], COMPUTER_TIMEOUTS.action); }
     else throw new ComputerUseError("ACTION_FAILED", "Drag requires coordinates or resolved elements.");
-    return { action: "drag", app: input.app, snapshotId: input.snapshotId, elementIndex: null, fromElementIndex: input.from?.element.index ?? null, toElementIndex: input.to?.element.index ?? null, performed: true };
+    return { action: "drag", app: input.app, snapshotId: input.snapshotId, elementIndex: null, fromElementIndex: input.from?.element.index ?? null, toElementIndex: input.to?.element.index ?? null, performed: true, snapshotConsumed: false };
   }
 
   private async assertAccessibility(): Promise<void> {
-    const access = (await this.permissions()).checks.find((check) => check.id === "accessibility");
-    if (access?.detail === MISSING_OSASCRIPT_DETAIL) {
+    const probe = await this.probePermissions();
+    const access = probe.result.checks.find((check) => check.id === "accessibility");
+    if (probe.missingBinary) {
       throw new ComputerUseError("PERMISSION_DENIED", "macOS osascript is unavailable.", "macOS with the osascript built-in is required for fn computer.", { missingBinary: "osascript" });
     }
     if (access?.status === "denied") throw new ComputerUseError("PERMISSION_DENIED", "Accessibility permission is denied.", REMEDIATION_ACCESSIBILITY, { permission: "accessibility" });
+  }
+
+  private async probePermissions(): Promise<{ result: PermissionsResult; missingBinary?: "osascript" }> {
+    const fallback = (detail: string): PermissionsResult => ({ platform: this.platform, adapterId: this.id, supported: true, allGranted: false, checks: [check("accessibility", "unknown", false, detail, REMEDIATION_ACCESSIBILITY), check("screen-recording", "unknown", false, detail, REMEDIATION_SCREEN)] });
+    let run;
+    try {
+      run = await this.context.seam.run("osascript", ["-l", "JavaScript", "-e", MACOS_PERMISSION_PREFLIGHT], { timeoutMs: COMPUTER_TIMEOUTS.permissionProbe });
+    } catch (error) {
+      /*
+       * FNXC:ComputerUse 2026-08-13-23:35:
+       * A missing osascript cannot prove either TCC grant, so the public probe remains unknown.
+       * Preserve a structural marker for C7.4 because automation must refuse before acting without
+       * coupling that safety decision to the versioned human-readable permission detail.
+       */
+      return isMissingBinary(error, "osascript")
+        ? { result: fallback(MISSING_OSASCRIPT_DETAIL), missingBinary: "osascript" }
+        : { result: fallback("Permission preflight could not run.") };
+    }
+    if (run.timedOut) return { result: fallback("Permission preflight timed out.") };
+    if (run.exitCode !== 0) return { result: fallback("Permission preflight could not run.") };
+    try {
+      const values = JSON.parse(run.stdout) as { accessibility: boolean; screenRecording: boolean };
+      if (typeof values.accessibility !== "boolean" || typeof values.screenRecording !== "boolean") return { result: fallback("Permission preflight returned invalid output.") };
+      const checks = [check("accessibility", values.accessibility ? "granted" : "denied", true, null, REMEDIATION_ACCESSIBILITY), check("screen-recording", values.screenRecording ? "granted" : "denied", true, null, REMEDIATION_SCREEN)];
+      return { result: { platform: this.platform, adapterId: this.id, supported: true, allGranted: checks.every((item) => item.granted), checks } };
+    } catch { return { result: fallback("Permission preflight returned invalid output.") }; }
   }
 
   private async resolveApp(target: AppTarget): Promise<AppRef> {
@@ -208,4 +216,4 @@ function isWindowRef(value: unknown): value is ResolvedComputerWindow["window"] 
 function isElement(value: unknown): value is Element { const element = value as Element; return isLiveElement(value) && typeof element.index === "number"; }
 function isLiveElement(value: unknown): value is Omit<Element, "index"> { const element = value as Element; return !!element && typeof element.role === "string" && !!element.locator && typeof element.locator.path === "string"; }
 function center(bounds: Element["bounds"]): { x: number; y: number } | undefined { return bounds ? { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 } : undefined; }
-function singleAction(action: string, app: AppRef, snapshotId: string | null, elementIndex: number | null): ActionResult { return { action, app, snapshotId: action === "hotkey" ? null : snapshotId, elementIndex, fromElementIndex: null, toElementIndex: null, performed: true }; }
+function singleAction(action: string, app: AppRef, snapshotId: string | null, elementIndex: number | null): ActionResult { return { action, app, snapshotId: action === "hotkey" ? null : snapshotId, elementIndex, fromElementIndex: null, toElementIndex: null, performed: true, snapshotConsumed: false }; }

@@ -158,7 +158,7 @@ describe("SettingsModal Node Routing section", () => {
     mockFetchSettingsByScope.mockResolvedValue({ global: baseSettings, project: {} });
     mockFetchAuthStatus.mockResolvedValue({ providers: [] });
     mockFetchModels.mockResolvedValue({ models: [], favoriteProviders: [], favoriteModels: [] });
-    mockFetchBackups.mockResolvedValue({ backups: [], totalSize: 0 });
+    mockFetchBackups.mockResolvedValue({ backups: [], count: 0, totalSize: 0, schedule: { enabled: false, cronExpression: "0 2 * * *", routineRegistered: false } });
     mockFetchMemoryFiles.mockResolvedValue({ files: [] });
     mockFetchMemoryFile.mockResolvedValue({ path: ".fusion/memory/MEMORY.md", content: "" });
     mockFetchGlobalConcurrency.mockResolvedValue({ globalMaxConcurrent: 10 });

@@ -186,10 +186,19 @@ section under one line.
   flex-wrap: wrap;
 }
 
-/* Consolidated action buttons in disclosure panel */
+/*
+FNXC:QuickAddActionRow 2026-08-13-05:24:
+The operator asked for the Quick Add bottom row to read as one centered desktop cluster (>=1025px).
+Replace the split toolbar's greedy options group and auto-pushed primary group with base-scope
+centering while preserving DOM order, grouping, and the action row's existing flex width. The
+FN-7680/FN-7683/FN-8147 fixed-height and FN-7684/FN-8164 Save-never-clipped contracts remain
+owned by their existing rules. At <=1024px, the deliberate edge-to-edge `space-between` layout is
+owned by the mobile and tablet tiers; do not unify these breakpoint layouts.
+*/
 .quick-entry-actions {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-sm);
   flex-wrap: wrap;
   flex: 1 1 auto;
@@ -200,10 +209,9 @@ FNXC:BoardComposer 2026-07-10-12:00:
 The action row is organized as two logical clusters instead of one undifferentiated wrap of chips:
 - `.quick-entry-options-group` — task options (workflow, optional steps, subtask, deps,
   models, node, agent), wrapping left-to-right with one consistent chip gap.
-- `.quick-entry-primary-group` — attach + GitHub tracking + Priority + Fast + Save; margin-left auto
-  keeps it right-aligned so the distinct Save action always ends the row (and wraps as one unit on
-  narrow columns, never splitting Save from its neighbors). Priority and Fast are icon-only here; the
-  priority glyph follows the shared up/high, down/low, flag/normal, alert/urgent mapping.
+- `.quick-entry-primary-group` — attach + GitHub tracking + Priority + Fast + Save; the primary
+  action stays last in DOM order. Priority and Fast are icon-only here; the priority glyph follows
+  the shared up/high, down/low, flag/normal, alert/urgent mapping.
 Chip HEIGHT consistency is already enforced by the FN-7680/FN-7683 fixed-box rule on
 `.quick-entry-actions .btn` above (descendant selector — still applies inside these wrappers); these
 rules only own grouping/spacing/alignment.
@@ -213,7 +221,7 @@ rules only own grouping/spacing/alignment.
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-xs) var(--space-sm);
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -249,7 +257,7 @@ line is strictly better than a clipped label.
   justify-content: flex-end;
   gap: var(--space-xs);
   flex: 0 0 auto;
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .quick-entry-primary-group [data-testid="quick-entry-save"] {
@@ -852,6 +860,12 @@ FN-7682 — the tokenized-CSS test forbids raw px in the workflow-selector rules
   intrinsic size={12}/size={14}. Desktop and the FN-7683 36px touch-target
   floor are unchanged.
   */
+  /*
+  FNXC:QuickAddActionRow 2026-08-13-05:24:
+  Mobile is the deliberate exception to the centered desktop/tablet action row. The 2026-07-16-13:05
+  operator decision rejected centering here because wrapped rows must share identical left and right
+  edges, so this later equal-specificity rule keeps `space-between` at <=768px.
+  */
   .quick-entry-actions {
     justify-content: space-between;
     column-gap: var(--space-xs);
@@ -896,6 +910,41 @@ FN-7682 — the tokenized-CSS test forbids raw px in the workflow-selector rules
     min-height: 36px;
     min-width: 36px;
     padding: var(--space-xs);
+  }
+}
+
+/*
+FNXC:QuickAddActionRow 2026-08-13-07:38:
+The operator requires tablet Quick Add controls to position like mobile: edge-to-edge rows with
+shared left/right edges and compact gaps. Keep the centered cluster desktop-only, and keep mobile
+36px touch targets and enlarged glyphs out of this tablet tier.
+*/
+@media (min-width: 769px) and (max-width: 1024px) {
+  .quick-entry-actions {
+    justify-content: space-between;
+    column-gap: var(--space-xs);
+  }
+
+  .quick-entry-options-group {
+    justify-content: space-between;
+    column-gap: var(--space-xs);
+  }
+
+  .quick-entry-primary-group {
+    gap: var(--space-xs);
+    justify-content: space-between;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .quick-entry-options-group .btn,
+  .quick-entry-options-group .wf-optional-steps-dropdown-trigger,
+  .quick-entry-primary-group .btn-icon {
+    padding-inline: var(--space-sm);
+  }
+
+  .quick-entry-primary-group .btn-icon {
+    min-width: var(--space-2xl);
   }
 }
 

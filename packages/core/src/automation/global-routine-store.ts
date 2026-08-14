@@ -10,6 +10,9 @@ function rowToRoutine(row: Record<string, unknown>): Routine {
     agentId: String(row.agent_id ?? ""), trigger: row.trigger_config as Routine["trigger"], command: row.command ? String(row.command) : undefined,
     enabled: Number(row.enabled) !== 0, scope: "global", catchUpPolicy: "run_one", executionPolicy: "queue",
     lastRunAt: row.last_run_at ? String(row.last_run_at) : undefined,
+    // FNXC:SettingsBackups 2026-08-13-23:52: Surface the durable outcome so the
+    // backup settings page can distinguish a scheduled routine from a proven run.
+    lastRunResult: (row.last_run_result as Routine["lastRunResult"]) ?? undefined,
     nextRunAt: row.next_run_at ? String(row.next_run_at) : undefined, runCount: Number(row.run_count ?? 0),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at), runHistory: (row.run_history as Routine["runHistory"]) ?? [],
   };
@@ -38,11 +41,37 @@ export class GlobalRoutineStore {
         VALUES (${id}, ${input.name}, ${input.description ?? null}, ${input.agentId}, ${input.trigger.type}, ${JSON.stringify(triggerConfig)}::jsonb, ${input.command ?? null}, ${input.enabled ? 1 : 0}, ${nextRunAt}, ${now}, ${now})
         ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, agent_id = EXCLUDED.agent_id,
           trigger_type = EXCLUDED.trigger_type, trigger_config = EXCLUDED.trigger_config, command = EXCLUDED.command,
-          enabled = EXCLUDED.enabled, next_run_at = EXCLUDED.next_run_at, updated_at = EXCLUDED.updated_at
+          enabled = EXCLUDED.enabled,
+          /* FNXC:SettingsBackups 2026-08-13-23:52: Reconciliation may run at every
+             engine startup. Keep an enabled routine's established due time when its
+             cron is unchanged; resetting it would indefinitely postpone a backup. */
+          next_run_at = CASE
+            WHEN global_routines.enabled = 1
+              AND EXCLUDED.enabled = 1
+              AND global_routines.trigger_type = EXCLUDED.trigger_type
+              AND global_routines.trigger_config IS NOT DISTINCT FROM EXCLUDED.trigger_config
+              AND global_routines.command IS NOT DISTINCT FROM EXCLUDED.command
+              AND global_routines.next_run_at IS NOT NULL
+            THEN global_routines.next_run_at
+            ELSE EXCLUDED.next_run_at
+          END,
+          updated_at = EXCLUDED.updated_at
         RETURNING *
       `) as unknown as Array<Record<string, unknown>>;
       return rowToRoutine(rows[0]!);
     });
+  }
+
+  /**
+   * FNXC:SettingsBackups 2026-08-13-23:52:
+   * The backup settings surface must inspect the one central routine by its stable
+   * name without listing unrelated global automation.
+   */
+  async getByName(name: string): Promise<Routine | undefined> {
+    const rows = (await this.layer.db.execute(sql`
+      SELECT * FROM central.global_routines WHERE name = ${name} LIMIT 1
+    `) ?? []) as unknown as Array<Record<string, unknown>>;
+    return rows[0] ? rowToRoutine(rows[0]) : undefined;
   }
 
   async deleteByName(name: string): Promise<void> {

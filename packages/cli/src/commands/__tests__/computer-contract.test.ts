@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   COMPUTER_ACTIONS, COMPUTER_ERROR_CODES, COMPUTER_SUBCOMMANDS, COMPUTER_TIMEOUTS, SNAPSHOT_STALE_REASONS,
-  failureEnvelope, isActionResult, isAppStateResult, isPermissionsResult, isValidSnapshotId, secretValue,
+  failureEnvelope, isActionResult, isAppStateResult, isPermissionsResult, isValidSnapshotId, secretValue, validateResult,
   successEnvelope, targetKeyForApp, targetKeySlug, windowKeyFor,
 } from "../computer/contract.js";
 
@@ -18,11 +18,16 @@ describe("computer contract", () => {
   });
   it("validates ids, permissions, state and action index shapes", () => {
     expect(isValidSnapshotId("cs_AbCdEf1234")).toBe(true); expect(isValidSnapshotId("cs_../evil")).toBe(false);
+    expect(SNAPSHOT_STALE_REASONS).toEqual(["not-found", "superseded", "expired", "pid-changed", "window-mismatch", "window-gone", "consumed-by-action"]);
     expect(isPermissionsResult({ allGranted: false, checks: [{ status: "granted", granted: true, probed: false }] })).toBe(false);
     const state = { snapshot: { elements: [{ index: 7, locator }] }, screenshot: { path: "x", width: null, height: null, verifiedPermission: true }, screenshotError: { code: "SCREENSHOT_FAILED", message: "no" } };
     expect(isAppStateResult(state)).toBe(false);
     expect(isActionResult({ action: "drag", performed: true, snapshotId: null, elementIndex: 1, fromElementIndex: 0, toElementIndex: 1 })).toBe(false);
     expect(isActionResult({ action: "hotkey", performed: true, snapshotId: "cs_AbCdEf1234", elementIndex: null, fromElementIndex: null, toElementIndex: null })).toBe(false);
+    const actionWithoutConsumption = { action: "click", performed: true, snapshotId: "cs_AbCdEf1234", elementIndex: 7, fromElementIndex: null, toElementIndex: null };
+    expect(isActionResult(actionWithoutConsumption)).toBe(false);
+    expect(validateResult("click", actionWithoutConsumption)).toBe(false);
+    expect(validateResult("click", { ...actionWithoutConsumption, snapshotConsumed: true })).toBe(true);
   });
   it("keeps app and window addressing separate", () => {
     const app = { bundleId: "com.apple.Safari", name: "Safari", pid: 2 };

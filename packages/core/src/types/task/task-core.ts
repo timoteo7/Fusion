@@ -643,6 +643,25 @@ export interface TaskRecommendation {
   createdTaskId?: string;
 }
 
+/** A recommendation paired with the completed task that produced it. */
+export interface TaskRecommendationListItem {
+  taskId: string;
+  taskTitle?: string;
+  taskColumn: string;
+  updatedAt: string;
+  recommendation: TaskRecommendation;
+}
+
+/** Row-paginated aggregate recommendation response for advisory project triage. */
+export interface TaskRecommendationListPage {
+  items: TaskRecommendationListItem[];
+  rowOffset: number;
+  rowLimit: number;
+  returnedRowCount: number;
+  totalRowCount: number;
+  hasMore: boolean;
+}
+
 export interface TaskReleaseGateVerdict {
   promoteBlocked: boolean;
   unplannedForExecution: boolean;

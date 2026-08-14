@@ -6,6 +6,17 @@ import { SettingsTextRow } from "../SettingsTextRow";
 import type { BackupSettingsMigrationCandidate, BackupSettingsMigrationConflict } from "@fusion/core";
 import type { SectionBaseProps } from "./context";
 import { LoadingSpinner } from "../../LoadingSpinner";
+import "./DatabaseBackupsSection.css";
+
+const formatBackupSize = (size: number): string => size > 1024 * 1024
+  ? `${(size / (1024 * 1024)).toFixed(1)} MB`
+  : `${(size / 1024).toFixed(1)} KB`;
+
+const formatBackupDate = (value: string): string => {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+};
+
 export interface DatabaseBackupsSectionProps extends SectionBaseProps {
   backupInfo: BackupListResponse | null;
   backupLoading: boolean;
@@ -120,37 +131,37 @@ export function DatabaseBackupsSection({ form, setForm, backupInfo, backupLoadin
           : undefined}
       />
 
-      {backupLoading ? (<div className="settings-empty-state"><LoadingSpinner label={t("settings.backups.loadingBackupInfo", "Loading backup info\u2026")} /></div>) : backupInfo ? (<div className="form-group">
+      {backupLoading ? (<div className="settings-empty-state"><LoadingSpinner label={t("settings.backups.loadingBackupInfo", "Loading backup info…")} /></div>) : backupInfo ? (<>
+        {/* FNXC:SettingsBackups 2026-08-13-23:51: The inventory must show both stored backups and central-routine evidence so a blank list cannot conceal a schedule failure. */}
+        <section className="backup-schedule" aria-labelledby="backup-schedule-heading">
+          <h5 id="backup-schedule-heading">{t("settings.backups.scheduleStatus", "Automatic backup schedule")}</h5>
+          <dl>
+            <div><dt>{t("settings.backups.status", "Status")}</dt><dd>{backupInfo.schedule.enabled ? t("settings.backups.on", "On") : t("settings.backups.off", "Off")}</dd></div>
+            <div><dt>{t("settings.backups.cron", "Cron")}</dt><dd><code>{backupInfo.schedule.cronExpression}</code></dd></div>
+            {backupInfo.schedule.nextRunAt && <div><dt>{t("settings.backups.nextRun", "Next run")}</dt><dd>{formatBackupDate(backupInfo.schedule.nextRunAt)}</dd></div>}
+            {backupInfo.schedule.lastRunAt && <div><dt>{t("settings.backups.lastRun", "Last run")}</dt><dd>{formatBackupDate(backupInfo.schedule.lastRunAt)} — {backupInfo.schedule.lastRunSucceeded ? t("settings.backups.succeeded", "Succeeded") : t("settings.backups.failed", "Failed")}</dd></div>}
+            {backupInfo.schedule.lastRunOutput && <div><dt>{t("settings.backups.lastOutput", "Last output")}</dt><dd className={backupInfo.schedule.lastRunSucceeded ? undefined : "backup-schedule-error"}>{backupInfo.schedule.lastRunOutput}</dd></div>}
+            {backupInfo.schedule.runCount !== undefined && <div><dt>{t("settings.backups.runCount", "Run count")}</dt><dd>{backupInfo.schedule.runCount}</dd></div>}
+          </dl>
+          {backupInfo.schedule.enabled && !backupInfo.schedule.routineRegistered && <div className="settings-notice settings-notice-warning" role="status">
+            {t("settings.backups.scheduleNotRegistered", "No backup schedule is registered. Restart Fusion or re-save Database Backup settings to register it.")}
+          </div>}
+        </section>
+        <div className="form-group">
           <label>{t("settings.backups.currentBackups", "Current Backups")}</label>
           <div className="backup-stats">
-            <div className="backup-stat">
-              <span className="backup-stat-value">{backupInfo.count}</span>
-              <span className="backup-stat-label">{t("settings.backups.backups", "backups")}</span>
-            </div>
-            <div className="backup-stat">
-              <span className="backup-stat-value">
-                {backupInfo.totalSize > 1024 * 1024
-                ? `${(backupInfo.totalSize / (1024 * 1024)).toFixed(1)} MB`
-                : `${(backupInfo.totalSize / 1024).toFixed(1)} KB`}
-              </span>
-              <span className="backup-stat-label">{t("settings.backups.totalSize", "total size")}</span>
-            </div>
+            <div className="backup-stat"><span className="backup-stat-value">{backupInfo.count}</span><span className="backup-stat-label">{t("settings.backups.backups", "backups")}</span></div>
+            <div className="backup-stat"><span className="backup-stat-value">{formatBackupSize(backupInfo.totalSize)}</span><span className="backup-stat-label">{t("settings.backups.totalSize", "total size")}</span></div>
           </div>
-          {backupInfo.backups.length > 0 && (<details className="backup-list">
-              <summary>{t("settings.backups.view", "View ")}{backupInfo.backups.length}{t("settings.backups.backupS", " backup(s)")}</summary>
-              <ul>
-                {backupInfo.backups.slice(0, 10).map((backup) => (<li key={backup.filename}>
-                    <code>{backup.filename}</code>
-                    <span className="backup-size">
-                      {backup.size > 1024 * 1024
-                        ? `${(backup.size / (1024 * 1024)).toFixed(1)} MB`
-                        : `${(backup.size / 1024).toFixed(1)} KB`}
-                    </span>
-                  </li>))}
-                {backupInfo.backups.length > 10 && (<li><em>{t("settings.backups.and", "...and ")}{backupInfo.backups.length - 10}{t("settings.backups.more", " more")}</em></li>)}
-              </ul>
-            </details>)}
-        </div>) : null}
+          {backupInfo.listError && <p className="backup-list-error" role="alert">{backupInfo.listError}</p>}
+          {backupInfo.count === 0 ? <p className="settings-empty-state">{t("settings.backups.noBackupsYet", "No backups yet — use Backup Now or enable automatic backups.")}</p> : <ul className="backup-list">
+            {backupInfo.backups.slice().sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)).slice(0, 10).map((backup) => <li key={backup.filename}>
+              <code>{backup.filename}</code><time dateTime={backup.createdAt}>{formatBackupDate(backup.createdAt)}</time><span className="backup-size">{formatBackupSize(backup.size)}</span>
+            </li>)}
+            {backupInfo.backups.length > 10 && <li><em>{t("settings.backups.and", "...and ")}{backupInfo.backups.length - 10}{t("settings.backups.more", " more")}</em></li>}
+          </ul>}
+        </div>
+      </>) : null}
       <div className="form-group">
         <button type="button" className="btn btn-sm" onClick={onBackupNow} disabled={backupLoading}>
           {backupLoading ? t("settings.backups.creating", "Creating…") : t("settings.backups.backupNow", "Backup Now")}

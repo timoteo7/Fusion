@@ -2,6 +2,105 @@
 
 User-facing release notes aggregated across all packages. This file is auto-synced from each `packages/*/CHANGELOG.md` by `scripts/release.mjs` — do not edit by hand.
 
+## 0.76.0
+
+### Highlights
+
+- Workflow stages now run on durable role agents; the ephemeral-agent setting is removed
+- Fixed the deadlocks that left tasks stuck in progress with no session and no error
+- Fixed a boot hang where spec-drift reconciliation exhausted the database connection pool
+- Reviews block only on high-priority findings, cutting repeated plan and code review fix rounds
+- Durable project memory: recall records, Memory Keeper consolidation, and MCP memory tools
+
+### Breaking
+
+- The retired ephemeral-agent compatibility setting and its Settings control are removed; stale values are discarded on read and update.
+- Deprecated v0 mission resume blockers are removed in favor of canonical blocker descriptors.
+
+### New
+
+- Workflow stages route through durable multi-role agents instead of ephemeral workers; existing singular role input stays migration-compatible.
+- Reviews gate on finding severity: new per-workflow Plan Review (default high) and Code Review (default critical) blocking thresholds. Set either to `any` to restore the old behavior where every REVISE blocks. Non-blocking findings land in PROMPT.md as Review Advisory Notes.
+- Durable project recall for decisions, preferences, and solutions, plus a Memory Keeper agent for knowledge-graph and recall consolidation, provenance-tagged memory semantics, automatic recall capture, and Fusion memory tools through the built-in MCP server. Every agent lane is steered to search memory first, and Agent Detail shows consolidation history.
+- Live agent activity: durable org-wide history with a live stream, a live activity and handoff flow in the Agents view, and a Command Center activity timeline with scroll-back.
+- Plan Review can now close stale or duplicate work before implementation starts.
+- Approved plans are preserved with immutable spec-lock, current-plan evidence, and deterministic execution drift reports.
+- Require named GitHub checks before Fusion merges pull requests, plus opt-in GitHub-native pull request auto-merge and signed GitHub CI signal ingestion that updates merge checks without waiting for polling.
+- Completed tasks now produce recommendations with guarded one-click task creation, a project-wide Insights surface, and optional mailbox notices.
+- macOS: `fn computer` adds desktop-app discovery, snapshots, actions, and permission reporting, with a version-matched computer-use agent skill that runtime sessions discover automatically.
+- Mission management: reconcile feature state from delivery task ground truth, a "Reconcile now" control with dry-run preview, agent tools to set mission and feature status with attributed audit events, clear and re-run controls for repairable validation badges, and an operator-only tool to clear a stale mission blocked badge.
+- Mailbox gains structural reports, inline approvals, chat-to-report handoff, roadmap-item attachments that open in Roadmaps, archive and restore for messages and conversations, and approvals raised during planning.
+- Planning a GitHub issue creates a task linked to that issue, and can import issue and comment screenshots.
+- New operator tool `fn_workflow_step_resume` unsticks permanently-pending merge review steps.
+- `fn knowledge-graph build` generates a committable code knowledge graph.
+- Managers can review and coach evaluation results for agents in their reporting tree.
+- Grok 4.6 is available in every model picker, and the bundled Pi runtime moves to 0.84.1.
+- Português (Brasil) joins the dashboard and terminal UI languages.
+
+### Fixed
+
+- Tasks no longer stall indefinitely in progress with no session after the workflow role-agent rollout: built-in role agents are routable again, continuation writes are atomic, and principal holds back off from 15s to 5m instead of re-dispatching about 3.5 times a second.
+- Queued tasks now start once the board frees up; capacity-parked continuations were owned by no drain and sat runnable forever.
+- Planned tasks no longer sit roughly 10 minutes in Todo before Plan Review starts.
+- Planning failures retry with 60s/120s/300s backoff and park after 3 attempts instead of looping every poll; provider request timeouts now route into that same bounded policy, and a new planning timeout caps a hung planning turn.
+- The Plan Review replan cap setting is now actually read; lowering it takes effect, and `0` parks on the first REVISE.
+- Fixed "Failed to create chat session" on model chats, and tasks wrongly failed as branch conflicts when their branch was already merged.
+- Fixed CLI commands aborting mid-command on Node 22.4+ so `fn init` completes.
+- Fixed Grok ACP startup by making `--no-auto-update` opt-in for Grok CLI v1.0.0.
+- Tunnels restart automatically with backoff after crashing instead of staying failed until manually restarted.
+- The Todo Lists and Roadmaps plugins now appear in navigation after being enabled.
+- Operator-owned external checkouts stay authoritative across recovery, remediation, verification, and cleanup, and Fusion no longer modifies or deletes them; routing without a checkout path fails closed.
+- A stale worktree base no longer fails a task: declined refreshes are recorded and execution continues, reacquired worktrees refresh against the current integration branch, and fresh worktrees rebase onto the configured integration branch.
+- Retained but inactive worktrees no longer exhaust live task capacity, and workflow principal session caps are removed with a sweep that re-queues continuations stranded in running or held.
+- Pull requests: no auto-merge for branch-protected, behind, conflicting, or unknown states; branch-protection blocks are reported as policy blocks rather than false conflicts; retries honor persisted backoff and pause for operator action; PR heads are refreshed before create and merge.
+- Alerts are quieter and more honest: no "needs operator action" for tasks running normally or intentionally held, terminal-failure alerts wait for automatic recovery to fail first, and generic terminal failures retry on a durable budget before escalating.
+- Reviewer verdicts and findings survive review prose containing stray braces, and resolved findings stay visible without allowing no-op revision requests.
+- Board and task detail: stale Planning badges clear, the In progress badge is restored, Promote is hidden while a task is planning or held on plan review and approval, and Promote appears on every card the server would actually release. Task cards distinguish the assigned agent from the creating agent, PR and review updates stay visible, and an empty Activity Feed refetches on open.
+- Planning Mode keeps running when browser storage is unavailable, shows four distinct responses plus a write-your-own choice, and offers a context-appropriate 3-5 option set.
+- Quick Add: the model dropdown filter box narrows the list as you type, the collapse/expand toggle works, the merger row is labeled "Merger", and action buttons center on desktop with edge-to-edge spacing at tablet widths.
+- Every open dashboard stays in sync when a task is paused or unpaused, and the model list no longer hangs when a provider catalog stalls.
+- Missions: reconciliation no longer fails every cycle, paused missions stay paused through status roll-up, duplicate manual validation runs are prevented, automatic validation waits for in-flight manual runs, and merge behavior plus read-only shared branch status are clearer.
+- Shared PostgreSQL isolation: durable agent data, agent ratings, custom workflows, chat data, approval audit history, verification-cache results, and project records are scoped to the active project.
+- Recommendations capture and display are restored, including an empty result state and a tab shown only when the completed task has records.
+- Execution retries after the first terminal tool-call failure by default, partially completed tasks resume after restart without a false failure, and canceled AI merge bodies can no longer overwrite successor merge state.
+- Settings history now records every change with truthful provenance, engine heartbeat churn no longer floods it, and revision APIs support paging.
+- The Agents Overview active-agent list scrolls on mobile, Messages structure selection fits narrow composers, and terminal pin and pop-out toggles moved to the top toolbar.
+- Restored missing localized merge, notification, recommendation, settings, and required-check copy across locales.
+
+### Performance
+
+- Scheduler hold-release sweeps and health probes stay responsive under PostgreSQL load via batched workflow-selection reads, a pass-scoped cache, per-project sweep guard, and sweep and probe deadlines.
+- The engine log no longer repeats dispatch-blocked and symbol-lock-loss lines every poll for a stuck task.
+
+### Internal
+
+- Eight project-owned storage tables now model their partition identities.
+- Plugin hot reload no longer leaves scratch files in plugin folders.
+- The published CLI manifest declares TypeScript once as a runtime dependency.
+
+## 0.76.0-beta.3
+
+### Highlights
+
+- Planned tasks no longer stall ~10 minutes in Todo before Plan Review starts
+- Insights adds project-wide task recommendations with paginated triage
+- Mailbox notices arrive for captured task recommendations, via a new project setting
+- Merge, notification, recommendation, and settings copy is localized again in six locales
+- Terminal pin and pop-out toggles moved to the top toolbar, left of the close button
+
+### New
+
+- Insights now has a project-wide task recommendations surface, backed by a bounded row-paginated API.
+- Captured task recommendations can send mailbox notices, controlled by the new `recommendationMailboxNoticeEnabled` project setting.
+
+### Fixed
+
+- Planned tasks that sat roughly ten minutes in Todo now move into Plan Review promptly: the planning-to-plan-review handoff retires its predecessor and installs the successor in a single transaction, and the follow-up reaction retries instead of dropping failures silently.
+- Localized merge, notification, recommendation, and settings copy is restored across six locales, and a stale pt-BR settings key was removed.
+- Terminal pin and pop-out toggles now sit in the top toolbar to the left of the close button.
+- The Quick Add composer's bottom row of action buttons is centered again, with the ≤768px layout unchanged.
+- Quick Add buttons use mobile edge-to-edge spacing on tablet widths (769px–1024px).
+
 ## 0.76.0-beta.2
 
 ### Highlights

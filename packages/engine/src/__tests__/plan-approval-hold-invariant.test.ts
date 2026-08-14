@@ -285,6 +285,71 @@ function seedStore(): { store: TaskStore; seeded: () => number } {
   return { store, seeded: () => seeds };
 }
 
+/*
+FNXC:PlanningHandoffAtomicity 2026-08-13-04:20:
+THE INVARIANT: the normal planning handoff must not bail on its OWN predecessor.
+Triage announces specification completion before its finally block marks the
+planning work item terminal, so the seeder routinely observes that row still
+`running`. Naming it via `retirePredecessorId` excludes it from the engine-side
+active pre-check and routes to the atomic store op that retires it with the
+successor install; any OTHER active row still blocks, and omitting the option
+keeps the historical bail (which is what self-healing's idle-graph repair needs).
+*/
+describe("#2b the handoff seeder does not bail on its own named predecessor", () => {
+  const runningPlanItem = { id: "wi-plan", state: "running" } as WorkflowWorkItem;
+
+  it("seeds atomically past a still-running named predecessor", async () => {
+    const { store } = seedStore();
+    (store.listWorkflowWorkItemsForTask as ReturnType<typeof vi.fn>).mockResolvedValue([runningPlanItem]);
+
+    const result = await seedPreReleasePlanReviewContinuation(store, task(), planInPlaceIr(), {
+      retirePredecessorId: "wi-plan",
+    });
+
+    expect(result.seeded).toBe(true);
+    expect(store.seedStrandedPlanReviewContinuation).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: "FN-1", nodeId: PLAN_REVIEW_GROUP_ID }),
+      { retirePredecessorId: "wi-plan" },
+    );
+    expect(store.replaceActiveTaskWorkflowContinuation).not.toHaveBeenCalled();
+  });
+
+  it("still bails on the same running row when no predecessor is named (opt-in)", async () => {
+    const { store, seeded } = seedStore();
+    (store.listWorkflowWorkItemsForTask as ReturnType<typeof vi.fn>).mockResolvedValue([runningPlanItem]);
+
+    const result = await seedPreReleasePlanReviewContinuation(store, task(), planInPlaceIr());
+
+    expect(result).toEqual({ seeded: false, reason: "active-continuation" });
+    expect(seeded()).toBe(0);
+  });
+
+  it("still bails when a DIFFERENT active row exists alongside the named predecessor", async () => {
+    const { store, seeded } = seedStore();
+    (store.listWorkflowWorkItemsForTask as ReturnType<typeof vi.fn>).mockResolvedValue([
+      runningPlanItem,
+      { id: "wi-other", state: "runnable" } as WorkflowWorkItem,
+    ]);
+
+    const result = await seedPreReleasePlanReviewContinuation(store, task(), planInPlaceIr(), {
+      retirePredecessorId: "wi-plan",
+    });
+
+    expect(result).toEqual({ seeded: false, reason: "active-continuation" });
+    expect(seeded()).toBe(0);
+  });
+
+  it("reports a workflow without a pre-release Plan Review node as its own quiet reason", async () => {
+    const { store, seeded } = seedStore();
+    const result = await seedPreReleasePlanReviewContinuation(store, task(), releaseIr(), {
+      retirePredecessorId: "wi-plan",
+    });
+
+    expect(result).toEqual({ seeded: false, reason: "no-pre-release-plan-review" });
+    expect(seeded()).toBe(0);
+  });
+});
+
 describe("#2 neither continuation seeder arms a run for a card blocked on approval", () => {
   it("seeds for an ordinary specified card (the control)", async () => {
     const { store, seeded } = seedStore();

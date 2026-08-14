@@ -63,6 +63,8 @@ describe("settings key parity", () => {
     expect(isProjectSettingsKey("maxConcurrent")).toBe(true);
     expect(isProjectSettingsKey("maxRecommendationsPerTask")).toBe(true);
     expect(isGlobalSettingsKey("maxRecommendationsPerTask")).toBe(false);
+    expect(isProjectSettingsKey("recommendationMailboxNoticeEnabled")).toBe(true);
+    expect(isGlobalSettingsKey("recommendationMailboxNoticeEnabled")).toBe(false);
     expect(isProjectSettingsKey("heartbeatMultiplier")).toBe(true);
     expect(isProjectSettingsKey("completionDocumentationMode")).toBe(true);
     expect(isProjectSettingsKey("reviewArtifacts")).toBe(true);

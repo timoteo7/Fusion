@@ -2,7 +2,7 @@
 
 [← Docs index](./README.md) · [CLI reference](./cli-reference.md)
 
-`fn computer` inspects and operates local desktop application windows. It is designed for a safe, repeatable **snapshot → act → snapshot** loop: capture the current accessibility state, perform one deliberate action against that capture, then capture again before relying on the UI after navigation, focus changes, scrolling, or rendering.
+`fn computer` inspects and operates local desktop application windows. It enforces a safe, repeatable **snapshot → act → snapshot** loop: capture the current accessibility state, perform one deliberate action against that capture, then capture again before relying on the UI after navigation, focus changes, scrolling, or re-rendering.
 
 > **Platform support:** macOS is supported using only operating-system-provided `osascript` and `screencapture`. Linux, Windows, and other platforms are honestly unsupported: `capabilities` and `permissions` succeed with `supported: false`; all other commands fail with `UNSUPPORTED_PLATFORM`. Fusion does not download a helper, native module, or automation dependency.
 
@@ -34,10 +34,11 @@ fn computer list-apps --json
 fn computer get-app-state --app com.apple.Safari --json
 # Inspect result.snapshot.elements[].index and save result.snapshot.snapshotId.
 fn computer click --app com.apple.Safari --element-index 42 --snapshot-id cs_01HABCDE123 --json
+# The successful action consumed that capture; inspect the fresh tree before another action.
 fn computer get-app-state --app com.apple.Safari --json
 ```
 
-The first command persists the snapshot before it prints its `snapshotId`. The later `click` may run in a completely separate `fn` process; `--snapshot-id` is an optimistic-concurrency fence that confirms the snapshot is still the current capture for that app.
+The first command persists the snapshot before it prints its `snapshotId`. The later `click` may run in a completely separate `fn` process; `--snapshot-id` is an optimistic-concurrency fence that confirms the snapshot is still the current capture for that app. Every successful action consumes the app's latest capture, so the next element action fails with `SNAPSHOT_STALE` / `consumed-by-action` until `get-app-state` captures again.
 
 Element indexes are snapshot-scoped and sparse. Read indexes from `snapshot.elements[].index`; never derive an index from `elementCount`, position, or bounds. Refresh state after navigation, focus change, scrolling, or re-rendering. Semantic actions (`click`, `set-value`) are preferred over raw keys because they survive focus changes better.
 
@@ -109,7 +110,7 @@ Remediation is required for unsupported platform, permission denied/unverified, 
 - `list-apps`: `{ apps }`, sorted by name. An app is `{ bundleId, name, pid }`.
 - `list-windows`: `{ app, windows }`. A window is `{ windowId, windowIndex, title, bounds, minimized }`.
 - `get-app-state`: `{ app, window, snapshot, screenshot, screenshotError? }`. `snapshot` has `{ snapshotId, targetKey, windowKey, capturedAt, expiresAt, treeText, elementCount, truncated, elements }`. An element is `{ index, role, title, value, label, enabled, focused, bounds, actions, locator }`; its locator is `{ kind: "ax-path", path, role, subrole, identifier, title }`.
-- Actions return `{ action, app, snapshotId, elementIndex, fromElementIndex, toElementIndex, performed: true }` only after the OS action succeeds. Single-endpoint actions use `elementIndex`; element-form drag uses `fromElementIndex` and `toElementIndex` with `elementIndex: null`; hotkey reports all index fields and `snapshotId` as `null`.
+- Actions return `{ action, app, snapshotId, elementIndex, fromElementIndex, toElementIndex, performed: true, snapshotConsumed: true }` only after the OS action succeeds. `snapshotConsumed` confirms the app's latest capture was burned and a fresh capture is required before another element action. Single-endpoint actions use `elementIndex`; element-form drag uses `fromElementIndex` and `toElementIndex` with `elementIndex: null`; hotkey reports all index fields and `snapshotId` as `null`.
 
 Screenshots are always paths, never base64, `data:` URLs, or byte arrays. `--no-screenshot` produces `screenshot: null` with no `screenshotError`; successful capture has `screenshot` and no error; failed/not-captured has `screenshot: null` and `screenshotError`. Screenshot `verifiedPermission` is true only for a preflight-confirmed Screen Recording grant.
 
@@ -130,16 +131,16 @@ Screenshots are always paths, never base64, `data:` URLs, or byte arrays. `--no-
 
 ## Durable snapshots and safe element replay
 
-Snapshots are stored per project at `.fusion/computer-use/snapshots/<snapshotId>.json`; the app's latest pointer is `.fusion/computer-use/latest/<targetKeySlug>.json`. They are never shared across project roots. Capture atomically persists the record and pointer before returning `snapshotId`.
+Snapshots are stored under the resolved Fusion project root, not the invoking working directory: `<projectRoot>/.fusion/computer-use/snapshots/<snapshotId>.json`; the app's latest pointer is `<projectRoot>/.fusion/computer-use/latest/<targetKeySlug>.json`. Each `fn computer` invocation resolves that root once by walking upward from its starting directory, and falls back to that resolved directory when no project root is found. Snapshots, pointers, and screenshots use the same root, so they are never shared across projects. Capture atomically persists the record and pointer before returning `snapshotId`.
 
-A resolved app has app-scoped `targetKey` (`bundle:<bundleId>`, or `pid:<pid>`) and window-scoped `windowKey` (`<targetKey>#<windowId>`). There is one latest pointer per app, not per window. An action with no `--snapshot-id` uses that latest snapshot. Action window flags are optional assertions: a supplied selector that differs from the recorded window produces `SNAPSHOT_STALE` / `window-mismatch`.
+A resolved app has app-scoped `targetKey` (`bundle:<bundleId>`, or `pid:<pid>`) and window-scoped `windowKey` (`<targetKey>#<windowId>`). There is one latest pointer per app, not per window. An action with no `--snapshot-id` uses that latest snapshot. A successful action consumes that app-scoped pointer rather than deleting its record, so both implicit and matching explicit IDs fail with `SNAPSHOT_STALE` / `consumed-by-action` until a new capture re-arms the pointer. Action window flags are optional assertions: a supplied selector that differs from the recorded window produces `SNAPSHOT_STALE` / `window-mismatch`.
 
 Snapshots expire after five minutes by default; `expiresAt` publishes the exact deadline. An explicit snapshot ID is a concurrency fence, not a way to revive old UI: a superseded ID fails. Before acting, Fusion re-resolves the recorded window and then the locator rooted in it, verifying role, subrole, and recorded identifier. It never acts on a new occupant of the old path and never falls back to saved bounds/coordinates.
 
 | Failure | When | Recovery |
 | --- | --- | --- |
 | `SNAPSHOT_REQUIRED` | No latest snapshot exists for the target app | Run `get-app-state`. |
-| `SNAPSHOT_STALE` | `not-found`, `superseded`, `expired`, `pid-changed`, `window-mismatch`, or `window-gone` | Run `get-app-state`; use the current window and snapshot. |
+| `SNAPSHOT_STALE` | `not-found`, `superseded`, `consumed-by-action`, `expired`, `pid-changed`, `window-mismatch`, or `window-gone` | Run `get-app-state`; use the current window and snapshot. |
 | `ELEMENT_INDEX_NOT_FOUND` | Index is absent from sparse map | Read the current `elements[].index` after re-snapshotting. |
 | `ELEMENT_UNRESOLVABLE` | Locator path fails or identity no longer matches | Re-snapshot; do not retry with coordinates. |
 

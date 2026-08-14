@@ -1776,21 +1776,40 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
       expect(await m.getMilestone(milestone.id)).toMatchObject({ status: "blocked" });
     });
 
-    it("preserves blocked milestones during terminal-task reconcile", async () => {
+    it("preserves protected intent and emits only unprotected terminal-reconcile rollups", async () => {
       const m = missions();
-      const mission = await m.createMission({ title: "Protected reconcile" });
-      const milestone = await m.addMilestone(mission.id, { title: "MS" });
-      const slice = await m.addSlice(milestone.id, { title: "SL" });
-      const feature = await m.addFeature(slice.id, { title: "Delivered" });
-      const task = await h.store().createTask({ description: "done", column: "done" });
-      await m.updateMilestone(milestone.id, { status: "blocked" });
+      const createHierarchy = async (title: string) => {
+        const mission = await m.createMission({ title });
+        const milestone = await m.addMilestone(mission.id, { title: `${title} milestone` });
+        const slice = await m.addSlice(milestone.id, { title: `${title} slice` });
+        const feature = await m.addFeature(slice.id, { title: `${title} feature` });
+        const task = await h.store().createTask({ description: `${title} done`, column: "done" });
+        return { mission, milestone, slice, feature, task };
+      };
+      const blockedMission = await createHierarchy("Blocked mission reconcile");
+      const archivedMission = await createHierarchy("Archived mission reconcile");
+      const blockedMilestone = await createHierarchy("Blocked milestone reconcile");
+      const control = await createHierarchy("Control reconcile");
+      await m.updateMission(blockedMission.mission.id, { status: "blocked" });
+      await m.updateMission(archivedMission.mission.id, { status: "archived" });
+      await m.updateMilestone(blockedMilestone.milestone.id, { status: "blocked" });
+      const missionUpdated = vi.fn();
       const milestoneUpdated = vi.fn();
+      m.on("mission:updated", missionUpdated);
       m.on("milestone:updated", milestoneUpdated);
-      await m.reconcileFeatureDoneWithTerminalTask(feature.id, task.id);
-      expect(await m.getFeature(feature.id)).toMatchObject({ status: "done", taskId: task.id });
-      expect(await m.getSlice(slice.id)).toMatchObject({ status: "complete" });
-      expect(await m.getMilestone(milestone.id)).toMatchObject({ status: "blocked" });
-      expect(milestoneUpdated).not.toHaveBeenCalled();
+
+      for (const hierarchy of [blockedMission, archivedMission, blockedMilestone, control]) {
+        await m.reconcileFeatureDoneWithTerminalTask(hierarchy.feature.id, hierarchy.task.id);
+      }
+
+      expect(await m.getMission(blockedMission.mission.id)).toMatchObject({ status: "blocked" });
+      expect(await m.getMission(archivedMission.mission.id)).toMatchObject({ status: "archived" });
+      expect(await m.getMilestone(blockedMilestone.milestone.id)).toMatchObject({ status: "blocked" });
+      expect(await m.getMilestone(control.milestone.id)).toMatchObject({ status: "complete" });
+      expect(missionUpdated).not.toHaveBeenCalled();
+      const updatedMilestoneIds = milestoneUpdated.mock.calls.map(([milestone]) => milestone.id);
+      expect(updatedMilestoneIds).not.toContain(blockedMilestone.milestone.id);
+      expect(updatedMilestoneIds).toContain(control.milestone.id);
     });
   });
 

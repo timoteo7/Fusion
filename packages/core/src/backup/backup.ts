@@ -6,6 +6,7 @@ import { PgBackupManager, type PgBackupPair, type PgDumpResult } from "../postgr
 import { resolveBackend } from "../postgres/backend-resolver.js";
 import { getActiveEmbeddedRuntimeUrl } from "../postgres/active-backend-registry.js";
 import type { Settings } from "../types.js";
+import type { Routine } from "../automation/routine.js";
 
 /**
  * FNXC:SettingsBackups 2026-07-16-14:50:
@@ -365,6 +366,70 @@ function formatBytes(bytes: number): string {
 
 export const BACKUP_SCHEDULE_NAME = "Database Backup";
 
+export type BackupScheduleState = "disabled" | "missing" | "inactive" | "mismatched" | "scheduled";
+
+export interface BackupScheduleStatus {
+  enabled: boolean;
+  cronExpression: string;
+  routineRegistered: boolean;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  lastRunSucceeded?: boolean;
+  lastRunOutput?: string;
+  runCount?: number;
+}
+
+export type BackupRoutineSyncPlan = { action: "none" | "upsert" | "delete" };
+
+/**
+ * FNXC:SettingsBackups 2026-08-13-23:50:
+ * Global settings saves must not postpone a pending backup. Compare desired routine
+ * fields before writing so a matching central row retains its next-run cadence.
+ */
+export function planBackupRoutineSync(existing: Routine | undefined, desired: Pick<Routine, "trigger" | "command" | "enabled">): BackupRoutineSyncPlan {
+  if (!desired.enabled) return { action: existing ? "delete" : "none" };
+  if (
+    existing?.enabled
+    && existing.command === desired.command
+    && existing.trigger.type === "cron"
+    && desired.trigger.type === "cron"
+    && existing.trigger.cronExpression === desired.trigger.cronExpression
+  ) return { action: "none" };
+  return { action: "upsert" };
+}
+
+export function buildBackupScheduleStatus(
+  settings: Pick<Settings, "autoBackupEnabled" | "autoBackupSchedule">,
+  routine: Routine | undefined,
+): BackupScheduleStatus {
+  const result = routine?.lastRunResult;
+  const output = typeof result?.output === "string" ? result.output : typeof result?.error === "string" ? result.error : undefined;
+  return {
+    enabled: Boolean(settings.autoBackupEnabled),
+    cronExpression: settings.autoBackupSchedule || "0 2 * * *",
+    routineRegistered: Boolean(routine),
+    nextRunAt: routine?.nextRunAt,
+    lastRunAt: routine?.lastRunAt,
+    lastRunSucceeded: result?.success,
+    lastRunOutput: output?.slice(0, 500),
+    runCount: routine?.runCount,
+  };
+}
+
+/** @deprecated Use buildBackupScheduleStatus for the dashboard response. */
+export function getBackupScheduleStatus(
+  settings: Pick<Settings, "autoBackupEnabled" | "autoBackupSchedule">,
+  routine: Routine | undefined,
+): { status: BackupScheduleState; schedule: string; routine?: Routine } {
+  const schedule = settings.autoBackupSchedule || "0 2 * * *";
+  if (!settings.autoBackupEnabled) return { status: "disabled", schedule, routine };
+  if (!routine) return { status: "missing", schedule };
+  if (!routine.enabled) return { status: "inactive", schedule, routine };
+  return routine.trigger.type === "cron" && routine.trigger.cronExpression === schedule
+    ? { status: "scheduled", schedule, routine }
+    : { status: "mismatched", schedule, routine };
+}
+
 export async function syncBackupAutomation(
   automationStore: import("../automation/automation-store.js").AutomationStore,
   settings: Settings
@@ -422,32 +487,38 @@ export async function syncBackupRoutine(
   if (routineStore.asyncLayer) {
     const { GlobalRoutineStore } = await import("../automation/global-routine-store.js");
     const globalRoutines = new GlobalRoutineStore(routineStore.asyncLayer);
-    if (!settings.autoBackupEnabled) {
-      await globalRoutines.deleteByName(BACKUP_SCHEDULE_NAME);
-      return undefined;
-    }
-    return globalRoutines.syncBackup({
+    const input = {
       name: BACKUP_SCHEDULE_NAME,
       description: "Automatic backup of the shared global PostgreSQL cluster",
       agentId: "",
-      trigger: { type: "cron", cronExpression: schedule },
+      trigger: { type: "cron" as const, cronExpression: schedule },
       command: "fn backup --create",
-      enabled: true,
-    });
+      enabled: Boolean(settings.autoBackupEnabled),
+    };
+    const existing = await globalRoutines.getByName(BACKUP_SCHEDULE_NAME);
+    const plan = planBackupRoutineSync(existing, input);
+    if (plan.action === "none") return existing;
+    if (plan.action === "delete") {
+      await globalRoutines.deleteByName(BACKUP_SCHEDULE_NAME);
+      return undefined;
+    }
+    return globalRoutines.syncBackup(input);
   }
 
   const routines = await routineStore.listRoutines();
   const existingRoutine = routines.find((routine) => routine.name === BACKUP_SCHEDULE_NAME);
-  if (!settings.autoBackupEnabled) {
-    if (existingRoutine) await routineStore.deleteRoutine(existingRoutine.id);
-    return undefined;
-  }
   const input = {
     name: BACKUP_SCHEDULE_NAME,
     description: "Automatic backup of the shared global PostgreSQL cluster",
     agentId: "", trigger: { type: "cron" as const, cronExpression: schedule },
     command: "fn backup --create", enabled: true, scope: "project" as const,
   };
+  const plan = planBackupRoutineSync(existingRoutine, { ...input, enabled: Boolean(settings.autoBackupEnabled) });
+  if (plan.action === "none") return existingRoutine;
+  if (plan.action === "delete") {
+    await routineStore.deleteRoutine(existingRoutine!.id);
+    return undefined;
+  }
   if (existingRoutine) return routineStore.updateRoutine(existingRoutine.id, { trigger: input.trigger, command: input.command, enabled: true });
   return routineStore.createRoutine(input);
 }

@@ -35,6 +35,17 @@ function buildApp(seed: Task[], projectId = "project-a") {
     listTasks: vi.fn(async (options?: { includeDeleted?: boolean }) =>
       tasks.filter((item) => options?.includeDeleted || !item.deletedAt),
     ),
+    findTaskByProposalClaimId: vi.fn(async (claimId: string, options?: { includeDeleted?: boolean }) =>
+      tasks.find((item) => item.proposalClaimId === claimId && (options?.includeDeleted || !item.deletedAt)) ?? null,
+    ),
+    listTaskRecommendations: vi.fn(async (options?: { completeColumns?: ReadonlySet<string>; limit?: number; offset?: number }) => {
+      const rows = tasks.filter((item) => !item.deletedAt && !!item.recommendations?.length && (options?.completeColumns ?? new Set(["done"])).has(item.column))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id));
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit ?? 50;
+      const page = rows.slice(offset, offset + limit);
+      return { items: page.flatMap((item) => (item.recommendations ?? []).map((recommendation) => ({ taskId: item.id, taskTitle: item.title, taskColumn: item.column, updatedAt: item.updatedAt, recommendation }))), rowOffset: offset, rowLimit: limit, returnedRowCount: page.length, totalRowCount: rows.length, hasMore: offset + page.length < rows.length };
+    }),
     searchTasks: vi.fn(async () => tasks.filter((item) => !item.deletedAt)),
     findRecentTasksByContentFingerprint: vi.fn(async () => []),
     getSettingsFast: vi.fn(async () => ({ autoSummarizeTitles: false })),
@@ -211,6 +222,24 @@ describe("recommendation task creation route", () => {
   beforeEach(() => locks?.clear());
   afterEach(() => { locks?.clear(); vi.restoreAllMocks(); });
 
+  it("lists completed recommendations with bounded row pagination before task-id routes", async () => {
+    const first = parent({ id: "FN-1", updatedAt: "2026-08-13T00:00:00.000Z" });
+    const second = parent({ id: "FN-2", updatedAt: "2026-08-13T00:00:00.000Z", recommendations: [{ id: "rec-1", title: "Second", description: "Another safe follow-up.", category: "bug" }] });
+    const { app, store } = buildApp([first, second]);
+    const response = await performRequest(app, "GET", "/api/tasks/recommendations?limit=1&offset=0");
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ rowLimit: 1, rowOffset: 0, returnedRowCount: 1, totalRowCount: 2, hasMore: true });
+    expect(store.getTask).not.toHaveBeenCalledWith("recommendations");
+    expect(await performRequest(app, "GET", "/api/tasks/recommendations?limit=1.5")).toMatchObject({ status: 400 });
+    expect(await performRequest(app, "GET", "/api/tasks/recommendations?limit=-1")).toMatchObject({ status: 400 });
+    expect(await performRequest(app, "GET", "/api/tasks/recommendations?offset=-1")).toMatchObject({ status: 400 });
+    expect(await performRequest(app, "GET", "/api/tasks/recommendations?offset=NaN")).toMatchObject({ status: 400 });
+    expect(await performRequest(app, "GET", "/api/tasks/recommendations?limit=999")).toMatchObject({ status: 200 });
+    expect(store.listTaskRecommendations).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 200 }));
+    const finalPage = await performRequest(app, "GET", "/api/tasks/recommendations?limit=1&offset=1");
+    expect(finalPage.body).toMatchObject({ rowOffset: 1, rowLimit: 1, returnedRowCount: 1, totalRowCount: 2, hasMore: false });
+  });
+
   it("creates and links exactly one child on concurrent clicks through guarded intake", async () => {
     const { app, store, tasks } = buildApp([parent()]);
     const [first, second] = await Promise.all([
@@ -224,6 +253,39 @@ describe("recommendation task creation route", () => {
     expect(children).toHaveLength(1);
     expect(children[0]).toMatchObject({ proposalClaimId: "recommendation:FN-1:rec-1", source: { sourceParentTaskId: "FN-1" } });
     expect(tasks[0]?.recommendations?.[0]?.createdTaskId).toBe(children[0]?.id);
+  });
+
+  it("keeps recommendation creation free of unbounded listTasks reads when search returns candidates (pre-fix violated this invariant)", async () => {
+    const { app, store } = buildApp([parent()]);
+    const response = await performRequest(app, "POST", "/api/tasks/FN-1/recommendations/rec-1/create", undefined);
+
+    expect(response.status).toBe(201);
+    expect(store.findTaskByProposalClaimId).toHaveBeenCalledWith("recommendation:FN-1:rec-1", { includeDeleted: true });
+    expect(store.listTasks).not.toHaveBeenCalled();
+  });
+
+  it("uses only the bounded limit-50 fallback when recommendation search has no candidates (pre-fix violated this invariant)", async () => {
+    const { app, store } = buildApp([parent({
+      recommendations: [{
+        id: "rec-1",
+        title: "Export task records",
+        description: "Add packages/dashboard/app/api/tasks/export.ts outside this task's scope.",
+        category: "feature",
+      }],
+    })]);
+    (store.searchTasks as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const response = await performRequest(app, "POST", "/api/tasks/FN-1/recommendations/rec-1/create", undefined);
+
+    expect(response.status).toBe(201);
+    expect(store.listTasks).toHaveBeenCalledTimes(1);
+    expect(store.listTasks).toHaveBeenCalledWith(expect.objectContaining({
+      limit: 50,
+    }));
+    for (const [options] of (store.listTasks as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(typeof options?.limit).toBe("number");
+      expect(options.limit).toBeLessThanOrEqual(50);
+    }
   });
 
   /*
@@ -345,7 +407,7 @@ describe("recommendation task creation route", () => {
     expect(response.status).toBe(409);
     expect(store.createTask).not.toHaveBeenCalled();
     expect(tasks[0]?.recommendations?.[0]?.createdTaskId).toBeUndefined();
-    expect(store.listTasks).toHaveBeenCalledWith(expect.objectContaining({ includeDeleted: true }));
+    expect(store.findTaskByProposalClaimId).toHaveBeenCalledWith(expect.any(String), { includeDeleted: true });
   });
 
   it("returns the normal duplicate conflict shape when post-create reconciliation loses a race", async () => {

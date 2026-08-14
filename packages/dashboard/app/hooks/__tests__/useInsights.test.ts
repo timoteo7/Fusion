@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useInsights, INSIGHT_CATEGORIES } from "../useInsights";
 import { SWR_CACHE_KEYS } from "../../utils/swrCache";
-import type { InsightCategory, InsightStatus } from "@fusion/core";
+import type { Insight, InsightCategory, InsightStatus } from "@fusion/core";
 
 // Mock the API module
 vi.mock("../../api", () => ({
@@ -72,6 +72,23 @@ const mockTriggerInsightRun = vi.mocked(triggerInsightRun);
 const mockFetchInsightRun = vi.mocked(fetchInsightRun);
 const mockFetchInsightRuns = vi.mocked(fetchInsightRuns);
 const mockGetInsightCreateTaskData = vi.mocked(getInsightCreateTaskData);
+
+function makeInsight(overrides: Partial<Insight> = {}): Insight {
+  return {
+    id: "INS-1",
+    projectId: "project-1",
+    title: "Insight",
+    content: "Content",
+    category: "features",
+    status: "generated",
+    fingerprint: "fp-1",
+    provenance: { trigger: "manual" },
+    lastRunId: null,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
 
 describe("useInsights", () => {
   beforeEach(() => {
@@ -195,6 +212,67 @@ describe("useInsights", () => {
       const cached = envelope.data;
       expect(cached?.[0]?.id).toBe("INS-1");
       expect(cached).not.toHaveProperty("dismissStates");
+    });
+
+    it("sorts API insights newest-first and breaks equal timestamps by descending id", async () => {
+      mockFetchInsights.mockResolvedValue({
+        insights: [
+          makeInsight({ id: "INS-OLD", createdAt: "2026-01-01T00:00:00Z" }),
+          makeInsight({ id: "INS-A", createdAt: "2026-02-01T00:00:00Z" }),
+          makeInsight({ id: "INS-Z", createdAt: "2026-02-01T00:00:00Z" }),
+          makeInsight({ id: "INS-NEW", createdAt: "2026-03-01T00:00:00Z" }),
+        ],
+        count: 4,
+      });
+      mockFetchInsightRuns.mockResolvedValue({ runs: [] });
+
+      const { result } = renderHook(() => useInsights("project-1"));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      expect(result.current.sections.find((section) => section.category === "features")?.items.map((item) => item.id))
+        .toEqual(["INS-NEW", "INS-Z", "INS-A", "INS-OLD"]);
+    });
+
+    it("sorts cached insights newest-first before the network refresh resolves", async () => {
+      localStorage.setItem(
+        `${SWR_CACHE_KEYS.INSIGHTS_PREFIX}project-1`,
+        JSON.stringify({
+          savedAt: Date.now(),
+          data: [
+            makeInsight({ id: "INS-CACHED-OLD", createdAt: "2026-01-01T00:00:00Z" }),
+            makeInsight({ id: "INS-CACHED-NEW", createdAt: "2026-03-01T00:00:00Z" }),
+          ],
+        }),
+      );
+      mockFetchInsights.mockImplementation(() => new Promise(() => {}));
+      mockFetchInsightRuns.mockImplementation(() => new Promise(() => {}));
+
+      const { result } = renderHook(() => useInsights("project-1"));
+
+      await waitFor(() => {
+        expect(result.current.sections.find((section) => section.category === "features")?.items.map((item) => item.id))
+          .toEqual(["INS-CACHED-NEW", "INS-CACHED-OLD"]);
+      });
+    });
+
+    it("sorts malformed createdAt values last without throwing", async () => {
+      mockFetchInsights.mockResolvedValue({
+        insights: [
+          makeInsight({ id: "INS-INVALID-FIRST", createdAt: "not-a-date" }),
+          makeInsight({ id: "INS-VALID", createdAt: "2026-03-01T00:00:00Z" }),
+          makeInsight({ id: "INS-MISSING", createdAt: undefined as unknown as string }),
+        ],
+        count: 3,
+      });
+      mockFetchInsightRuns.mockResolvedValue({ runs: [] });
+
+      const { result } = renderHook(() => useInsights("project-1"));
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      expect(result.current.sections.find((section) => section.category === "features")?.items.map((item) => item.id))
+        .toEqual(["INS-VALID", "INS-INVALID-FIRST", "INS-MISSING"]);
     });
 
     it("caps persisted insight cache at 500", async () => {
@@ -748,6 +826,32 @@ describe("useInsights", () => {
       });
       expect(mockUnarchiveInsight).toHaveBeenCalledWith("INS-1", "project-1");
       expect(result.current.archivedCount).toBe(0);
+    });
+
+    it("preserves newest-first order after dismissing and showing archived insights", async () => {
+      const insights = [
+        makeInsight({ id: "INS-OLD", createdAt: "2026-01-01T00:00:00Z" }),
+        makeInsight({ id: "INS-ARCHIVED", status: "archived", createdAt: "2026-02-01T00:00:00Z" }),
+        makeInsight({ id: "INS-NEW", createdAt: "2026-03-01T00:00:00Z" }),
+      ];
+      mockFetchInsights.mockResolvedValue({ insights, count: insights.length });
+      mockFetchInsightRuns.mockResolvedValue({ runs: [] });
+      mockDismissInsight.mockResolvedValue({ ...insights[0], status: "dismissed" });
+
+      const { result } = renderHook(() => useInsights("project-1"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await act(async () => {
+        await result.current.dismiss("INS-OLD");
+      });
+      expect(result.current.sections.find((section) => section.category === "features")?.items.map((item) => item.id))
+        .toEqual(["INS-NEW"]);
+
+      act(() => {
+        result.current.toggleShowArchived();
+      });
+      expect(result.current.sections.find((section) => section.category === "features")?.items.map((item) => item.id))
+        .toEqual(["INS-NEW", "INS-ARCHIVED"]);
     });
 
     it("toggleShowArchived hides and shows archived insights", async () => {

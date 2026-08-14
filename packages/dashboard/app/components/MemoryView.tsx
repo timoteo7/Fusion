@@ -7,6 +7,7 @@ import type { MemoryFileInfo, MemoryRetrievalTestResult } from "../api";
 import { FileEditor } from "./FileEditor";
 import { ViewHeader } from "./ViewHeader";
 import { useMemoryData } from "../hooks/useMemoryData";
+import { KnowledgeGraphPanel } from "./KnowledgeGraphPanel";
 
 interface MemoryViewProps {
   projectId?: string;
@@ -14,7 +15,7 @@ interface MemoryViewProps {
   onSendSelectionToTask?: (description: string) => void;
 }
 
-type Tab = "working" | "insights" | "engines";
+type Tab = "working" | "insights" | "engines" | "graph";
 
 /** Known category headers in the insights file */
 const CATEGORY_HEADERS: Record<string, string> = {
@@ -416,6 +417,16 @@ export function MemoryView({ projectId, addToast, onSendSelectionToTask }: Memor
         <button
           type="button"
           role="tab"
+          aria-selected={activeTab === "graph"}
+          className={`memory-view-tab${activeTab === "graph" ? " memory-view-tab--active" : ""}`}
+          onClick={() => setActiveTab("graph")}
+          data-testid="memory-tab-graph"
+        >
+          {t("memory.tabGraph", "Knowledge Graph")}
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={activeTab === "engines"}
           className={`memory-view-tab${activeTab === "engines" ? " memory-view-tab--active" : ""}`}
           onClick={() => setActiveTab("engines")}
@@ -427,6 +438,8 @@ export function MemoryView({ projectId, addToast, onSendSelectionToTask }: Memor
 
       {/* Content area */}
       <div className="memory-view-content">
+        {activeTab === "graph" && <KnowledgeGraphPanel projectId={projectId} addToast={addToast} />}
+
         {/* Working Memory Tab */}
         {activeTab === "working" && (
           <div className="memory-working-tab">

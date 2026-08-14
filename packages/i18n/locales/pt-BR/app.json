@@ -3235,7 +3235,16 @@
     "unarchiveLabel": "Desarquivar este insight",
     "unarchiveTitle": "Desarquivar este insight",
     "unarchiving": "Desarquivando \"{{title}}\"...",
-    "usePlanningDefault": "Usar padrão de planejamento"
+    "usePlanningDefault": "Usar padrão de planejamento",
+    "recommendations": {
+      "title": "",
+      "count": "",
+      "source": "",
+      "loadMore": "",
+      "loadingMore": "",
+      "loadMoreFailed": "",
+      "truncated": ""
+    }
   },
   "interview": {
     "addContextDirection": "Adicione contexto ou direcionamento extra...",
@@ -3609,7 +3618,20 @@
     "testSearchHint": "Executa o mesmo caminho memory_search baseado em qmd que os agentes usam.",
     "title": "Memória",
     "totalInsights": "Total de insights",
-    "workingMemoryLabel": "Memória de trabalho"
+    "workingMemoryLabel": "Memória de trabalho",
+    "tabGraph": "Knowledge Graph",
+    "graphLoading": "Loading knowledge graph…",
+    "graphUnavailable": "Graph unavailable",
+    "graphBuild": "Build graph",
+    "graphNodes": "nodes",
+    "graphEdges": "edges",
+    "graphForce": "Force rebuild",
+    "graphRebuilding": "Rebuilding…",
+    "graphRebuild": "Rebuild",
+    "graphFilters": "Graph filters",
+    "graphClearFilters": "Clear filters",
+    "graphResults": "results",
+    "graphNoResults": "No matching nodes."
   },
   "merge": {
     "advanced": "Avançado",
@@ -3993,7 +4015,8 @@
     "verification": "Verificação:",
     "verificationCriteria": "Critérios de verificação",
     "viewMissionFailures": "Ver falhas da missão",
-    "whatToBuild": "O que você quer construir?"
+    "whatToBuild": "O que você quer construir?",
+    "autoMergeOverrideDescription": "Herdado segue a configuração do projeto. O merge automático integra cada funcionalidade assim que ela é aprovada. Uma única solicitação de pull mantém todas as funcionalidades em uma branch compartilhada para revisão e merge conjuntos."
   },
   "modalManager": {
     "createdFromPlanning": "{{id}} criado a partir do modo de planejamento",
@@ -5881,7 +5904,11 @@
       "gitRemoteThatMergedResultsArePushedTo": "Remoto do Git para onde os resultados do merge recebem push. Padrão: \"origin\".",
       "pushTargetBranch": "Branch de destino do push",
       "sameAsIntegrationBranchDefault": "(mesma da branch de integração — padrão)",
-      "pushTargetBranchHelp": "Branch no remoto para onde os resultados do merge recebem push. Deixe no padrão para enviar a branch de integração para a branch remota de mesmo nome; escolha uma branch remota listada ou selecione Personalizado… para digitar uma que ainda não existe no remoto (o push a cria)."
+      "pushTargetBranchHelp": "Branch no remoto para onde os resultados do merge recebem push. Deixe no padrão para enviar a branch de integração para a branch remota de mesmo nome; escolha uma branch remota listada ou selecione Personalizado… para digitar uma que ainda não existe no remoto (o push a cria).",
+      "githubNativeAutoMerge": "Usar merge automático nativo do GitHub",
+      "githubNativeAutoMergeHelp": "O GitHub aguarda todo o conjunto de regras antes de fazer o merge. O repositório deve permitir merge automático; o Fusion falha de forma segura se ele não estiver disponível. Padrão: desativado.",
+      "requiredChecks": "Verificações obrigatórias de pull request",
+      "requiredChecksHelp": "Sem padrão — não definido. Nomes de verificações separados por vírgulas correspondem exatamente aos do GitHub (diferenciam maiúsculas de minúsculas). Deixar isto vazio usa apenas as verificações de status obrigatórias do GitHub; uma verificação nomeada que nunca informa bloqueia o merge."
     },
     "conflictModalTitle": "Resolver conflitos de configurações",
     "closeModal": "Fechar modal de conflito",
@@ -5975,7 +6002,6 @@
       "updating": "Atualizando…",
       "upperBoundOnMessagesFetchedFromTheRoom": "Limite superior de mensagens buscadas do armazenamento da sala para consideração de compactação. Padrão: 200.",
       "upToDate": "Você está atualizado ✓",
-      "useEphemeralTaskWorkerAgents": " Usar agentes efêmeros para execução de tarefas ",
       "warnOnTheBoardWhenTodoWorkExceeds": "Avisar no quadro quando o trabalho a fazer exceder o limite e não houver agentes ociosos disponíveis. Padrão: desativado.",
       "whenEnabledDefaultFusionSpawnsShortLived": " Quando ativado (padrão), o Fusion cria agentes efêmeros de curta duração ",
       "whenEnabledFusionChecksOpenAndClosedIssues": " Quando ativado, o Fusion verifica issues abertas e fechadas no repositório de destino em busca de possíveis duplicatas (usando caminhos do File Scope e sintomas-chave) antes de criar uma nova issue de rastreamento. Desmarque para sempre criar uma nova issue. Padrão: ativado. ",
@@ -6033,7 +6059,11 @@
       "reportDiscussionCategorySelect": "Selecione uma categoria de discussão",
       "reportDiscussionCategoryUnavailable": "As categorias de discussão não estão disponíveis para o repositório configurado.",
       "reportDiscussionCategoryEmpty": "Nenhuma categoria de discussão está disponível para o repositório configurado.",
-      "reportTargetByActionHelp": "Substituição opcional por ação do destino padrão do relatório para bug, feedback, ideia ou ajuda. Sem padrão — ações não definidas herdam reportTarget / os padrões da ação."
+      "reportTargetByActionHelp": "Substituição opcional por ação do destino padrão do relatório para bug, feedback, ideia ou ajuda. Sem padrão — ações não definidas herdam reportTarget / os padrões da ação.",
+      "recommendationMailboxNoticeEnabled": "",
+      "recommendationMailboxNoticeEnabledHelp": "",
+      "maxRecommendationsPerTask": "Máximo de recomendações por tarefa",
+      "maxRecommendationsPerTaskHelp": "Padrão: 3. Defina 0 para desativar recomendações; escolha um número inteiro de 1 a 20 para limitar cada tarefa concluída."
     },
     "mobileNav": {
       "label": "Seção de configurações"
@@ -6690,7 +6720,9 @@
       "ntfyEnabledHint": "Padrão: desativado.",
       "webhookEnabledHint": "Padrão: desativado.",
       "webhookUrlHint": "Sem padrão — não definido.",
-      "webhookFormatHint": "Padrão: genérico."
+      "webhookFormatHint": "Padrão: genérico.",
+      "wedgeNotificationSettleMs": "Janela de estabilização de bloqueio terminal (ms)",
+      "wedgeNotificationSettleMsHelp": "Por quanto tempo uma falha terminal deve persistir antes de alertar um operador. 0 = notificar imediatamente. Padrão: 300000 (5 minutos)."
     },
     "memory": {
       "03": "0 3 * * *",
@@ -6751,7 +6783,6 @@
       "backupDirectory": "Diretório de backup",
       "backupNow": "Fazer backup agora",
       "backups": "backups",
-      "backupS": " backup(s)",
       "backupScheduleCron": "Agendamento de backup (cron)",
       "creating": "Criando…",
       "cronExpressionForBackupTimingDefault02": " Expressão cron para o horário do backup. Padrão: 0 2 * * * (diariamente às 2h). Exemplos: 0 * * * * (a cada hora), 0 0 * * 0 (semanalmente), */15 * * * * (a cada 15 min) ",
@@ -6779,11 +6810,23 @@
       "projectOnlyFusionMemory": "Somente projeto (.fusion/memory)",
       "retentionCount": "Contagem de retenção",
       "totalSize": "tamanho total",
-      "view": "Ver ",
       "whenEnabledProjectAndAgentMemoryFilesAre": "Quando ativado, o backup dos arquivos de memória do projeto e dos agentes é feito automaticamente, conforme um agendamento. Padrão: desativado.",
       "whenEnabledTheDatabaseIsBackedUpAutomatically": "Quando ativado, o backup do banco de dados é feito automaticamente, conforme um agendamento. Padrão: desativado.",
       "createFailed": "Falha ao criar backup",
-      "memoryBackupScopeHint": "Padrão: todos (projeto + agentes)."
+      "memoryBackupScopeHint": "Padrão: todos (projeto + agentes).",
+      "scheduleStatus": "",
+      "status": "",
+      "on": "",
+      "off": "",
+      "cron": "",
+      "nextRun": "",
+      "lastRun": "",
+      "succeeded": "",
+      "failed": "",
+      "lastOutput": "",
+      "runCount": "",
+      "scheduleNotRegistered": "",
+      "noBackupsYet": ""
     },
     "auth": {
       "apiKeyCleared": "Chave de API limpa",
@@ -6919,7 +6962,9 @@
       "modelFailed": "Corrija ou tente novamente a instalação do modelo antes de ativar a entrada de voz.",
       "runtimeModuleMissing": "Instale uma versão do Fusion que inclua o runtime de voz opcional e reabra as Configurações.",
       "runtimePlatformLoadFailed": "Reinstale o Fusion para esta plataforma para que o runtime de voz opcional possa carregar.",
-      "runtimeIncompatible": "Atualize ou reinstale o Fusion porque o runtime de voz instalado é incompatível.",
+      "runtimeIncompatible": "The installed voice runtime is incompatible. Repair it, then re-check the runtime.",
+      "recheckRuntime": "Re-check runtime",
+      "recheckingRuntime": "Re-checking runtime…",
       "unknown": "Status indisponível",
       "downloading": "Baixando modelo…",
       "downloadingProgress": "Baixando: {{progress}}%",
@@ -8113,7 +8158,8 @@
       "terminal": "Sessão",
       "worktreeTerminal": "Terminal",
       "workflow": "Fluxo de trabalho",
-      "cost": "Custo"
+      "cost": "Custo",
+      "recommendations": "Recomendações"
     },
     "terminal": {
       "loading": "Carregando terminal…"
@@ -8160,6 +8206,15 @@
       "totalCostLabel": "Total",
       "totalTokens": "Total de tokens",
       "unknownModel": "(desconhecido)"
+    },
+    "recommendations": {
+      "title": "Recomendações",
+      "empty": "Nenhuma recomendação foi produzida para esta tarefa.",
+      "created": "Criada {{taskId}}",
+      "creating": "Criando…",
+      "retry": "Tentar criar tarefa novamente",
+      "create": "Criar tarefa",
+      "error": "Não foi possível criar a tarefa. Tente novamente."
     }
   },
   "taskDocuments": {

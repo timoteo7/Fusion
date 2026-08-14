@@ -2032,7 +2032,7 @@ export function SettingsModal({
   }, [activeSection]);
 
   useEffect(() => {
-    if (activeSection === "backups") {
+    if (activeSection === "backups-global") {
       setBackupLoading(true);
       fetchBackups(projectId)
         .then((info) => setBackupInfo(info))
@@ -3525,6 +3525,16 @@ export function SettingsModal({
       ]);
 
       await workflowLaneSaverRef.current?.();
+
+      /*
+      FNXC:SettingsBackups 2026-08-13-23:51:
+      Saving database-backup settings can register or reschedule the central
+      routine. Refresh its evidence immediately so the open settings view does
+      not require a close-and-reopen cycle to report the new schedule.
+      */
+      if (Object.keys(globalPatch).some((key) => key.startsWith("autoBackup"))) {
+        void fetchBackups(projectId).then(setBackupInfo).catch(() => setBackupInfo(null));
+      }
 
       // Only clear workflow-lane dirtiness when no newer lane edit arrived.
       if (workflowLaneRevisionRef.current === workflowLaneRevisionSnapshot) {

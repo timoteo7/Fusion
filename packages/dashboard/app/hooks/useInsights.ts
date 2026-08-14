@@ -72,6 +72,30 @@ export const STATUS_LABELS: Record<InsightStatus, string> = {
   archived: "Archived",
 };
 
+/*
+ * FNXC:InsightsView 2026-08-13-21:58:
+ * The Insights list must read newest-first. InsightStore.listInsights is contractually
+ * createdAt ASC for deterministic pagination and dedupe, so presentation order is inverted
+ * at this single section-derivation seam rather than in the store. Tie-break valid equal
+ * timestamps by id DESC; malformed timestamps sort last without changing their source order.
+ */
+function compareInsightsRecentFirst(a: Insight, b: Insight): number {
+  const aCreatedAt = Date.parse(a.createdAt);
+  const bCreatedAt = Date.parse(b.createdAt);
+  const aHasValidCreatedAt = Number.isFinite(aCreatedAt);
+  const bHasValidCreatedAt = Number.isFinite(bCreatedAt);
+
+  if (!aHasValidCreatedAt || !bHasValidCreatedAt) {
+    if (aHasValidCreatedAt) return -1;
+    if (bHasValidCreatedAt) return 1;
+    return 0;
+  }
+
+  if (aCreatedAt !== bCreatedAt) return bCreatedAt - aCreatedAt;
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? 1 : -1;
+}
+
 // Section data structure
 export interface InsightSection {
   category: InsightCategory;
@@ -347,7 +371,7 @@ export function useInsights(projectId?: string): UseInsightsResult {
       INSIGHT_CATEGORIES.map((category) => ({
         category,
         label: getCategoryLabel(category),
-        items: grouped.get(category) ?? [],
+        items: [...(grouped.get(category) ?? [])].sort(compareInsightsRecentFirst),
         isLoading: false,
         error: null,
       })),

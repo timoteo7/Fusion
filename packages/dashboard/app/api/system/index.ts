@@ -6,6 +6,7 @@ export * from "./system-panel.js";
 export * from "./insights.js";
 export * from "./research.js";
 export * from "./memory.js";
+export * from "./knowledge-graph.js";
 export * from "./scheduling.js";
 export * from "./workflows.js";
 export * from "./plugins-and-skills.js";

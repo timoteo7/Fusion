@@ -220,6 +220,15 @@ vi.mock("../FileBrowser", () => ({
 }));
 
 describe("SettingsModal", () => {
+  it("renders recommendation mailbox notices enabled by default and persists disabling it", async () => {
+    renderModal({ initialSection: "general" });
+    await waitForSettingsModalReady();
+    const toggle = screen.getByLabelText("Recommendation mailbox notices");
+    expect(toggle).toBeChecked();
+    await settingsModalUser.click(toggle);
+    await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalled());
+    expect(mockUpdateSettings.mock.calls.at(-1)?.[0]).toMatchObject({ recommendationMailboxNoticeEnabled: false });
+  });
   // Keep Advanced off by default so disclosure default/persist tests stay truthful.
   installSettingsModalEnv({ advancedSettings: false });
 
@@ -1702,6 +1711,7 @@ describe("SettingsModal", () => {
       expect(payload.autoMerge).toBeNull();
       expect(payload.maxConcurrent).toBeNull();
       expect(payload.maxRecommendationsPerTask).toBeNull();
+      expect(payload.recommendationMailboxNoticeEnabled).toBeNull();
       // Global-only key must never appear in a project-scope reset payload.
       expect(payload).not.toHaveProperty("themeMode");
       expect(mockUpdateGlobalSettings).not.toHaveBeenCalled();

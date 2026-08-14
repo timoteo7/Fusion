@@ -18,7 +18,7 @@ describe("incremental graph builder", () => {
     const before=await Promise.all(["nodes.json","edges.json","manifest.json"].map(file=>readFile(join(dir,file),"utf8")));
     const typeScript=vi.fn(realTypeScript), extract=vi.fn(realExtractFile);
     const noChange=await buildKnowledgeGraph({projectRoot:root,graphDir:dir,extractFile:extract,deps:{typescript:typeScript},discovery});
-    expect(noChange.changed).toBe(false); expect(extract).not.toHaveBeenCalled();
+    expect(noChange.changed).toBe(false); expect(noChange.stats).toMatchObject({ recoveryReason: null, reusedFiles: 2 }); expect(extract).not.toHaveBeenCalled();
     await writeFile(join(root,"src","b.ts"),"export const b = 2;");
     const changed=await buildKnowledgeGraph({projectRoot:root,graphDir:dir,extractFile:extract,deps:{typescript:typeScript},discovery});
     expect(changed.stats).toMatchObject({parsedFiles:1,reusedFiles:1}); expect(extract).toHaveBeenCalledTimes(1); expect(typeScript).toHaveBeenCalledTimes(1);
@@ -61,6 +61,33 @@ describe("incremental graph builder", () => {
     const inferred = rebuilt.graph.edges.find(edge => edge.provenance === "inferred")!;
     expect(inferred.source).toEqual(currentAnchor.source);
     expect(inferred.ownerPath).toBe(currentAnchor.ownerPath);
+  });
+
+  it("fully rebuilds artifacts after exact-shape and import-reference cache corruption", async () => {
+    const root = await fixture(), dir = join(root, ".fusion-knowledge/graph");
+    await mkdir(join(root, "docs"));
+    await writeFile(join(root, "docs", "guide.md"), "# Guide\n");
+    const graphDiscovery = { sourceRoots: ["src"], markdownRoots: ["docs"] };
+    const artifactBytes = () => Promise.all(["nodes.json", "edges.json", "manifest.json"].map(file => readFile(join(dir, file), "utf8")));
+    await buildKnowledgeGraph({ projectRoot: root, graphDir: dir, discovery: graphDiscovery });
+
+    const nodesPath = join(dir, "nodes.json");
+    const nodes = JSON.parse(await readFile(nodesPath, "utf8")) as { nodes: Array<Record<string, unknown>> };
+    nodes.nodes[0]!.foreign = "tampered";
+    await writeFile(nodesPath, `${JSON.stringify(nodes)}\n`);
+    const shapeRecovery = await buildKnowledgeGraph({ projectRoot: root, graphDir: dir, discovery: graphDiscovery });
+    expect(shapeRecovery.stats.recoveryReason).toBe("invalid-artifact");
+    expect(await artifactBytes()).toEqual(await buildKnowledgeGraph({ projectRoot: root, graphDir: dir, discovery: graphDiscovery, force: true }).then(artifactBytes));
+    expect((await artifactBytes()).join("")).not.toContain("tampered");
+
+    const manifestPath = join(dir, "manifest.json");
+    const artifactManifest = JSON.parse(await readFile(manifestPath, "utf8")) as { files: Record<string, { importRefs?: unknown[] }> };
+    artifactManifest.files["docs/guide.md"]!.importRefs = [{ kind: "imports", specifier: "./a", candidates: ["src/a.ts"], line: 1, column: 1, typeOnly: false }];
+    await writeFile(manifestPath, `${JSON.stringify(artifactManifest)}\n`);
+    const consistencyRecovery = await buildKnowledgeGraph({ projectRoot: root, graphDir: dir, discovery: graphDiscovery });
+    expect(consistencyRecovery.stats.recoveryReason).toBe("inconsistent-artifact");
+    expect(await artifactBytes()).toEqual(await buildKnowledgeGraph({ projectRoot: root, graphDir: dir, discovery: graphDiscovery, force: true }).then(artifactBytes));
+    expect((JSON.parse(await readFile(manifestPath, "utf8")) as { files: Record<string, { importRefs?: unknown[] }> }).files["docs/guide.md"]!.importRefs).toBeUndefined();
   });
 
   it("rebuilds rather than reusing a cache with forged synthetic file provenance", async () => {

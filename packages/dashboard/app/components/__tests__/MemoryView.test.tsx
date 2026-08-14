@@ -14,6 +14,10 @@ vi.mock("../../hooks/useMemoryData", () => ({
   useMemoryData: (...args: unknown[]) => mockUseMemoryData(...args),
 }));
 
+vi.mock("../KnowledgeGraphPanel", () => ({
+  KnowledgeGraphPanel: () => <div data-testid="knowledge-graph-panel" />,
+}));
+
 vi.mock("../FileEditor", () => ({
   FileEditor: (props: { filePath: string; onSendSelectionToTask?: (description: string) => void }) => {
     capturedFileEditorProps.push(props);
@@ -101,6 +105,15 @@ function createMemoryData(overrides: Record<string, unknown> = {}) {
 }
 
 describe("MemoryView", () => {
+  it("adds the lazy Knowledge Graph tab without mounting it initially", async () => {
+    render(<MemoryView addToast={vi.fn()} />);
+    expect(screen.getByTestId("memory-tab-graph")).toBeInTheDocument();
+    expect(screen.queryByTestId("knowledge-graph-panel")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("memory-tab-graph"));
+    expect(screen.getByTestId("knowledge-graph-panel")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("memory-tab-working"));
+    expect(screen.queryByTestId("knowledge-graph-panel")).not.toBeInTheDocument();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     capturedFileEditorProps.length = 0;

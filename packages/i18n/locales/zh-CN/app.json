@@ -3225,7 +3225,16 @@
     "unarchiveLabel": "取消存档此洞察",
     "unarchiveTitle": "取消存档此洞察",
     "unarchiving": "正在取消存档\"{{title}}\"...",
-    "usePlanningDefault": "使用规划默认值"
+    "usePlanningDefault": "使用规划默认值",
+    "recommendations": {
+      "title": "",
+      "count": "",
+      "source": "",
+      "loadMore": "",
+      "loadingMore": "",
+      "loadMoreFailed": "",
+      "truncated": ""
+    }
   },
   "interview": {
     "addContextDirection": "添加任何额外的上下文或方向...",
@@ -3599,7 +3608,20 @@
     "testSearchHint": "运行与代理使用的相同 qmd 支持的 memory_search 路径。",
     "title": "记忆",
     "totalInsights": "洞察总数",
-    "workingMemoryLabel": "工作记忆"
+    "workingMemoryLabel": "工作记忆",
+    "tabGraph": "Knowledge Graph",
+    "graphLoading": "Loading knowledge graph…",
+    "graphUnavailable": "Graph unavailable",
+    "graphBuild": "Build graph",
+    "graphNodes": "nodes",
+    "graphEdges": "edges",
+    "graphForce": "Force rebuild",
+    "graphRebuilding": "Rebuilding…",
+    "graphRebuild": "Rebuild",
+    "graphFilters": "Graph filters",
+    "graphClearFilters": "Clear filters",
+    "graphResults": "results",
+    "graphNoResults": "No matching nodes."
   },
   "merge": {
     "advanced": "高级",
@@ -5812,7 +5834,6 @@
       "backupDirectory": "",
       "backupNow": "立即备份",
       "backups": "",
-      "backupS": "",
       "backupScheduleCron": "",
       "creating": "创建中…",
       "cronExpressionForBackupTimingDefault02": "",
@@ -5840,11 +5861,23 @@
       "projectOnlyFusionMemory": "",
       "retentionCount": "",
       "totalSize": "",
-      "view": "",
       "whenEnabledProjectAndAgentMemoryFilesAre": "",
       "whenEnabledTheDatabaseIsBackedUpAutomatically": "",
       "createFailed": "",
-      "memoryBackupScopeHint": ""
+      "memoryBackupScopeHint": "",
+      "scheduleStatus": "",
+      "status": "",
+      "on": "",
+      "off": "",
+      "cron": "",
+      "nextRun": "",
+      "lastRun": "",
+      "succeeded": "",
+      "failed": "",
+      "lastOutput": "",
+      "runCount": "",
+      "scheduleNotRegistered": "",
+      "noBackupsYet": ""
     },
     "clearToDefault": "",
     "cliAgents": {
@@ -6030,7 +6063,9 @@
       "refinementTaskWorkflow": "",
       "refinementTaskWorkflowHelp": "",
       "maxRecommendationsPerTask": "",
-      "maxRecommendationsPerTaskHelp": ""
+      "maxRecommendationsPerTaskHelp": "",
+      "recommendationMailboxNoticeEnabled": "",
+      "recommendationMailboxNoticeEnabledHelp": ""
     },
     "globalGeneral": {
       "andShowsUpdateNoticesInTheCLIAnd": "",
@@ -6381,7 +6416,9 @@
       "sameAsIntegrationBranchDefault": "",
       "pushTargetBranchHelp": "",
       "requiredChecks": "",
-      "requiredChecksHelp": ""
+      "requiredChecksHelp": "",
+      "githubNativeAutoMerge": "使用 GitHub 原生自动合并",
+      "githubNativeAutoMergeHelp": "GitHub 会在合并前等待其完整规则集。仓库必须允许自动合并；不可用时 Fusion 会安全失败。默认：禁用。"
     },
     "mergeManually": "手动合并",
     "mobileNav": {
@@ -6500,7 +6537,9 @@
       "webhookFormatHint": "",
       "agentClarification": "",
       "agentClarificationEnable": "",
-      "agentClarificationHint": ""
+      "agentClarificationHint": "",
+      "wedgeNotificationSettleMs": "终端卡滞稳定等待窗口（毫秒）",
+      "wedgeNotificationSettleMsHelp": "在通知操作员前，终端故障必须持续多长时间。0 = 立即通知。默认：300000（5 分钟）。"
     },
     "plugins": {
       "fusionPlugins": "",
@@ -6965,7 +7004,9 @@
       "modelFailed": "",
       "runtimeModuleMissing": "",
       "runtimePlatformLoadFailed": "",
-      "runtimeIncompatible": ""
+      "runtimeIncompatible": "The installed voice runtime is incompatible. Repair it, then re-check the runtime.",
+      "recheckRuntime": "Re-check runtime",
+      "recheckingRuntime": "Re-checking runtime…"
     }
   },
   "setup": {

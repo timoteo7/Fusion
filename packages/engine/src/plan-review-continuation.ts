@@ -37,18 +37,33 @@ export type ApprovedPlanReviewHandoffResult = {
  * an active non-task continuation means the graph is not idle, even though the
  * newly seeded continuation itself remains kind `task` for processor parity.
  */
+/*
+FNXC:PlanningHandoffAtomicity 2026-08-13-04:20:
+The bail-reason union is exported so the runtime reaction's quiet-park set stays type-linked to it:
+a rename or new reason here must be a compile error at the consumer, not a silent behavior change.
+"no-pre-release-plan-review" exists because a workflow with no pre-release Plan Review node (or a
+plan-review gate living in a WIP column) is a legitimate configuration — the reaction must treat
+that bail as a quiet park, not an anomaly worth retries and warnings.
+*/
+export type PlanReviewSeedBailReason =
+  | "no-pre-release-plan-review"
+  | "active-continuation"
+  | "plan-review-passed"
+  | "awaiting-approval"
+  | "paused";
+
 export async function seedPreReleasePlanReviewContinuation(
   store: TaskStore,
   task: Task,
   ir: WorkflowIr,
-  options: { atomic?: boolean } = {},
+  options: { atomic?: boolean; retirePredecessorId?: string } = {},
 ): Promise<{
   seeded: boolean;
-  reason?: "active-continuation" | "plan-review-passed" | "awaiting-approval" | "paused";
+  reason?: PlanReviewSeedBailReason;
   workItemId?: string;
 }> {
   const node = resolvePreReleasePlanReviewNode(ir);
-  if (!node || node.column !== task.column) return { seeded: false };
+  if (!node || node.column !== task.column) return { seeded: false, reason: "no-pre-release-plan-review" };
   /*
   FNXC:PlanApprovalHold 2026-07-27-19:30 (U7 / R4):
   Arming a runnable continuation is starting AI work on this card, so the parks
@@ -70,7 +85,18 @@ export async function seedPreReleasePlanReviewContinuation(
   if (isTaskBlockedOnApproval(task)) return { seeded: false, reason: "awaiting-approval" };
   if (task.paused === true || task.userPaused === true) return { seeded: false, reason: "paused" };
   const items = await store.listWorkflowWorkItemsForTask(task.id);
-  const active = items.filter((item) => ACTIVE_WORKFLOW_WORK_ITEM_STATES.includes(item.state));
+  /*
+  FNXC:PlanningHandoffAtomicity 2026-08-13-03:49:
+  The normal planning handoff names its own just-finished plan work item via
+  `retirePredecessorId`. That row is often still `running` here because triage
+  announces completion BEFORE its finally block marks the row terminal, so counting
+  it as "active" made the seeder bail on its own predecessor and strand the card
+  until FN-8592 self-healing re-seeded it ~10 minutes later. The predecessor is
+  excluded from this advisory pre-check and retired atomically with the successor
+  install inside the store operation; any OTHER active row still blocks the seed.
+  */
+  const active = items.filter((item) =>
+    ACTIVE_WORKFLOW_WORK_ITEM_STATES.includes(item.state) && item.id !== options.retirePredecessorId);
   if (active.length > 0) return { seeded: false, reason: "active-continuation" };
   // FNXC:StrandedHoldContinuation 2026-07-26-16:10:
   // A terminal predecessor is still part of this task's durable run history.
@@ -91,6 +117,16 @@ export async function seedPreReleasePlanReviewContinuation(
     targetColumn: task.column,
     irHash: computeWorkflowIrPin(ir, node.id).irHash,
   };
+  /*
+  FNXC:PlanningHandoffAtomicity 2026-08-13-03:49:
+  A caller that names a predecessor gets the atomic conditional seed regardless of the
+  `atomic` flag: the pre-check above is advisory (outside any transaction), so the
+  retire-predecessor + idle-recheck + successor-install must all land in ONE store
+  transaction under the task lock for the handoff to be ordering-proof.
+  */
+  if (options.retirePredecessorId) {
+    return store.seedStrandedPlanReviewContinuation(input, { retirePredecessorId: options.retirePredecessorId });
+  }
   if (options.atomic) return store.seedStrandedPlanReviewContinuation(input);
   const item = await store.replaceActiveTaskWorkflowContinuation(input);
   return { seeded: true, workItemId: item.id };
@@ -120,9 +156,13 @@ export async function resumeApprovedPlanReviewHandoff(
 
   const seeded = await seedPreReleasePlanReviewContinuation(store, task, ir, { atomic: true });
   if (seeded.seeded) return { resumed: true, reason: "seeded", workItemId: seeded.workItemId };
+  // FNXC:PlanningHandoffAtomicity 2026-08-13-04:20: the no-node bail now carries its own reason
+  // token; this seam already pre-checked the node above, so map it to its legacy result name.
   return {
     resumed: false,
-    reason: seeded.reason ?? "not-plan-in-place",
+    reason: seeded.reason === undefined || seeded.reason === "no-pre-release-plan-review"
+      ? "not-plan-in-place"
+      : seeded.reason,
   };
 }
 

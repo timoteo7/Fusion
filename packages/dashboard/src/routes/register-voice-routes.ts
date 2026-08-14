@@ -47,7 +47,15 @@ export function createRegisterVoiceRoutes(deps: { manager?: typeof defaultManage
   const service = deps.service ?? defaultService;
   return (ctx) => {
   const { router } = ctx;
-  router.get("/voice/status", async (req, res) => { const { voice } = await settingsFor(ctx, req); const model = resolveVoiceModelId(voice.model); const language = resolveVoiceLanguage(voice.language); const modelState = manager.peekState().status === "queued" || manager.peekState().status === "downloading" ? manager.peekState() : await manager.getState(); res.json({ enabled: voice.enabled === true, modelId: "id" in model ? model.id : undefined, language: "language" in language ? language.language : undefined, unsupportedModel: "unsupported" in model ? model.unsupported : undefined, unsupportedLanguage: "unsupported" in language ? language.unsupported : undefined, model: modelState, runtime: await service.getRuntimeStatus() }); });
+  const voiceStatus = async (req: express.Request) => {
+    const { voice } = await settingsFor(ctx, req);
+    const model = resolveVoiceModelId(voice.model);
+    const language = resolveVoiceLanguage(voice.language);
+    const modelState = manager.peekState().status === "queued" || manager.peekState().status === "downloading" ? manager.peekState() : await manager.getState();
+    return { enabled: voice.enabled === true, modelId: "id" in model ? model.id : undefined, language: "language" in language ? language.language : undefined, unsupportedModel: "unsupported" in model ? model.unsupported : undefined, unsupportedLanguage: "unsupported" in language ? language.unsupported : undefined, model: modelState, runtime: await service.getRuntimeStatus() };
+  };
+  router.get("/voice/status", async (req, res) => { res.json(await voiceStatus(req)); });
+  router.post("/voice/runtime/recheck", async (req, res) => { service.resetRuntime(); res.json(await voiceStatus(req)); });
   router.post("/voice/model/download", async (req, res) => { const { voice } = await settingsFor(ctx, req); const model = resolveVoiceModelId(voice.model); if ("unsupported" in model) return error(res, 400, { error: "unsupported-model", value: model.unsupported, supported: [DEFAULT_VOICE_MODEL_ID] }); const scheduled = manager.scheduleDownload(); if (!scheduled.accepted) return error(res, 409, { error: scheduled.state.errorReason }); res.status(202).json({ state: scheduled.state }); });
   router.delete("/voice/model", async (_req, res) => {
     // Increment before awaiting cleanup so pending createSession() calls are fenced immediately.

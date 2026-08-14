@@ -13,6 +13,7 @@ import { executorLog } from "../logger.js";
 import type { EngineRunContext } from "../util/run-audit.js";
 import { resolveReboundColumnFor, resolveTerminalColumnsFor } from "./lifecycle-columns.js";
 import { runContextForTotal } from "./run-context-for.js";
+import { dispatchAcceptedCompletionRecommendationNotice } from "./completion-recommendation-notice.js";
 
 export type FinalizeAcceptedNoOpCompletionDeps = {
   store: TaskStore;
@@ -169,6 +170,17 @@ export async function finalizeAcceptedNoOpCompletion(
       && !(rejectIfPaused && (beforeWatchdog.paused || beforeWatchdog.userPaused))
     ) {
       deps.scheduleCompletedTaskWatchdog(task.id, "fn_task_done");
+    }
+    // FNXC:TaskRecommendations 2026-08-13-03:56: every rollback guard is above; this accepted boundary dispatches without delaying completion.
+    if (recommendations !== undefined) {
+      dispatchAcceptedCompletionRecommendationNotice({
+        store: deps.store,
+        taskId: task.id,
+        taskTitle: task.title,
+        recommendations,
+        settings,
+        log: executorLog,
+      });
     }
     return { completed: true, hardPauseActive };
   } catch (error) {

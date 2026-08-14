@@ -3235,7 +3235,16 @@
     "unarchiveLabel": "Unarchive this insight",
     "unarchiveTitle": "Unarchive this insight",
     "unarchiving": "Unarchiving \"{{title}}\"...",
-    "usePlanningDefault": "Use planning default"
+    "usePlanningDefault": "Use planning default",
+    "recommendations": {
+      "title": "Task Recommendations",
+      "count": "Showing {{shown}} of {{total}} source tasks",
+      "source": "Source: {{task}}",
+      "loadMore": "Load more",
+      "loadingMore": "Loading more…",
+      "loadMoreFailed": "Could not load more recommendations.",
+      "truncated": "Showing the first 20 pages. Refresh to see the latest recommendations."
+    }
   },
   "interview": {
     "addContextDirection": "Add any extra context or direction...",
@@ -3609,7 +3618,20 @@
     "testSearchHint": "Runs the same qmd-backed memory_search path agents use.",
     "title": "Memory",
     "totalInsights": "Total Insights",
-    "workingMemoryLabel": "Working Memory"
+    "workingMemoryLabel": "Working Memory",
+    "tabGraph": "Knowledge Graph",
+    "graphLoading": "Loading knowledge graph…",
+    "graphUnavailable": "Graph unavailable",
+    "graphBuild": "Build graph",
+    "graphNodes": "nodes",
+    "graphEdges": "edges",
+    "graphForce": "Force rebuild",
+    "graphRebuilding": "Rebuilding…",
+    "graphRebuild": "Rebuild",
+    "graphFilters": "Graph filters",
+    "graphClearFilters": "Clear filters",
+    "graphResults": "results",
+    "graphNoResults": "No matching nodes."
   },
   "merge": {
     "advanced": "Advanced",
@@ -5822,7 +5844,6 @@
       "backupDirectory": "Backup Directory",
       "backupNow": "Backup Now",
       "backups": "backups",
-      "backupS": " backup(s)",
       "backupScheduleCron": "Backup Schedule (Cron)",
       "creating": "Creating…",
       "cronExpressionForBackupTimingDefault02": " Cron expression for backup timing. Default: 0 2 * * * (daily at 2 AM). Examples: 0 * * * * (hourly), 0 0 * * 0 (weekly), */15 * * * * (every 15 min) ",
@@ -5850,11 +5871,23 @@
       "projectOnlyFusionMemory": "Project only (.fusion/memory)",
       "retentionCount": "Retention Count",
       "totalSize": "total size",
-      "view": "View ",
       "whenEnabledProjectAndAgentMemoryFilesAre": "When enabled, project and agent memory files are backed up automatically on a schedule. Default: disabled.",
       "whenEnabledTheDatabaseIsBackedUpAutomatically": "When enabled, the database is backed up automatically on a schedule. Default: disabled.",
       "createFailed": "Failed to create backup",
-      "memoryBackupScopeHint": "Default: all (project + agents)."
+      "memoryBackupScopeHint": "Default: all (project + agents).",
+      "scheduleStatus": "Automatic backup schedule",
+      "status": "Status",
+      "on": "On",
+      "off": "Off",
+      "cron": "Cron",
+      "nextRun": "Next run",
+      "lastRun": "Last run",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "lastOutput": "Last output",
+      "runCount": "Run count",
+      "scheduleNotRegistered": "No backup schedule is registered. Restart Fusion or re-save Database Backup settings to register it.",
+      "noBackupsYet": "No backups yet — use Backup Now or enable automatic backups."
     },
     "clearToDefault": "Reset to default",
     "cliAgents": {
@@ -6054,7 +6087,9 @@
       "reportDiscussionCategoryEmpty": "No Discussion categories are available for the configured repository.",
       "reportTargetByActionHelp": "Optional per-action override of the default report target for bug, feedback, idea, or help. No default — unset actions inherit reportTarget / action defaults.",
       "maxRecommendationsPerTask": "Maximum recommendations per task",
-      "maxRecommendationsPerTaskHelp": "Default: 3. Set 0 to disable recommendations; choose a whole number from 1 to 20 to cap each completed task."
+      "maxRecommendationsPerTaskHelp": "Default: 3. Set 0 to disable recommendations; choose a whole number from 1 to 20 to cap each completed task.",
+      "recommendationMailboxNoticeEnabled": "Recommendation mailbox notices",
+      "recommendationMailboxNoticeEnabledHelp": "Default: enabled. When a completed task captures recommendations, send a summary to your mailbox. Turning this off does not change whether recommendations are captured."
     },
     "globalGeneral": {
       "andShowsUpdateNoticesInTheCLIAnd": " and shows update notices in the CLI and dashboard. Cadence is governed by the frequency below. Default: enabled. ",
@@ -6971,7 +7006,9 @@
       "modelFailed": "Fix or retry the model installation before enabling voice input.",
       "runtimeModuleMissing": "Install a Fusion release that includes the optional voice runtime, then reopen Settings.",
       "runtimePlatformLoadFailed": "Reinstall Fusion for this platform so the optional voice runtime can load.",
-      "runtimeIncompatible": "Update or reinstall Fusion because the installed voice runtime is incompatible.",
+      "runtimeIncompatible": "The installed voice runtime is incompatible. Repair it, then re-check the runtime.",
+      "recheckRuntime": "Re-check runtime",
+      "recheckingRuntime": "Re-checking runtime…",
       "unknown": "Status unavailable",
       "downloading": "Downloading model…",
       "downloadingProgress": "Downloading: {{progress}}%",

@@ -30,6 +30,17 @@ describe("shouldApplyRecomputedStatus", () => {
     }
   });
 
+  it("keeps protected no-op computations and excludes protected statuses from rollup ownership", () => {
+    expect(shouldApplyRecomputedStatus("blocked", "blocked", ROLLUP_OWNED_MISSION_STATUSES)).toBe(false);
+    expect(shouldApplyRecomputedStatus("archived", "archived", ROLLUP_OWNED_MISSION_STATUSES)).toBe(false);
+    expect(shouldApplyRecomputedStatus("blocked", "blocked", ROLLUP_OWNED_MILESTONE_STATUSES)).toBe(false);
+    expect(ROLLUP_OWNED_MISSION_STATUSES).toEqual(["planning", "active", "complete"]);
+    expect(ROLLUP_OWNED_MILESTONE_STATUSES).toEqual(["planning", "active", "complete"]);
+    expect(ROLLUP_OWNED_MISSION_STATUSES).not.toContain("blocked");
+    expect(ROLLUP_OWNED_MISSION_STATUSES).not.toContain("archived");
+    expect(ROLLUP_OWNED_MILESTONE_STATUSES).not.toContain("blocked");
+  });
+
   it("preserves mission statuses outside automatic rollup ownership", () => {
     for (const current of MISSION_STATUSES.filter((status) => !ROLLUP_OWNED_MISSION_STATUSES.includes(status))) {
       for (const computed of ROLLUP_OWNED_MISSION_STATUSES) {

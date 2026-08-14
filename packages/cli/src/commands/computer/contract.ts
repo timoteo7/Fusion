@@ -73,7 +73,13 @@ export const COMPUTER_COMMAND_SURFACE = Object.freeze({
   drag: { description: "Drag between coordinates or two captured elements.", flags: [{ flag: "--app", valueKind: "string", required: true, description: "Application target." }, { flag: "--from-x", valueKind: "integer", required: false, description: "Starting x coordinate." }, { flag: "--from-y", valueKind: "integer", required: false, description: "Starting y coordinate." }, { flag: "--to-x", valueKind: "integer", required: false, description: "Ending x coordinate." }, { flag: "--to-y", valueKind: "integer", required: false, description: "Ending y coordinate." }, { flag: "--from-element-index", valueKind: "integer", required: false, description: "Starting element index." }, { flag: "--to-element-index", valueKind: "integer", required: false, description: "Ending element index." }, { flag: "--snapshot-id", valueKind: "string", required: false, description: "Snapshot fence for element drag." }, { flag: "--window-id", valueKind: "string", required: false, mutuallyExclusiveWith: "--window-index", description: "Window identifier." }, { flag: "--window-index", valueKind: "integer", required: false, mutuallyExclusiveWith: "--window-id", description: "Window position." }], requirements: ["Choose exactly one form: all four coordinate flags, or both element-index flags.", "Coordinate drag takes no --snapshot-id or window flags."] },
 } as const satisfies Record<ComputerSubcommand, ComputerCommandSurfaceEntry>);
 export type CommandName = `computer.${ComputerSubcommand}` | "computer";
-export const SNAPSHOT_STALE_REASONS = Object.freeze(["not-found", "superseded", "expired", "pid-changed", "window-mismatch", "window-gone"] as const);
+/*
+ * FNXC:ComputerUse 2026-08-13-22:02:
+ * A successful action can re-render or refocus the window, so the capture that supplied sparse
+ * element indexes is no longer authoritative. Keep this append-only reason so stale replays fail
+ * closed and callers must capture again rather than risk acting on a different element.
+ */
+export const SNAPSHOT_STALE_REASONS = Object.freeze(["not-found", "superseded", "expired", "pid-changed", "window-mismatch", "window-gone", "consumed-by-action"] as const);
 export type SnapshotStaleReason = (typeof SNAPSHOT_STALE_REASONS)[number];
 export const COMPUTER_TIMEOUTS = Object.freeze({ permissionProbe: 5_000, discovery: 10_000, stateCapture: 20_000, screenshotCapture: 15_000, locatorReplay: 10_000, action: 10_000 });
 
@@ -109,7 +115,12 @@ export interface ListAppsResult { apps: AppRef[]; }
 export interface ListWindowsResult { app: AppRef; windows: WindowRef[]; }
 export interface Screenshot { path: string; width: number | null; height: number | null; verifiedPermission: boolean; }
 export interface AppStateResult { app: AppRef; window: WindowRef; snapshot: { snapshotId: string; targetKey: string; windowKey: string; capturedAt: string; expiresAt: string; treeText: string; elementCount: number; truncated: boolean; elements: Element[] }; screenshot: Screenshot | null; screenshotError?: { code: "SCREENSHOT_FAILED" | "PERMISSION_DENIED" | "PERMISSION_UNVERIFIED" | "TIMEOUT"; message: string }; }
-export interface ActionResult { action: string; app: AppRef; snapshotId: string | null; elementIndex: number | null; fromElementIndex: number | null; toElementIndex: number | null; performed: true; }
+/*
+ * FNXC:ComputerUse 2026-08-13-22:02:
+ * Successful actions burn the app-scoped snapshot fence because they may change the accessible
+ * tree. Publishing this field lets callers confirm they must capture again before replaying indexes.
+ */
+export interface ActionResult { action: string; app: AppRef; snapshotId: string | null; elementIndex: number | null; fromElementIndex: number | null; toElementIndex: number | null; performed: true; snapshotConsumed: boolean; }
 export interface SnapshotRecord { snapshotId: string; targetKey: string; windowKey: string; capturedAt: string; expiresAt: string; app: AppRef; window: WindowRef; elementCount: number; elements: Record<string, Element>; }
 export const SNAPSHOT_ID_PATTERN = /^cs_[A-Za-z0-9]{10,40}$/;
 export const isValidSnapshotId = (value: string | undefined): value is string => typeof value === "string" && SNAPSHOT_ID_PATTERN.test(value);
@@ -127,7 +138,7 @@ function validLocator(value: unknown): value is ElementLocator { const x = value
 export function isCapabilitiesResult(value: unknown): value is CapabilitiesResult { const x = value as CapabilitiesResult; return !!x && typeof x.platform === "string" && Array.isArray(x.actions) && Array.isArray(x.unsupportedActions) && !!x.features; }
 export function isPermissionsResult(value: unknown): value is PermissionsResult { const x = value as PermissionsResult; return !!x && Array.isArray(x.checks) && typeof x.allGranted === "boolean" && x.checks.every((c) => c.granted === (c.status === "granted") && (!c.granted || c.probed)) && (!x.allGranted || x.checks.length > 0 && x.checks.every((c) => c.status === "granted")); }
 export function isAppStateResult(value: unknown, screenshotSkipped = false): value is AppStateResult { const x = value as AppStateResult; return !!x && !!x.snapshot && Array.isArray(x.snapshot.elements) && x.snapshot.elements.every((e) => Number.isInteger(e.index) && validLocator(e.locator)) && !(x.screenshot && x.screenshotError) && !(!x.screenshot && !x.screenshotError && !screenshotSkipped); }
-export function isActionResult(value: unknown): value is ActionResult { const x = value as ActionResult; if (!x || x.performed !== true) return false; if (x.action === "drag") return x.elementIndex === null && ((x.fromElementIndex === null && x.toElementIndex === null) || (typeof x.fromElementIndex === "number" && typeof x.toElementIndex === "number")); if (x.action === "hotkey") return x.snapshotId === null && x.elementIndex === null && x.fromElementIndex === null && x.toElementIndex === null; return x.fromElementIndex === null && x.toElementIndex === null; }
+export function isActionResult(value: unknown): value is ActionResult { const x = value as ActionResult; if (!x || x.performed !== true || typeof x.snapshotConsumed !== "boolean") return false; if (x.action === "drag") return x.elementIndex === null && ((x.fromElementIndex === null && x.toElementIndex === null) || (typeof x.fromElementIndex === "number" && typeof x.toElementIndex === "number")); if (x.action === "hotkey") return x.snapshotId === null && x.elementIndex === null && x.fromElementIndex === null && x.toElementIndex === null; return x.fromElementIndex === null && x.toElementIndex === null; }
 export function validateResult(subcommand: ComputerSubcommand, value: unknown, screenshotSkipped = false): boolean { if (subcommand === "capabilities") return isCapabilitiesResult(value); if (subcommand === "permissions") return isPermissionsResult(value); if (subcommand === "get-app-state") return isAppStateResult(value, screenshotSkipped); if (COMPUTER_ACTIONS.includes(subcommand as ComputerAction)) return isActionResult(value); return !!value && typeof value === "object"; }
 export const SECRET_VALUE: unique symbol = Symbol("computer-secret");
 export type SecretValue = { readonly [SECRET_VALUE]: true; readonly value: string };

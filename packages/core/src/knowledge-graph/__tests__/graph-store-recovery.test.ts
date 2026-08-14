@@ -20,6 +20,20 @@ describe("knowledge graph artifact recovery",()=>{
     await writeFile(join(dir, "nodes.json"), JSON.stringify({ nodes: [] }));
     expect(await loadArtifacts(dir)).toMatchObject({ ok: false, recoveryReason: "invalid-artifact" });
   });
+  it("rejects import references that contradict extractor ownership or uniqueness", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kg-store-"));
+    dirs.push(dir);
+    const fileGraph: KnowledgeGraph = { schemaVersion: 2, nodes: [{ id: "file:src/a.ts", kind: "file", name: "a", owner: "file", ownerPath: "src/a.ts", source: { path: "src/a.ts", line: 1, column: 1 }, attributes: { syntheticSource: "true" } }], edges: [] };
+    const reference = { kind: "imports" as const, specifier: "./b", candidates: ["src/b.ts"], line: 1, column: 1, typeOnly: false };
+    await writeArtifacts(dir, fileGraph, { schemaVersion: 2, extractorVersion: 1, files: { "src/a.ts": { hash: "a".repeat(64), importRefs: [reference] } } });
+    expect(await loadArtifacts(dir)).toMatchObject({ ok: true });
+
+    await writeArtifacts(dir, { ...fileGraph, nodes: [{ ...fileGraph.nodes[0]!, id: "file:docs/a.md", ownerPath: "docs/a.md", source: { path: "docs/a.md", line: 1, column: 1 } }] }, { schemaVersion: 2, extractorVersion: 1, files: { "docs/a.md": { hash: "a".repeat(64), importRefs: [reference] } } });
+    expect(await loadArtifacts(dir)).toMatchObject({ ok: false, recoveryReason: "inconsistent-artifact" });
+
+    await writeArtifacts(dir, fileGraph, { schemaVersion: 2, extractorVersion: 1, files: { "src/a.ts": { hash: "a".repeat(64), importRefs: [reference, { ...reference, typeOnly: true }] } } });
+    expect(await loadArtifacts(dir)).toMatchObject({ ok: false, recoveryReason: "inconsistent-artifact" });
+  });
   it("rejects a retained edge whose file owner is absent from the manifest", async () => {
     const dir = await mkdtemp(join(tmpdir(), "kg-store-"));
     dirs.push(dir);
