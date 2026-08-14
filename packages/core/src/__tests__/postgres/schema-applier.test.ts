@@ -101,6 +101,7 @@ import {
   PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
   PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
   MESSAGE_ARCHIVE_SCHEMA_VERSION,
+  IDENTITY_ACTORS_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
 import type { PluginSchemaInitHook } from "../../postgres/plugin-schema-hook.js";
@@ -135,7 +136,9 @@ describe("schema-applier: immutable migration identities", () => {
     expect(PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION).toBe("0056");
     expect(PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION).toBe("0057");
     expect(MESSAGE_ARCHIVE_SCHEMA_VERSION).toBe("0058");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0058");
+    // FNXC:Identity 2026-08-09-03:04: per-migration identities are immutable; only the ceiling moves as 0059 adds the identity schema.
+    expect(IDENTITY_ACTORS_VERSION).toBe("0059");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0059");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -750,7 +753,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 113 project tables, 17 central tables, 1 archive table", async () => {
+  it("creates all 114 project tables, 21 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -774,14 +777,14 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     0050 adds immutable lock, evidence, and report history (109 → 112); 0052 adds recall records (→ 113). Plugin tables are added separately
     by the schema-init hook and are excluded here.
     */
-    expect(bySchema.project).toBe(113);
+    expect(bySchema.project).toBe(114);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
     database still CREATEs it from the historical 0000 baseline and then drops it,
     so fresh and upgraded databases converge on the same shape.
     */
-    expect(bySchema.central).toBe(17);
+    expect(bySchema.central).toBe(21);
     expect(bySchema.archive).toBe(1);
   });
 
@@ -1809,6 +1812,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
   PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
       PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
       MESSAGE_ARCHIVE_SCHEMA_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
   });
@@ -1893,6 +1897,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
   PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
       PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
       MESSAGE_ARCHIVE_SCHEMA_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 
@@ -2110,6 +2115,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
   PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
       PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
       MESSAGE_ARCHIVE_SCHEMA_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 
@@ -2208,6 +2214,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
   PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
       PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
       MESSAGE_ARCHIVE_SCHEMA_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 
@@ -2306,6 +2313,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
   PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION,
       PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION,
       MESSAGE_ARCHIVE_SCHEMA_VERSION,
+      IDENTITY_ACTORS_VERSION,
     ]);
   });
 });

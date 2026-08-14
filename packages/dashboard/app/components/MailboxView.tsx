@@ -62,6 +62,18 @@ import { getRelativeTimeBucket } from "../utils/relativeTimeAgo";
 
 type MailboxTab = "inbox" | "outbox" | "archived" | "agents" | "approvals";
 
+/*
+DELIBERATE-LITERAL — "archived" here is a MAILBOX TAB, not a task lifecycle column.
+The lifecycle-column census matches the bare string, so every `activeTab === ARCHIVED_MAILBOX_TAB`
+comparison read as an unresolved column guard. Routing it through
+resolveTaskLifecycleColumns would be wrong, not merely unnecessary: this value names a
+segment of the message list (inbox / outbox / archived / agents) and has no task, and no
+workflow, to resolve against. Hoisted to one named constant so the intent is stated once
+rather than re-argued at each comparison.
+*/
+const ARCHIVED_MAILBOX_TAB = "archived" as const;
+
+
 interface MailboxViewProps {
   projectId?: string;
   addToast?: (msg: string, type?: "success" | "error") => void;
@@ -573,7 +585,7 @@ export function MailboxView({
   useEffect(() => {
     if (activeTab === "inbox") loadInbox();
     else if (activeTab === "outbox") loadOutbox();
-    else if (activeTab === "archived") loadArchivedInbox();
+    else if (activeTab === ARCHIVED_MAILBOX_TAB) loadArchivedInbox();
     else if (activeTab === "agents") loadAgents();
     else if (activeTab === "approvals") {
       void loadApprovals(approvalSubTab);
@@ -783,7 +795,7 @@ export function MailboxView({
     try {
       await archiveMessage(id, projectId);
       dismissMessage();
-      if (activeTab === "archived") loadArchivedInbox();
+      if (activeTab === ARCHIVED_MAILBOX_TAB) loadArchivedInbox();
       else if (activeTab === "outbox") loadOutbox();
       else if (activeTab === "inbox") loadInbox();
       else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
@@ -812,7 +824,7 @@ export function MailboxView({
       // Refresh current tab
       if (activeTab === "inbox") loadInbox();
       else if (activeTab === "outbox") loadOutbox();
-    else if (activeTab === "archived") loadArchivedInbox();
+    else if (activeTab === ARCHIVED_MAILBOX_TAB) loadArchivedInbox();
       else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
       else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
       addToast?.("Message deleted", "success");
@@ -1134,7 +1146,7 @@ export function MailboxView({
 
   const renderListPane = () => (
     <>
-      {activeTab === "archived" && (
+      {activeTab === ARCHIVED_MAILBOX_TAB && (
         <div className="mailbox-list" data-testid="mailbox-archived-list">
           {isLoading && !archivedInbox && <MailboxSkeleton />}
           {archivedInbox?.messages.length === 0 && <div className="mailbox-empty" data-testid="mailbox-archived-empty">No archived messages</div>}
@@ -1576,7 +1588,7 @@ export function MailboxView({
               onClick={() => {
                 if (activeTab === "inbox") loadInbox();
                 else if (activeTab === "outbox") loadOutbox();
-    else if (activeTab === "archived") loadArchivedInbox();
+    else if (activeTab === ARCHIVED_MAILBOX_TAB) loadArchivedInbox();
                 else if (activeTab === "approvals") loadApprovals(approvalSubTab);
                 else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
                 else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
@@ -1610,7 +1622,7 @@ export function MailboxView({
           <Send size={14} />
           <span>{t("mailbox.outbox", "Outbox")}</span>
         </button>
-        <button className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "archived" ? "active" : ""}`} onClick={() => handleSelectTab("archived")} data-testid="mailbox-tab-archived">Archived</button>
+        <button className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === ARCHIVED_MAILBOX_TAB ? "active" : ""}`} onClick={() => handleSelectTab("archived")} data-testid="mailbox-tab-archived">Archived</button>
         <button
           className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "agents" ? "active" : ""}`}
           onClick={() => handleSelectTab("agents")}
