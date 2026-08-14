@@ -4,6 +4,8 @@
  */
 import type { TaskStore } from "@fusion/core";
 import { resolveArchiveTargetForTask } from "@fusion/core";
+// FNXC:Identity 2026-08-12-01:20: one-line import on purpose — the U18 census counts any non-`import`-prefixed line naming the marker.
+import { UNATTRIBUTED_MUTATION_CONTEXT } from "@fusion/core";
 import type { GhostBugDecision } from "../triage-domain/triage-preflight.js";
 
 /**
@@ -20,7 +22,7 @@ export async function archiveAsGhostBug(
   await store.logEntry(
     taskId,
     "Auto-archived as ghost bug — cited code construct not present on main",
-    JSON.stringify({ reason: decision.reason, findings: decision.findings }, null, 2),
+    JSON.stringify({ reason: decision.reason, findings: decision.findings }, null, 2), UNATTRIBUTED_MUTATION_CONTEXT,
   );
   await store.recordActivity({
     type: "task:auto-archived-ghost-bug",
@@ -32,5 +34,5 @@ export async function archiveAsGhostBug(
       findings: decision.findings.slice(0, 10),
     },
   });
-  await store.moveTask(taskId, await resolveArchiveTargetForTask(store, taskId), { moveSource: "engine", recoveryRehome: true });
+  await store.moveTask(taskId, await resolveArchiveTargetForTask(store, taskId), { moveSource: "engine", recoveryRehome: true }, UNATTRIBUTED_MUTATION_CONTEXT);
 }

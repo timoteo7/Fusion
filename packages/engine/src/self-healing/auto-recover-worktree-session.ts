@@ -9,6 +9,14 @@
 import { resolve } from "node:path";
 import type { Task, TaskStore } from "@fusion/core";
 import { resolveReboundTarget, resolveWorkflowIrForTask } from "@fusion/core";
+/*
+FNXC:Identity 2026-08-12-01:20 (U18/KTD2 Stage A):
+This module is an unattended self-healing sweep peeled out of `self-healing.ts`. There is no session,
+no request and no acting agent to derive from — the only ids in scope name the task being repaired —
+so every write carries the unattributed marker, exactly as it did before the peel. Ownership is U13.
+*/
+// FNXC:Identity 2026-08-12-01:20: one-line import on purpose — the U18 census counts any non-`import`-prefixed line naming the marker.
+import { UNATTRIBUTED_MUTATION_CONTEXT } from "@fusion/core";
 import { hasUsableWorktreeShape } from "../worktree/worktree-pool.js";
 import {
   classifyMissingWorktreeSessionStartFailure,
@@ -55,7 +63,7 @@ export async function autoRecoverWorktreeSessionStartFailure(
   if (nextStaleMetadataClearRecoveryCount !== undefined && nextStaleMetadataClearRecoveryCount > MAX_WORKTREE_SESSION_RETRIES) {
     await store.logEntry(
       task.id,
-      `Auto-recovery exhausted (${MAX_WORKTREE_SESSION_RETRIES}/${MAX_WORKTREE_SESSION_RETRIES}) for merge-active unusable-worktree stale-metadata clears — leaving in-review for human inspection`,
+      `Auto-recovery exhausted (${MAX_WORKTREE_SESSION_RETRIES}/${MAX_WORKTREE_SESSION_RETRIES}) for merge-active unusable-worktree stale-metadata clears — leaving in-review for human inspection`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
     );
     await opts.auditor?.database({
       type: "task:auto-recover-worktree-session-exhausted",
@@ -73,7 +81,7 @@ export async function autoRecoverWorktreeSessionStartFailure(
   if (!resetRetryBudget && nextCount > MAX_WORKTREE_SESSION_RETRIES) {
     await store.logEntry(
       task.id,
-      `Auto-recovery exhausted (${MAX_WORKTREE_SESSION_RETRIES}/${MAX_WORKTREE_SESSION_RETRIES}) for unusable-worktree session-start failure — leaving in-review for human inspection`,
+      `Auto-recovery exhausted (${MAX_WORKTREE_SESSION_RETRIES}/${MAX_WORKTREE_SESSION_RETRIES}) for unusable-worktree session-start failure — leaving in-review for human inspection`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
     );
     await opts.auditor?.database({
       type: "task:auto-recover-worktree-session-exhausted",
@@ -122,7 +130,7 @@ export async function autoRecoverWorktreeSessionStartFailure(
     worktree: clearWorktreeMetadata ? null : staleWorktree,
     branch: nextBranch,
     sessionFile: null,
-  });
+  }, UNATTRIBUTED_MUTATION_CONTEXT);
   await opts.auditor?.database({
     type: "task:auto-recover-worktree-session-metadata",
     target: task.id,
@@ -172,13 +180,13 @@ export async function autoRecoverWorktreeSessionStartFailure(
           staleWorktree && (!missingWorktreePath || resolve(staleWorktree) !== resolve(missingWorktreePath))
             ? `; the recorded task worktree ${staleWorktree} is ${recordedWorktreeStillUsable ? "still present" : "gone too"}`
             : ""
-        } — cleared stale session metadata${clearWorktreeMetadata && !branchIsRederivable ? ` (kept non-canonical branch ${task.branch})` : ""} and requeued to ${reboundColumn} (${attemptLabel}, failure: ${failureExcerpt})`,
+        } — cleared stale session metadata${clearWorktreeMetadata && !branchIsRederivable ? ` (kept non-canonical branch ${task.branch})` : ""} and requeued to ${reboundColumn} (${attemptLabel}, failure: ${failureExcerpt})`, undefined, UNATTRIBUTED_MUTATION_CONTEXT,
   );
   if (noProgress) {
     // #1411: backward recovery move — recoveryRehome skips order-derived adjacency.
-    await store.moveTask(task.id, reboundColumn, { moveSource: "engine", recoveryRehome: true });
+    await store.moveTask(task.id, reboundColumn, { moveSource: "engine", recoveryRehome: true }, UNATTRIBUTED_MUTATION_CONTEXT);
   } else {
-    await store.moveTask(task.id, reboundColumn, { preserveProgress: true, moveSource: "engine", recoveryRehome: true });
+    await store.moveTask(task.id, reboundColumn, { preserveProgress: true, moveSource: "engine", recoveryRehome: true }, UNATTRIBUTED_MUTATION_CONTEXT);
   }
   return { outcome: "requeue-todo", retries: nextCount, classification };
 }

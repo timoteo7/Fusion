@@ -89,7 +89,16 @@ export interface AcquireTaskWorktreeOptions {
   pool?: WorktreePool;
   logger?: { log: (m: string) => void; warn: (m: string) => void; debug?: (m: string) => void; error?: (m: string) => void };
   audit?: Pick<RunAuditor, "git" | "filesystem">;
-  runContext?: RunMutationContext;
+  /*
+  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C — required, not optional):
+  Stage B left this optional and resolved a single unattributed marker inside `acquireTaskWorktree`,
+  because `executor.ts` was the one caller that could not supply a context. Stage C threaded the
+  executor's run carrier, so every caller can — and the option is now REQUIRED. That is the whole
+  point of the staging: an optional context turns ~45 downstream writes in this file into writes an
+  unwired caller can silently leave unattributed, and only a required parameter makes that a compile
+  error instead.
+  */
+  runContext: RunMutationContext;
   runInitCommand?: boolean;
   secretsStore?: Pick<SecretsStore, "listEnvExportable">;
   createWorktree?: (
@@ -266,7 +275,8 @@ async function maybeWarnForeignTaskStartPoint(
     taskId: string;
     logger?: { warn: (m: string) => void };
     store: TaskStore;
-    runContext?: RunMutationContext;
+    /** FNXC:Identity 2026-08-09-03:04 (U18 Stage B): required — the only caller resolves it first. */
+    runContext: RunMutationContext;
   },
 ): Promise<void> {
   const { baseBranch, rootDir, worktreePath, taskId, logger, store, runContext } = input;
@@ -318,6 +328,12 @@ async function pinnedWorktreeBranchMatches(rootDir: string, worktreePath: string
 }
 
 export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Promise<AcquireTaskWorktreeResult> {
+  /*
+  FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C):
+  This file already threaded `runContext` end to end; what U18 changed is that the store now REFUSES
+  an absent one, and what Stage C changed is that the caller can no longer omit it. The ~45
+  downstream writes take the caller's context directly — there is no local fallback left to resolve.
+  */
   const { task, rootDir, store, settings, pool, logger, audit, runContext, createWorktree, runConfiguredCommand, runInitCommand, taskEnv, secretsStore } = opts;
   const renameWorktreeDirectory = opts.renameWorktreeDirectory ?? rename;
   const refreshExistingWorktree = async (
@@ -348,7 +364,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
     const refreshSettings = settings.worktrunk?.enabled === true
       ? { ...settings, worktrunk: { ...settings.worktrunk, enabled: false } }
       : settings;
-    const refresh = await refreshReusedWorktreeBase({ task, rootDir, worktreePath: path, store, settings: refreshSettings, audit, logger });
+    const refresh = await refreshReusedWorktreeBase({ task, rootDir, worktreePath: path, store, settings: refreshSettings, audit, logger, runContext });
     /*
     FNXC:WorktreeBaseRefresh 2026-08-09-23:49:
     A declined refresh is an unremarkable outcome, not an execution failure: the checkout is intact and the
@@ -467,7 +483,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
       });
       logger?.log(`${task.id}: assigned worktree is not usable; creating a fresh worktree instead: ${worktreePath}`);
       await store.logEntry(task.id, "Assigned worktree is not a registered, usable git worktree; creating a fresh worktree instead", worktreePath, runContext);
-      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null });
+      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null }, runContext);
       const fallbackName = generateWorktreeName(rootDir, settings);
       worktreePath = await resolveTaskWorktreePathForBackend(rootDir, fallbackName, settings, backend, branchName);
       isResume = false;
@@ -637,13 +653,13 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
      */
     if (isRepoRootPath(rootDir, created.path)) {
       await emitRepoRootReturnGuardAudit(created.path, source);
-      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null });
+      await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null }, runContext);
       throw new RepoRootWorktreeError(task.id, rootDir, created.path, `fresh-create:${logOrigin}`);
     }
 
     worktreePath = created.path;
     branch = created.branch;
-    await store.updateTask(task.id, { worktree: created.path, branch: created.branch });
+    await store.updateTask(task.id, { worktree: created.path, branch: created.branch }, runContext);
     await audit?.git({ type: "worktree:create", target: created.path, metadata: { branch: created.branch, source: logOrigin === "return-guard" ? "acquire-return-guard" : undefined } });
     await audit?.git({ type: "branch:create", target: created.branch });
     if (created.branch !== branchName) {
@@ -719,7 +735,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
     await emitRepoRootReturnGuardAudit(guardedPath, source);
     logger?.warn(`${task.id}: acquisition ${source} returned repo root; clearing assignment and creating a fresh worktree`);
     await store.logEntry(task.id, "Acquisition attempted to return the project root as a task worktree; creating a fresh worktree instead", guardedPath, runContext);
-    await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null });
+    await store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null }, runContext);
     const fallbackName = generateWorktreeName(rootDir, settings);
     const fallbackPath = await resolveTaskWorktreePathForBackend(rootDir, fallbackName, settings, backend, branchName);
     const created = await createWorktreeImpl(branchName, fallbackPath, task.id, freshStartPoint, allowSiblingBranchRename);
@@ -774,7 +790,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
         metadata: { taskId: task.id, previous: task.worktree, derived: pinnedPath, source: "acquire" },
       });
       await store.logEntry(task.id, "Re-derived task-pinned worktree path from task id", `${task.worktree} -> ${pinnedPath}`, runContext);
-      await store.updateTask(task.id, { worktree: pinnedPath });
+      await store.updateTask(task.id, { worktree: pinnedPath }, runContext);
     }
 
     const reservation = await acquireWorktreePathReservation({
@@ -826,7 +842,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
          * was already correct.
          */
         if (task.worktree !== pinnedPath || task.branch !== resumedBranch) {
-          await store.updateTask(task.id, { worktree: pinnedPath, branch: resumedBranch });
+          await store.updateTask(task.id, { worktree: pinnedPath, branch: resumedBranch }, runContext);
         }
         return reuseWarmWorktree(pinnedPath, resumedBranch, "existing");
       }
@@ -940,7 +956,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
         }
       }
       // The removed worktree's session cannot resume into a fresh checkout — clear it so the executor starts clean.
-      await store.updateTask(task.id, { sessionFile: null });
+      await store.updateTask(task.id, { sessionFile: null }, runContext);
     }
 
       const created = await createWorktreeImpl(branchName, pinnedPath, task.id, freshStartPoint, allowSiblingBranchRename, true);
@@ -1055,7 +1071,7 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
           });
           acquiredFromPool = true;
           logger?.log(`Acquired worktree from pool: ${worktreePath}`);
-          await store.updateTask(task.id, { worktree: worktreePath, branch });
+          await store.updateTask(task.id, { worktree: worktreePath, branch }, runContext);
           await audit?.git({ type: "worktree:reuse", target: worktreePath, metadata: { branch, reclaimed: prepared.reclaimed } });
           if (prepared.reclaimed) {
             await store.logEntry(task.id, `Acquired reclaimed worktree from pool: ${worktreePath} (${prepared.strandedCommitCount ?? 0} commits preserved)`, undefined, runContext);
@@ -1160,7 +1176,8 @@ async function verifyResumeBranchNotMisbound(input: {
   store: TaskStore;
   audit?: Pick<RunAuditor, "git" | "filesystem">;
   logger?: { log?: (msg: string) => void; warn?: (msg: string) => void };
-  runContext: RunMutationContext | undefined;
+  /** FNXC:Identity 2026-08-09-03:04 (U18 Stage B): required — both callers sit below the single resolution point above. */
+  runContext: RunMutationContext;
 }): Promise<void> {
   const { worktreePath, branchName, taskId, rootDir, store, audit, logger, runContext } = input;
 
@@ -1232,7 +1249,10 @@ export interface AcquireWorkspaceRepoWorktreeOptions {
   logger?: { log: (m: string) => void; warn: (m: string) => void; error?: (m: string) => void };
   secretsStore?: Pick<SecretsStore, "listEnvExportable">;
   audit?: Pick<RunAuditor, "git" | "filesystem">;
-  runContext?: RunMutationContext;
+  /* FNXC:Identity 2026-08-09-03:04 (U18/KTD2 Stage C): required for the same reason as
+     `AcquireTaskWorktreeOptions.runContext` — the sole context-less caller was
+     `fn_acquire_repo_worktree`, built by `executor.ts`, which now carries a run context. */
+  runContext: RunMutationContext;
   /** Test seam: inject the path-keyed exclusivity registry (defaults to the process singleton). */
   registry?: ActiveSessionRegistry;
   runConfiguredCommand?: AcquireTaskWorktreeOptions["runConfiguredCommand"];
@@ -1524,7 +1544,7 @@ export async function acquireWorkspaceRepoWorktree(
     the standard chip — the blank/wrong-card state U10 prevents. Nulling them here
     keeps `task.worktree` null for the workspace task's whole lifetime.
     */
-    await store.updateTask(task.id, { workspaceWorktrees: updated, worktree: null, branch: null });
+    await store.updateTask(task.id, { workspaceWorktrees: updated, worktree: null, branch: null }, runContext);
 
     return { worktreePath: result.worktreePath, branch: result.branch, baseCommitSha, alreadyAcquired: false };
   } catch (err) {
