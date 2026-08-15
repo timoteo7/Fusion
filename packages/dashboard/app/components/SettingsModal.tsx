@@ -1773,11 +1773,6 @@ export function SettingsModal({
       const result = await installUpdate(projectId);
       setUpdateInstallResult(result);
 
-      if (result.error) {
-        addToast(result.error, "error");
-        return;
-      }
-
       if (result.updated) {
         addToast(t("settings.general.updateSuccessToast", "Update installed. Restart Fusion to apply it."), "success");
         /*
@@ -1791,6 +1786,9 @@ export function SettingsModal({
           .catch(() => {
             // Keep whatever the mount probe resolved; the guidance text covers it.
           });
+      } else {
+        const message = result.message ?? result.error ?? t("settings.general.updateUnknown", "Update did not complete — see the Fusion logs");
+        addToast(message, result.outcome === "check-failed" || result.outcome === "failed" || Boolean(result.error) ? "error" : "info");
       }
     } catch (error) {
       const message = getErrorMessage(error) || t("settings.general.updateFailed", "Update failed");
@@ -1799,6 +1797,8 @@ export function SettingsModal({
         latestVersion: updateCheckResult?.latestVersion ?? null,
         updated: false,
         error: message,
+        outcome: "failed",
+        message,
       });
       addToast(message, "error");
     } finally {
@@ -1876,6 +1876,8 @@ export function SettingsModal({
     if (updateCheckResult.updateAvailable && updateCheckResult.latestVersion) {
       const installSucceeded = updateInstallResult?.updated === true;
       const installError = updateInstallResult?.error;
+      const installMessage = updateInstallResult?.message ?? installError ?? (updateInstallResult && !updateInstallResult.updated ? t("settings.general.updateUnknown", "Update did not complete — see the Fusion logs") : undefined);
+      const installIsError = updateInstallResult?.outcome === "check-failed" || updateInstallResult?.outcome === "failed" || Boolean(installError && updateInstallResult?.outcome !== "unsupported-install-method");
 
       return (
         <>
@@ -1960,9 +1962,9 @@ export function SettingsModal({
               )}
             </button>
           )}
-          {installError && (
-            <span className="settings-update-install-status settings-update-install-status--error" aria-live="polite">
-              {t("settings.general.updateFailedWithMessage", "Update failed: {{message}}", { message: installError })}
+          {installMessage && !installSucceeded && (
+            <span className={`settings-update-install-status${installIsError ? " settings-update-install-status--error" : ""}`} aria-live="polite">
+              {installIsError ? t("settings.general.updateFailedWithMessage", "Update failed: {{message}}", { message: installMessage }) : installMessage}
             </span>
           )}
         </>

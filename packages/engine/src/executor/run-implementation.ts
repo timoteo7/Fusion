@@ -52,7 +52,6 @@ import {
   RetryStormError,
   columnsWithFlag,
   isEphemeralAgent,
-  loadWorkspaceConfig,
   resolveEphemeralTaskCreationPolicy,
   resolveExecutorFallbackModel,
   resolvePersistAgentThinkingLog,
@@ -217,6 +216,7 @@ export type RunImplementationDeps = {
   store: TaskStore;
   rootDir: string;
   workspaceConfig: WorkspaceConfig | null | undefined;
+  ensureWorkspaceConfig: () => Promise<WorkspaceConfig | null>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TaskExecutorOptions is large and only partially used here
   options: any;
   stuckAborted: Map<string, boolean>;
@@ -609,9 +609,7 @@ export async function runImplementation(
         return;
       }
 
-      if (deps.workspaceConfig === undefined) {
-        deps.workspaceConfig = await loadWorkspaceConfig(deps.rootDir);
-      }
+      await deps.ensureWorkspaceConfig();
       /*
       FNXC:Workspace 2026-06-22-00:00:
       Workspace mode is only meaningful with at least one usable sub-repo. An empty `{ repos: [] }`

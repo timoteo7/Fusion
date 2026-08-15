@@ -637,6 +637,7 @@ Task lifecycle and task operations.
 fn task create "Fix login race condition"
 fn task create "Fix bug" --attach screenshot.png --depends FN-010
 fn task create "Investigate flaky runner" --node edge-runner
+fn task create "Fix workspace revert" --github --github-repo acme/kb
 fn task plan "Design a new authentication flow"
 ```
 
@@ -1383,6 +1384,8 @@ Subcommands: `search`, `install`, `get`.
 | `--attach` | `fn task create` |
 | `--depends` | `fn task create` |
 | `--node` | `fn task create` |
+| `--github` / `--no-github` | `fn task create` (per-task GitHub issue tracking override; default comes from project/global settings) |
+| `--github-repo` | `fn task create` (`owner/repo` override for the tracking issue) |
 | `--feedback` | `fn task refine` |
 | `--yes` | confirmation-skipping flows (`task plan`, `settings import`, git pull/push, etc.) |
 | `--limit`, `-l` | `fn task import`, `fn task import-gitlab` (default: 30, max: 100), `fn skills search` (default: 10, max: 50) |

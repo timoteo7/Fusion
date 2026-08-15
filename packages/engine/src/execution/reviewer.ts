@@ -81,6 +81,13 @@ export interface ReviewResult {
   verdict: ReviewVerdict;
   review: string;
   summary: string;
+  /**
+   * FNXC:WorkflowReviewGates 2026-08-15-04:21:
+   * Only deterministic verdicts whose inputs cannot change on another invocation
+   * may disable the step-review retry loop. Provider failures still throw
+   * ReviewerProviderError rather than being converted into UNAVAILABLE.
+   */
+  retryable?: boolean;
 }
 
 export interface ReviewOptions {

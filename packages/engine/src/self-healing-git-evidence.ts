@@ -42,6 +42,27 @@ import type { SelfHealingOptions } from "./self-healing.js";
 
 export const execAsync = promisify(exec);
 
+/**
+ * FNXC:Workspace 2026-08-15-04:42:
+ * Evidence unavailable must never be laundered into proof that a branch is absent: the sole
+ * consumer turns absence into an irreversible `status:"failed"` park. `git show-ref --verify
+ * --quiet` exits 0 for present, 1 for absent, and 128 for a non-repository/ref-read failure;
+ * only its clean numeric exit 1 is absence evidence. Spawn, timeout, signal, and malformed
+ * errors are unknown so later sweeps can retry.
+ */
+export function classifyBranchProbeError(error: unknown): "absent" | "unknown" {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === 1 &&
+    !(error as { killed?: unknown }).killed &&
+    ((error as { signal?: unknown }).signal === null || (error as { signal?: unknown }).signal === undefined)
+  ) {
+    return "absent";
+  }
+  return "unknown";
+}
 
 export interface LandedTaskCommit {
   sha: string;
@@ -434,16 +455,38 @@ export abstract class SelfHealingGitEvidence {
     }
   }
 
-  protected async repoBranchExists(repoRootDir: string, branch: string): Promise<boolean> {
+  /**
+   * FNXC:Workspace 2026-08-15-04:42:
+   * `show-ref --verify --quiet` distinguishes present (0), absent (clean 1), and unreadable
+   * repository evidence (128/error), unlike `rev-parse --verify`, which returns 128 for both a
+   * missing ref and a non-repository cwd. The irreversible partial-land park may consume only
+   * absence proof; all other errors remain unknown for a later sweep.
+   */
+  protected async probeRepoBranch(repoRootDir: string, branch: string): Promise<"present" | "absent" | "unknown"> {
     try {
-      await execAsync(`git rev-parse --verify ${shellQuote(`refs/heads/${branch}`)}`, {
-        cwd: repoRootDir,
-        timeout: 30_000,
-      });
-      return true;
-    } catch {
-      return false;
+      await this.execBranchProbe(repoRootDir, branch);
+      return "present";
+    } catch (err: unknown) {
+      const outcome = classifyBranchProbeError(err);
+      if (outcome === "unknown") {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.warn(`[self-healing] branch evidence unavailable for ${repoRootDir} (${branch}): ${errorMessage}`);
+      }
+      return outcome;
     }
+  }
+
+  /**
+   * FNXC:Workspace 2026-08-15-04:42:
+   * This protected seam sits below the real probe classifier so fixture tests can inject timeout
+   * and spawn-error shapes without mocking module-local `execAsync`. It deliberately has no
+   * catch: `probeRepoBranch` maps only a clean show-ref exit 1 to absence evidence.
+   */
+  protected async execBranchProbe(repoRootDir: string, branch: string): Promise<void> {
+    await execAsync(`git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}`, {
+      cwd: repoRootDir,
+      timeout: 30_000,
+    });
   }
 
   protected async readShortstatForSha(

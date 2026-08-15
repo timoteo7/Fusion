@@ -27,6 +27,10 @@ Each event has these 12 fields, in the shape exported as `AgentActivityEvent`:
 | `occurredAt` | ISO timestamp string. |
 | `metadata` | Sanitized metadata object or `null`. |
 
+## Event type compatibility
+
+`agent:state-changed` remains a valid event enum value and `type` filter value so historical durable rows remain readable through this unchanged wire shape. No current writer produces that type; agent roster state is instead observed through the roster and its separate live state channel. Consumers that present work activity hide historical state-change rows without treating the enum as invalid.
+
 ## Bounds and ordering
 
 `before` is an **exclusive** upper bound and `since` is an **exclusive** lower bound. Supplying both selects the **open interval `(since, before)`**. It is not a half-open interval: neither endpoint is returned.

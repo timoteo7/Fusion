@@ -1735,6 +1735,21 @@ export default function kbExtension(pi: ExtensionAPI) {
             "Omit to inherit the project default workflow. Use fn_workflow_list to discover valid IDs.",
         }),
       ),
+      github_tracking: Type.Optional(
+        Type.Boolean({
+          description:
+            "Per-task GitHub issue tracking override. true links a tracking issue to this task; " +
+            "false disables tracking even when the project/global default enables it. " +
+            "Omit to inherit the project/global default.",
+        }),
+      ),
+      github_repo: Type.Optional(
+        Type.String({
+          description:
+            "\"owner/repo\" override for the GitHub tracking issue's repository. " +
+            "Omit to use the project/global default repo.",
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1798,10 +1813,33 @@ export default function kbExtension(pi: ExtensionAPI) {
         }
       }
 
+      /*
+      FNXC:GithubTracking 2026-08-15-03:50:
+      Per-task GitHub tracking is decided at CREATE time (the lifecycle hooks key off the
+      persisted `task.githubTracking.enabled === true` flag, never re-resolving defaults),
+      so callers need a create-time override. `github_tracking`/`github_repo` feed the
+      task-level slot of resolveTaskGithubTracking, which already gives task > project >
+      global precedence. An explicit `false` is persisted (not dropped) so a later flip of
+      the project default cannot retroactively enable tracking for this task.
+      */
+      const githubRepoOverride = params.github_repo?.trim() || undefined;
+      if (githubRepoOverride && !fusionCore.isValidRepoSlug(githubRepoOverride)) {
+        const error = `Invalid github_repo "${githubRepoOverride}" — expected "owner/repo".`;
+        return { content: [{ type: "text", text: `ERROR: ${error}` }], isError: true, details: { error } };
+      }
+
       try {
         const globalSettings = await store.getGlobalSettingsStore().getSettings();
         const resolvedTracking = resolveTaskGithubTracking(
-          { githubTracking: undefined },
+          {
+            githubTracking:
+              params.github_tracking !== undefined || githubRepoOverride
+                ? {
+                    ...(params.github_tracking !== undefined ? { enabled: params.github_tracking } : {}),
+                    ...(githubRepoOverride ? { repoOverride: githubRepoOverride } : {}),
+                  }
+                : undefined,
+          },
           projectSettingsForGate,
           globalSettings,
         );
@@ -1831,7 +1869,9 @@ export default function kbExtension(pi: ExtensionAPI) {
                   ? { repoOverride: `${resolvedTracking.repo.owner}/${resolvedTracking.repo.repo}` }
                   : {}),
               }
-            : undefined,
+            : params.github_tracking === false
+              ? { enabled: false }
+              : undefined,
         }, { rootDir: ctx.cwd, sourceAgentId: fnCtx.agentId, sourceTaskId: fnCtx.taskId });
 
         const label =

@@ -25,8 +25,8 @@ vi.mock("../TaskCard", () => ({
   }),
 }));
 vi.mock("../WorktreeGroup", () => ({
-  WorktreeGroup: ({ label, activeTasks, queuedTasks }: { label: string; activeTasks: Task[]; queuedTasks: Task[] }) => (
-    <div data-testid="worktree-group" data-label={label} data-active-count={activeTasks.length} data-queued-count={queuedTasks.length}>
+  WorktreeGroup: ({ label, kind, activeTasks, queuedTasks }: { label: string; kind: string; activeTasks: Task[]; queuedTasks: Task[] }) => (
+    <div data-testid="worktree-group" data-label={label} data-kind={kind} data-active-count={activeTasks.length} data-queued-count={queuedTasks.length}>
       <span>{label}</span>
       {activeTasks.map((task) => <div key={task.id} data-testid={`group-active-${task.id}`}>{task.id}</div>)}
       {queuedTasks.map((task) => <div key={task.id} data-testid={`group-queued-${task.id}`}>{task.id}</div>)}
@@ -565,6 +565,34 @@ describe("Column worktree grouping setting", () => {
     expect(screen.getByTestId("group-active-FN-004")).toBeInTheDocument();
     expect(screen.getByTestId("group-queued-FN-005")).toBeInTheDocument();
     expect(screen.queryByTestId("task-FN-003")).toBeNull();
+  });
+
+  it("passes workspace tasks to a workspace group instead of Unassigned", () => {
+    const workspaceTask = {
+      ...makeTask("FN-9044"),
+      column: "exec" as ColumnType,
+      workspaceWorktrees: {
+        "repo-a": { worktreePath: "/ws/repo-a/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+        "repo-b": { worktreePath: "/ws/repo-b/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+      },
+    };
+    render(
+      <Column
+        {...defaultProps}
+        column={"exec" as ColumnType}
+        workflowMode
+        columnDisplayName="Executing"
+        columnFlags={{ countsTowardWip: true }}
+        showWorktreeGrouping
+        tasks={[workspaceTask]}
+        allTasks={[workspaceTask]}
+      />,
+    );
+
+    expect(screen.getByTestId("worktree-group")).toHaveAttribute("data-kind", "workspace");
+    expect(screen.getByTestId("worktree-group")).toHaveAttribute("data-label", "FN-9044");
+    expect(screen.queryByText("Unassigned")).toBeNull();
+    expect(screen.getByTestId("group-active-FN-9044")).toBeInTheDocument();
   });
 
   it("does not leave worktree shells in empty processing columns", () => {

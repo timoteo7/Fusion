@@ -197,7 +197,7 @@ describe("update-check", () => {
       timeout: 300_000,
       maxBuffer: 10 * 1024 * 1024,
     });
-    expect(result).toEqual({ currentVersion: "1.0.0", latestVersion: "2.0.0", updated: true });
+    expect(result).toEqual({ currentVersion: "1.0.0", latestVersion: "2.0.0", updated: true, outcome: "installed" });
     expect(existsSync(cachePath)).toBe(false);
   });
 
@@ -215,7 +215,7 @@ describe("update-check", () => {
     expect(execFake).toHaveBeenCalledTimes(2);
     expect(execFake).toHaveBeenNthCalledWith(1, "npm install -g @runfusion/fusion@2.0.0", expect.any(Object));
     expect(execFake).toHaveBeenNthCalledWith(2, "npm install --force -g @runfusion/fusion@2.0.0", expect.any(Object));
-    expect(result).toEqual({ currentVersion: "1.0.0", latestVersion: "2.0.0", updated: true });
+    expect(result).toEqual({ currentVersion: "1.0.0", latestVersion: "2.0.0", updated: true, outcome: "installed" });
   });
 
   it("performUpdateInstall returns an error result for non-collision install failures", async () => {
@@ -225,6 +225,8 @@ describe("update-check", () => {
       currentVersion: "1.0.0",
       latestVersion: "2.0.0",
       updated: false,
+      outcome: "failed",
+      message: "registry down",
       error: "registry down",
     });
     expect(execFake).toHaveBeenCalledTimes(1);
@@ -245,6 +247,8 @@ describe("update-check", () => {
       currentVersion: "1.0.0",
       latestVersion: "2.0.0",
       updated: false,
+      outcome: "failed",
+      message: expect.stringMatching(/timed out after 5 minutes.*terminal/i),
       error: expect.stringMatching(/timed out after 5 minutes.*terminal/i),
     });
     expect(result.error).toContain("npm install -g @runfusion/fusion@2.0.0");
@@ -622,5 +626,16 @@ describe("update-check", () => {
       expect(result.updated).toBe(false);
       expect(result.error).toContain("No valid update target version");
     });
+  });
+
+  it("refuses source checkouts and missing npm before meaningful install work", async () => {
+    const execFake = vi.fn();
+    const source = await performUpdateInstall("1.0.0", "2.0.0", { exec: execFake, fusionDir, installMethod: { sourceWorkspaceRoot: "/repo/fusion" } });
+    expect(source.outcome).toBe("unsupported-install-method");
+    expect(source.message).toContain("source checkout");
+    expect(execFake).not.toHaveBeenCalled();
+    const missing = await performUpdateInstall("1.0.0", "2.0.0", { exec: vi.fn().mockRejectedValue(Object.assign(new Error("spawn npm ENOENT"), { code: "ENOENT" })), fusionDir });
+    expect(missing.outcome).toBe("unsupported-install-method");
+    expect(missing.message).toContain("npm");
   });
 });

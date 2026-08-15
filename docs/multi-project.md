@@ -2,7 +2,7 @@
 
 [← Docs index](./README.md)
 
-Fusion can coordinate multiple repositories from one installation, with shared visibility and global concurrency control.
+Fusion can coordinate multiple repositories from one installation, with shared visibility and global concurrency control. Multi-project mode means many registered projects; [workspace mode](./workspaces.md) means one registered project containing multiple Git sub-repositories.
 
 The [2026-07-14 PostgreSQL runtime cutover review](./postgres-migration-review-2026-07-14.md) is the current authority for legacy-reader and deployment boundaries.
 

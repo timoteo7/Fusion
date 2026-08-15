@@ -1,6 +1,7 @@
 {
   "counts": {
     "packages/core/src/merge/task-merge.ts": 1,
+    "packages/core/src/store.ts": 1,
     "packages/core/src/task-store/branch-and-pr-entities.ts": 1,
     "packages/core/src/task-store/moves.ts": 1,
     "packages/core/src/task-store/task-update.ts": 1,

@@ -387,6 +387,7 @@ export {
   // re-exported so the engine dispatch can switch to instanceof in the separate pass.
   WorkspaceRepoLandBusyError,
   WorkspacePartialLandError,
+  WorkspaceFinalizeBlockedError,
   type WorkspaceMergeResult,
   type WorkspaceRepoLandResult,
   type LandOneRepoResult,

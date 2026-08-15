@@ -85,7 +85,7 @@ import type { CliRelaunchRegistry } from "./cli-session-transport.js";
 import { validateRemoteAuthToken } from "./remote-auth.js";
 import { getCliPackageVersion, isUnresolvedCliPackageVersion } from "./cli-package-version.js";
 import { performUpdateCheck } from "./update-check.js";
-import { startAutoUpdateWatcher } from "./auto-update.js";
+import { buildAutoUpdateDeps, startAutoUpdateWatcher } from "./auto-update.js";
 import {
   dayHasSamples,
   fileScopeInvariantFailuresPerDay,
@@ -1822,20 +1822,19 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
   if (options?.systemControl && shouldScheduleAiSessionCleanup()) {
     const systemControl = options.systemControl;
     stopAutoUpdateWatcher?.();
-    stopAutoUpdateWatcher = startAutoUpdateWatcher({
+    stopAutoUpdateWatcher = startAutoUpdateWatcher(buildAutoUpdateDeps({
       getSettings: async () => {
         const globalStore = store.getGlobalSettingsStore?.();
         return globalStore ? await globalStore.getSettings() : {};
       },
       currentVersion: cliPackageVersion,
-      supervised: systemControl.supervised,
-      requestRestart: (reason) => systemControl.requestRestart(reason),
+      systemControl,
       log: {
         info: (message, context) => runtimeLogger.info(message, context),
         warn: (message, context) => runtimeLogger.warn(message, context),
         error: (message, context) => runtimeLogger.error(message, context),
       },
-    });
+    }));
   }
 
   /*

@@ -1411,6 +1411,44 @@ describe("project-aware task command behavior", () => {
     expect(refineTask).toHaveBeenCalledWith("FN-123", "more tests");
   });
 
+  it("exits non-zero when a workspace finalize is blocked after all repos landed", async () => {
+    const getTask = vi.fn().mockResolvedValue(makeTask({
+      id: "FN-WS-BLOCKED",
+      column: "in-review",
+      workspaceWorktrees: { "repo-a": { worktreePath: "/tmp/a", branch: "fusion/fn-ws-blocked" } },
+    }));
+    const resolvedStore = { getTask } as unknown as TaskStore;
+    vi.mocked(resolveProject).mockResolvedValue({
+      projectId: "proj_test",
+      projectPath: "/test",
+      projectName: "demo-project",
+      isRegistered: true,
+      store: resolvedStore,
+    });
+    vi.mocked(landWorkspaceTask).mockResolvedValue({
+      allLanded: true,
+      finalized: false,
+      finalizeBlockedReason: "operator review required",
+      repos: [{ repo: "repo-a", status: "empty", integrationBranch: "main" }],
+    } as never);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((((code?: number) => {
+      throw new Error(`process.exit:${code}`);
+    }) as unknown) as (code?: string | number | null | undefined) => never);
+
+    let output = "";
+    try {
+      await expect(runTaskMerge("FN-WS-BLOCKED", "demo-project")).rejects.toThrow("process.exit:1");
+      output = logSpy.mock.calls.flat().join(" ");
+    } finally {
+      exitSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+
+    expect(output).toContain("Merge blocked — operator review required");
+    expect(output).not.toContain("task finalized to done");
+  });
+
   it("routes GitHub import commands through the resolved project store", async () => {
     const listTasks = vi.fn().mockResolvedValue([]);
     const createTask = vi.fn().mockResolvedValue(makeTask({ id: "FN-200" }));

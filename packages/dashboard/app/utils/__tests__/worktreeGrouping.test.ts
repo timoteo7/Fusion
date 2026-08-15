@@ -110,6 +110,88 @@ describe("groupByWorktree", () => {
     expect(groups[0].activeTasks).toEqual([unassigned]);
   });
 
+  it("groups workspace tasks by their acquired repo worktrees", () => {
+    const workspaceTask = makeTask({
+      id: "FN-9044",
+      workspaceWorktrees: {
+        "repo-c": { worktreePath: "/ws/repo-c/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+        "repo-a": { worktreePath: "/ws/repo-a/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+        "repo-b": { worktreePath: "/ws/repo-b/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+      },
+    });
+
+    const groups = groupByWorktree([workspaceTask], [workspaceTask], 2);
+
+    expect(groups).toEqual([expect.objectContaining({
+      id: "workspace:FN-9044",
+      kind: "workspace",
+      label: "FN-9044",
+      repoCount: 3,
+      activeTasks: [workspaceTask],
+    })]);
+    expect(groups.find((group) => group.kind === "unassigned")).toBeUndefined();
+  });
+
+  it("uses a workspace group for a single acquired repo", () => {
+    const workspaceTask = makeTask({
+      id: "FN-9044",
+      workspaceWorktrees: {
+        "repo-a": { worktreePath: "/ws/repo-a/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+      },
+    });
+
+    expect(groupByWorktree([workspaceTask], [workspaceTask], 2)[0]).toMatchObject({
+      kind: "workspace", repoCount: 1, label: "FN-9044",
+    });
+  });
+
+  it("keeps tasks without acquired workspace worktrees unassigned", () => {
+    const emptyWorkspace = makeTask({ id: "FN-empty", workspaceWorktrees: {} });
+    const missingWorkspace = makeTask({ id: "FN-missing", workspaceWorktrees: undefined });
+
+    const groups = groupByWorktree([emptyWorkspace, missingWorkspace], [emptyWorkspace, missingWorkspace], 2);
+
+    expect(groups).toEqual([expect.objectContaining({
+      id: "unassigned", kind: "unassigned", activeTasks: [emptyWorkspace, missingWorkspace],
+    })]);
+  });
+
+  it("prefers a singular worktree for transient rows that contain both shapes", () => {
+    const transient = makeTask({
+      id: "FN-transient",
+      worktree: "/ws/.worktrees/single-worktree",
+      workspaceWorktrees: {
+        "repo-a": { worktreePath: "/ws/repo-a/.worktrees/FN-transient", branch: "fusion/FN-transient" },
+      },
+    });
+
+    expect(groupByWorktree([transient], [transient], 2)).toEqual([expect.objectContaining({
+      id: "/ws/.worktrees/single-worktree", kind: "worktree", label: "single-worktree",
+    })]);
+  });
+
+  it("keeps basename-colliding workspace and singular worktree groups distinct", () => {
+    const workspaceA = makeTask({ id: "FN-workspace-a", workspaceWorktrees: {
+      "repo-a": { worktreePath: "/ws/repo-a/.worktrees/FN-9044", branch: "fusion/a" },
+    } });
+    const workspaceB = makeTask({ id: "FN-workspace-b", workspaceWorktrees: {
+      "repo-b": { worktreePath: "/ws/repo-b/.worktrees/FN-9044", branch: "fusion/b" },
+    } });
+    const singleA = makeTask({ id: "FN-single-a", worktree: "/ws/repo-a/.worktrees/FN-9044" });
+    const singleB = makeTask({ id: "FN-single-b", worktree: "/ws/repo-b/.worktrees/FN-9044" });
+
+    const groups = groupByWorktree([workspaceA, workspaceB, singleA, singleB], [workspaceA, workspaceB, singleA, singleB], 2);
+
+    expect(groups).toHaveLength(4);
+    expect(groups.map((group) => group.id)).toEqual([
+      "/ws/repo-a/.worktrees/FN-9044",
+      "/ws/repo-b/.worktrees/FN-9044",
+      "workspace:FN-workspace-a",
+      "workspace:FN-workspace-b",
+    ]);
+    expect(new Set(groups.map((group) => group.id)).size).toBe(4);
+  });
+
   it("excludes paused todo tasks from Up Next", () => {
     const active = makeTask({ id: "FN-001", worktree: ".worktrees/swift-falcon" });
     const paused = makeTask({

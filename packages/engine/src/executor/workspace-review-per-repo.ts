@@ -11,8 +11,8 @@
  * own `invokeForCwd(cwd)` once per acquired worktree (cwd = repo.worktreePath) and aggregates the repo-tagged
  * verdicts as a CONJUNCTION — the task is "reviewed" only if EVERY repo passes; the FIRST non-APPROVE repo's
  * verdict becomes the aggregate verdict (mirroring verifyWorktreeInvariants' first-failing-repo return), and its
- * findings are repo-tagged. A zero-acquire workspace task (empty map) returns UNAVAILABLE so the caller routes it
- * rather than fabricating an APPROVE.
+ * findings are repo-tagged. A zero-acquire workspace task is classified with the completion invariant: proven
+ * commit-free work approves honestly, while unproven work returns non-retryable UNAVAILABLE.
  *
  * Verdict severity for the conjunction: any RETHINK/REVISE/UNAVAILABLE fails the whole review; only all-APPROVE
  * (or all-skipped UNAVAILABLE-advisory, handled by the caller) approves. We surface the first failing repo's exact
@@ -21,6 +21,7 @@
  */
 import type { Task } from "@fusion/core";
 import type { ReviewResult } from "../execution/reviewer.js";
+import { classifyWorkspaceZeroAcquire, type WorkspaceZeroAcquireOptions } from "./workspace-zero-acquire.js";
 
 export async function reviewWorkspacePerRepo(
   // FNXC:Workspace 2026-06-21-15:00: F7 — drop the dead `repoRel` callback param.
@@ -29,18 +30,37 @@ export async function reviewWorkspacePerRepo(
   // (Phase C). The loop below still tags findings with `repoRel` from its own iteration key.
   task: Task,
   invokeForCwd: (cwd: string) => Promise<ReviewResult>,
+  options: Omit<WorkspaceZeroAcquireOptions, "workspaceMode"> & { workspaceMode?: boolean } = {},
 ): Promise<ReviewResult> {
   const workspaceWorktrees = task.workspaceWorktrees ?? {};
   // FNXC:Workspace 2026-06-21-15:00: F6 — sort repo keys so the reported FIRST failing repo is
   // deterministic across runs/rehydrate.
   const repoKeys = Object.keys(workspaceWorktrees).sort();
   if (repoKeys.length === 0) {
-    // No acquired worktree — surface UNAVAILABLE so the caller routes it rather than
-    // fabricating an authoritative APPROVE for an un-reviewable workspace task.
+    /*
+    FNXC:Workspace 2026-08-15-04:21:
+    This is the review-side consumer of classifyWorkspaceZeroAcquire. A proven
+    commit-free task has no diff to inspect and may approve honestly; an unproven
+    empty map remains unavailable, but re-invoking cannot acquire a repo, so it is
+    explicitly non-retryable rather than burning the review retry budget.
+    */
+    const zeroAcquire = classifyWorkspaceZeroAcquire(task, {
+      workspaceMode: options.workspaceMode ?? true,
+      noOpCompletion: options.noOpCompletion,
+      noOpCompletionReason: options.noOpCompletionReason,
+    });
+    if (zeroAcquire.kind === "commit-free-eligible") {
+      return {
+        verdict: "APPROVE",
+        review: `No sub-repo worktree was acquired; no diff was reviewed because this workspace task is commit-free eligible (${zeroAcquire.reason}).`,
+        summary: `APPROVE: no sub-repo worktree acquired (${zeroAcquire.reason})`,
+      };
+    }
     return {
       verdict: "UNAVAILABLE",
-      review: "No acquired sub-repo worktree to review (workspace task with zero worktrees).",
-      summary: "Skipped: no sub-repo worktree",
+      retryable: false,
+      review: "No acquired sub-repo worktree to review; re-invocation cannot change this unproven zero-acquire workspace verdict.",
+      summary: "Unavailable: no sub-repo worktree acquired",
     };
   }
 

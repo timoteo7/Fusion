@@ -17,6 +17,7 @@ import type { WorktreeInvariantDeps } from "./worktree-verify-invariants.js";
 import type { NonContinuableSessionDeps } from "./non-continuable-session.js";
 import { facadeFields, facadeMethods } from "./facade-methods.js";
 import * as pure from "./pure-bindings.js";
+import { resolveWorkspaceConfigOnce } from "./workspace-config-resolver.js";
 import {
   MAX_WORKTREE_RETRIES,
   WORKTREE_RETRY_DELAYS,
@@ -91,20 +92,23 @@ export type WorktreeInvariantDepsSource = {
   rootDir: string;
   store: TaskStore;
   workspaceConfig: unknown | null | undefined;
+  ensureWorkspaceConfig?: () => Promise<unknown | null>;
   getActiveWorktreePaths: (taskId: string) => string[];
   getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   emitWorktreeReanchoredAudit: WorktreeInvariantDeps["emitWorktreeReanchoredAudit"];
 };
 
 export function buildWorktreeInvariantDeps(src: WorktreeInvariantDepsSource): WorktreeInvariantDeps {
-  return {
+  const bag = {
     rootDir: src.rootDir,
     store: src.store,
-    workspaceConfig: src.workspaceConfig,
+    ensureWorkspaceConfig: src.ensureWorkspaceConfig,
     getActiveWorktreePaths: src.getActiveWorktreePaths,
     getRunContextFor: src.getRunContextFor,
     emitWorktreeReanchoredAudit: src.emitWorktreeReanchoredAudit,
   };
+  // FNXC:Workspace 2026-08-14-21:06: Workspace mode must remain live through every bag re-projection; a getter/setter preserves host writes in strict-mode callers.
+  return defineLiveWorkspaceConfig(bag, src);
 }
 
 export type NonContinuableSessionDepsSource = NonContinuableSessionDeps;
@@ -187,12 +191,32 @@ export function buildHandleGraphFailureDeps(host: any): any {
  * runImplementation deps bag peeled from TaskExecutor (U4). Constants are injected by the
  * façade so the free builder stays free of executor-constants coupling.
  */
+function defineLiveWorkspaceConfig<T extends object>(bag: T, owner: { workspaceConfig: unknown }): T & { workspaceConfig: unknown } {
+  Object.defineProperty(bag, "workspaceConfig", {
+    enumerable: true,
+    configurable: true,
+    get: () => owner.workspaceConfig,
+    set: (value: unknown) => { owner.workspaceConfig = value; },
+  });
+  return bag as T & { workspaceConfig: unknown };
+}
+
+function withWorkspaceResolver(host: any): () => Promise<unknown | null> {
+  return () => resolveWorkspaceConfigOnce({
+    rootDir: host.rootDir,
+    workspaceConfigOwner: host,
+    getWorkspaceConfig: () => host.workspaceConfig,
+    setWorkspaceConfig: (config) => { host.workspaceConfig = config; },
+  });
+}
+
 export function buildRunImplementationDeps(
   host: any,
   constants: { BRANCH_CONFLICT_TRIPWIRE_THRESHOLD: number; MAX_AUTO_RECOVERY_ATTEMPTS: number },
 ): any {
-  return {
-    ...facadeFields(host, ["store", "rootDir", "workspaceConfig"]),
+  const bag = {
+    ...facadeFields(host, ["store", "rootDir"]),
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
     options: host.options as any,
     BRANCH_CONFLICT_TRIPWIRE_THRESHOLD: constants.BRANCH_CONFLICT_TRIPWIRE_THRESHOLD,
     MAX_AUTO_RECOVERY_ATTEMPTS: constants.MAX_AUTO_RECOVERY_ATTEMPTS,
@@ -230,11 +254,13 @@ export function buildRunImplementationDeps(
     ]),
     sharedWorkerTools: buildSharedWorkerToolsDeps(host),
   };
+  return defineLiveWorkspaceConfig(bag, host);
 }
 
 export function buildRunGraphCustomNodeDeps(host: any): any {
-  return {
-    ...facadeFields(host, ["store", "rootDir", "workspaceConfig"]),
+  const bag = {
+    ...facadeFields(host, ["store", "rootDir"]),
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
     options: host.options as { pluginRunner?: unknown; [k: string]: unknown },
     graphUnattendedRuns: host.graphUnattendedRuns,
     ...facadeMethods(host, [
@@ -245,15 +271,17 @@ export function buildRunGraphCustomNodeDeps(host: any): any {
       "runRawCliCommand",
     ]),
   };
+  return defineLiveWorkspaceConfig(bag, host);
 }
 
 export function buildCreateAuthoritativeWorkflowSeamsDeps(host: any): any {
-  return {
+  const bag = {
     store: host.store,
     rootDir: host.rootDir,
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
     options: host.options as { mergeRequester?: unknown; pluginRunner?: unknown; [k: string]: unknown },
     ...facadeFields(host, [
-      "workspaceConfig", "activeWorkflowPrincipals", "graphSeamGoverningNodeId", "graphSeamThinkingLevel",
+      "activeWorkflowPrincipals", "graphSeamGoverningNodeId", "graphSeamThinkingLevel",
       "graphStepActiveContext", "graphRethinkNarrations", "pausedAborted",
       "mergeRequester",
     ]),
@@ -265,6 +293,7 @@ export function buildCreateAuthoritativeWorkflowSeamsDeps(host: any): any {
       "unregisterSubagentSession",
     ]),
   };
+  return defineLiveWorkspaceConfig(bag, host);
 }
 
 export function buildCreateSpawnAgentToolDeps(host: any): any {
@@ -322,9 +351,9 @@ export function buildFinalizeAcceptedNoOpCompletionDeps(host: any): any {
 }
 
 export function buildMarkStuckAbortedDeps(host: any): any {
-  return {
+  const bag = {
     ...facadeFields(host, [
-      "store", "rootDir", "workspaceConfig",
+      "store", "rootDir",
       "activeStepExecutors", "stuckAborted", "executing",
       "activeWorktrees", "loopRecoveryState",
     ]),
@@ -333,7 +362,9 @@ export function buildMarkStuckAbortedDeps(host: any): any {
       "awaitAbortInFlightTaskWork", "clearPausedAborted", "resetStepsIfWorkLost",
       "hasActiveWorktreeBinding",
     ]),
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
   };
+  return defineLiveWorkspaceConfig(bag, host);
 }
 
 export function buildRunGraphTaskStepDeps(host: any): any {
@@ -379,6 +410,7 @@ export function buildEnsureGraphCustomNodeWorktreeDeps(host: any, runConfiguredC
   return {
     store: host.store,
     rootDir: host.rootDir,
+    workspaceConfigOwner: host,
     getWorkspaceConfig: () => host.workspaceConfig,
     setWorkspaceConfig: (c: unknown) => { host.workspaceConfig = c; },
     ...facadeMethods(host, [
@@ -424,12 +456,14 @@ export function buildRunRawCliCommandDeps(host: any, runConfiguredCommand: any =
 }
 
 export function buildEvaluateTaskDoneScopeLeakDeps(host: any): any {
-  return {
-    ...facadeFields(host, ["store", "workspaceConfig"]),
+  const bag = {
+    ...facadeFields(host, ["store"]),
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
     ...facadeMethods(host, [
       "getRunContextFor", "captureUncommittedModifiedFiles", "captureModifiedFiles",
     ]),
   };
+  return defineLiveWorkspaceConfig(bag, host);
 }
 
 export function buildScheduleCompletedTaskWatchdogDeps(
@@ -654,11 +688,13 @@ export function buildHandleImplicitTaskDoneRefusalDeps(host: any): any {
 }
 
 export function buildCleanupTaskWorktreeDeps(host: any): any {
-  return {
-    ...facadeFields(host, ["store", "workspaceConfig", "activeWorktrees"]),
+  const bag = {
+    ...facadeFields(host, ["store", "activeWorktrees"]),
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
     getActiveWorktreePaths: (id: string) => host.getActiveWorktreePaths(id),
     removeOwnWorktreeWithReconcile: (...args: unknown[]) => host.removeOwnWorktreeWithReconcile(...args),
   };
+  return defineLiveWorkspaceConfig(bag, host);
 }
 
 export function buildResumeTaskForAgentDeps(host: any): any {
@@ -862,6 +898,7 @@ export function buildBuildForeachWorktreeDepsDeps(host: any): any {
   return {
     ...facadeFields(host, ["store", "rootDir"]),
     ...facadeMethods(host, ["createWorktree"]),
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
     semaphoreAvailableCount: () => host.options.semaphore?.availableCount ?? 1,
   };
 }
@@ -1061,6 +1098,7 @@ export function buildEnsureTaskWorktreeForPlanningDeps(host: any): any {
   return {
     store: host.store,
     rootDir: host.rootDir,
+    workspaceConfigOwner: host,
     getWorkspaceConfig: () => host.workspaceConfig,
     setWorkspaceConfig: (cfg: unknown) => { host.workspaceConfig = cfg; },
     ensureGraphCustomNodeWorktree: (t: unknown, s: unknown, nodeId: string, refresh?: boolean) =>
@@ -1193,12 +1231,15 @@ export function buildAdoptColumnAgentForNodeDeps(host: any): any {
 }
 
 export function buildWorktreeInvariantFacadeDeps(host: any): any {
-  return buildWorktreeInvariantDeps({
-    ...facadeFields(host, ["rootDir", "store", "workspaceConfig"]),
+  const facade = {
+    ...facadeFields(host, ["rootDir", "store"]),
+    ensureWorkspaceConfig: withWorkspaceResolver(host),
     ...facadeMethods(host, [
       "getActiveWorktreePaths", "getRunContextFor", "emitWorktreeReanchoredAudit",
     ]),
-  });
+  };
+  // FNXC:Workspace 2026-08-14-21:06: Object spread snapshots accessors, so the invariant's two-hop facade explicitly re-projects the live getter/setter.
+  return buildWorktreeInvariantDeps(defineLiveWorkspaceConfig(facade, host));
 }
 
 export function buildHandleDepAbortCleanupDeps(host: any): any {

@@ -19,6 +19,7 @@ function createStore(overrides: Partial<Record<string, unknown>> = {}): TaskStor
     updateTask: vi.fn().mockResolvedValue(undefined),
     logEntry: vi.fn().mockResolvedValue(undefined),
     getSettings: vi.fn().mockResolvedValue({ autoMerge: false }),
+    getTask: vi.fn().mockResolvedValue(undefined),
     on: emitter.on.bind(emitter),
     ...overrides,
   }) as unknown as TaskStore & EventEmitter;
@@ -256,17 +257,16 @@ describeIfGit("U1 KTD1 — verifyWorktreeInvariants gated off in workspace mode"
   let fx: WorkspaceFixture;
   afterEach(() => fx?.cleanup());
 
-  it("returns ok for a zero-acquire workspace task (no task.worktree) so fn_task_done does not requeue", async () => {
+  it("refuses an unproven zero-acquire workspace task so fn_task_done can requeue for acquisition", async () => {
     fx = await createWorkspaceFixture();
     const store = createStore();
     const executor = new TaskExecutor(store, fx.rootDir);
     (executor as any).workspaceConfig = { repos: fx.repos } as WorkspaceConfig;
 
-    // A workspace task that acquired ZERO sub-repos has no task.worktree and no
-    // tracked paths. The singular invariant would otherwise refuse on
-    // "missing task.worktree"; in workspace mode it is gated OFF.
+    // A workspace task that acquired ZERO sub-repos has no task.worktree. It must
+    // acquire one before claiming completion unless it proves commit-free intent.
     const result = await (executor as any).verifyWorktreeInvariants(makeTask("FN-WS-1", { worktree: undefined }));
-    expect(result).toEqual({ ok: true });
+    expect(result).toMatchObject({ ok: false, reason: "no_commits" });
   });
 
   it("non-workspace task with no worktree still fails the invariant (regression: gate is workspace-only)", async () => {

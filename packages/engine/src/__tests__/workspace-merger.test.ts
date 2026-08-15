@@ -322,6 +322,7 @@ describeIfGit("landWorkspaceTask — per-repo merge loop (Phase C U1)", () => {
     // No sub-repo FAILED, but nothing landed → blocked, NOT finalized.
     expect(result.allLanded).toBe(true);
     expect(result.finalized).toBe(false);
+    expect(result.finalizeBlockedReason).toEqual(expect.stringContaining("operator review required"));
     for (const r of result.repos) expect(r.status).toBe("empty");
 
     // Moved back to todo with error set; never moved done and never emitted task:merged.
@@ -343,7 +344,7 @@ describe("workspace merge defense-in-depth (non-routed doors keep throwing)", ()
       id: TASK_ID,
       workspaceWorktrees: { "repo-a": { worktreePath: "/x/repo-a", branch: BRANCH } },
     } as unknown as Task;
-    expect(() => assertNotWorkspaceTaskMerge(task)).toThrowError(/cannot merge until per-repo merge/i);
+    expect(() => assertNotWorkspaceTaskMerge(task)).toThrowError(/reached a single-repo merge path/i);
     try {
       assertNotWorkspaceTaskMerge(task);
     } catch (err) {

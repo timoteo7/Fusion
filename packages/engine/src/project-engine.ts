@@ -91,7 +91,13 @@ import { createFusionAuthStorage, getFusionOAuthAlertStatePath } from "./auth/au
 import { CronRunner, createAiPromptExecutor } from "./scheduling/cron-runner.js";
 import type { RoutineRunner } from "./scheduling/routine-runner.js";
 import { sweepStaleAutostashes, VerificationError } from "./merger.js";
-import { runAiMerge, landWorkspaceTask, WorkspacePartialLandError, WorkspaceRepoLandBusyError } from "./merge/merger-ai.js";
+import {
+  runAiMerge,
+  landWorkspaceTask,
+  WorkspaceFinalizeBlockedError,
+  WorkspacePartialLandError,
+  WorkspaceRepoLandBusyError,
+} from "./merge/merger-ai.js";
 import { promoteBranchGroup, type BranchGroupPromotionResult, type CreateGroupPrFn, type SyncGroupPrFn } from "./merge/group-merge-coordinator.js";
 import {
   formatAdmissionCapacityQueuedReason,
@@ -4153,8 +4159,8 @@ export class ProjectEngine {
           // Hoist the workspace check here so workspace tasks ALWAYS fall through
           // to the existing direct/else `rawMerge` branch below, whose
           // isWorkspaceTask(mergeTask) routing already calls landWorkspaceTask
-          // correctly, regardless of the configured mergeStrategy — until true
-          // per-repo PR merge for workspace tasks (master-plan U6) ships.
+          // correctly, regardless of the configured mergeStrategy. PR-based
+          // workspace landing remains outside this direct workspace land path.
           const mergeCandidate = await store.getTask(taskId).catch(() => null);
           const routeWorkspaceDirect = !!mergeCandidate && isWorkspaceTask(mergeCandidate);
 
@@ -4463,6 +4469,20 @@ export class ProjectEngine {
                     `Workspace partial land for ${taskId}: ${landedCount} repo(s) landed, ${failed.length} failed — ${detail}`,
                   );
                 }
+                /*
+                FNXC:Workspace 2026-08-15-04:22:
+                `allLanded` only proves no sub-repo failed; `finalized` proves the task reached
+                `done`. A blocked finalize is already parked and non-retryable, so never let it
+                reach the success path that resets retries, resolves manual waiters, or promotes
+                a branch group.
+                */
+                if (!workspaceResult.finalized) {
+                  throw new WorkspaceFinalizeBlockedError(
+                    taskId,
+                    workspaceResult.finalizeBlockedReason
+                      ?? "workspace finalize was blocked after all sub-repos landed; task progress was preserved",
+                  );
+                }
                 // Finalized to done by landWorkspaceTask; report the merge as merged so
                 // the success path (retry reset + branch-group promotion) runs normally.
                 const latest = await store.getTask(taskId).catch(() => mergeTask!);
@@ -4550,15 +4570,15 @@ export class ProjectEngine {
             continue;
           }
 
-          // FNXC:Workspace 2026-06-21-19:40:
-          // R7 workspace merge-boundary park (master-plan U0). A WorkspaceTaskMergeError
-          // is a PERMANENT config error (workspace task hit a merge door before the
-          // per-repo merge loop exists — master-plan U6), NOT a transient merge failure.
-          // Park with status:"failed" so the auto-merge cooldown sweep STOPS re-attempting:
+          // FNXC:Workspace 2026-08-15-04:54:
+          // `landWorkspaceTask` owns the workspace per-repository land path. A
+          // WorkspaceTaskMergeError means a workspace task reached this single-repository
+          // merge door despite that routing, not a transient merge failure. Park with
+          // status:"failed" so the auto-merge cooldown sweep stops re-attempting:
           // `canMergeTask` short-circuits on status==="failed". (Parking with status:null +
           // mergeRetries:0 passes every eligibility gate, so the sweep re-enqueues every tick
           // → tight WorkspaceTaskMergeError re-throw/re-park loop.) Keep mergeRetries:0 (not
-          // the cap) so a human's manual merge after the config is addressed is not blocked by
+          // the cap) so a human's manual merge after the routing is addressed is not blocked by
           // exhausted retries — and manual merge flows through the manual-resolver branch
           // (rejectMergeResolvers), which bypasses canMergeTask, so "failed" never blocks it.
           // Detect by err.name (matches the VerificationError/MergeAbortedError convention and
@@ -4567,7 +4587,7 @@ export class ProjectEngine {
             err instanceof Error && err.name === "WorkspaceTaskMergeError";
           if (isWorkspaceMergeError) {
             runtimeLog.error(
-              `${hasManualResolver ? "Manual" : "Auto"}-merge blocked for ${taskId}: workspace-mode tasks cannot merge until per-repo merge support (master-plan U6) lands; parking as failed (manual retry still works) without exhausting mergeRetries: ${errorMsg}`,
+              `${hasManualResolver ? "Manual" : "Auto"}-merge blocked for ${taskId}: workspace task reached a single-repo merge path and must land per-repo via landWorkspaceTask; parking as failed (manual retry still works) without exhausting mergeRetries: ${errorMsg}`,
             );
             await store
               .logEntry(taskId, `Merge blocked: ${errorMsg}`, "WorkspaceTaskMergeError", toRunMutationContext(autoMergeRunContext))
@@ -4633,6 +4653,26 @@ export class ProjectEngine {
                 `Auto-merge: ${taskId} workspace land busy ${ProjectEngine.WORKSPACE_BUSY_MAX_REENQUEUES} times — parked as failed (sustained sub-repo lease contention)`,
               );
             }
+            continue;
+          }
+
+          /*
+          FNXC:Workspace 2026-08-15-04:22:
+          A workspace finalize blocked after all repos landed is NOT merge success and is NOT
+          retryable: the producer already parked it with task.error. Do not reset or consume
+          mergeRetries, double-park it as failed, resolve a manual waiter with ok:true, or promote
+          a branch group. Clear transient busy bookkeeping and surface the real blocked reason.
+          */
+          if (err instanceof WorkspaceFinalizeBlockedError) {
+            runtimeLog.error(
+              `${hasManualResolver ? "Manual" : "Auto"}-merge blocked for ${taskId}: ${err.reason}`,
+            );
+            await store.logEntry(taskId, `Workspace finalize blocked: ${err.reason}`, "WorkspaceFinalizeBlocked")
+              .catch(() => undefined);
+            if (hasManualResolver) {
+              this.rejectMergeResolvers(taskId, err);
+            }
+            this.workspaceBusyReenqueues.delete(taskId);
             continue;
           }
 

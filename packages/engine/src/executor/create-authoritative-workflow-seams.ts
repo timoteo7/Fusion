@@ -28,7 +28,7 @@ import {
   resolveValidatorThinkingLevel,
   resolveValidatorFallbackThinkingLevel,
 } from "../agents/agent-session-helpers.js";
-import type { ReviewVerdict } from "../execution/reviewer.js";
+import type { ReviewResult } from "../execution/reviewer.js";
 import {
   buildReviewUnavailableMessage,
   buildPlanVerifiedMessage,
@@ -56,6 +56,7 @@ export type CreateAuthoritativeWorkflowSeamsDeps = {
     [k: string]: unknown;
   };
   workspaceConfig: WorkspaceConfig | null | undefined;
+  ensureWorkspaceConfig?: () => Promise<WorkspaceConfig | null>;
   activeWorkflowPrincipals: Map<string, { agentId: string; nodeInstanceId: string; agent?: import("@fusion/core").Agent }>;
   graphSeamGoverningNodeId: Map<string, string>;
   graphSeamThinkingLevel: Map<string, ThinkingLevel>;
@@ -420,16 +421,35 @@ export function createAuthoritativeWorkflowSeams(
               onSessionEnded: (s) => deps.unregisterSubagentSession(seamTask.id, s),
             },
           });
-        const runForCwd = (cwd: string): Promise<{ verdict: ReviewVerdict; review: string; summary: string }> => {
+        const runForCwd = (cwd: string): Promise<ReviewResult> => {
           const invoke = () => invokeReviewerForCwd(cwd);
           return sem ? sem.runNested(invoke) : invoke();
         };
+        const workspaceConfig = deps.ensureWorkspaceConfig
+          ? await deps.ensureWorkspaceConfig()
+          : deps.workspaceConfig;
+        /*
+        FNXC:Workspace 2026-08-15-04:31:
+        Only step-review nodes use this per-repo aggregation seam. Prompt-node
+        code-review and plan-review groups remain intentionally out of scope;
+        extending their workspace awareness requires separate review authority work.
+        */
         const invokeReviewer = () =>
-          deps.workspaceConfig && reviewCwd === worktreePath
-            ? deps.reviewWorkspacePerRepo(detail, (cwd: string) => runForCwd(cwd))
+          workspaceConfig && reviewCwd === worktreePath
+            ? deps.reviewWorkspacePerRepo(detail, (cwd: string) => runForCwd(cwd), {
+                /*
+                FNXC:Workspace 2026-08-15-04:49:
+                fn_task_done persists an accepted no-op sentinel as noCommitsExpected
+                before scheduling this review handoff. Carry that durable provenance
+                into the shared classifier so workspace review agrees with completion
+                even when the task acquired no sub-repo worktree.
+                */
+                noOpCompletion: detail.noCommitsExpected === true,
+                noOpCompletionReason: "verified no-op completion persisted by fn_task_done",
+              })
             : runForCwd(reviewCwd);
 
-        let review: { verdict: ReviewVerdict; review: string; summary: string };
+        let review: ReviewResult;
         try {
           review = await invokeReviewer();
         } catch (err) {
@@ -476,7 +496,7 @@ export function createAuthoritativeWorkflowSeams(
           }
         }
 
-        return { verdict: review.verdict, review: review.review, summary: review.summary };
+        return { verdict: review.verdict, review: review.review, summary: review.summary, retryable: review.retryable };
       },
     };
 }

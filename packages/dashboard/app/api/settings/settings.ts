@@ -45,6 +45,8 @@ export interface UpdateInstallResponse {
   currentVersion: string;
   latestVersion: string | null;
   updated: boolean;
+  outcome?: "installed" | "no-update-available" | "check-failed" | "unsupported-install-method" | "failed";
+  message?: string;
   error?: string;
 }
 

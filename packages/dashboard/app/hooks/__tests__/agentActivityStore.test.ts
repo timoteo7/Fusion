@@ -31,9 +31,15 @@ import { ACTIVE_STATE_WINDOW_MS } from "../../components/agentsOrgChartActivity"
 
 const NOW = new Date("2026-08-09T10:00:00.000Z");
 const page = (events: ReturnType<typeof event>[] = []) => ({ events, nextCursor: null });
-const event = (eventId: string, occurredAt: string, agentId = "agent-a", projectId = "project") => ({
+const event = (
+  eventId: string,
+  occurredAt: string,
+  agentId = "agent-a",
+  projectId = "project",
+  type: "task:started" | "agent:state-changed" = "task:started",
+) => ({
   eventId, seq: eventId, projectId, agentId, agentAttribution: "agent" as const,
-  taskId: null, type: "task:started" as const, fromAgentId: null, toAgentId: null,
+  taskId: null, type, fromAgentId: null, toAgentId: null,
   summary: eventId, occurredAt, metadata: null,
 });
 const deliver = (value: ReturnType<typeof event>) => {
@@ -91,6 +97,35 @@ describe("agentActivityStore", () => {
     mocks.getOnReconnect()!();
     await vi.waitFor(() => expect(mocks.getAgentActivity).toHaveBeenCalledTimes(2));
     expect(agentActivityStore.getSnapshot().events.map((item) => item.eventId)).toEqual(["new", "old"]);
+  });
+
+  it("drops hidden seed and SSE state changes while retaining real activity for the same agent", async () => {
+    mocks.getAgentActivity.mockResolvedValue(page([
+      event("seed-state", "2026-08-09T10:00:02.000Z", "agent-a", "project", "agent:state-changed"),
+      event("started", "2026-08-09T10:00:01.000Z"),
+    ]));
+    agentActivityStore.retain("one", "project");
+    await vi.waitFor(() => expect(agentActivityStore.getSnapshot().events).toHaveLength(1));
+
+    deliver(event("live-state", "2026-08-09T10:00:03.000Z", "agent-a", "project", "agent:state-changed"));
+    const snapshot = agentActivityStore.getSnapshot();
+    expect(snapshot.events.map((item) => item.eventId)).toEqual(["started"]);
+    expect(snapshot.activityByAgentId.get("agent-a")?.eventId).toBe("started");
+  });
+
+  it("does not let hidden state changes consume retained-ring capacity", async () => {
+    mocks.getAgentActivity.mockResolvedValue(page());
+    agentActivityStore.retain("one", "project");
+    await vi.waitFor(() => expect(mocks.getActivityHandler()).toBeTypeOf("function"));
+    for (let index = 0; index < ACTIVITY_EVENT_CAP; index++) {
+      deliver(event(`event-${index}`, new Date(NOW.getTime() + index).toISOString(), `agent-${index}`));
+    }
+
+    deliver(event("hidden", new Date(NOW.getTime() + ACTIVITY_EVENT_CAP).toISOString(), "agent-hidden", "project", "agent:state-changed"));
+    const snapshot = agentActivityStore.getSnapshot();
+    expect(snapshot.events).toHaveLength(ACTIVITY_EVENT_CAP);
+    expect(snapshot.events.some((item) => item.eventId === "event-0")).toBe(true);
+    expect(snapshot.events.some((item) => item.eventId === "hidden")).toBe(false);
   });
 
   it("drops malformed timestamps and retains the newest events when the ring reaches its cap", async () => {

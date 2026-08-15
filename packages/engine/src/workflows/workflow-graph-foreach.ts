@@ -189,6 +189,8 @@ export interface ForeachEnvironment {
    *  (re)allocation so a rework lands on the UPDATED base (KTD-11). Optional —
    *  defaults to undefined (the allocator's own default base). */
   resolveIntegrationBase?: () => Promise<string | undefined>;
+  /** Optional workspace gate for worktree isolation; absent preserves legacy injections. */
+  resolveWorktreeIsolationBlock?: () => Promise<string | undefined>;
   /** Ordered-integration git mechanics (KTD-11). Required when `isolation:
    *  "worktree"`; the queue uses it to land branches in step order. */
   integrationGitOps?: IntegrationGitOps;
@@ -504,6 +506,21 @@ async function runForeachWorktree(
   pinnedStepCount: number,
   visitedNodeIds: string[],
 ): Promise<ForeachRunResult> {
+  /*
+  FNXC:WorkflowForeach 2026-08-15-04:22:
+  A multi-repo workspace must fail with an operator-visible diagnostic before foreach allocates against its non-git root. The graph gate is paired with the allocation seam so future callers cannot bypass this contract.
+  */
+  const workspaceBlock = await env.resolveWorktreeIsolationBlock?.().catch(() => undefined);
+  if (workspaceBlock) {
+    schedulerLog.warn(`foreach ${foreachNode.id} for task ${env.task.id}: ${workspaceBlock}`);
+    try {
+      await env.logTaskEntry?.("worktree isolation unsupported for workspace project", workspaceBlock);
+    } catch {
+      // Task logging is diagnostic-only and cannot mask the routable failure.
+    }
+    return { outcome: "failure", value: "worktree-isolation-unsupported-workspace", visitedNodeIds };
+  }
+
   if (!env.allocateInstanceWorktree || !env.integrationGitOps || !env.integrationProjection) {
     // Worktree isolation requires the full wiring; fail cleanly (routable) rather
     // than silently running shared-mode physics.

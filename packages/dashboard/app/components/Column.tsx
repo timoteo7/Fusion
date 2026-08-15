@@ -1118,7 +1118,9 @@ function ColumnComponent({ column, tasks, projectId, maxConcurrent, showWorktree
             ) : (
               worktreeGroups.map((group) => (
                 <WorktreeGroup
-                  key={group.label}
+                  key={group.id}
+                  kind={group.kind}
+                  repoCount={group.repoCount}
                   label={group.label}
                   activeTasks={group.activeTasks}
                   queuedTasks={group.queuedTasks}

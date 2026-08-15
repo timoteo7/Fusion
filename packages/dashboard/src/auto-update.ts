@@ -45,6 +45,7 @@ export type AutoUpdateOutcome =
   | "up-to-date"
   | "check-failed"
   | "install-failed"
+  | "unsupported-install-method"
   | "restart-unavailable"
   | "restarting";
 
@@ -63,9 +64,27 @@ export interface AutoUpdateDeps {
   requestRestart: (reason: string) => boolean;
   log: AutoUpdateLogger;
   fusionDir?: string;
+  /** Host-injected checkout root: global npm cannot update this running program. */
+  sourceWorkspaceRoot?: string;
   /** Test seams. */
   checkForUpdate?: typeof performUpdateCheck;
   installUpdate?: typeof performUpdateInstall;
+}
+
+/*
+FNXC:AutoUpdate 2026-08-14-19:31:
+Only the dashboard host knows whether Fusion runs from a source checkout. Keep
+that context in this exported builder so unattended installs cannot restart a
+program that a global npm install could never change.
+*/
+export function buildAutoUpdateDeps(input: {
+  getSettings: () => Promise<AutoUpdateSettings>;
+  currentVersion: string;
+  systemControl: { supervised: boolean; requestRestart: (reason: string) => boolean; sourceWorkspaceRoot?: string };
+  log: AutoUpdateLogger;
+  fusionDir?: string;
+}): AutoUpdateDeps {
+  return { getSettings: input.getSettings, currentVersion: input.currentVersion, supervised: input.systemControl.supervised, requestRestart: input.systemControl.requestRestart, sourceWorkspaceRoot: input.systemControl.sourceWorkspaceRoot, log: input.log, fusionDir: input.fusionDir };
 }
 
 /**
@@ -120,14 +139,22 @@ export async function runAutoUpdateCycle(deps: AutoUpdateDeps): Promise<AutoUpda
 
   let installed: UpdateInstallResult;
   try {
-    installed = await install(result.currentVersion, result.latestVersion, { fusionDir });
+    installed = await install(result.currentVersion, result.latestVersion, {
+      fusionDir,
+      installMethod: { sourceWorkspaceRoot: deps.sourceWorkspaceRoot },
+    });
   } catch (error) {
     deps.log.error("Auto-update install failed", { message: errorMessage(error) });
     return "install-failed";
   }
 
-  if (!installed.updated) {
-    deps.log.error("Auto-update install failed", { message: installed.error ?? "unknown install failure" });
+  if (installed.outcome === "unsupported-install-method") {
+    deps.log.warn("Auto-update skipped: this host cannot be updated by a global npm install", { message: installed.message });
+    return "unsupported-install-method";
+  }
+  if (installed.outcome === "no-update-available") return "up-to-date";
+  if ((installed.outcome && installed.outcome !== "installed") || !installed.updated) {
+    deps.log.error("Auto-update install failed", { message: installed.error ?? installed.message ?? "unknown install failure" });
     return "install-failed";
   }
 

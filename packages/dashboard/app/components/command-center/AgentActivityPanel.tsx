@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentActivityEventType } from "../../api";
 import { ActivityFeedRowPresentation } from "../ActivityFeed";
+import { isHiddenAgentActivityType } from "../agentsOrgChartActivity";
 import { AreaShell } from "./areas/AreaShell";
 import { AGENT_ACTIVITY_TYPE_CONFIG, DEFAULT_AGENT_ACTIVITY_CONFIG } from "./agentActivityPresentation";
 import type { DateRange } from "./DateRangePicker";
@@ -10,7 +11,8 @@ import "./AgentActivityPanel.css";
 
 const LIVE_RENDER_LIMIT = 100;
 const TIMELINE_WINDOW_SIZE = 100;
-const EVENT_TYPES = Object.keys(AGENT_ACTIVITY_TYPE_CONFIG) as AgentActivityEventType[];
+const EVENT_TYPES = (Object.keys(AGENT_ACTIVITY_TYPE_CONFIG) as AgentActivityEventType[])
+  .filter((type) => !isHiddenAgentActivityType(type));
 
 export interface AgentActivityPanelProps {
   projectId?: string;
@@ -38,9 +40,16 @@ export function AgentActivityPanel({ projectId, range, onOpenAgent, onOpenTask }
     () => [...new Set(activity.events.map((event) => event.agentId).filter(Boolean))].sort(),
     [activity.events],
   );
+  /*
+  FNXC:AgentActivityStream 2026-08-14-19:18:
+  FN-9041 hides historical state churn at this render boundary because the cursor hook must retain
+  every wire row for correct no-progress and exhaustion accounting. Filter before each display limit
+  so hidden rows cannot consume a visible slot, while paging can still load older real activity.
+  */
+  const visibleEvents = activity.visibleEvents.filter((event) => !isHiddenAgentActivityType(event.type));
   const rows = mode === "live"
-    ? activity.events.slice(0, LIVE_RENDER_LIMIT)
-    : activity.visibleEvents.slice(0, timelineLimit);
+    ? activity.events.filter((event) => !isHiddenAgentActivityType(event.type)).slice(0, LIVE_RENDER_LIMIT)
+    : visibleEvents.slice(0, timelineLimit);
 
   return (
     <section className="cc-agent-activity">
@@ -63,10 +72,12 @@ export function AgentActivityPanel({ projectId, range, onOpenAgent, onOpenTask }
         </div>
       ) : null}
       <AreaShell testId="agent-activity" isLoading={activity.isLoading} error={activity.error} isEmpty={!rows.length && !activity.hasMore} emptyMessage={t("commandCenter.agentActivity.empty", "No agent activity yet.")}>
-        <div className="cc-agent-activity-list">
-          {rows.map((row) => <AgentActivityRow key={row.eventId} event={row} onOpenAgent={onOpenAgent} onOpenTask={onOpenTask} />)}
-        </div>
-        {mode === "timeline" && timelineLimit < activity.visibleEvents.length ? (
+        {!rows.length ? <div className="cc-area-empty" data-testid="cc-area-agent-activity-empty"><p>{t("commandCenter.agentActivity.empty", "No agent activity yet.")}</p></div> : (
+          <div className="cc-agent-activity-list">
+            {rows.map((row) => <AgentActivityRow key={row.eventId} event={row} onOpenAgent={onOpenAgent} onOpenTask={onOpenTask} />)}
+          </div>
+        )}
+        {mode === "timeline" && timelineLimit < visibleEvents.length ? (
           <button type="button" className="btn" onClick={() => setTimelineLimit((value) => value + TIMELINE_WINDOW_SIZE)}>{t("commandCenter.agentActivity.showMore", "Show more loaded activity")}</button>
         ) : null}
         {mode === "timeline" && activity.hasMore ? (

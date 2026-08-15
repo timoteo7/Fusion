@@ -136,6 +136,7 @@ export interface StepReviewSeamResult {
   verdict: "APPROVE" | "REVISE" | "RETHINK" | "UNAVAILABLE";
   review?: string;
   summary?: string;
+  retryable?: boolean;
 }
 
 /** The reserved context key carrying the active foreach instance (KTD-3, U3).
@@ -488,9 +489,12 @@ export function createPrimitivePromptLikeHandler(
   };
 }
 
-/** Per-step-review-node cap on UNAVAILABLE retries before routing the
- *  `outcome:unavailable` edge (KTD-4 — mirrors the in-session
- *  `planSpecUnavailableCounts` limiter posture, executor.ts ~7297). */
+/*
+FNXC:WorkflowReviewGates 2026-08-15-04:21:
+This cap is reserved for transient reviewer unavailability. A deterministic
+UNAVAILABLE such as an unproven zero-acquire workspace map cannot change by
+retrying, so handlers route it after one attempt without consuming this budget.
+*/
 const STEP_REVIEW_UNAVAILABLE_RETRY_CAP = 2;
 
 /** Resolve a step-review node's config (KTD-4). Defaults `type` to `code` (the
@@ -551,7 +555,7 @@ export function createStepReviewHandler(seams: WorkflowLegacySeams): WorkflowNod
     let result: StepReviewSeamResult = { verdict: "UNAVAILABLE" };
     for (let attempt = 0; attempt <= STEP_REVIEW_UNAVAILABLE_RETRY_CAP; attempt++) {
       result = await seams.stepReview(ctx.task, ctx.context, config);
-      if (result.verdict !== "UNAVAILABLE") break;
+      if (result.verdict !== "UNAVAILABLE" || result.retryable === false) break;
     }
 
     // Persist the verdict onto the active context so the foreach sub-walk writes
@@ -612,7 +616,7 @@ export function createPrimitiveStepReviewHandler(primitives: WorkflowRuntimePrim
       }
       primitivePatch = primitiveResult.contextPatch;
       result = primitiveResult.data ?? { verdict: "UNAVAILABLE" as const };
-      if (result.verdict !== "UNAVAILABLE") break;
+      if (result.verdict !== "UNAVAILABLE" || result.retryable === false) break;
     }
 
     if (!advisory) {

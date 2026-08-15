@@ -338,10 +338,10 @@ export async function mergeTaskImpl(store: TaskStore, id: string): Promise<Merge
     return store.withTaskLock(id, async () => {
       const dir = store.taskDir(id);
       const task = await store.readTaskJson(dir);
-      // FNXC:Workspace 2026-06-21-19:05:
-      // R7 merge-boundary guard (master-plan U0). Reject workspace-mode tasks
-      // BEFORE any git checkout/squash — they need the per-repo merge loop that
-      // lands in master-plan U6, which removes this guard. See the predicate's
+      // FNXC:Workspace 2026-08-15-04:54:
+      // `landWorkspaceTask` owns workspace-mode per-repository land. Keep this
+      // single-repository merge door guard as defense-in-depth so a misrouted task
+      // fails before git runs against the non-git workspace root. See the predicate's
       // FNXC:Workspace note in @fusion/core types.
       assertNotWorkspaceTaskMerge(task);
       const branch = task.branch || `fusion/${id.toLowerCase()}`;

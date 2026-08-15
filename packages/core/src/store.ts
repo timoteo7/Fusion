@@ -1713,6 +1713,20 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
   async clearWorkflowRunStepInstancesAsync(taskId: string, keepRunId?: string): Promise<void> {
     return clearWorkflowRunStepInstancesAsyncImpl(this, taskId, keepRunId);
   }
+  /*
+  FNXC:WorkflowLifecycleColumns 2026-08-14-04:30:
+  Deliberately forwards `options` without resolving a lane here, and is recorded in
+  scripts/lib/lane-wiring-baseline.json for that reason.
+
+  The guard exists to catch a callee silently falling back to a LEGACY COLUMN LITERAL when a caller
+  omits the lane. This callee does not: `listTaskRecommendationsImpl` falls back to
+  `resolveProjectColumnsForRoles(store, ["complete"])`, which reads the board's own lanes. Resolving
+  again in this wrapper would duplicate that query on every call and give the pass-through no
+  behavioural difference from the fallback.
+
+  Real callers already supply it — the dashboard route resolves `completeColumns` and passes it — so
+  the fallback serves the pass-through wrapper, not production paths.
+  */
   async listTaskRecommendations(options?: { completeColumns?: ReadonlySet<string>; limit?: number; offset?: number }): Promise<import("./types.js").TaskRecommendationListPage> {
     return listTaskRecommendationsImpl(this, options);
   }

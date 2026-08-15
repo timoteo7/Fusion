@@ -31,6 +31,18 @@ export const AGENT_ACTIVITY_EVENT_CLASSIFICATION: Readonly<Record<AgentActivityE
   "approval:requested": "in-flight",
 };
 
+/*
+FNXC:AgentActivityStream 2026-08-14-19:18:
+FN-9041 removes agent state churn from work-activity displays. Roster state and the live
+agent:stateChanged channel remain authoritative, so historical state-change rows must never
+enter the retained activity stream or consume its bounded capacity.
+*/
+export const HIDDEN_AGENT_ACTIVITY_TYPES: ReadonlySet<AgentActivityEventType> = new Set(["agent:state-changed"]);
+
+export function isHiddenAgentActivityType(type: string): boolean {
+  return HIDDEN_AGENT_ACTIVITY_TYPES.has(type as AgentActivityEventType);
+}
+
 /** Returns milliseconds for a valid ISO timestamp, otherwise null for store-side rejection. */
 export function parseActivityOccurredAt(occurredAt: unknown): number | null {
   /*

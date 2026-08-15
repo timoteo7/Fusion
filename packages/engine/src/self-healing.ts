@@ -710,14 +710,15 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
   private deadlockRecoveryCooldown: Map<string, number> = new Map();
   private mergeStarvationDrops: Map<string, number> = new Map();
   /*
-  FNXC:Workspace 2026-06-22-14:10 (Phase D review B/E — bounded workspace re-enqueue / orphan-remove):
-  Per-task drop counter for the workspace partial-land re-enqueue (mirror of `mergeStarvationDrops`):
-  `enqueueMerge` returns false when the merge queue rejects (full). Without bounding, a perpetually
-  rejected workspace task is re-enqueued FOREVER. After MAX_STARVATION_DROPS consecutive drops we
-  park it `status:"failed"`. `orphanWorktreeRemovalFailures` likewise bounds the per-path
-  `git worktree remove --force` retry in reconcileOrphanedWorkspaceWorktrees.
+  FNXC:Workspace 2026-08-15-04:42:
+  The partial-land reconciler separately bounds rejected merge enqueues and unavailable branch
+  evidence. A clean `show-ref` exit 1 proves a branch is absent; timeout, missing directories, and
+  ref-read failures prove nothing, so they defer rather than falsely terminalize intact work. Both
+  counters are candidate-scoped and exhaustion parks visibly: infinite silent deferral is also a
+  failure mode requiring operator intervention.
   */
   private workspacePartialLandDrops: Map<string, number> = new Map();
+  private workspacePartialLandEvidenceDefers: Map<string, number> = new Map();
   private orphanWorktreeRemovalFailures: Map<string, number> = new Map();
   private finalizeUnprovenWarned = new Set<string>();
   /*
@@ -1033,20 +1034,34 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
   task ROW lifecycle.)
   */
   /*
-  FNXC:WorkflowResolvedColumns 2026-07-31-23:40:
-  `completeColumns` is REQUIRED and resolved by the caller (async, once per sweep) because this
-  predicate is sync and its caller is not.
+  FNXC:Workspace 2026-08-15-04:11:
+  Archive is cold storage, but `getTask` serves its snapshot as an archived-column task. An archived
+  or soft-deleted owner cannot be running, while this in-memory registry retains a leaked land lease
+  until process exit. Resolve archive columns with the workflow vocabulary and treat them as terminal;
+  the unchanged age, merge-pending, and executing guards still prevent reclaiming a live land.
 
-  MEMBERSHIP of `complete` ONLY, deliberately: the literal it replaces was `done` alone, and the
-  comment above spells out that every non-terminal state must read LIVE so a lease is never yanked
-  from a task that could still be running. Adding `archived` would widen what counts as terminal and
-  reclaim leases the old code kept — a behaviour change riding inside a column conversion.
+  Non-terminal states must continue to read LIVE. The column sets are resolved once by the async
+  caller because this predicate remains synchronous.
   */
-  private isWorkspaceOwnerLive(owner: Task | null | undefined, completeColumns: ReadonlySet<string>): boolean {
-    if (!owner) return false; // not found / deleted → terminal.
-    if (completeColumns.has(owner.column)) return false;
-    if (owner.status === "failed") return false;
-    return true;
+  private workspaceOwnerTerminalReason(
+    owner: Task | null | undefined,
+    completeColumns: ReadonlySet<string>,
+    archivedColumns: ReadonlySet<string>,
+  ): "missing" | "complete" | "archived" | "deleted" | "failed" | null {
+    if (!owner) return "missing";
+    if (completeColumns.has(owner.column)) return "complete";
+    if (archivedColumns.has(owner.column)) return "archived";
+    if (typeof owner.deletedAt === "string" && owner.deletedAt.length > 0) return "deleted";
+    if (owner.status === "failed") return "failed";
+    return null;
+  }
+
+  private isWorkspaceOwnerLive(
+    owner: Task | null | undefined,
+    completeColumns: ReadonlySet<string>,
+    archivedColumns: ReadonlySet<string>,
+  ): boolean {
+    return this.workspaceOwnerTerminalReason(owner, completeColumns, archivedColumns) === null;
   }
 
   private async evaluateBackwardMoveTripleProof(
@@ -10021,6 +10036,9 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
       for (const taskId of [...this.workspacePartialLandDrops.keys()]) {
         if (!candidateIds.has(taskId)) this.workspacePartialLandDrops.delete(taskId);
       }
+      for (const taskId of [...this.workspacePartialLandEvidenceDefers.keys()]) {
+        if (!candidateIds.has(taskId)) this.workspacePartialLandEvidenceDefers.delete(taskId);
+      }
 
       if (candidates.length === 0) return 0;
 
@@ -10064,12 +10082,13 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
             continue;
           }
 
-          // Classify each acquired sub-repo: landed / retryable / unrecoverable (FORK-A).
+          // Classify each acquired sub-repo: landed / retryable / unrecoverable / unreadable (FORK-A).
           const workspaceWorktrees = task.workspaceWorktrees ?? {};
           const repoKeys = Object.keys(workspaceWorktrees);
           const landedRepos: string[] = [];
           const unlandedRepos: string[] = [];
           const unrecoverableRepos: string[] = [];
+          const evidenceUnavailableRepos: string[] = [];
           for (const repoRel of repoKeys) {
             const entry = workspaceWorktrees[repoRel];
             const repoRootDir = join(this.options.rootDir, repoRel);
@@ -10090,22 +10109,19 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
               continue;
             }
             /*
-            FNXC:Workspace 2026-06-22-14:10 (Phase D review D — FORK-A: branch-gone-and-not-landed
-            is unrecoverable, regardless of a STALE landedSha):
-            We are here because `isRepoLanded` returned FALSE — the recorded `landedSha` (if any) is
-            NOT reachable from the integration tip (branch was force-reset / rolled back / never
-            actually landed) AND no task-trailer commit is on the ref. The old test was
-            `!branchPresent && !entry.landedSha`, which let a repo with a STALE landedSha set but
-            UNREACHABLE, and its `fusion/<id>` branch GONE, fall to `unlandedRepos` → re-enqueued →
-            `landWorkspaceTask` has NO branch to land → loops forever. Since the repo is provably
-            NOT landed, the correct test is: branch GONE ⇒ unrecoverable, whether or not a (stale)
-            landedSha is present. Only a branch that still EXISTS is retryable.
+            FNXC:Workspace 2026-08-15-04:42:
+            FORK-A may park only on proof, never absence of evidence. `probeRepoBranch` uses
+            `show-ref`: present (0) retries, absent (clean 1) is unrecoverable, and timeout/spawn/
+            ref-read failures are unknown. Deferral wins over any sibling absent repo because a task
+            is not proven unrecoverable while even one sub-repo's branch state cannot be read.
             */
-            const branchPresent = entry.branch
-              ? await this.repoBranchExists(repoRootDir, entry.branch)
-              : false;
-            if (!branchPresent) {
+            const branchEvidence = entry.branch
+              ? await this.probeRepoBranch(repoRootDir, entry.branch)
+              : "absent";
+            if (branchEvidence === "absent") {
               unrecoverableRepos.push(repoRel);
+            } else if (branchEvidence === "unknown") {
+              evidenceUnavailableRepos.push(repoRel);
             } else {
               unlandedRepos.push(repoRel);
             }
@@ -10119,8 +10135,31 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
             phase: "reconcile-workspace-partial-land",
           });
 
+          if (evidenceUnavailableRepos.length > 0) {
+            const defers = (this.workspacePartialLandEvidenceDefers.get(task.id) ?? 0) + 1;
+            this.workspacePartialLandEvidenceDefers.set(task.id, defers);
+            if (defers >= MAX_STARVATION_DROPS) {
+              const error = `Workspace partial-land evidence unavailable: branch state could not be read after ${MAX_STARVATION_DROPS} sweeps for sub-repo(s) ${evidenceUnavailableRepos.join(", ")} — manual intervention required.`;
+              await this.store.updateTask(task.id, { status: "failed", error });
+              await this.store.logEntry(task.id, error);
+              this.workspacePartialLandEvidenceDefers.delete(task.id);
+              await auditor.database({
+                type: "task:reconcile-workspace-partial-land",
+                target: task.id,
+                metadata: { taskId: task.id, landedRepos, unlandedRepos, failedRepos: unrecoverableRepos, evidenceUnavailableRepos, action: "park-failed", reason: "evidence-unavailable-exhausted" },
+              }).catch(() => undefined);
+              log.warn(`reconcileWorkspacePartialLands: parked ${task.id} failed after unavailable evidence (${evidenceUnavailableRepos.join(", ")})`);
+              recovered++;
+            } else {
+              await this.emitWorkspacePartialLandNoAction(task, "evidence-unavailable", []);
+            }
+            continue;
+          }
+
+          this.workspacePartialLandEvidenceDefers.delete(task.id);
+
           if (unrecoverableRepos.length > 0) {
-            // FORK-A: at least one repo can never land (branch gone, nothing landed) → park failed.
+            // FORK-A: at least one repo is proven branch-gone and not landed → park failed.
             const error = `Workspace partial-land unrecoverable: sub-repo(s) ${unrecoverableRepos.join(", ")} have no fusion/${task.id.toLowerCase()} branch and no landedSha — manual intervention required.`;
             await this.store.updateTask(task.id, { status: "failed", error }, UNATTRIBUTED_MUTATION_CONTEXT);
             await this.store.logEntry(task.id, error, undefined, UNATTRIBUTED_MUTATION_CONTEXT);
@@ -10169,7 +10208,7 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
 
   private async emitWorkspacePartialLandNoAction(
     task: Task,
-    reason: "auto-merge-off" | "user-paused" | "live-worktree" | "merge-pending",
+    reason: "auto-merge-off" | "user-paused" | "live-worktree" | "merge-pending" | "evidence-unavailable",
     livePaths: string[],
   ): Promise<void> {
     try {
@@ -10275,9 +10314,10 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
       const entries = activeSessionRegistry.entriesByKind("workspace-repo-land");
       if (entries.length === 0) return 0;
 
-      /* FNXC:WorkflowResolvedColumns 2026-07-31-23:40: resolved once per sweep, AFTER the early
-         return above, so a board with no leases pays nothing. See `isWorkspaceOwnerLive`. */
+      /* FNXC:Workspace 2026-08-15-04:11: resolve terminal lane vocabularies once per sweep, AFTER
+         the early return above, so a board with no leases pays nothing. See `isWorkspaceOwnerLive`. */
       const leaseOwnerCompleteColumns = await resolveProjectColumnsForRoles(this.store, ["complete"]);
+      const leaseOwnerArchivedColumns = await resolveProjectColumnsForRoles(this.store, ["archived"]);
 
       const graceMs = settings.taskStuckTimeoutMs ?? STALE_ACTIVE_BRANCH_EXECUTION_GRACE_MS;
       const staleFloorMs = graceMs * PHANTOM_EXECUTOR_BINDING_AGE_MULTIPLIER;
@@ -10307,8 +10347,9 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
 
           const owner = await this.store.getTask(entry.taskId).catch(() => null);
           const ownerColumn = owner?.column ?? "deleted";
+          const ownerTerminalReason = this.workspaceOwnerTerminalReason(owner, leaseOwnerCompleteColumns, leaseOwnerArchivedColumns);
           // Only a DEMONSTRABLY TERMINAL owner's lease is reclaimed (review C fix).
-          if (this.isWorkspaceOwnerLive(owner, leaseOwnerCompleteColumns)) continue;
+          if (this.isWorkspaceOwnerLive(owner, leaseOwnerCompleteColumns, leaseOwnerArchivedColumns)) continue;
 
           activeSessionRegistry.unregisterPath(entry.path);
           await createRunAuditor(this.store, {
@@ -10319,7 +10360,7 @@ const movedTask = await this.store.moveTask(task.id, completeLane, undefined, UN
           }).database({
             type: "task:reclaim-phantom-workspace-land-lease",
             target: entry.taskId,
-            metadata: { taskId: entry.taskId, path: entry.path, kind: entry.kind, registeredAt: entry.registeredAt, ageMs, staleBindingAgeFloorMs: staleFloorMs, ownerColumn },
+            metadata: { taskId: entry.taskId, path: entry.path, kind: entry.kind, registeredAt: entry.registeredAt, ageMs, staleBindingAgeFloorMs: staleFloorMs, ownerColumn, ownerTerminalReason },
           }).catch(() => undefined);
           log.warn(`reclaimPhantomWorkspaceLandLeases: reclaimed leaked land lease on ${entry.path} (owner ${entry.taskId}, age ${ageMs}ms)`);
           reclaimed++;

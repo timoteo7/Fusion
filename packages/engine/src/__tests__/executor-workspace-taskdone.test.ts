@@ -237,6 +237,20 @@ describeIfGit("U2 KTD4 — per-repo scope-leak guard in fn_task_done", () => {
   });
 });
 
+describe("FN-9060 — zero-acquire workspace completion invariant", () => {
+  it("refuses unproven zero-acquire work but accepts explicit commit-free completion", async () => {
+    const store = createStore(["src/**"]);
+    const executor = new TaskExecutor(store, "/tmp/workspace-root");
+    (executor as any).workspaceConfig = { repos: ["repo-a"] } as WorkspaceConfig;
+    const unproven = await (executor as any).verifyWorktreeInvariants(makeTask({ workspaceWorktrees: {} }));
+    expect(unproven).toMatchObject({ ok: false, reason: "no_commits", observed: "0 acquired sub-repo worktrees" });
+    expect((unproven as any).expected).toContain("fn_acquire_repo_worktree");
+
+    const eligible = await (executor as any).verifyWorktreeInvariants(makeTask({ workspaceWorktrees: {}, noCommitsExpected: true }));
+    expect(eligible).toEqual({ ok: true });
+  });
+});
+
 describeIfGit("U2 KTD4 — per-repo worktree-invariant verify in fn_task_done", () => {
   let fx: WorkspaceFixture;
   afterEach(() => fx?.cleanup());

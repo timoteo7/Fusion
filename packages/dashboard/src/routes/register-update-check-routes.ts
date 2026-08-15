@@ -57,16 +57,30 @@ export const registerUpdateCheckRoutes: ApiRouteRegistrar = (ctx) => {
         channel: globalSettings.updateChannel,
       });
 
-      if (!updateCheck.updateAvailable || !updateCheck.latestVersion) {
-        res.json({
-          currentVersion: updateCheck.currentVersion,
-          latestVersion: updateCheck.latestVersion,
-          updated: false,
-        });
+      /*
+      FNXC:UpdateInstall 2026-08-14-19:31:
+      Every terminal response has an outcome: the old early return discarded a
+      failed re-check and made it look like a successful no-op to both clients.
+      */
+      if (updateCheck.error?.trim()) {
+        const message = `Could not check for updates: ${updateCheck.error}`;
+        res.json({ currentVersion: updateCheck.currentVersion, latestVersion: updateCheck.latestVersion, updated: false, outcome: "check-failed", error: updateCheck.error, message });
+        return;
+      }
+      if (!updateCheck.latestVersion) {
+        const message = "Could not determine the latest published Fusion version.";
+        res.json({ currentVersion: updateCheck.currentVersion, latestVersion: null, updated: false, outcome: "check-failed", error: message, message });
+        return;
+      }
+      if (!updateCheck.updateAvailable) {
+        res.json({ currentVersion: updateCheck.currentVersion, latestVersion: updateCheck.latestVersion, updated: false, outcome: "no-update-available", message: `Fusion is already up to date at v${updateCheck.currentVersion}.` });
         return;
       }
 
-      const result = await performUpdateInstall(updateCheck.currentVersion, updateCheck.latestVersion, { fusionDir });
+      const result = await performUpdateInstall(updateCheck.currentVersion, updateCheck.latestVersion, {
+        fusionDir,
+        installMethod: { sourceWorkspaceRoot: ctx.options?.systemControl?.sourceWorkspaceRoot },
+      });
       res.json(result);
     } catch (error) {
       rethrowAsApiError(error, "Failed to install update");

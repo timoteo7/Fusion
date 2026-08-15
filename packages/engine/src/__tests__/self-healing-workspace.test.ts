@@ -24,6 +24,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Settings, Task, TaskStore } from "@fusion/core";
 import { SelfHealingManager } from "../self-healing.js";
+import { classifyBranchProbeError } from "../self-healing-git-evidence.js";
 import { activeSessionRegistry } from "../agents/active-session-registry.js";
 import { landWorkspaceTask } from "../merge/merger-ai.js";
 import { createWorkspaceFixture, hasGit, type WorkspaceFixture } from "./_workspace-fixture.js";
@@ -86,17 +87,38 @@ function createStore(rows: Task[], settings: Partial<Settings> = {}): TaskStore 
   return store;
 }
 
-function makeManager(store: TaskStore, rootDir: string, opts: Record<string, unknown> = {}): SelfHealingManager {
+function managerOptions(store: TaskStore, rootDir: string, opts: Record<string, unknown> = {}): Record<string, unknown> {
   const enqueueMerge = (taskId: string) => {
     (store as unknown as RecordingStore).enqueued.push(taskId);
     return true;
   };
-  return new SelfHealingManager(store, {
-    rootDir,
-    enqueueMerge,
-    clearMergeActive: vi.fn(),
-    ...opts,
-  } as never);
+  return { rootDir, enqueueMerge, clearMergeActive: vi.fn(), ...opts };
+}
+
+function makeManager(store: TaskStore, rootDir: string, opts: Record<string, unknown> = {}): SelfHealingManager {
+  return new SelfHealingManager(store, managerOptions(store, rootDir, opts) as never);
+}
+
+/*
+FNXC:Workspace 2026-08-15-04:42:
+These harnesses inject only the exec boundary so timeout tests execute the production probe try/catch
+and classifier. Returning an outcome from an overridden probe would make the regression tautological.
+*/
+class BranchProbeHarness extends SelfHealingManager {
+  async readBranchEvidence(repoRootDir: string, branch: string): Promise<"present" | "absent" | "unknown"> {
+    return this.probeRepoBranch(repoRootDir, branch);
+  }
+}
+
+class UnavailableBranchProbeManager extends SelfHealingManager {
+  unavailable = true;
+
+  protected override async execBranchProbe(repoRootDir: string, branch: string): Promise<void> {
+    if (this.unavailable) {
+      throw Object.assign(new Error("Command failed: git show-ref"), { killed: true, signal: "SIGTERM", code: null });
+    }
+    return super.execBranchProbe(repoRootDir, branch);
+  }
 }
 
 /** Add a real `fusion/<id>` branch in a sub-repo with one non-conflicting own commit. */
@@ -319,6 +341,104 @@ describeIfGit("workspace-aware self-healing (Phase D U1)", () => {
     expect(store.enqueued).not.toContain(TASK_ID);
   });
 
+  it("classifies only a clean exit-1 branch probe error as absent", () => {
+    expect(classifyBranchProbeError({ code: 1 })).toBe("absent");
+    for (const error of [
+      { code: 1, killed: true, signal: "SIGTERM" },
+      { code: 128 },
+      { code: "ENOENT" },
+      { code: "EACCES" },
+      { killed: true, signal: "SIGTERM", code: null },
+      {},
+      "non-error throw",
+    ]) {
+      expect(classifyBranchProbeError(error)).toBe("unknown");
+    }
+  });
+
+  it("probes real existing and deleted branches as present and absent", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    addRepoBranch(fx, "repo-a", "a\n");
+    const store = createStore([]);
+    const manager = new BranchProbeHarness(store, managerOptions(store, fx.rootDir) as never);
+
+    expect(await manager.readBranchEvidence(fx.repoPath("repo-a"), BRANCH)).toBe("present");
+    fx.git("repo-a", `git branch -D ${BRANCH}`);
+    expect(await manager.readBranchEvidence(fx.repoPath("repo-a"), BRANCH)).toBe("absent");
+  });
+
+  it("defers missing sub-repo evidence without failing, moving, or enqueuing", async () => {
+    fx = await createWorkspaceFixture(["repo-a", "repo-b"]);
+    const task = workspaceTask({
+      "repo-a": { worktreePath: fx.repoPath("repo-a"), branch: BRANCH },
+      "missing-repo": { worktreePath: path.join(fx.rootDir, "missing-repo"), branch: BRANCH },
+    });
+    const store = createStore([task]);
+    const manager = makeManager(store, fx.rootDir);
+
+    expect(await manager.reconcileWorkspacePartialLands()).toBe(0);
+    expect(store.tasks.get(TASK_ID)?.status).not.toBe("failed");
+    expect(store.tasks.get(TASK_ID)?.column).toBe("in-review");
+    expect(store.enqueued).not.toContain(TASK_ID);
+    expect((store.recordRunAuditEvent as ReturnType<typeof vi.fn>).mock.calls.some(
+      ([event]) => (event as { metadata?: { reason?: string } }).metadata?.reason === "evidence-unavailable",
+    )).toBe(true);
+  });
+
+  it("defers timeout-shaped evidence through the real probe classifier", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    addRepoBranch(fx, "repo-a", "a\n");
+    const task = workspaceTask({ "repo-a": { worktreePath: fx.repoPath("repo-a"), branch: BRANCH } });
+    const store = createStore([task]);
+    const manager = new UnavailableBranchProbeManager(store, managerOptions(store, fx.rootDir) as never);
+
+    expect(await manager.reconcileWorkspacePartialLands()).toBe(0);
+    expect(store.tasks.get(TASK_ID)?.status).not.toBe("failed");
+    expect(store.tasks.get(TASK_ID)?.column).toBe("in-review");
+    expect(store.enqueued).not.toContain(TASK_ID);
+    expect((store.recordRunAuditEvent as ReturnType<typeof vi.fn>).mock.calls.some(
+      ([event]) => (event as { metadata?: { reason?: string } }).metadata?.reason === "evidence-unavailable",
+    )).toBe(true);
+  });
+
+  it("parks only after bounded unavailable-evidence deferrals and resets after recovery", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    addRepoBranch(fx, "repo-a", "a\n");
+    const task = workspaceTask({ "repo-a": { worktreePath: fx.repoPath("repo-a"), branch: BRANCH } });
+    const store = createStore([task]);
+    const manager = new UnavailableBranchProbeManager(store, managerOptions(store, fx.rootDir) as never);
+
+    await manager.reconcileWorkspacePartialLands();
+    await manager.reconcileWorkspacePartialLands();
+    expect(store.tasks.get(TASK_ID)?.status).not.toBe("failed");
+    manager.unavailable = false;
+    expect(await manager.reconcileWorkspacePartialLands()).toBe(1);
+    expect(store.enqueued).toContain(TASK_ID);
+
+    store.enqueued.length = 0;
+    manager.unavailable = true;
+    await manager.reconcileWorkspacePartialLands();
+    await manager.reconcileWorkspacePartialLands();
+    await manager.reconcileWorkspacePartialLands();
+    expect(store.tasks.get(TASK_ID)?.status).toBe("failed");
+    expect(store.tasks.get(TASK_ID)?.error).toContain("evidence unavailable");
+    expect(store.tasks.get(TASK_ID)?.error).not.toContain("no fusion/");
+  });
+
+  it("defers when unknown evidence is mixed with a genuinely absent branch", async () => {
+    fx = await createWorkspaceFixture(["repo-a", "repo-b"]);
+    const task = workspaceTask({
+      "missing-repo": { worktreePath: path.join(fx.rootDir, "missing-repo"), branch: BRANCH },
+      "repo-b": { worktreePath: fx.repoPath("repo-b"), branch: BRANCH },
+    });
+    const store = createStore([task]);
+    const manager = makeManager(store, fx.rootDir);
+
+    expect(await manager.reconcileWorkspacePartialLands()).toBe(0);
+    expect(store.tasks.get(TASK_ID)?.status).not.toBe("failed");
+    expect(store.enqueued).not.toContain(TASK_ID);
+  });
+
   it("FORK-A: branch gone + landedSha set → skipped as landed (re-enqueue finalize)", async () => {
     fx = await createWorkspaceFixture(["repo-a"]);
     addRepoBranch(fx, "repo-a", "a\n");
@@ -395,6 +515,156 @@ describeIfGit("workspace-aware self-healing (Phase D U1)", () => {
 
     expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(1);
     expect(activeSessionRegistry.isPathActive(leasePath)).toBe(false);
+  });
+
+  /*
+  FNXC:Workspace 2026-08-15-04:11:
+  The archived-owner symptom failed before FN-9054: `getTask` returned the cold-storage snapshot
+  in `archived`, which the terminal predicate read as live. After the staleness floor, reclaim must
+  free that real sub-repo path so a different workspace task can acquire the next land lease.
+  */
+  it("reclaims an archived owner's stale lease and makes the repo re-leasable", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    const leasePath = fx.repoPath("repo-a");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00.000Z"));
+    activeSessionRegistry.registerPath(leasePath, { taskId: TASK_ID, kind: "workspace-repo-land", ownerKey: "land" });
+
+    const task = workspaceTask({ "repo-a": { worktreePath: leasePath, branch: BRANCH } }, { column: "archived" });
+    const store = createStore([task]);
+    const manager = makeManager(store, fx.rootDir);
+
+    vi.setSystemTime(new Date("2026-08-15T00:10:00.000Z"));
+    expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(1);
+    expect(activeSessionRegistry.isPathActive(leasePath)).toBe(false);
+
+    expect(() => activeSessionRegistry.registerPath(leasePath, {
+      taskId: "FN-7002", kind: "workspace-repo-land", ownerKey: "next-land",
+    })).not.toThrow();
+    expect(activeSessionRegistry.lookupByPath(leasePath)?.taskId).toBe("FN-7002");
+  });
+
+  /*
+  FNXC:Workspace 2026-08-15-04:11:
+  Archive terminality follows the archived trait rather than the legacy literal, so a project that
+  renames its archive lane cannot leave a crashed workspace land holder blocking future tasks.
+  */
+  it("reclaims a land lease whose owner rests in a RENAMED archive lane", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    const leasePath = fx.repoPath("repo-a");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00.000Z"));
+    activeSessionRegistry.registerPath(leasePath, { taskId: TASK_ID, kind: "workspace-repo-land", ownerKey: "land" });
+
+    const task = workspaceTask({ "repo-a": { worktreePath: leasePath, branch: BRANCH } }, { column: "retained" });
+    const store = createStore([task]);
+    (store as unknown as { listWorkflowDefinitions: unknown }).listWorkflowDefinitions = vi.fn(async () => [{
+      id: "custom:renamed-archive",
+      ir: {
+        version: "v2",
+        id: "custom:renamed-archive",
+        nodes: [],
+        edges: [],
+        columns: [
+          { id: "building", name: "building", traits: [{ trait: "wip", config: { limitSetting: "maxConcurrent" } }] },
+          { id: "retained", name: "retained", traits: [{ trait: "archived" }] },
+        ],
+      },
+    }]);
+    const manager = makeManager(store, fx.rootDir);
+
+    vi.setSystemTime(new Date("2026-08-15T00:10:00.000Z"));
+    expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(1);
+    expect(activeSessionRegistry.isPathActive(leasePath)).toBe(false);
+  });
+
+  /*
+  FNXC:Workspace 2026-08-15-04:11:
+  Soft-deleted rows and hard misses both have no live owner. Once the unchanged age and execution
+  guards admit them, their leaked in-memory leases must be reclaimable rather than permanently busy.
+  */
+  it("reclaims soft-deleted and missing owners after the staleness floor", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    const leasePath = fx.repoPath("repo-a");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00.000Z"));
+    activeSessionRegistry.registerPath(leasePath, { taskId: TASK_ID, kind: "workspace-repo-land", ownerKey: "land" });
+
+    const softDeleted = workspaceTask(
+      { "repo-a": { worktreePath: leasePath, branch: BRANCH } },
+      { column: "in-progress", deletedAt: "2026-08-14T23:00:00.000Z" },
+    );
+    const store = createStore([softDeleted]);
+    const manager = makeManager(store, fx.rootDir);
+
+    vi.setSystemTime(new Date("2026-08-15T00:10:00.000Z"));
+    expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(1);
+    expect(activeSessionRegistry.isPathActive(leasePath)).toBe(false);
+
+    activeSessionRegistry.registerPath(leasePath, { taskId: "FN-7002", kind: "workspace-repo-land", ownerKey: "missing-land" });
+    vi.setSystemTime(new Date("2026-08-15T00:20:00.000Z"));
+    expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(1);
+    expect(activeSessionRegistry.isPathActive(leasePath)).toBe(false);
+  });
+
+  /*
+  FNXC:Workspace 2026-08-15-04:11:
+  Archive terminality does not shorten the existing floor; a newly registered archived snapshot
+  remains protected while a legitimate land operation is still warming.
+  */
+  it("does NOT reclaim a young lease owned by an archived task", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    const leasePath = fx.repoPath("repo-a");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00.000Z"));
+    activeSessionRegistry.registerPath(leasePath, { taskId: TASK_ID, kind: "workspace-repo-land", ownerKey: "land" });
+
+    const task = workspaceTask({ "repo-a": { worktreePath: leasePath, branch: BRANCH } }, { column: "archived" });
+    const manager = makeManager(createStore([task]), fx.rootDir);
+
+    vi.setSystemTime(new Date("2026-08-15T00:01:00.000Z"));
+    expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(0);
+    expect(activeSessionRegistry.isPathActive(leasePath)).toBe(true);
+  });
+
+  /*
+  FNXC:Workspace 2026-08-15-04:11:
+  An archived snapshot cannot override the merge-pending guard: queued land work remains live until
+  its in-memory merge pipeline releases the lease.
+  */
+  it("does NOT reclaim an archived owner's lease while it is merge-pending", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    const leasePath = fx.repoPath("repo-a");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00.000Z"));
+    activeSessionRegistry.registerPath(leasePath, { taskId: TASK_ID, kind: "workspace-repo-land", ownerKey: "land" });
+
+    const task = workspaceTask({ "repo-a": { worktreePath: leasePath, branch: BRANCH } }, { column: "archived" });
+    const manager = makeManager(createStore([task]), fx.rootDir, { isMergePending: (id: string) => id === TASK_ID });
+
+    vi.setSystemTime(new Date("2026-08-15T00:10:00.000Z"));
+    expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(0);
+    expect(activeSessionRegistry.isPathActive(leasePath)).toBe(true);
+  });
+
+  /*
+  FNXC:Workspace 2026-08-15-04:11:
+  An active executor remains authoritative over row terminality; even a stale archived snapshot
+  cannot make self-healing yank its workspace land lease.
+  */
+  it("does NOT reclaim an archived owner's lease while its task is active", async () => {
+    fx = await createWorkspaceFixture(["repo-a"]);
+    const leasePath = fx.repoPath("repo-a");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00.000Z"));
+    activeSessionRegistry.registerPath(leasePath, { taskId: TASK_ID, kind: "workspace-repo-land", ownerKey: "land" });
+
+    const task = workspaceTask({ "repo-a": { worktreePath: leasePath, branch: BRANCH } }, { column: "archived" });
+    const manager = makeManager(createStore([task]), fx.rootDir, { isTaskActive: (id: string) => id === TASK_ID });
+
+    vi.setSystemTime(new Date("2026-08-15T00:10:00.000Z"));
+    expect(await manager.reclaimPhantomWorkspaceLandLeases()).toBe(0);
+    expect(activeSessionRegistry.isPathActive(leasePath)).toBe(true);
   });
 
   it("does NOT reclaim a land lease owned by a live merging task", async () => {

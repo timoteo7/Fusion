@@ -1322,20 +1322,16 @@ export interface Task {
 }
 
 /*
-FNXC:Workspace 2026-06-21-19:05:
-R7 workspace merge-boundary guard (master-plan U0). Workspace-mode tasks populate
-`task.workspaceWorktrees` (one git worktree per sub-repo); their merge must run a
-per-repo loop that does NOT exist yet — it lands in master-plan U6. Until then, a
-workspace task reaching ANY merge entry point (engine dispatch, store.mergeTask,
-the CLI `onMergeImpl` / `runTaskMerge` callers) would run git operations against
-the NON-GIT workspace root and crash. This single shared predicate is called at the
-top of every merge door, BEFORE any git work, so the task is held with a clear,
-actionable error instead. It lives in @fusion/core so all four call sites — including
-store.mergeTask, which cannot import from @fusion/engine — share ONE implementation.
-The guard throws a NAMED `WorkspaceTaskMergeError` so callers (e.g. the engine merge
-dispatch catch) can distinguish this permanent config error from a transient merge
-failure and avoid burning mergeRetries. Master-plan U6 REMOVES this guard when the
-per-repo merge loop becomes the gate.
+FNXC:Workspace 2026-08-15-04:54:
+`landWorkspaceTask` ships the per-repository land loop for workspace-mode tasks,
+whose `task.workspaceWorktrees` entries each identify a sub-repository worktree.
+This shared guard remains defense-in-depth at single-repository merge doors: a
+workspace task that reaches one would otherwise run git against the non-git workspace
+root. It fails loudly and directs callers to the workspace land path instead. It lives
+in @fusion/core so all merge doors — including store.mergeTask, which cannot import
+from @fusion/engine — share one implementation. The named `WorkspaceTaskMergeError`
+lets callers distinguish this permanent routing error from a transient merge failure
+and avoid burning mergeRetries.
 */
 
 /**
@@ -1359,7 +1355,7 @@ export class WorkspaceTaskMergeError extends Error {
 export function assertNotWorkspaceTaskMerge(task: Pick<Task, "id" | "workspaceWorktrees">): void {
   if (isWorkspaceTask(task)) {
     throw new WorkspaceTaskMergeError(
-      `Workspace task ${task.id} cannot merge until per-repo merge support (master-plan U6) lands`,
+      `Workspace task ${task.id} reached a single-repo merge path; workspace tasks must land per-repo via landWorkspaceTask`,
     );
   }
 }

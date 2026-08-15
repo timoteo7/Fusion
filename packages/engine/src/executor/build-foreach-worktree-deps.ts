@@ -8,7 +8,7 @@
  * integration rebases each branch in step order; projection flips done-iff-integrated.
  * Best-effort: a git failure routes the foreach to a clean failure rather than crashing the run.
  */
-import type { Task, TaskStore } from "@fusion/core";
+import { isWorkspaceTask, type Task, type TaskStore } from "@fusion/core";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { getConflictedFiles } from "../merger.js";
@@ -27,6 +27,8 @@ import { executorLog } from "../logger.js";
 
 const execAsync = promisify(exec);
 
+export const WORKSPACE_ISOLATION_UNSUPPORTED_MESSAGE = "per-instance worktree isolation is not supported for workspace projects";
+
 export type BuildForeachWorktreeDepsBag = {
   store: TaskStore;
   rootDir: string;
@@ -37,6 +39,7 @@ export type BuildForeachWorktreeDepsBag = {
     startPoint?: string,
   ) => Promise<{ path: string; branch: string }>;
   semaphoreAvailableCount: () => number;
+  ensureWorkspaceConfig?: () => Promise<{ repos: string[] } | null>;
 };
 
 export type ForeachWorktreeDeps = {
@@ -45,6 +48,8 @@ export type ForeachWorktreeDeps = {
     base: string | undefined,
   ) => Promise<{ worktreePath: string; branchName: string }>;
   resolveIntegrationBase: () => Promise<string | undefined>;
+  /** Fail-fast diagnostic when a multi-repo workspace cannot allocate one instance worktree. */
+  resolveWorktreeIsolationBlock: () => Promise<string | undefined>;
   integrationGitOps: IntegrationGitOps;
   integrationProjection: IntegrationProjection;
   semaphoreAvailability: () => number;
@@ -104,6 +109,26 @@ export function buildForeachWorktreeDeps(
       return resolveTaskWorkingBranch(task);
     }
   };
+  const resolveWorktreeIsolationBlock = async (): Promise<string | undefined> => {
+    let currentTask = task;
+    try {
+      currentTask = await deps.store.getTask(taskId);
+    } catch {
+      // The caller's task snapshot remains the conservative fallback.
+    }
+    if (isWorkspaceTask(currentTask)) {
+      return `${WORKSPACE_ISOLATION_UNSUPPORTED_MESSAGE} (task ${taskId}, workspace root ${deps.rootDir})`;
+    }
+    try {
+      const workspaceConfig = await deps.ensureWorkspaceConfig?.();
+      if (workspaceConfig?.repos.length) {
+        return `${WORKSPACE_ISOLATION_UNSUPPORTED_MESSAGE} (task ${taskId}, workspace root ${deps.rootDir})`;
+      }
+    } catch {
+      // Fail open when the optional project-config probe is unavailable.
+    }
+    return undefined;
+  };
 
   return {
     resolveIntegrationBase: async (): Promise<string | undefined> => {
@@ -116,7 +141,14 @@ export function buildForeachWorktreeDeps(
         return await mainBranch();
       }
     },
+    resolveWorktreeIsolationBlock,
     allocateInstanceWorktree: async (stepIndex, base): Promise<{ worktreePath: string; branchName: string }> => {
+      /*
+      FNXC:Workspace 2026-08-15-04:22:
+      Workspace projects need one worktree per repository for every foreach instance and an N-way ordered integration queue. That design is out of scope, so reject before path or branch allocation rather than running git at the non-git workspace root.
+      */
+      const block = await resolveWorktreeIsolationBlock();
+      if (block) throw new Error(block);
       const branchName = canonicalStepInstanceBranchName(taskId, stepIndex);
       const worktreePath = resolveTaskWorktreePath(
         deps.rootDir,

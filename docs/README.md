@@ -42,6 +42,7 @@ For a full walkthrough (installation, onboarding, first task, and daily workflow
 | [Custom Non-Coding Workflows MVP Spec](./custom-workflows-mvp-spec.md) | MVP framing for user-authored non-coding workflows, lifecycle mapping, metrics, and risk checklist |
 | [Task Evaluations](./evals.md) | Eval scoring contract, evidence persistence, score categories, and evaluation pipeline |
 | [Multi-Project](./multi-project.md) | Central registry architecture, project management, isolation modes, and migration paths |
+| [Workspaces (Multi-Repository)](./workspaces.md) | Workspace setup, per-repository execution and land, recovery, revert, and archive cleanup |
 
 ### Configuration & Agents
 <!--

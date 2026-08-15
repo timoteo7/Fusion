@@ -15,13 +15,14 @@
  */
 import { existsSync } from "node:fs";
 import type { Settings, TaskDetail, TaskStore, WorkspaceConfig } from "@fusion/core";
-import { loadWorkspaceConfig } from "@fusion/core";
 import { executorLog, formatError } from "../logger.js";
+import { resolveWorkspaceConfigOnce } from "./workspace-config-resolver.js";
 
 export type EnsureTaskWorktreeForPlanningDeps = {
   store: TaskStore;
   rootDir: string;
   /** Mutable holder so lazy load updates TaskExecutor.workspaceConfig. */
+  workspaceConfigOwner: object;
   getWorkspaceConfig: () => WorkspaceConfig | null | undefined;
   setWorkspaceConfig: (cfg: WorkspaceConfig | null) => void;
   ensureGraphCustomNodeWorktree: (
@@ -37,10 +38,7 @@ export async function ensureTaskWorktreeForPlanning(
   taskId: string,
 ): Promise<string | null> {
   try {
-    if (deps.getWorkspaceConfig() === undefined) {
-      deps.setWorkspaceConfig(await loadWorkspaceConfig(deps.rootDir));
-    }
-    const workspaceConfig = deps.getWorkspaceConfig();
+    const workspaceConfig = await resolveWorkspaceConfigOnce(deps);
     if (workspaceConfig && (workspaceConfig.repos.length ?? 0) > 0) return null;
 
     const live = await deps.store.getTask(taskId);

@@ -21,6 +21,7 @@ import { executorLog } from "../logger.js";
 import { createRunAuditor, type EngineRunContext } from "../util/run-audit.js";
 import { canonicalizePath } from "./session-worktree-paths.js";
 import { resolveDiffBaseRef } from "./worktree-git-refs.js";
+import { classifyWorkspaceZeroAcquire } from "./workspace-zero-acquire.js";
 import { evaluatePromptDerivedNoCommitEligibility } from "./prompt-derived-eligibility.js";
 import { getNoCommitEligibilityReason } from "./no-commit-eligibility.js";
 import { resolveAuthoritativeExternalExecutionRoute } from "./resolve-authoritative-external-execution-route.js";
@@ -36,6 +37,7 @@ export type WorktreeInvariantDeps = {
   rootDir: string;
   store: TaskStore;
   workspaceConfig: unknown | null | undefined;
+  ensureWorkspaceConfig?: () => Promise<unknown | null>;
   getActiveWorktreePaths: (taskId: string) => string[];
   getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   emitWorktreeReanchoredAudit: (
@@ -53,15 +55,33 @@ export async function verifyWorktreeInvariants(
   allowReanchor = true,
   options?: { noOpCompletion?: boolean; noOpCompletionReason?: string },
 ): Promise<WorktreeInvariantResult> {
+  const workspaceConfig = deps.ensureWorkspaceConfig
+    ? await deps.ensureWorkspaceConfig()
+    : deps.workspaceConfig;
   const settings = await deps.store.getSettings();
-  // FNXC:Workspace 2026-06-21-23:30: KTD2 — un-stubbed per-repo worktree-invariant verification.
-  // Phase A returned a flat {ok:true} stub here (no root worktree to verify against the non-git root). Phase B iterates every `task.workspaceWorktrees` entry, asserting (a) the sub-repo worktree's git toplevel matches the recorded repo.worktreePath and (b) its HEAD is on the recorded `fusion/<id>` branch (repo.branch). The result union is PRESERVED EXACTLY — `{ok:true} | {ok:false; reason:'wrong_toplevel'|'wrong_branch'|'no_commits'; observed; expected}` — because the :10889 consumer switches on `reason` to drive requeue/handoff (:10894-10936). We ADD an optional `repo` field to the failure shape (purely additive; the consumer only reads reason/observed/expected) and return the FIRST failing repo. A zero-acquire workspace task (empty map) verifies vacuously → {ok:true}, matching Phase A so fn_task_done does not requeue it.
-  if (deps.workspaceConfig) {
+  // FNXC:Workspace 2026-08-15-04:21:
+  // Per-repo review consumes the same zero-acquire map. Classify it before the
+  // loop so fn_task_done accepts only a proven commit-free task instead of
+  // vacuously accepting work that review must honestly leave unavailable.
+  if (workspaceConfig) {
     const workspaceWorktrees = task.workspaceWorktrees ?? {};
-    // FNXC:Workspace 2026-06-22-00:00: KTD2 — resolve the SAME task-wide no-commit eligibility the singular path
-    // uses (getNoCommitEligibilityReason / no-op-completion sentinel / prompt-derived), once, before the per-repo
-    // loop. When eligible (Plan-Only, verified no-op, etc.) the per-repo no_commits guard below is skipped so an
-    // intentionally commit-free workspace task is not blocked from completion.
+    const zeroAcquire = classifyWorkspaceZeroAcquire(task, {
+      workspaceMode: true,
+      noOpCompletion: options?.noOpCompletion,
+      noOpCompletionReason: options?.noOpCompletionReason,
+    });
+    if (zeroAcquire.kind === "commit-free-eligible") {
+      executorLog.debug(`${task.id}: workspace fn_task_done zero-acquire accepted (${zeroAcquire.reason})`);
+      return { ok: true };
+    }
+    if (zeroAcquire.kind === "unproven") {
+      return {
+        ok: false,
+        reason: "no_commits",
+        observed: "0 acquired sub-repo worktrees",
+        expected: "at least one acquired sub-repo worktree (fn_acquire_repo_worktree), or a no-op completion sentinel / noCommitsExpected",
+      };
+    }
     const workspacePromptContent = (task as Task & { prompt?: unknown }).prompt;
     const workspacePromptEligibility = evaluatePromptDerivedNoCommitEligibility(
       task,
@@ -75,11 +95,10 @@ export async function verifyWorktreeInvariants(
       (workspacePromptEligibility.eligible
         ? workspacePromptEligibility.reason ?? "prompt-derived no-commit eligibility"
         : null);
-    if (workspaceNoCommitEligibilityReason) {
-      executorLog.debug(`${task.id}: workspace fn_task_done no_commits guard skipped (${workspaceNoCommitEligibilityReason})`);
-    }
     // FNXC:Workspace 2026-06-21-15:00: F6 — iterate sorted repo keys so the FIRST failing repo
     // returned here is deterministic across runs/rehydrate (the value is surfaced to the operator).
+    const commitCounts: string[] = [];
+    let totalCommitCount = 0;
     for (const repoRel of Object.keys(workspaceWorktrees).sort()) {
       const repo = workspaceWorktrees[repoRel];
       const expectedBranch = repo.branch || canonicalFusionBranchName(task.id);
@@ -155,12 +174,6 @@ export async function verifyWorktreeInvariants(
           expected: expectedBranch,
         };
       }
-      // FNXC:Workspace 2026-06-22-00:00: KTD2 — per-repo no_commits guard (parity with the singular path at :10821).
-      // Phase B originally returned {ok:true} after the toplevel/branch checks, so a workspace task could call
-      // fn_task_done having committed NOTHING in any sub-repo (scope-leak sees zero touched files, branch names match)
-      // and still advance to in-review. Enforce the same `git rev-list --count <base>..HEAD > 0` invariant per repo,
-      // gated by the SAME task-wide no-commit eligibility below so Plan-Only / no-op-sentinel tasks stay exempt.
-      // The first sub-repo with zero commits fails with reason:'no_commits' (consumer-stable union).
       if (!workspaceNoCommitEligibilityReason) {
         const repoBaseRef = await resolveDiffBaseRef(repo.worktreePath, repo.baseCommitSha);
         if (repoBaseRef) {
@@ -172,18 +185,18 @@ export async function verifyWorktreeInvariants(
               maxBuffer: 1024 * 1024,
             });
             const trimmedCount = stdout.trim();
-            if (trimmedCount) {
-              const count = Number.parseInt(trimmedCount, 10);
-              if (!Number.isFinite(count) || count <= 0) {
-                return {
-                  ok: false,
-                  reason: "no_commits",
-                  repo: repoRel,
-                  observed: Number.isFinite(count) ? String(count) : trimmedCount,
-                  expected: "> 0",
-                };
-              }
+            const count = Number.parseInt(trimmedCount, 10);
+            if (!Number.isFinite(count) || count < 0) {
+              return {
+                ok: false,
+                reason: "no_commits",
+                repo: repoRel,
+                observed: trimmedCount,
+                expected: `git rev-list --count ${repoBaseRef}..HEAD > 0`,
+              };
             }
+            commitCounts.push(`${repoRel}=${count}`);
+            totalCommitCount += count;
           } catch (error) {
             return {
               ok: false,
@@ -197,6 +210,14 @@ export async function verifyWorktreeInvariants(
           executorLog.warn(`${task.id}: unable to resolve diff base for ${repoRel} no_commits guard; skipping for this sub-repo`);
         }
       }
+    }
+    /*
+    FNXC:Workspace 2026-08-14-21:06:
+    A workspace task may legitimately change only a subset of acquired repositories. The commit
+    invariant is task-wide, because rejecting the first empty repository blocked committed work (issue #3435).
+    */
+    if (!workspaceNoCommitEligibilityReason && commitCounts.length > 0 && totalCommitCount === 0) {
+      return { ok: false, reason: "no_commits", observed: commitCounts.join(", "), expected: "> 0" };
     }
     return { ok: true };
   }

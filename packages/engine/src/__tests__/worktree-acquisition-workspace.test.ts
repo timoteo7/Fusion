@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Settings, Task, TaskStore } from "@fusion/core";
 import {
+  acquireTaskWorktree,
   acquireWorkspaceRepoWorktree,
   WorkspaceRepoAcquireBusyError,
 } from "../worktree/worktree-acquisition.js";
@@ -31,11 +32,17 @@ function git(repo: string, command: string): string {
  * and its acquireTaskWorktree callee touch: updateTask (merge-in-place so the
  * idempotency re-read sees persisted workspaceWorktrees), logEntry, getTask.
  */
-function makeFakeStore(task: Task): { store: TaskStore; current: () => Task; logs: string[] } {
+function makeFakeStore(
+  task: Task,
+  options: { failWhen?: (patch: Partial<Task>) => boolean } = {},
+): { store: TaskStore; current: () => Task; logs: string[]; patches: Partial<Task>[] } {
   let current = task;
   const logs: string[] = [];
+  const patches: Partial<Task>[] = [];
   const store = {
     async updateTask(id: string, patch: Partial<Task>): Promise<void> {
+      patches.push(patch);
+      if (options.failWhen?.(patch)) throw new Error("injected update failure");
       if (id === current.id) current = { ...current, ...patch };
     },
     async logEntry(_id: string, message: string): Promise<void> {
@@ -45,7 +52,7 @@ function makeFakeStore(task: Task): { store: TaskStore; current: () => Task; log
       return id === current.id ? current : null;
     },
   } as unknown as TaskStore;
-  return { store, current: () => current, logs };
+  return { store, current: () => current, logs, patches };
 }
 
 function makeTask(id: string): Task {
@@ -201,7 +208,7 @@ describeIfGit("acquireWorkspaceRepoWorktree (U2 per-repo hardening)", { timeout:
     // prove a second task is rejected while it is held.
     registry.registerPath(repoAbs, { taskId: "FN-A", kind: "workspace-repo-acquire", ownerKey: "workspace-repo-acquire" });
 
-    const { store, current } = makeFakeStore(makeTask("FN-B"));
+    const { store, current, patches } = makeFakeStore(makeTask("FN-B"));
     await expect(
       acquireWorkspaceRepoWorktree({
         repoRelPath: "repo-a",
@@ -215,6 +222,7 @@ describeIfGit("acquireWorkspaceRepoWorktree (U2 per-repo hardening)", { timeout:
 
     // The holder's entry is untouched by the rejected loser.
     expect(registry.lookupByPath(repoAbs)?.taskId).toBe("FN-A");
+    expect(patches).toHaveLength(0);
 
     // Once released, the same task acquires cleanly and the registry is freed.
     registry.unregisterPath(repoAbs);
@@ -233,7 +241,7 @@ describeIfGit("acquireWorkspaceRepoWorktree (U2 per-repo hardening)", { timeout:
 
   it("is idempotent across (taskId, repo): re-acquire returns the existing entry without re-capture", async () => {
     fixture = await createWorkspaceFixture(["repo-a"]);
-    const { store, current } = makeFakeStore(makeTask("FN-4"));
+    const { store, current, patches } = makeFakeStore(makeTask("FN-4"));
     const registry = new ActiveSessionRegistry();
 
     const first = await acquireWorkspaceRepoWorktree({
@@ -259,6 +267,7 @@ describeIfGit("acquireWorkspaceRepoWorktree (U2 per-repo hardening)", { timeout:
     expect(second.alreadyAcquired).toBe(true);
     expect(second.worktreePath).toBe(first.worktreePath);
     expect(second.baseCommitSha).toBe(first.baseCommitSha);
+    expect(patches).toHaveLength(1);
     expect(registry.isPathActive(fixture.repoPath("repo-a"))).toBe(false);
   });
 
@@ -336,7 +345,7 @@ describeIfGit("acquireWorkspaceRepoWorktree (U2 per-repo hardening)", { timeout:
   */
   it("preserves a sibling sub-repo's workspaceWorktrees entry across two different-repo acquires (F5)", async () => {
     fixture = await createWorkspaceFixture(["repo-a", "repo-b"]);
-    const { store, current } = makeFakeStore(makeTask("FN-7"));
+    const { store, current, patches } = makeFakeStore(makeTask("FN-7"));
     const registry = new ActiveSessionRegistry();
 
     const first = await acquireWorkspaceRepoWorktree({
@@ -364,5 +373,84 @@ describeIfGit("acquireWorkspaceRepoWorktree (U2 per-repo hardening)", { timeout:
     const persisted = current().workspaceWorktrees ?? {};
     expect(persisted["repo-a"]?.worktreePath).toBe(first.worktreePath);
     expect(persisted["repo-b"]?.worktreePath).toBe(second.worktreePath);
+    expect(patches.every((patch) => !patch.worktree && !patch.branch)).toBe(true);
+  });
+
+  it("re-acquires a dead remembered workspace entry without singular persistence", async () => {
+    fixture = await createWorkspaceFixture(["repo-a"]);
+    const initial = {
+      ...makeTask("FN-8"),
+      workspaceWorktrees: {
+        "repo-a": { worktreePath: join(fixture.rootDir, "missing-worktree"), branch: "fusion/fn-8" },
+      },
+    };
+    const { store, current, patches } = makeFakeStore(initial);
+
+    const result = await acquireWorkspaceRepoWorktree({
+      repoRelPath: "repo-a", workspaceRootDir: fixture.rootDir, task: initial, store,
+      settings: SETTINGS, registry: new ActiveSessionRegistry(),
+    });
+
+    expect(result.alreadyAcquired).toBe(false);
+    expect(current().workspaceWorktrees?.["repo-a"]?.worktreePath).toBe(result.worktreePath);
+    expect(patches.every((patch) => !patch.worktree && !patch.branch)).toBe(true);
+  });
+
+  it("never exposes a singular worktree assignment while acquiring a workspace repo", async () => {
+    fixture = await createWorkspaceFixture(["repo-a"]);
+    const initial = makeTask("FN-8");
+    const { store, patches } = makeFakeStore(initial);
+
+    await acquireWorkspaceRepoWorktree({
+      repoRelPath: "repo-a", workspaceRootDir: fixture.rootDir, task: initial, store,
+      settings: SETTINGS, registry: new ActiveSessionRegistry(),
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]).toHaveProperty("workspaceWorktrees");
+    expect(patches.every((patch) => !patch.worktree && !patch.branch)).toBe(true);
+
+    let replayed = initial;
+    for (const patch of patches) {
+      replayed = { ...replayed, ...patch };
+      expect(replayed.worktree).toBeFalsy();
+      expect(replayed.branch).toBeFalsy();
+    }
+  });
+
+  it("leaves the task workspace-shaped when the final workspace state write fails", async () => {
+    fixture = await createWorkspaceFixture(["repo-a"]);
+    const initial = makeTask("FN-9");
+    const { store, current, patches } = makeFakeStore(initial, {
+      failWhen: (patch) => "workspaceWorktrees" in patch,
+    });
+
+    await expect(acquireWorkspaceRepoWorktree({
+      repoRelPath: "repo-a", workspaceRootDir: fixture.rootDir, task: initial, store,
+      settings: SETTINGS, registry: new ActiveSessionRegistry(),
+    })).rejects.toThrow("injected update failure");
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]).toHaveProperty("workspaceWorktrees");
+    expect(patches.every((patch) => !patch.worktree && !patch.branch)).toBe(true);
+    expect(current().worktree).toBeFalsy();
+    expect(current().branch).toBeFalsy();
+    expect(Boolean(current().worktree)).toBe(false);
+    expect(current().workspaceWorktrees).toBeUndefined();
+  });
+
+  it("keeps the single-repo acquisition persistence contract when suppression is absent", async () => {
+    fixture = await createWorkspaceFixture(["repo-a"]);
+    const initial = makeTask("FN-10");
+    const { store, patches } = makeFakeStore(initial);
+
+    const result = await acquireTaskWorktree({
+      task: initial,
+      rootDir: fixture.repoPath("repo-a"),
+      store,
+      settings: SETTINGS,
+    });
+
+    expect(patches).toContainEqual({ worktree: result.worktreePath, branch: result.branch });
   });
 });

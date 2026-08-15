@@ -18,7 +18,13 @@ vi.mock("../TaskCard", () => ({
     </div>
   ),
 }));
-vi.mock("../WorktreeGroup", () => ({ WorktreeGroup: () => <div data-testid="worktree-group" /> }));
+vi.mock("../WorktreeGroup", () => ({
+  WorktreeGroup: ({ label, kind, activeTasks }: { label: string; kind: string; activeTasks: Task[] }) => (
+    <div data-testid="worktree-group" data-label={label} data-kind={kind}>
+      {activeTasks.map((task) => <div key={task.id} data-testid={`group-active-${task.id}`}>{task.id}</div>)}
+    </div>
+  ),
+}));
 vi.mock("../QuickEntryBox", () => ({ QuickEntryBox: () => <div data-testid="quick-entry-box" /> }));
 vi.mock("../PluginSlot", () => ({ PluginSlot: () => null }));
 vi.mock("lucide-react", () => ({
@@ -97,6 +103,22 @@ describe("Lane", () => {
     expect(headings).toContain("Done");
     // Archived column is hidden.
     expect(headings).not.toContain("Archived");
+  });
+
+  it("forwards workspace tasks through Column's worktree-grouping path", () => {
+    const workspaceTask = mkTask({
+      id: "FN-9044",
+      column: "in-progress",
+      workspaceWorktrees: {
+        "repo-a": { worktreePath: "/ws/repo-a/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+        "repo-b": { worktreePath: "/ws/repo-b/.worktrees/FN-9044", branch: "fusion/FN-9044" },
+      },
+    });
+    render(<Lane {...baseProps()} showWorktreeGrouping tasks={[workspaceTask]} />);
+
+    expect(screen.getByTestId("worktree-group")).toHaveAttribute("data-kind", "workspace");
+    expect(screen.getByTestId("worktree-group")).toHaveAttribute("data-label", "FN-9044");
+    expect(screen.getByTestId("group-active-FN-9044")).toBeInTheDocument();
   });
 
   it("renders creation controls only in the first visible column", () => {

@@ -1,9 +1,13 @@
-import type { Task } from "@fusion/core";
+import { isWorkspaceTask, type Task } from "@fusion/core";
 import { getPathBasename } from "./pathDisplay";
 import { isArchivedColumnRole, isCompleteColumnRole, isHoldColumnRole, isReviewColumnRole } from "./columnRoles";
 
 export interface WorktreeGroupData {
+  /** Stable identity; display labels collide for separate worktree paths. */
+  id: string;
+  kind: "worktree" | "workspace" | "unassigned" | "up-next";
   label: string;
+  repoCount?: number;
   activeTasks: Task[];
   queuedTasks: Task[];
 }
@@ -85,9 +89,15 @@ export function groupByWorktree(
   */
   dependencyColumnFlags?: ReadonlyMap<string, Parameters<typeof isCompleteColumnRole>[0]>,
 ): WorktreeGroupData[] {
-  // Separate assigned vs unassigned in-progress tasks
-  const assigned = inProgressTasks.filter((t) => t.worktree);
-  const unassigned = inProgressTasks.filter((t) => !t.worktree);
+  /*
+  FNXC:Workspace 2026-08-15-03:35:
+  A workspace task legitimately has no singular `worktree` while owning one per-repository
+  worktree. Boolean(task.worktree) therefore is not its assignment test. Workspace worktrees
+  commonly share a basename, so groups use stable ids rather than labels as React keys.
+  */
+  const assigned = inProgressTasks.filter((task) => Boolean(task.worktree));
+  const workspaceTasks = inProgressTasks.filter((task) => !task.worktree && isWorkspaceTask(task));
+  const unassigned = inProgressTasks.filter((task) => !task.worktree && !isWorkspaceTask(task));
 
   // Group assigned tasks by worktree
   const worktreeMap = new Map<string, Task[]>();
@@ -143,8 +153,23 @@ export function groupByWorktree(
 
   for (const key of worktreeKeys) {
     groups.push({
+      id: key,
+      kind: "worktree",
       label: getWorktreeLabel(key),
       activeTasks: worktreeMap.get(key)!,
+      queuedTasks: [],
+    });
+  }
+
+  for (const task of workspaceTasks) {
+    const entries = task.workspaceWorktrees!;
+    const firstRepo = Object.keys(entries).sort()[0]!;
+    groups.push({
+      id: `workspace:${task.id}`,
+      kind: "workspace",
+      label: getWorktreeLabel(entries[firstRepo]!.worktreePath),
+      repoCount: Object.keys(entries).length,
+      activeTasks: [task],
       queuedTasks: [],
     });
   }
@@ -152,6 +177,8 @@ export function groupByWorktree(
   // Add unassigned group if needed
   if (unassigned.length > 0) {
     groups.push({
+      id: "unassigned",
+      kind: "unassigned",
       label: "Unassigned",
       activeTasks: unassigned,
       queuedTasks: [],
@@ -162,6 +189,8 @@ export function groupByWorktree(
   const queued = orderedEligible.slice(0, maxConcurrent);
   if (queued.length > 0) {
     groups.push({
+      id: "up-next",
+      kind: "up-next",
       label: "Up Next",
       activeTasks: [],
       queuedTasks: queued,

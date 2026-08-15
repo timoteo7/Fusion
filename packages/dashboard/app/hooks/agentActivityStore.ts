@@ -5,6 +5,7 @@ import {
   compareActivityEvents,
   FLOW_EDGE_WINDOW_MS,
   getActivityEventAgeMs,
+  isHiddenAgentActivityType,
   parseActivityOccurredAt,
   withActivityWindowTimestamp,
 } from "../components/agentsOrgChartActivity";
@@ -152,7 +153,7 @@ class AgentActivityStore {
     // The event URL is project-scoped, but validate frames and seed rows as a defense-in-depth
     // boundary: a stale or misrouted project frame must never populate a retained snapshot.
     if (projectId !== undefined && event?.projectId !== projectId) return false;
-    if (!event || typeof event.eventId !== "string" || this.seenIds.has(event.eventId) || parseActivityOccurredAt(event.occurredAt) === null) return false;
+    if (!event || isHiddenAgentActivityType(event.type) || typeof event.eventId !== "string" || this.seenIds.has(event.eventId) || parseActivityOccurredAt(event.occurredAt) === null) return false;
     this.seenIds.add(event.eventId);
     this.events.push(withActivityWindowTimestamp(event, Date.now()));
     // Comparator order is newest-first; remove the tail so backfills cannot evict fresh activity.

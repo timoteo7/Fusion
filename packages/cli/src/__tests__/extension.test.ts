@@ -3422,6 +3422,58 @@ pgTest("fn pi extension (runnable structured-output regression slice)", () => {
     expect(result.content[0].text).toContain("requires an \"executor\"-role agent");
   });
 
+  it("fn_task_create persists per-task github tracking overrides from github_tracking/github_repo", async () => {
+    const createTool = api.tools.get("fn_task_create")!;
+    const result = await createTool.execute(
+      "create-gh-on",
+      { description: "Track me on GitHub", github_tracking: true, github_repo: "acme/widgets" },
+      undefined,
+      undefined,
+      makeCtx(tmpDir),
+    );
+    const task = await h.store().getTask(result.details.taskId);
+    expect(task.githubTracking?.enabled).toBe(true);
+    expect(task.githubTracking?.repoOverride).toBe("acme/widgets");
+
+    const invalid = await createTool.execute(
+      "create-gh-bad-repo",
+      { description: "Bad repo slug", github_repo: "not a slug" },
+      undefined,
+      undefined,
+      makeCtx(tmpDir),
+    );
+    expect(invalid.isError).toBe(true);
+    expect(invalid.content[0].text).toContain("owner/repo");
+  });
+
+  it("fn_task_create persists an explicit github_tracking:false even when the project default enables tracking", async () => {
+    await h.store().updateSettings({ githubTrackingEnabledByDefault: true });
+    try {
+      const createTool = api.tools.get("fn_task_create")!;
+      const offResult = await createTool.execute(
+        "create-gh-off",
+        { description: "Opt out of GitHub tracking", github_tracking: false },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      const offTask = await h.store().getTask(offResult.details.taskId);
+      expect(offTask.githubTracking?.enabled).toBe(false);
+
+      const defaultResult = await createTool.execute(
+        "create-gh-default",
+        { description: "Inherit project GitHub tracking default" },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      const defaultTask = await h.store().getTask(defaultResult.details.taskId);
+      expect(defaultTask.githubTracking?.enabled).toBe(true);
+    } finally {
+      await h.store().updateSettings({ githubTrackingEnabledByDefault: false });
+    }
+  });
+
   it("fn_task_update rejects reviewer assignment for implementation tasks", async () => {
     const agentStore = new AgentStore({ rootDir: join(tmpDir, ".fusion"), asyncLayer: h.store().getAsyncLayer() });
     await agentStore.init();
@@ -4314,7 +4366,10 @@ pgTest("fn pi extension (runnable structured-output regression slice)", () => {
       expect(text).not.toMatch(new RegExp(`Current Task: ${triageTask.id}(?! \\()`));
     });
 
-    it("lists the four mandatory built-in workflow owners on a fresh project", async () => {
+    // FNXC:BuiltinAgents 2026-08-14-00:10: FN-8932 added the durable Memory Keeper owner alongside the
+    // four routed workflow principals, so a fresh project now seeds five built-in agents. Assert both the
+    // four workflow owners AND the Memory Keeper are present so the built-in-owner invariant stays fully covered.
+    it("lists the mandatory built-in workflow owners plus the Memory Keeper on a fresh project", async () => {
       const tool = api.tools.get("fn_list_agents")!;
       const result = await tool.execute("la-5", {}, undefined, undefined, makeCtx(tmpDir));
 
@@ -4322,7 +4377,8 @@ pgTest("fn pi extension (runnable structured-output regression slice)", () => {
       expect(result.content[0].text).toContain("Workflow Executor");
       expect(result.content[0].text).toContain("Workflow Reviewer");
       expect(result.content[0].text).toContain("Workflow Merger");
-      expect(result.details.count).toBe(4);
+      expect(result.content[0].text).toContain("Memory Keeper");
+      expect(result.details.count).toBe(5);
     });
   });
 
@@ -5099,7 +5155,9 @@ pgTest("fn pi extension (runnable structured-output regression slice)", () => {
       expect(result.content[0].text).toContain("org-report");
     });
 
-    it("shows the mandatory built-in workflow owners in a fresh project", async () => {
+    // FNXC:BuiltinAgents 2026-08-14-00:10: FN-8932 added the durable Memory Keeper owner alongside the
+    // four routed workflow principals, so the fresh-project org chart now enumerates five built-in agents.
+    it("shows the mandatory built-in workflow owners plus the Memory Keeper in a fresh project", async () => {
       const tool = api.tools.get("fn_agent_org_chart")!;
       const result = await tool.execute("oc-3", {}, undefined, undefined, makeCtx(tmpDir));
 
@@ -5107,7 +5165,8 @@ pgTest("fn pi extension (runnable structured-output regression slice)", () => {
       expect(result.content[0].text).toContain("Workflow Executor");
       expect(result.content[0].text).toContain("Workflow Reviewer");
       expect(result.content[0].text).toContain("Workflow Merger");
-      expect(result.details.count).toBe(4);
+      expect(result.content[0].text).toContain("Memory Keeper");
+      expect(result.details.count).toBe(5);
     });
 
     it("returns single agent for lone agent", async () => {

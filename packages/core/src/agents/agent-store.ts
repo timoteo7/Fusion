@@ -1511,8 +1511,12 @@ export class AgentStore extends EventEmitter {
 
       await this.writeAgent(updated);
       this.emit("agent:stateChanged", agentId, currentState, newState);
-      /* FNXC:AgentActivityStream 2026-08-09-09:09: monitoring is fail-soft and still probes this in-memory agent against the live roster. */
-      if (this.asyncLayer) try { await appendAgentActivityEvent(this.asyncLayer, { type: "agent:state-changed", attributionClaim: resolveAgentActivityAttribution([{ id: agentId, provenance: "roster" }], "executor"), taskId: updated.taskId, occurredAt: updated.updatedAt, discriminator: updated.updatedAt, metadata: { fromState: currentState, toState: newState, source: "update" } }); } catch { /* monitoring must not block a state transition */ }
+      /*
+      FNXC:AgentActivityStream 2026-08-14-19:18:
+      FN-9041 removes roster state churn from the durable work-activity feed. State remains
+      observable through the roster and this live agent:stateChanged event without consuming
+      outbox retention reserved for task and workflow activity.
+      */
       this.emit("agent:updated", updated, currentState);
 
       return updated;
@@ -3467,23 +3471,11 @@ export class AgentStore extends EventEmitter {
         if (stateChanged) {
           this.emit("agent:stateChanged", agent.id, previousState, agent.state);
           /*
-          FNXC:AgentActivityStream 2026-08-09-09:38:
-          A separate-process state transition may only become visible through this reconciliation observer. Reuse its durable updatedAt identity so an originating writer dedupes, while an older writer still gains one outbox row. Monitoring remains fail-soft.
+          FNXC:AgentActivityStream 2026-08-14-19:18:
+          FN-9041 keeps cross-process reconciliation on the roster/live state channel rather than
+          writing state churn to the durable work-activity outbox. Cache updates and both emitted
+          events remain intact so separate-process state observers still receive this transition.
           */
-          if (this.asyncLayer) {
-            try {
-              await appendAgentActivityEvent(this.asyncLayer, {
-                type: "agent:state-changed",
-                attributionClaim: resolveAgentActivityAttribution([{ id: agent.id, provenance: "roster" }], "executor"),
-                taskId: agent.taskId,
-                occurredAt: agent.updatedAt,
-                discriminator: agent.updatedAt,
-                metadata: { fromState: previousState, toState: agent.state, source: "reconciliation" },
-              });
-            } catch {
-              // Monitoring must not interrupt roster reconciliation.
-            }
-          }
           this.emit("agent:updated", agent, previousState);
         } else {
           this.emit("agent:updated", agent);

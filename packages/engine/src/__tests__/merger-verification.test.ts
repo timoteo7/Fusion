@@ -2995,7 +2995,8 @@ describe("inferDefaultTestCommand — pnpm workspace scoping", () => {
     });
 
     const result = inferDefaultTestCommand("/tmp/root", undefined, undefined, "main", "fusion/fn-123");
-    expect(result?.command).toBe(`pnpm --filter '@fusion/dashboard...^' test`);
+    expect(result?.command).toBe(`pnpm --filter '...@fusion/dashboard' test`);
+    expect(result?.command).not.toMatch(/\.\.\.\^/);
     expect(result?.testSource).toBe("inferred-scoped");
     expect(mockedExecSync).toHaveBeenCalledWith(
       "git diff --name-only 'main'...'fusion/fn-123'",
@@ -3031,10 +3032,34 @@ describe("inferDefaultTestCommand — pnpm workspace scoping", () => {
     });
 
     const result = inferDefaultTestCommand("/tmp/root", undefined, undefined, "main", "fusion/fn-123");
-    expect(result?.command).toContain("--filter");
-    expect(result?.command).toContain("@fusion/dashboard");
-    expect(result?.command).toContain("@fusion/engine");
+    expect(result?.command).toBe(
+      "pnpm --filter '...@fusion/dashboard' --filter '...@fusion/engine' test",
+    );
+    expect(result?.command).not.toMatch(/\.\.\.\^/);
     expect(result?.testSource).toBe("inferred-scoped");
+  });
+
+  it("keeps a metacharacter package name shell-quoted inside a dependents selector", () => {
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = String(p);
+      return path.includes("pnpm-lock.yaml") || path.includes("pnpm-workspace.yaml") || path.includes("package.json");
+    });
+    mockedReadFileSync.mockImplementation((p: any) => {
+      const path = String(p);
+      if (path.includes("pnpm-workspace.yaml")) return `packages:\n  - "packages/*"\n`;
+      if (path.includes("dashboard/package.json")) return JSON.stringify({ name: "@evil/pkg'; rm -rf /" });
+      return JSON.stringify({ name: "unknown" });
+    });
+    mockedReaddirSync.mockReturnValue([
+      { name: "dashboard", isDirectory: () => true },
+    ] as any);
+    mockedExecSync.mockImplementation((cmd: any) => String(cmd).includes("git diff --name-only")
+      ? "packages/dashboard/src/index.ts\n"
+      : "");
+
+    const result = inferDefaultTestCommand("/tmp/root", undefined, undefined, "main", "fusion/fn-123");
+    expect(result?.command).toBe("pnpm --filter '...@evil/pkg'\\''; rm -rf /' test");
+    expect(result?.command).not.toMatch(/\.\.\.\^/);
   });
 
   it("falls back to pnpm test (inferred) when all changes are root-only files", () => {

@@ -9,7 +9,7 @@
  * Per-node worktree acquisition is expected graph plumbing once the task has a worktree.
  */
 import type { Settings, Task, TaskDetail, TaskStore } from "@fusion/core";
-import { loadWorkspaceConfig, type RunCommandResult } from "@fusion/core";
+import { type RunCommandResult, type WorkspaceConfig } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import { generateSyntheticRunId, createRunAuditor, type EngineRunContext, type RunAuditor } from "../util/run-audit.js";
 import { acquireTaskWorktree } from "../worktree/worktree-acquisition.js";
@@ -17,12 +17,14 @@ import { captureBaseCommitSha } from "./worktree-git-refs.js";
 import { createConfiguredCommandAbortError } from "./task-predicates.js";
 import type { WorktreePool } from "../worktree/worktree-pool.js";
 import { runContextForTotal } from "./run-context-for.js";
+import { resolveWorkspaceConfigOnce } from "./workspace-config-resolver.js";
 
 export type EnsureGraphCustomNodeWorktreeDeps = {
   store: TaskStore;
   rootDir: string;
-  getWorkspaceConfig: () => Awaited<ReturnType<typeof loadWorkspaceConfig>> | undefined;
-  setWorkspaceConfig: (config: Awaited<ReturnType<typeof loadWorkspaceConfig>>) => void;
+  workspaceConfigOwner: object;
+  getWorkspaceConfig: () => WorkspaceConfig | null | undefined;
+  setWorkspaceConfig: (config: WorkspaceConfig | null) => void;
   getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   pool?: WorktreePool;
   secretsStore?: Parameters<typeof acquireTaskWorktree>[0]["secretsStore"];
@@ -54,11 +56,7 @@ export async function ensureGraphCustomNodeWorktree(
   nodeId: string,
   refreshStaleBase = false,
 ): Promise<TaskDetail> {
-  let workspaceConfig = deps.getWorkspaceConfig();
-  if (workspaceConfig === undefined) {
-    workspaceConfig = await loadWorkspaceConfig(deps.rootDir);
-    deps.setWorkspaceConfig(workspaceConfig);
-  }
+  const workspaceConfig = await resolveWorkspaceConfigOnce(deps);
   if (workspaceConfig && (workspaceConfig.repos.length ?? 0) > 0) {
     return task;
   }

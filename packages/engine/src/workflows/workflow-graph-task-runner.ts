@@ -131,6 +131,7 @@ export interface WorkflowGraphTaskRunnerDeps {
    *  Additive; a shared-isolation foreach never invokes them. */
   allocateInstanceWorktree?: ForeachEnvironment["allocateInstanceWorktree"];
   resolveIntegrationBase?: ForeachEnvironment["resolveIntegrationBase"];
+  resolveWorktreeIsolationBlock?: ForeachEnvironment["resolveWorktreeIsolationBlock"];
   integrationGitOps?: ForeachEnvironment["integrationGitOps"];
   integrationProjection?: ForeachEnvironment["integrationProjection"];
   semaphoreAvailability?: ForeachEnvironment["semaphoreAvailability"];
@@ -421,6 +422,7 @@ export class WorkflowGraphTaskRunner {
         // Step-inversion (KTD-11, U10): worktree isolation + parallel scheduling.
         allocateInstanceWorktree: this.deps.allocateInstanceWorktree,
         resolveIntegrationBase: this.deps.resolveIntegrationBase,
+        resolveWorktreeIsolationBlock: this.deps.resolveWorktreeIsolationBlock,
         integrationGitOps: this.deps.integrationGitOps,
         integrationProjection: this.deps.integrationProjection,
         semaphoreAvailability: this.deps.semaphoreAvailability,

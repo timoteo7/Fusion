@@ -9359,7 +9359,9 @@ export default interface Resources {
     },
     "worktree": {
       "unassigned": "Unassigned",
-      "upNext": "Up Next"
+      "upNext": "Up Next",
+      "workspaceRepos_one": "{{label}} · {{count}} repo",
+      "workspaceRepos_other": "{{label}} · {{count}} repos"
     },
     "worktrunk": {
       "assetUrl": "Asset URL",

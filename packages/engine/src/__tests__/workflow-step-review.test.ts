@@ -221,6 +221,20 @@ describe("WorkflowGraphExecutor step-review (U5)", () => {
     expect(result.outcome).toBe("success");
   });
 
+  it("deterministic UNAVAILABLE routes unavailable after one attempt without changing the verdict", async () => {
+    const stepReview = vi.fn(async (): Promise<StepReviewSeamResult> => ({ verdict: "UNAVAILABLE", retryable: false }));
+    const seams = baseSeams({
+      stepExecute: async () => ({ outcome: "success", value: "step-done" }),
+      stepReview,
+    });
+    const executor = new WorkflowGraphExecutor({ seams });
+    const result = await executor.run(taskWithSteps(1), settingsOn(), reviewForeachIr());
+
+    expect(stepReview).toHaveBeenCalledTimes(1);
+    // No unavailable edge means template exit, but no authoritative APPROVE marked the step done.
+    expect(result.outcome).toBe("success");
+  });
+
   it("persists the verdict into the instance row", async () => {
     const saved: WorkflowStepInstanceState[] = [];
     const seams = baseSeams({

@@ -10,7 +10,11 @@ import { ProjectEngine, __resetDeterministicMergerModeDeprecationWarned } from "
 import { AgentSemaphore, projectAdmissionCoordinator} from "../concurrency/concurrency.js";
 // Resolves to the vi.mock factory above (the mocked merger-ai exports the real-shaped
 // workspace land error classes so the dispatch's `instanceof` matching is exercised).
-import { WorkspacePartialLandError, WorkspaceRepoLandBusyError } from "../merge/merger-ai.js";
+import {
+  WorkspaceFinalizeBlockedError,
+  WorkspacePartialLandError,
+  WorkspaceRepoLandBusyError,
+} from "../merge/merger-ai.js";
 import { runtimeLog } from "../logger.js";
 import { TunnelProcessManager } from "../remote-access/tunnel-process-manager.js";
 import { NtfyNotifier } from "../util/notifier.js";
@@ -122,11 +126,21 @@ vi.mock("../merge/merger-ai.js", () => {
       this.name = "WorkspacePartialLandError";
     }
   }
+  class WorkspaceFinalizeBlockedError extends Error {
+    constructor(
+      public readonly taskId: string,
+      public readonly reason: string,
+    ) {
+      super(`Workspace finalize blocked for ${taskId}: ${reason}`);
+      this.name = "WorkspaceFinalizeBlockedError";
+    }
+  }
   return {
     runAiMerge: mocks.runAiMerge,
     landWorkspaceTask: mocks.landWorkspaceTask,
     WorkspaceRepoLandBusyError,
     WorkspacePartialLandError,
+    WorkspaceFinalizeBlockedError,
   };
 });
 
@@ -1496,6 +1510,7 @@ describe("ProjectEngine U0 merge unification dispatch", () => {
     mocks.currentStore = mockStore.store;
     mocks.landWorkspaceTask.mockResolvedValue({
       allLanded: true,
+      finalized: true,
       repos: [
         { repo: "repo-a", status: "landed", landedSha: "aaaa1111", integrationBranch: "main" },
         { repo: "repo-b", status: "landed", landedSha: "bbbb2222", integrationBranch: "main" },
@@ -1538,6 +1553,7 @@ describe("ProjectEngine U0 merge unification dispatch", () => {
       mocks.currentStore = mockStore.store;
       mocks.landWorkspaceTask.mockResolvedValue({
         allLanded: true,
+        finalized: true,
         repos: [
           { repo: "repo-a", status: "landed", landedSha: "aaaa1111", integrationBranch: "main" },
           { repo: "repo-b", status: "landed", landedSha: "bbbb2222", integrationBranch: "main" },
@@ -1570,6 +1586,7 @@ describe("ProjectEngine U0 merge unification dispatch", () => {
       mocks.currentStore = mockStore.store;
       mocks.landWorkspaceTask.mockResolvedValue({
         allLanded: true,
+        finalized: true,
         repos: [{ repo: "repo-c", status: "landed", landedSha: "cccc3333", integrationBranch: "main" }],
       } as any);
 
@@ -1602,6 +1619,7 @@ describe("ProjectEngine U0 merge unification dispatch", () => {
       // reports allLanded:true and finalizes gracefully.
       mocks.landWorkspaceTask.mockResolvedValue({
         allLanded: true,
+        finalized: true,
         repos: [{ repo: "repo-d", status: "empty", integrationBranch: "main" }],
       } as any);
 
@@ -1677,6 +1695,91 @@ describe("ProjectEngine workspace merge dispatch hardening (Phase C review)", ()
       "repo-a": { worktreePath: "/tmp/a", branch: "fusion/fn-wsh-a" },
     },
     ...overrides,
+  });
+
+  it("rejects a manual workspace merge when finalization is blocked without laundering success", async () => {
+    const mockStore = createMockStore({ ...baseSettings, autoMerge: true });
+    const task = workspaceTask({
+      branchContext: { assignmentMode: "shared", groupId: "BG-9051", source: "planning" },
+    });
+    mockStore.store.getTask.mockResolvedValue(task as any);
+    mocks.currentStore = mockStore.store;
+    mocks.landWorkspaceTask.mockResolvedValue({
+      allLanded: true,
+      finalized: false,
+      finalizeBlockedReason: "operator review required",
+      repos: [{ repo: "repo-a", status: "empty", integrationBranch: "main" }],
+    } as any);
+    const mergedLogSpy = vi.spyOn(runtimeLog, "log").mockImplementation(() => undefined);
+    const engine = createEngine({ createGroupPr: vi.fn() });
+    await engine.start();
+
+    await expect(engine.onMerge("FN-WSH")).rejects.toMatchObject({
+      name: "WorkspaceFinalizeBlockedError",
+      reason: "operator review required",
+    });
+
+    expect(mockStore.store.updateTask.mock.calls.some(([, patch]) =>
+      typeof (patch as { mergeRetries?: unknown }).mergeRetries === "number",
+    )).toBe(false);
+    expect(mockStore.store.updateTask).not.toHaveBeenCalledWith(
+      "FN-WSH",
+      expect.objectContaining({ status: "failed" }),
+    );
+    expect(mockStore.store.getBranchGroup).not.toHaveBeenCalled();
+    expect(mergedLogSpy.mock.calls.flat().join(" ")).not.toContain("merge merged: FN-WSH");
+
+    mergedLogSpy.mockRestore();
+    await engine.stop();
+  });
+
+  it("keeps a blocked workspace finalize out of the auto retry and failure paths", async () => {
+    const mockStore = createMockStore({ ...baseSettings, autoMerge: true });
+    mockStore.store.getTask.mockResolvedValue(workspaceTask() as any);
+    mocks.currentStore = mockStore.store;
+    mocks.landWorkspaceTask.mockResolvedValue({
+      allLanded: true,
+      finalized: false,
+      finalizeBlockedReason: "operator review required",
+      repos: [{ repo: "repo-a", status: "empty", integrationBranch: "main" }],
+    } as any);
+    const engine = createEngine();
+    await engine.start();
+    engine.enqueueMerge("FN-WSH");
+
+    await vi.waitFor(() => {
+      expect(mockStore.store.logEntry).toHaveBeenCalledWith(
+        "FN-WSH",
+        expect.stringContaining("operator review required"),
+        "WorkspaceFinalizeBlocked",
+      );
+    });
+
+    expect(mockStore.store.updateTask.mock.calls.some(([, patch]) =>
+      typeof (patch as { mergeRetries?: unknown }).mergeRetries === "number"
+      || (patch as { status?: unknown }).status === "failed",
+    )).toBe(false);
+    await engine.stop();
+  });
+
+  it("uses the generic blocked reason when the workspace finalize fence is orphaned", async () => {
+    const mockStore = createMockStore({ ...baseSettings, autoMerge: true });
+    mockStore.store.getTask.mockResolvedValue(workspaceTask() as any);
+    mocks.currentStore = mockStore.store;
+    mocks.landWorkspaceTask.mockResolvedValue({
+      allLanded: true,
+      finalized: false,
+      repos: [{ repo: "repo-a", status: "empty", integrationBranch: "main" }],
+    } as any);
+    const engine = createEngine();
+    await engine.start();
+
+    await expect(engine.onMerge("FN-WSH")).rejects.toMatchObject({
+      name: "WorkspaceFinalizeBlockedError",
+      reason: expect.stringContaining("workspace finalize was blocked"),
+    });
+
+    await engine.stop();
   });
 
   // B1: getTask returning null in the partial-land catch must FAIL CLOSED — no retry timer.

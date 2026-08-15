@@ -32,7 +32,7 @@ export {
   extractSymptomKeywords,
   scoreCandidateIssue,
 } from "./github-tracking-dedup.js";
-export { registerGithubTrackingHook } from "./github-tracking-hook.js";
+export { registerGithubTrackingHook, createTrackingIssueForTask } from "./github-tracking-hook.js";
 export {
   GitLabClient,
   GitLabApiError,

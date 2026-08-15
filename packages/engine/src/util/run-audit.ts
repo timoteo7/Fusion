@@ -652,7 +652,7 @@ export type DatabaseMutationType =
   | "task:reconcile-workspace-partial-land"
   /** Metadata: { taskId, reason: "auto-merge-off" | "user-paused" | "live-worktree", livePaths: string[] } */
   | "task:reconcile-workspace-partial-land-no-action"
-  /** Metadata: { taskId, path, kind: "workspace-repo-land", registeredAt, ageMs, staleBindingAgeFloorMs, ownerColumn } */
+  /** Metadata: { taskId, path, kind: "workspace-repo-land", registeredAt, ageMs, staleBindingAgeFloorMs, ownerColumn, ownerTerminalReason: "missing" | "complete" | "archived" | "deleted" | "failed" } */
   | "task:reclaim-phantom-workspace-land-lease"
   /** Metadata: { taskId, repo, worktreePath, success, reason } */
   | "task:reconcile-orphaned-workspace-worktree"

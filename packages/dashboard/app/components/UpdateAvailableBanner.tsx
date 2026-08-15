@@ -50,6 +50,8 @@ export function UpdateAvailableBanner({ latestVersion, currentVersion, onDismiss
         latestVersion,
         updated: false,
         error: getErrorMessage(error) || t("updateBanner.updateFailed", "Update failed"),
+        outcome: "failed",
+        message: getErrorMessage(error) || t("updateBanner.updateFailed", "Update failed"),
       });
     } finally {
       setInstallLoading(false);
@@ -84,8 +86,11 @@ export function UpdateAvailableBanner({ latestVersion, currentVersion, onDismiss
     }
   };
 
+  /* FNXC:UpdateBanner 2026-08-14-19:31: an Update now result always remains visible; failed checks are errors, never up-to-date reassurance. */
   const installSucceeded = installResult?.updated === true;
   const installError = installResult?.error;
+  const installMessage = installResult?.message ?? installError ?? (installResult && !installResult.updated ? t("updateBanner.updateUnknown", "Update did not complete — see the Fusion logs") : undefined);
+  const installIsError = installResult?.outcome === "check-failed" || installResult?.outcome === "failed" || Boolean(installError && installResult?.outcome !== "unsupported-install-method");
   // Advisory guidance only — shown when the host explicitly reported no supervising parent.
   const restartUnavailable = restartSupported === false;
 
@@ -176,9 +181,9 @@ export function UpdateAvailableBanner({ latestVersion, currentVersion, onDismiss
               )}
             </button>
           )}
-          {installError && (
-            <span className="update-available-banner__install-status update-available-banner__install-status--error" aria-live="polite">
-              {t("updateBanner.updateFailedWithMessage", "Update failed: {{message}}", { message: installError })}
+          {installMessage && !installSucceeded && (
+            <span className={`update-available-banner__install-status${installIsError ? " update-available-banner__install-status--error" : ""}`} aria-live="polite">
+              {installIsError ? t("updateBanner.updateFailedWithMessage", "Update failed: {{message}}", { message: installMessage }) : installMessage}
             </span>
           )}
         </div>

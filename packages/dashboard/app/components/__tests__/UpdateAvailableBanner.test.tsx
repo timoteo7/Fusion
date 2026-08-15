@@ -205,6 +205,25 @@ describe("UpdateAvailableBanner", () => {
   });
 
   it.each([
+    ["installed", { ...successfulInstall, outcome: "installed" }, /Updated to v0\.7\.0/],
+    ["no-update-available", { currentVersion: "0.6.0", latestVersion: "0.7.0", updated: false, outcome: "no-update-available", message: "Fusion is already up to date." }, /already up to date/i],
+    ["check-failed", { currentVersion: "0.6.0", latestVersion: null, updated: false, outcome: "check-failed", error: "registry unavailable", message: "Could not check for updates: registry unavailable" }, /Could not check for updates: registry unavailable/],
+    ["unsupported-install-method", { currentVersion: "0.6.0", latestVersion: "0.7.0", updated: false, outcome: "unsupported-install-method", message: "Use pull and rebuild for this source checkout." }, /pull and rebuild/i],
+    ["failed", { currentVersion: "0.6.0", latestVersion: "0.7.0", updated: false, outcome: "failed", error: "npm failed", message: "npm failed" }, /Update failed: npm failed/],
+    ["legacy fallback", { currentVersion: "0.6.0", latestVersion: "0.7.0", updated: false }, /Update did not complete — see the Fusion logs/],
+  ])("renders the %s install outcome in a live status", async (_outcome, response, expected) => {
+    mockInstallUpdate.mockResolvedValueOnce(response);
+    renderBanner();
+
+    fireEvent.click(screen.getByRole("button", { name: "Update now" }));
+
+    const status = await screen.findByText(expected);
+    expect(status).toHaveAttribute("aria-live", "polite");
+    if (_outcome === "check-failed") expect(status).not.toHaveTextContent(/up to date/i);
+    if (_outcome === "installed") expect(screen.getByRole("button", { name: "Restart Fusion" })).toBeInTheDocument();
+  });
+
+  it.each([
     ["supported", true],
     ["unsupported", false],
   ])("keeps the mobile action row and %s restart control in the document", async (_state, restartSupported) => {

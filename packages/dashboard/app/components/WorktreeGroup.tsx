@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { useTranslation } from "react-i18next";
 import type { Task, TaskDetail, MergeResult, GithubIssueAction, ColumnId } from "@fusion/core";
+import type { WorktreeGroupData } from "../utils/worktreeGrouping";
 import { isNearDuplicateCanonicalInactive } from "../../../core/src/duplicates/near-duplicate-canonical";
 import { ClipboardList, GitBranch } from "lucide-react";
 import { TaskCard } from "./TaskCard";
@@ -10,7 +11,9 @@ import type { BlockerFanoutEntry } from "../hooks/useBlockerFanout";
 import type { TaskContextMenuColumnMetadata } from "./TaskContextMenu";
 
 interface WorktreeGroupProps {
+  kind: WorktreeGroupData["kind"];
   label: string;
+  repoCount?: number;
   activeTasks: Task[];
   queuedTasks: Task[];
   allTasks?: Task[];
@@ -67,7 +70,9 @@ interface WorktreeGroupProps {
 }
 
 function WorktreeGroupComponent({
+  kind,
   label,
+  repoCount,
   activeTasks,
   queuedTasks,
   allTasks,
@@ -104,8 +109,15 @@ function WorktreeGroupComponent({
   taskContextMenuColumnsByTaskId,
 }: WorktreeGroupProps) {
   const { t } = useTranslation("app");
-  const upNextLabel = t("worktree.upNext", "Up Next");
-  const unassignedLabel = t("worktree.unassigned", "Unassigned");
+  /*
+  FNXC:Workspace 2026-08-15-03:35:
+  Group labels originate in a pure utility as English display values, while this component
+  translates headers. Comparing those strings selected the wrong icon in non-English locales;
+  the stable group kind is the locale-independent header contract.
+  */
+  const headerLabel = kind === "workspace"
+    ? t("worktree.workspaceRepos", "{{label}} · {{count}} repos", { label, count: repoCount ?? 0 })
+    : label;
   const resolveNearDuplicateCanonicalInactive = (task: Task): boolean | undefined => {
     const nearDuplicateOf = task.sourceMetadata?.nearDuplicateOf;
     if (typeof nearDuplicateOf !== "string" || !allTasks) return undefined;
@@ -127,9 +139,9 @@ function WorktreeGroupComponent({
     <div className="worktree-group">
       <div className="worktree-group-header">
         <span className="worktree-icon">
-          {label === upNextLabel || label === unassignedLabel ? <ClipboardList size={14} /> : <GitBranch size={14} />}
+          {kind === "unassigned" || kind === "up-next" ? <ClipboardList size={14} /> : <GitBranch size={14} />}
         </span>
-        <span className="worktree-label">{label}</span>
+        <span className="worktree-label">{headerLabel}</span>
       </div>
       {activeTasks.map((task) => (
         <TaskCard

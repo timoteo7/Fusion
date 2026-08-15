@@ -37,19 +37,22 @@ pgTest("agent activity production writers", () => {
     await h.afterEach();
   });
 
-  it("persists one roster-proven state transition through updateAgentState", async () => {
+  it("does not persist direct or cross-process roster state transitions", async () => {
     const agent = await agentStore.createAgent({ name: "Activity executor", role: "executor" });
+    const observer = new AgentStore({ rootDir: h.rootDir(), asyncLayer: h.layer() });
+    await observer.init();
 
-    await agentStore.updateAgentState(agent.id, "running");
+    try {
+      await agentStore.updateAgentState(agent.id, "running");
+      let activity = await queryAgentActivityEvents(h.layer(), { agentId: agent.id });
+      expect(activity.events).toHaveLength(0);
 
-    const { events } = await queryAgentActivityEvents(h.layer(), { agentId: agent.id });
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      type: "agent:state-changed",
-      agentId: agent.id,
-      agentAttribution: "agent",
-      metadata: { fromState: "active", toState: "running", source: "update" },
-    });
+      await observer.checkForChanges();
+      activity = await queryAgentActivityEvents(h.layer(), { agentId: agent.id });
+      expect(activity.events).toHaveLength(0);
+    } finally {
+      observer.close();
+    }
   });
 
   it("persists an attributable approval through its production AsyncDataLayer seam", async () => {

@@ -176,12 +176,25 @@ describe("U2 KTD3 — reviewWorkspacePerRepo conjunction + tagging (the shared l
     expect(result.summary).toMatch(/^repo-a:/);
   });
 
-  it("zero-acquire workspace task → UNAVAILABLE (caller routes; no fabricated APPROVE)", async () => {
+  it("unproven zero-acquire workspace task → non-retryable UNAVAILABLE without invoking a reviewer", async () => {
     const task = makeTask({ workspaceWorktrees: {} });
     const executor = workspaceExecutor(makeStore(task));
     const invoke = vi.fn();
     const result = await (executor as any).reviewWorkspacePerRepo(task, invoke);
     expect(result.verdict).toBe("UNAVAILABLE");
+    expect(result.retryable).toBe(false);
+    expect(result.review).toContain("re-invocation cannot change");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("commit-free zero-acquire workspace task approves honestly without invoking a reviewer", async () => {
+    const task = makeTask({ workspaceWorktrees: {}, noCommitsExpected: true });
+    const executor = workspaceExecutor(makeStore(task));
+    const invoke = vi.fn();
+    const result = await (executor as any).reviewWorkspacePerRepo(task, invoke);
+    expect(result.verdict).toBe("APPROVE");
+    expect(result.review).toContain("no diff was reviewed");
+    expect(result.review).toContain("explicit noCommitsExpected=true");
     expect(invoke).not.toHaveBeenCalled();
   });
 });
@@ -204,6 +217,28 @@ describe("U2 KTD3 — step-inversion review seam (executor.ts:5668) loops per su
     expect(seen).toEqual([WT_A, WT_B]);
     expect(seen).not.toContain(ROOT);
     expect(result.verdict).toBe("APPROVE");
+  });
+
+  it("preserves fn_task_done's persisted no-op eligibility through the production step-review seam", async () => {
+    // fn_task_done persists this flag before it schedules the graph handoff; the
+    // later review must not reclassify the same zero-acquire task as unproven.
+    const task = makeTask({
+      workspaceWorktrees: {},
+      noCommitsExpected: true,
+      summary: "PREMISE STALE: implementation already exists on HEAD",
+    });
+    const store = makeStore(task);
+    const executor = workspaceExecutor(store);
+    const seams = executor.createAuthoritativeWorkflowSeams({ autoMerge: false } as any);
+    const context = {
+      [FOREACH_ACTIVE_CONTEXT_KEY]: { stepIndex: 1, worktreePath: ROOT, baselineSha: "base" },
+    } as any;
+
+    const result = await seams.stepReview!(task as any, context, { type: "code", advisory: false } as any);
+
+    expect(result.verdict).toBe("APPROVE");
+    expect(result.review).toContain("no diff was reviewed");
+    expect(mockedReviewStep).not.toHaveBeenCalled();
   });
 
   it("passes unified user comments and legacy steering into workflow graph stepReview", async () => {

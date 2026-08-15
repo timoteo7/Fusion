@@ -1,5 +1,5 @@
 import { cliOperatorMutationContext } from "../identity/cli-operator-mutation-context.js";
-import { TaskStore, COLUMNS, COLUMN_LABELS, resolveProjectColumnsForRoles, TERMINAL_ROLES, resolveReviewColumns, resolveTaskLifecycleColumns, resolveWorkflowIrForTask, CentralCore, buildAutoPauseClearPatch, buildManualRetryResetPatch, extractIntentSignature, findNearDuplicates, getTaskDuplicateLineage, isWorkspaceTask, reconcileDeterministicDuplicate, resolveTaskGithubTracking, runDeterministicDuplicateGuard, type Settings, type Column, type ColumnId, type StepStatus, type AgentLogType, type AgentLogEntry, type IntentSignature, type NearDuplicateCandidate, type NearDuplicateMatch, type TaskDependencyMutation } from "@fusion/core";
+import { TaskStore, COLUMNS, COLUMN_LABELS, resolveProjectColumnsForRoles, TERMINAL_ROLES, resolveReviewColumns, resolveTaskLifecycleColumns, resolveWorkflowIrForTask, CentralCore, buildAutoPauseClearPatch, buildManualRetryResetPatch, extractIntentSignature, findNearDuplicates, getTaskDuplicateLineage, isValidRepoSlug, isWorkspaceTask, reconcileDeterministicDuplicate, resolveTaskGithubTracking, runDeterministicDuplicateGuard, type Settings, type Column, type ColumnId, type StepStatus, type AgentLogType, type AgentLogEntry, type IntentSignature, type NearDuplicateCandidate, type NearDuplicateMatch, type TaskDependencyMutation } from "@fusion/core";
 import { isInReviewMissingWorktreeSessionStartFailure, runAiMerge, landWorkspaceTask, installBaselineArchiveWorktreeDisposer } from "@fusion/engine";
 import { createInterface } from "node:readline/promises";
 import type { PlanningQuestion, PlanningSummary } from "@fusion/core";
@@ -446,8 +446,22 @@ async function runCliNearDuplicateCheck(args: {
   process.exit(0);
 }
 
-export async function runTaskCreate(descriptionArg?: string, attachFiles?: string[], depends?: string[], projectName?: string, nodeName?: string, noDedup = false) {
+export async function runTaskCreate(descriptionArg?: string, attachFiles?: string[], depends?: string[], projectName?: string, nodeName?: string, noDedup = false, githubOpts?: { github?: boolean; githubRepo?: string }) {
   let description = descriptionArg;
+
+  /*
+  FNXC:GithubTracking 2026-08-15-03:50:
+  `fn task create --github [--github-repo owner/repo]` decides tracking at CREATE time,
+  because the tracking lifecycle keys off the persisted `task.githubTracking.enabled === true`
+  flag and never re-resolves project/global defaults for existing tasks. Before this flag,
+  CLI-created tasks could not opt in at all (only the dashboard and fn_task_create could).
+  Explicit `--no-github` persists `enabled:false` so a later default flip cannot re-enable it.
+  */
+  const githubRepoOverride = githubOpts?.githubRepo?.trim() || undefined;
+  if (githubRepoOverride && !isValidRepoSlug(githubRepoOverride)) {
+    console.error(`Invalid --github-repo "${githubRepoOverride}" — expected "owner/repo".`);
+    process.exit(1);
+  }
 
   if (!description) {
     const rl = createInterface({ input: process.stdin, output: promptOutputStream() });
@@ -513,15 +527,59 @@ export async function runTaskCreate(descriptionArg?: string, attachFiles?: strin
           id, so a stale value can never make CLI create throw.
           */
           const originWorkflowId = await store.resolveOriginWorkflowOverrideId("task-create");
+          /*
+          FNXC:GithubTracking 2026-08-15-03:50:
+          Same create-time resolution as fn_task_create: CLI flag > project default >
+          global default. Also fixes CLI creates silently ignoring a project's
+          "GitHub tracking enabled by default" setting (the persisted flag is the only
+          thing the tracking lifecycle reads).
+          */
+          const globalSettingsForTracking = await store.getGlobalSettingsStore().getSettings();
+          const resolvedTracking = resolveTaskGithubTracking(
+            {
+              githubTracking:
+                githubOpts?.github !== undefined || githubRepoOverride
+                  ? {
+                      ...(githubOpts?.github !== undefined ? { enabled: githubOpts.github } : {}),
+                      ...(githubRepoOverride ? { repoOverride: githubRepoOverride } : {}),
+                    }
+                  : undefined,
+            },
+            await store.getSettings(),
+            globalSettingsForTracking,
+          );
+          const githubTracking = resolvedTracking.enabled
+            ? {
+                enabled: true as const,
+                ...(resolvedTracking.repo
+                  ? { repoOverride: `${resolvedTracking.repo.owner}/${resolvedTracking.repo.repo}` }
+                  : {}),
+              }
+            : githubOpts?.github === false
+              ? { enabled: false as const }
+              : undefined;
+          /*
+          FNXC:GithubTracking 2026-08-15-04:50:
+          Suppress the task-created hook here and invoke tracking-issue creation
+          DIRECTLY after the create block instead. With autoSummarizeTitles on, a
+          long, title-less description routes the hook onto the deferred
+          fire-and-forget summarize chain, and the short-lived CLI process closes
+          the store and exits before it runs — the task ends up with
+          githubTracking.enabled=true but no issue ever created (observed:
+          FN-9045..FN-9061). A synchronous post-create call is exactly-once and
+          deterministic; maybeCreateTrackingIssue does its own title summarization
+          when the task has none.
+          */
           const created = await store.createTask({
             description: trimmedDescription,
             dependencies: depends,
             ...(originWorkflowId ? { workflowId: originWorkflowId } : {}),
+            ...(githubTracking ? { githubTracking } : {}),
             source: {
               sourceType: "cli",
               sourceMetadata: Object.keys(sourceMetadata).length > 0 ? sourceMetadata : undefined,
             },
-          }, undefined, cliOperatorMutationContext());
+          }, { invokeTaskCreatedHook: false }, cliOperatorMutationContext());
 
           const reconcileResult = await reconcileDeterministicDuplicate(store, {
             createdTask: created,
@@ -578,6 +636,26 @@ export async function runTaskCreate(descriptionArg?: string, attachFiles?: strin
       console.log(`    Node: ${resolvedNode.name || resolvedNode.id}`);
     }
     console.log(`    Path:   .fusion/tasks/${resolvedTask.id}/`);
+
+    /*
+    FNXC:GithubTracking 2026-08-15-04:50:
+    Create the tracking issue synchronously before the CLI exits (the create
+    call above suppressed the task-created hook; see the create-site note).
+    Runs only for fresh creates: a linked-existing canonical already had its
+    own create-time pass.
+    */
+    if (!linkedExisting && resolvedTask.githubTracking?.enabled === true && !resolvedTask.githubTracking?.issue) {
+      try {
+        await dashboard.createTrackingIssueForTask?.(store, resolvedTask);
+        const refreshed = await store.getTask(resolvedTask.id).catch(() => undefined);
+        const issue = refreshed?.githubTracking?.issue;
+        if (issue) {
+          console.log(`    GitHub: ${issue.owner}/${issue.repo}#${issue.number}`);
+        }
+      } catch (error) {
+        console.error(`    ✗ GitHub tracking issue not created: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     if (attachFiles && attachFiles.length > 0) {
       const { readFile } = await import("node:fs/promises");
@@ -1212,14 +1290,21 @@ export async function runTaskMerge(id: string, projectName?: string) {
           : `failed: ${repo.error ?? "unknown"}`;
         console.log(`  ${repo.status === "failed" ? "✗" : "✓"} ${repo.repo}: ${label}`);
       }
-      // FNXC:Workspace 2026-06-22-05:10 (Phase C review B3):
-      // landWorkspaceTask now finalizes the workspace task to done on allLanded (Phase C U2),
-      // so report it as merged rather than "remains in review until U2". A partial land leaves
-      // the task in review (landed repos stay landed locally) and exits non-zero.
+      /*
+      FNXC:Workspace 2026-08-15-04:22:
+      `finalized`, not `allLanded`, is the merged signal. A blocked finalize is already parked
+      with progress preserved, so the CLI must report it as blocked and exit non-zero rather than
+      claiming success for sub-repos that landed without the task reaching `done`.
+      */
+      const workspaceMerged = workspaceResult.allLanded && workspaceResult.finalized;
       console.log(
-        `\n  ${workspaceResult.allLanded ? "✓ All sub-repos landed — task finalized to done" : "✗ Partial land — see failures above (task remains in review; landed repos stay landed locally)"}\n`,
+        `\n  ${workspaceMerged
+          ? "✓ All sub-repos landed — task finalized to done"
+          : workspaceResult.allLanded
+            ? `✗ Merge blocked — ${workspaceResult.finalizeBlockedReason ?? "workspace finalize was blocked"} (task moved back with progress preserved)`
+            : "✗ Partial land — see failures above (task remains in review; landed repos stay landed locally)"}\n`,
       );
-      if (!workspaceResult.allLanded) await closeBoardContextAndExit(context, 1);
+      if (!workspaceMerged) await closeBoardContextAndExit(context, 1);
       return;
     }
 

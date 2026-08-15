@@ -16,6 +16,7 @@ type AnyFn = (...args: any[]) => any;
 export type CleanupTaskWorktreeDeps = {
   store: TaskStore;
   workspaceConfig: WorkspaceConfig | null | undefined;
+  ensureWorkspaceConfig?: () => Promise<WorkspaceConfig | null>;
   activeWorktrees: Map<string, Set<string>>;
   getActiveWorktreePaths: (taskId: string) => string[];
   removeOwnWorktreeWithReconcile: AnyFn;
@@ -25,13 +26,16 @@ export async function cleanupTaskWorktree(
   deps: CleanupTaskWorktreeDeps,
   taskId: string,
 ): Promise<void> {
+  const workspaceConfig = deps.ensureWorkspaceConfig
+    ? await deps.ensureWorkspaceConfig()
+    : deps.workspaceConfig;
   const worktreePaths = deps.getActiveWorktreePaths(taskId);
   if (worktreePaths.length === 0) return;
 
   deps.activeWorktrees.delete(taskId);
 
   // FNXC:Workspace 2026-06-21-12:00: KTD1 — in workspace mode the tracked path is the non-git workspace root (browse-only), never a removable worktree. Drop the in-memory tracking above but never remove the root. Per-repo worktree teardown returns in Phase B.
-  if (deps.workspaceConfig) {
+  if (workspaceConfig) {
     return;
   }
   // Non-workspace tasks hold a one-element set — preserve the original single-path removal semantics.

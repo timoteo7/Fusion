@@ -19,6 +19,8 @@ Create a new task on the Fusion task board. The task enters the planning column 
 | `agentId` | string | — | Agent ID to assign this task to (e.g. 'agent-abc123') |
 | `priority` | string(enum) | — | Task priority (low, normal, high, urgent) |
 | `workflow_id` | string | — | Workflow ID to select for the new task (e.g. 'WF-003' or 'builtin:coding'). Omit to inherit the project default workflow. Use fn_workflow_list to discover valid IDs. |
+| `github_tracking` | boolean | — | Per-task GitHub issue tracking override. true links a tracking issue to this task; false disables tracking even when the project/global default enables it. Omit to inherit the project/global default. |
+| `github_repo` | string | — | "owner/repo" override for the GitHub tracking issue's repository. Omit to use the project/global default repo. |
 
 ### fn_task_update
 

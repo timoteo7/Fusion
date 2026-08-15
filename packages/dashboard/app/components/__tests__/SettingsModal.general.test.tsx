@@ -427,6 +427,26 @@ describe("SettingsModal", () => {
       expect(screen.queryByText(/Needs a supervising parent/)).not.toBeInTheDocument();
     });
 
+    it.each([
+      ["installed", { currentVersion: "1.2.3", latestVersion: "2.0.0", updated: true, outcome: "installed" }, /Updated to v2\.0\.0/, true],
+      ["no-update-available", { currentVersion: "1.2.3", latestVersion: "2.0.0", updated: false, outcome: "no-update-available", message: "Fusion is already up to date." }, /already up to date/i, false],
+      ["check-failed", { currentVersion: "1.2.3", latestVersion: null, updated: false, outcome: "check-failed", error: "registry unavailable", message: "Could not check for updates: registry unavailable" }, /Update failed: Could not check for updates: registry unavailable/, false],
+      ["unsupported-install-method", { currentVersion: "1.2.3", latestVersion: "2.0.0", updated: false, outcome: "unsupported-install-method", message: "Use pull and rebuild for this source checkout." }, /pull and rebuild/i, false],
+      ["failed", { currentVersion: "1.2.3", latestVersion: "2.0.0", updated: false, outcome: "failed", error: "npm failed", message: "npm failed" }, /Update failed: npm failed/, false],
+    ])("renders the %s install outcome in the Settings live status", async (_outcome, response, expected, restarts) => {
+      mockCheckForUpdates.mockResolvedValue(availableUpdate);
+      mockInstallUpdate.mockResolvedValue(response);
+      renderModal();
+      await waitForSettingsModalReady();
+      await settingsModalUser.click(screen.getByRole("button", { name: "Check for updates" }));
+      await settingsModalUser.click(await screen.findByRole("button", { name: "Update now" }));
+
+      const status = await screen.findByText(expected);
+      expect(status).toHaveAttribute("aria-live", "polite");
+      if (_outcome === "check-failed") expect(status).not.toHaveTextContent(/up to date/i);
+      expect(screen.queryByRole("button", { name: "Restart Fusion" })).toBe(restarts ? screen.getByRole("button", { name: "Restart Fusion" }) : null);
+    });
+
     it("clears stale unsupported guidance by re-probing after a successful install", async () => {
       // Mount probe fails (fails closed to "unsupported"); the post-install re-probe
       // proves the host is supervised after all.

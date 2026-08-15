@@ -13,7 +13,6 @@ import {isWorkspaceTask, type Task, type GithubIssueAction, type TaskDeleteClosu
 import {type TaskDeleteAuditContext} from "../task-delete-attribution.js";
 import "../builtin-traits.js";
 import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
-import {toJson} from "../db/db-helpers.js";
 import {getErrorMessage} from "../process/error-message.js";
 import {ArchiveWorkspaceDisposalError, ArchiveWorkspaceDisposalIncompleteError, ArchiveWorkspaceWorktreeDisposerMissingError, getArchiveWorkspaceWorktreeDisposer, getArchiveWorktreeDisposer, type ArchiveWorkspaceDisposalResult, type WorkspaceDisposalPlanEntry} from "../db/archive-worktree-disposer.js";
 import {acquireWorktreePathReservation, canonicalizeWorktreePath} from "../tasks/worktree-path-reservation.js";
@@ -153,40 +152,12 @@ export async function disposeArchivedWorktree(store: TaskStore, task: Task): Pro
   } finally { if (reservation.state === "held") await reservation.release(); }
 }
 
-function _scheduleDeleteBranchCleanup(store: TaskStore, task: Task): void {
-    /*
-    FNXC:TaskDeletion 2026-07-15-09:45:
-    Soft-delete latency must be bounded by the database mutation, audit, and event emission; branch cleanup can spawn serialized git subprocesses and must not hold withTaskLock or the returned deleteTask Promise. Schedule the cleanup after the task is already soft-deleted, but keep the existing cleanup guarantees by still clearing stale execution-start branch references and persisting the cleaned-branch log entry on the deleted row.
-    */
-    void (async () => {
-      try {
-        const cleanedBranches = await store.cleanupBranchForTask(task);
-        if (cleanedBranches.length === 0) {
-          return;
-        }
-
-        const deletedTask = store.readTaskFromDb(task.id, { includeDeleted: true });
-        if (!deletedTask) {
-          return;
-        }
-        const updatedAt = new Date().toISOString();
-        const nextLog = [
-          ...(deletedTask.log ?? []),
-          {
-            timestamp: updatedAt,
-            action: `Cleaned up branch: ${cleanedBranches.join(", ")}`,
-          },
-        ];
-        store.db.prepare("UPDATE tasks SET log = ?, updatedAt = ? WHERE id = ?").run(toJson(nextLog), updatedAt, task.id);
-        store.db.bumpLastModified();
-      } catch (error) {
-        storeLog.warn("Deferred task-delete branch cleanup failed", {
-          taskId: task.id,
-          error: getErrorMessage(error),
-        });
-      }
-    })();
-  }
+/*
+FNXC:TaskDeletion 2026-08-15-04:54:
+The live async delete path in archive-lifecycle-2.ts owns branch cleanup through
+`store.cleanupBranchForTask(task)`. The retired deferred copy used the deleted
+synchronous SQLite Database surface, which would throw in PostgreSQL mode.
+*/
 
 export async function deleteTaskImpl(store: TaskStore, id: string, options?: DeleteTaskOptions & { runContext?: RunMutationContext },): Promise<Task> {
     // FNXC:RuntimeLifecycleAsync 2026-06-24-12:00:

@@ -228,11 +228,18 @@ export function deriveScopedPnpmTestCommand(rootDir: string, baseBranch: string,
   }
 
   // 5. Compose the scoped pnpm command
-  // `...^` includes dependents (packages that import the changed packages).
+  /*
+   * FNXC:Verification 2026-08-15-04:18:
+   * pnpm `name...` selects a package with dependencies, `...name` selects it
+   * with dependents, and `...^name` excludes the package from its dependents.
+   * Merge verification needs `...name` so changed-package tests run alongside
+   * dependent tests; the former malformed trailing `name...^` could produce a
+   * zero-package, zero-test green verification.
+   */
   // Package names come from workspace package.json files (potentially
   // untrusted) so we quote each filter argument via `quoteArg` to prevent
   // shell interpolation if a name contains metacharacters.
-  const filters = packageNames.map((name) => `--filter ${quoteArg(`${name}...^`)}`).join(" ");
+  const filters = packageNames.map((name) => `--filter ${quoteArg(`...${name}`)}`).join(" ");
   return `pnpm ${filters} test`;
 }
 

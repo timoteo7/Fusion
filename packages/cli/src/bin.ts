@@ -518,6 +518,9 @@ Options:
   --attach <file>            Attach file(s) on task create (repeatable)
   --depends <id>             Declare dependency on task create (repeatable)
   --no-dedup                 Bypass deterministic duplicate guard on task create
+  --github                   Enable GitHub issue tracking for the created task
+  --no-github                Disable GitHub issue tracking (overrides project default)
+  --github-repo <owner/repo> Repository override for the task's tracking issue
   --feedback <text>          Refinement feedback (non-interactive mode)
   --yes                      Skip confirmation prompts (planning mode)
   --limit, -l <n>            Max issues to import (default: 30, max: 100)
@@ -1266,6 +1269,8 @@ async function main() {
             const dependsIds: string[] = [];
             let nodeName: string | undefined;
             let noDedup = false;
+            let github: boolean | undefined;
+            let githubRepo: string | undefined;
             const descParts: string[] = [];
             for (let i = 0; i < createArgs.length; i++) {
               if (createArgs[i] === "--attach" && i + 1 < createArgs.length) {
@@ -1279,12 +1284,19 @@ async function main() {
                 i++; // skip the value
               } else if (createArgs[i] === "--no-dedup") {
                 noDedup = true;
+              } else if (createArgs[i] === "--github") {
+                github = true;
+              } else if (createArgs[i] === "--no-github") {
+                github = false;
+              } else if (createArgs[i] === "--github-repo" && i + 1 < createArgs.length) {
+                githubRepo = createArgs[i + 1];
+                i++; // skip the value
               } else {
                 descParts.push(createArgs[i]);
               }
             }
             const title = descParts.join(" ");
-            await runTaskCreate(title || undefined, attachFiles.length > 0 ? attachFiles : undefined, dependsIds.length > 0 ? dependsIds : undefined, projectName, nodeName, noDedup);
+            await runTaskCreate(title || undefined, attachFiles.length > 0 ? attachFiles : undefined, dependsIds.length > 0 ? dependsIds : undefined, projectName, nodeName, noDedup, github !== undefined || githubRepo !== undefined ? { github, githubRepo } : undefined);
             break;
           }
           case "plan": {
