@@ -136,9 +136,14 @@ describe("schema-applier: immutable migration identities", () => {
     expect(PROJECT_OWNERSHIP_DECLARATION_DRIFT_VERSION).toBe("0056");
     expect(PROJECT_OWNERSHIP_DEFAULT_RECONCILIATION_VERSION).toBe("0057");
     expect(MESSAGE_ARCHIVE_SCHEMA_VERSION).toBe("0058");
-    // FNXC:Identity 2026-08-09-03:04: per-migration identities are immutable; only the ceiling moves as 0059 adds the identity schema.
-    expect(IDENTITY_ACTORS_VERSION).toBe("0059");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0059");
+    /*
+    FNXC:Identity 2026-08-14-08:40: per-migration identities are immutable; only the ceiling moves as
+    0060 adds the identity schema. The number moved twice (0047 -> 0059 -> 0060) as main landed its
+    own migrations under the numbers this one first claimed; these assertions were left on 0059 and
+    are what catches the next collision, so they must track the real filename.
+    */
+    expect(IDENTITY_ACTORS_VERSION).toBe("0060");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0060");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
