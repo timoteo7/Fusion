@@ -2555,7 +2555,7 @@ every existing REFERENCES central.* is central→central, and R4 requires a tomb
 resolve, so ON DELETE CASCADE would be wrong. Referential integrity is enforced in core.
 The PK is (projectId, actorId, role) because the steady-state ownership audit in schema-applier.ts
 throws on every subsequent boot unless each PK/unique key on a project table includes project_id.
-Materialized by migration 0047_fn_identity_actors.sql.
+Materialized by migration 0060_fn_identity_actors.sql.
 */
 export const actorRoleGrants = projectSchema.table("actor_role_grants", {
   projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`),
