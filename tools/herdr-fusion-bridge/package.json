@@ -1,0 +1,16 @@
+{
+  "name": "herdr-fusion-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Event- and liveness-driven coordination bridge between Herdr panes, the Fusion engine, and Hermes notification delivery.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bin/hfb.js run",
+    "test": "node --test test/**/*.test.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

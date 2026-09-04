@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "description": "Canonical event schema for the herdr-fusion-bridge. Every event carries a correlation tuple { taskId, executorId, paneId }, a monotonic seq, and a state kind. seq is per-emitter monotonic. taskId/executorId/paneId may be \"unknown\" when the dimension is not resolvable, never dropped.",
+  "fields": {
+    "kind": "string, one of: start | progress | blocked | error | stalled | completed | engine_absent | association_stale",
+    "seq": "number, monotonic per emitter",
+    "taskId": "string, correlation dimension (\"unknown\" if absent)",
+    "executorId": "string, correlation dimension (\"unknown\" if absent)",
+    "paneId": "string, correlation dimension (\"unknown\" if absent)",
+    "ts": "number, epoch millis when the event was observed",
+    "payload": "object, optional, shape depends on kind"
+  },
+  "kinds": {
+    "start": {
+      "meaning": "a task/executor transitioned to running",
+      "payload": { "state": "string" }
+    },
+    "progress": {
+      "meaning": "a discrete state/event change (REAL progress; log lines are NOT progress)",
+      "payload": { "state": "string" }
+    },
+    "blocked": {
+      "meaning": "the task reached a blocked/waiting state or the watchdog declared it stalled",
+      "payload": { "reason": "string", "kind": "blocked|stall" }
+    },
+    "error": {
+      "meaning": "an integration or task error",
+      "payload": { "message": "string" }
+    },
+    "stalled": {
+      "meaning": "no REAL progress within HBRIDGE_WATCHDOG_TIMEOUT_MS",
+      "payload": { "lastProgressMs": "number", "timeoutMs": "number" }
+    },
+    "completed": {
+      "meaning": "a task/executor reached a terminal success state",
+      "payload": { "state": "string" }
+    },
+    "engine_absent": {
+      "meaning": "the Fusion engine could not be detected; all downstream reconcile/steer work is suspended",
+      "payload": { "rechecked": "boolean" }
+    },
+    "association_stale": {
+      "meaning": "the pane or executor for a task could not be resolved",
+      "payload": { "reason": "string" }
+    }
+  },
+  "examples": [
+    {
+      "kind": "start",
+      "seq": 1,
+      "taskId": "T-1",
+      "executorId": "E-1",
+      "paneId": "P-1",
+      "ts": 1700000000000,
+      "payload": { "state": "running" }
+    },
+    {
+      "kind": "stalled",
+      "seq": 2,
+      "taskId": "T-1",
+      "executorId": "E-1",
+      "paneId": "P-1",
+      "ts": 1700000060000,
+      "payload": { "lastProgressMs": 1700000000000, "timeoutMs": 60000 }
+    },
+    {
+      "kind": "engine_absent",
+      "seq": 3,
+      "taskId": "unknown",
+      "executorId": "unknown",
+      "paneId": "unknown",
+      "ts": 1700000100000,
+      "payload": { "rechecked": false }
+    }
+  ]
+}
