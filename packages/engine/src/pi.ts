@@ -71,6 +71,12 @@ import {
   type SkillSelectionContext,
 } from "./cli-runtime/skill-resolver.js";
 import { isContextLimitError } from "./errors/context-limit-detector.js";
+import { isUsageLimitError } from "./errors/usage-limit-detector.js";
+import { isTransientAuthCredentialError } from "./errors/transient-error-detector.js";
+import {
+  fallbackEntries,
+  type FallbackModelEntry,
+} from "./util/fallback-model-list.js";
 import { applyClaudeAcpEnable } from "./cli-runtime/claude-acp-enable.js";
 import { createFusionAuthStorage, createFusionModelRegistry } from "./auth/auth-storage.js";
 import { refreshFusionModelRegistry } from "./auth/model-registry-refresh.js";
@@ -1020,6 +1026,15 @@ export class ModelFallbackExhaustedError extends Error {
   readonly triggerPoint: "session-creation" | "prompt-time";
   readonly attempts: number;
   readonly underlyingReason: string;
+  /*
+   * FNXC:ModelFallback 2026-09-04-00:00:
+   * GDPR-001 — when the chain loop is in effect (AgentOptions.fallbackModels is
+   * non-empty), the exhausted error carries the full ordered chain of entries
+   * that were tried, with each one's outcome (provider/model/thinkingLevel plus
+   * the reason it stopped). The legacy single-pair path leaves this `undefined`
+   * so the existing error consumers (and tests) keep working unchanged.
+   */
+  readonly attemptChain?: ReadonlyArray<AttemptChainEntry>;
 
   constructor(input: {
     primaryModel: string;
@@ -1027,6 +1042,7 @@ export class ModelFallbackExhaustedError extends Error {
     triggerPoint: "session-creation" | "prompt-time";
     attempts: number;
     underlyingReason: string;
+    attemptChain?: ReadonlyArray<AttemptChainEntry>;
   }) {
     const fallbackClause = input.fallbackModel ? `, fallback ${input.fallbackModel}` : ", no fallback configured";
     super(
@@ -1039,7 +1055,28 @@ export class ModelFallbackExhaustedError extends Error {
     this.triggerPoint = input.triggerPoint;
     this.attempts = input.attempts;
     this.underlyingReason = input.underlyingReason;
+    this.attemptChain = input.attemptChain;
   }
+}
+
+/*
+ * FNXC:ModelFallback 2026-09-04-00:00:
+ * Per-entry record of what was tried and why the chain loop stopped on that entry.
+ * `outcome: "recovered"` only appears for the entry that succeeded; for entries that
+ * failed, the field is the failure class. `skipped` means the error matched the
+ * chain-skip predicate (`isUsageLimitError` || `isTransientAuthCredentialError`),
+ * `bubble` means any other error (and the loop stops).
+ */
+export interface AttemptChainEntry {
+  /** The model that was tried at this position in the chain (1 = primary). */
+  position: number;
+  /** `provider/modelId` of the entry. */
+  model: string;
+  /** Per-entry thinking level when set, else the resolved default. */
+  thinkingLevel?: string;
+  outcome: "recovered" | "skipped-rate-limit" | "skipped-auth" | "bubble";
+  /** Short reason, used for the exhausted error's `underlyingReason` field. */
+  reason: string;
 }
 
 export type BuiltinWebToolName = "WebSearch" | "WebFetch";
@@ -1097,6 +1134,17 @@ export interface AgentOptions {
    * Fallback model swaps must honor the fallback model's configured thinking level while preserving the lane/default thinking level when no fallback-specific value is set.
    */
   fallbackThinkingLevel?: string;
+  /*
+   * FNXC:ModelFallback 2026-09-04-00:00:
+   * GDPR-001 ordered fallback-model list. When non-empty, this list wins over the
+   * legacy single pair (`fallbackProvider` / `fallbackModelId`) and the chain loop
+   * in `createAgentSession` walks the entries with 1 attempt per entry, skipping
+   * to the next on a rate-limit or transient-auth error without sleeping. Empty
+   * preserves the legacy primary → fallback → primary-retry path exactly. Parsed
+   * entries are `provider:modelId[:thinkingLevel]`; the optional per-entry
+   * thinking level overrides `fallbackThinkingLevel` for that entry only.
+   */
+  fallbackModels?: import("./util/fallback-model-list.js").FallbackModelEntry[];
   /** Default thinking effort level (e.g. "medium", "high"). When provided, sets the session's thinking level after creation. */
   defaultThinkingLevel?: string;
   /** Optional pre-configured SessionManager. When provided, the agent session
@@ -2682,8 +2730,8 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
   // Resolve explicit model selection if provider and model ID are specified.
   // If the primary configured model cannot be resolved but a fallback model is
   // configured, prefer the fallback as the initial model selection.
-  let selectedModel;
-  let fallbackModel;
+  let selectedModel: ReturnType<typeof resolveConfiguredModel>;
+  let fallbackModel: ReturnType<typeof resolveConfiguredModel>;
   try {
     selectedModel = resolveConfiguredModel(
       modelRegistry,
@@ -3057,6 +3105,14 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
     triggerPoint: "session-creation" | "prompt-time",
     attempts: number,
     underlying: unknown,
+    /*
+     * FNXC:ModelFallback 2026-09-04-00:00:
+     * Chain path only. When set, the chain's attempt log is included on the
+     * exhausted error so consumers can see which entries were tried and why each
+     * one stopped. The legacy single-pair path leaves this undefined and the
+     * error shape is identical to the pre-GDPR-001 contract.
+     */
+    attemptChain?: AttemptChainEntry[],
   ): ModelFallbackExhaustedError => {
     const underlyingReason = underlying instanceof Error ? underlying.message : String(underlying);
     return new ModelFallbackExhaustedError({
@@ -3065,6 +3121,7 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
       triggerPoint,
       attempts,
       underlyingReason,
+      ...(attemptChain && attemptChain.length > 0 ? { attemptChain } : {}),
     });
   };
 
@@ -3102,55 +3159,29 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
   };
 
   /*
-   * FNXC:ModelFallback 2026-07-16-00:00:
-   * FN-8098 requires a distinct fallback failure to get one final primary retry before
-   * blocking. This bounded primary → fallback → primary sequence prevents fallback loops
-   * while still surfacing an operator-actionable ModelFallbackExhaustedError after three attempts.
+   * FNXC:Settings-ThinkingLevel 2026-07-10-00:00:
+   * The GDPR-001 chain path applies per-entry thinking levels immediately after
+   * session creation, so the helper is defined here (BEFORE the chain block) and
+   * shared with the prompt-time path. The function is hoisted via `const` to
+   * preserve the original caller surface — no other call sites change.
+   *
+   * FNXC:ModelFallback 2026-09-04-00:00:
+   * Per-entry thinking level: when an entry carries a 3rd `thinkingLevel` field
+   * (from the parsed `*FallbackModels` list), it overrides the legacy
+   * `usingFallback`/default-derived level so the resolved entry's level is honored
+   * exactly. Pass `undefined` to keep the legacy `fallbackThinkingLevel` /
+   * `defaultThinkingLevel` resolution unchanged.
    */
-  let sessionResult;
-  let usingFallback = false;
-  try {
-    sessionResult = await createSessionWithModel(selectedModel);
-    // FNXC:EngineDiagnostics 2026-07-26-10:00: every agent session start emitted this at info; steady-state bookkeeping → debug (FUSION_DEBUG=pi).
-    piLog.debug(`Session created successfully (model=${selectedModel ? `${selectedModel.provider}/${selectedModel.id}` : "default"})`);
-  } catch (err: any) {
-    if (!fallbackModel || !selectedModel || !hasDistinctFallback || !isRetryableModelSelectionError(err?.message || "")) {
-      piLog.error(`Session creation failed: ${err.message}`);
-      throw err;
-    }
-    piLog.warn(`Primary model failed (${err.message}), trying fallback`);
-    usingFallback = true;
-    try {
-      sessionResult = await createSessionWithModel(fallbackModel);
-    } catch (_fallbackErr: unknown) {
-      // The final retry is intentionally primary and terminal even when fallback failed non-retryably.
-      usingFallback = false;
-      try {
-        sessionResult = await createSessionWithModel(selectedModel);
-      } catch (primaryRetryErr: unknown) {
-        throw makeFallbackExhaustedError("session-creation", 3, primaryRetryErr);
-      }
-    }
-    await emitFallbackUsed("session-creation", err);
-    piLog.debug("Fallback session created successfully");
-  }
-
-  let activeSession = sessionResult.session;
-  wrapSessionDisposeWithShutdown(activeSession);
-  installToolResultContentGuard(activeSession as AgentToolHookSession);
-  installMessageContentGuard(activeSession as AgentToolHookSession, sessionManager as unknown as SessionManagerLike);
-  (activeSession as any).__fusionMemoryAppendAvailable = options.customTools?.some((tool) => tool.name === FN_MEMORY_APPEND_TOOL_NAME) === true;
-  const promptableSession = activeSession as PromptableSession;
-
   let thinkingCompatibilityDisabled = false;
-  const applyThinkingLevelIfSupported = (targetSession: AgentSession, sourceModel: string): void => {
-    /*
-     * FNXC:Settings-ThinkingLevel 2026-07-10-00:00:
-     * Fallback-swap sessions apply the fallback model's configured thinking level, or transparently keep the lane/default level when no fallback-specific value exists. The compatibility-disable guard remains shared so thinking/reasoning conflicts disable explicit thinking for both primary and fallback paths.
-     */
-    const effectiveThinkingLevel = usingFallback
-      ? options.fallbackThinkingLevel ?? options.defaultThinkingLevel
-      : options.defaultThinkingLevel;
+  const applyThinkingLevelIfSupported = (
+    targetSession: AgentSession,
+    sourceModel: string,
+    explicitThinkingLevel?: string,
+  ): void => {
+    const effectiveThinkingLevel = explicitThinkingLevel
+      ?? (usingFallback
+        ? options.fallbackThinkingLevel ?? options.defaultThinkingLevel
+        : options.defaultThinkingLevel);
     if (!effectiveThinkingLevel || thinkingCompatibilityDisabled) {
       return;
     }
@@ -3165,6 +3196,322 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
       piLog.warn(`Disabling explicit thinking level for model ${sourceModel}: ${message}`);
     }
   };
+
+  /*
+   * FNXC:ModelFallback 2026-07-16-00:00:
+   * FN-8098 requires a distinct fallback failure to get one final primary retry before
+   * blocking. This bounded primary → fallback → primary sequence prevents fallback loops
+   * while still surfacing an operator-actionable ModelFallbackExhaustedError after three attempts.
+   *
+   * FNXC:ModelFallback 2026-09-04-00:00:
+   * GDPR-001 ordered fallback-model list. The chain is `[primary, ...resolvedList]`
+   * where `primary` is the configured lane primary (`selectedModel` resolved from
+   * `options.defaultProvider`/`defaultModelId`). The list wins when non-empty —
+   * the legacy `fallbackProvider`/`fallbackModelId` pair is ignored entirely. The
+   * chain path replaces the legacy primary → fallback → primary-retry structure
+   * with a single ordered walk: each level gets ONE attempt; on a rate-limit or
+   * transient-auth error the loop SKIPS to the next entry (no sleep, no 30s wait
+   * inside the fallback path); on any other error the raw error bubbles immediately
+   * (preserves the "non-retryable" exit). On full chain exhaustion the
+   * `ModelFallbackExhaustedError` carries the per-attempt reasons in `attemptChain`,
+   * and `attempts === chain.length + 1` (primary + N entries). The legacy single-pair
+   * path runs only when the list is empty/unset or resolves to zero entries.
+   */
+  let sessionResult: Awaited<ReturnType<typeof createSessionWithModel>> | undefined;
+  let usingFallback = false;
+  /*
+   * Chain-path bookkeeping. Populated only when `options.fallbackModels` resolves
+   * to a non-empty ordered list. Read by the prompt-time loop below; the legacy
+   * path leaves these `undefined` and continues to use `selectedModel`/`fallbackModel`.
+   */
+  let chainActive: boolean = false;
+  let chainResolvedEntry: { provider: string; modelId: string; thinkingLevel?: string } | undefined;
+  let chainAttemptLog: AttemptChainEntry[] = [];
+  let chainActiveIndex: number = -1;
+  /*
+   * Resolve the chain list up-front so the session-creation loop can iterate by
+   * position. Entries whose model is missing in the registry are dropped with a
+   * bounded warning; a list that resolves to zero entries is a no-op and the
+   * legacy single-pair path is used unchanged.
+   */
+  const resolvedChainList: Array<{ entry: FallbackModelEntry; model: ReturnType<typeof resolveConfiguredModel> }> = (() => {
+    if (!options.fallbackModels || options.fallbackModels.length === 0) {
+      return [];
+    }
+    const resolved: Array<{ entry: FallbackModelEntry; model: ReturnType<typeof resolveConfiguredModel> }> = [];
+    for (const entry of options.fallbackModels) {
+      try {
+        const model = resolveConfiguredModel(modelRegistry, "fallback", entry.provider, entry.modelId);
+        if (!model) {
+          // FNXC:FallbackModelList 2026-09-04-00:00: skip-unresolvable entries with a bounded warning. Never raise from a resilience setting.
+          piLog.warn(`Fallback chain: skipping unresolvable ${entry.provider}:${entry.modelId}`);
+          continue;
+        }
+        resolved.push({ entry, model });
+      } catch (resolutionErr: unknown) {
+        const msg = resolutionErr instanceof Error ? resolutionErr.message : String(resolutionErr);
+        // FNXC:FallbackModelList 2026-09-04-00:00: skip-unresolvable entries with a bounded warning. Never raise from a resilience setting.
+        piLog.warn(`Fallback chain: skipping ${entry.provider}:${entry.modelId} — ${msg}`);
+      }
+    }
+    return resolved;
+  })();
+  const chainHasEntries = resolvedChainList.length > 0;
+  if (chainHasEntries) {
+    chainActive = true;
+    /*
+     * GDPR-001 chain path — primary first, then the list in order.
+     *
+     * The configured lane primary (`selectedModel`) is ALWAYS the first attempt;
+     * the list entries are positions 2..N+1 in `chainAttemptLog`. `selectedModel`
+     * is never reassigned (it stays bound to the configured primary so token
+     * accounting, log fields, and the prompt-time loop's `selectedModel`-swap all
+     * read the true primary, not the first list entry).
+     *
+     * Per-level reasoning:
+     *   - success → record `recovered`, advance `chainActiveIndex`, set
+     *     `usingFallback` true if we're past the primary, apply per-entry thinking
+     *     level, break.
+     *   - usage-limit or transient-auth → record `skipped-rate-limit` /
+     *     `skipped-auth`, emit a per-level `onFallbackModelUsed` transition, advance
+     *     to the next entry (NO sleep — this is the binding behavior change vs the
+     *     3×30s same-model backoff in `withRateLimitRetry`).
+     *   - any other error → record `bubble`, RE-THROW the raw error immediately
+     *     (preserves the current "non-retryable" exit; a single non-skip error on
+     *     any level stops the chain).
+     */
+    const primaryModelLabel = selectedModel
+      ? `${selectedModel.provider}/${selectedModel.id}`
+      : "unknown model";
+    const tryChainLevel = async (
+      position: number,
+      modelRef: typeof selectedModel,
+      entry: { provider: string; modelId: string; thinkingLevel?: string },
+      label: string,
+    ): Promise<{ ok: true; result: Awaited<ReturnType<typeof createSessionWithModel>>; entry: typeof entry; position: number } | { ok: false; skip: true; message: string; entry: typeof entry; position: number } | { ok: false; skip: false; error: unknown; entry: typeof entry; position: number }> => {
+      try {
+        const result = await createSessionWithModel(modelRef);
+        chainAttemptLog.push({
+          position,
+          model: label,
+          ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+          outcome: "recovered",
+          reason: "session created",
+        });
+        piLog.debug(`Fallback chain: session created at position ${position} (${label})`);
+        return { ok: true, result, entry, position };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        const isUsage = isUsageLimitError(message);
+        const isAuth = isTransientAuthCredentialError(message);
+        if (isUsage || isAuth) {
+          chainAttemptLog.push({
+            position,
+            model: label,
+            ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+            outcome: isUsage ? "skipped-rate-limit" : "skipped-auth",
+            reason: message.slice(0, 200),
+          });
+          // FNXC:FallbackModelList 2026-09-04-00:00: skip-on-rate-limit / skip-on-transient-auth. NO sleep — the ordered list is what makes a chain different from a 3×30s same-model backoff.
+          piLog.warn(`Fallback chain: skipping ${label} (${isUsage ? "rate-limit" : "transient-auth"})`);
+          return { ok: false, skip: true, message, entry, position };
+        }
+        chainAttemptLog.push({
+          position,
+          model: label,
+          ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+          outcome: "bubble",
+          reason: message.slice(0, 200),
+        });
+        return { ok: false, skip: false, error: err, entry, position };
+      }
+    };
+    const emitChainTransition = async (
+      fromLabel: string,
+      toLabel: string,
+      failureMessage: string,
+    ): Promise<void> => {
+      if (!options.onFallbackModelUsed) return;
+      const normalizedFailure = failureMessage.toLowerCase();
+      const failureCategory: FallbackModelUsedPayload["failureCategory"] =
+        normalizedFailure.includes("auth")
+        || normalizedFailure.includes("api key")
+        || normalizedFailure.includes("credential")
+        || normalizedFailure.includes("oauth")
+        || normalizedFailure.includes("401")
+        || normalizedFailure.includes("403")
+          ? "authentication"
+          : normalizedFailure.includes("rate limit") || normalizedFailure.includes("429") || normalizedFailure.includes("quota")
+            ? "rate-limit"
+            : isRetryableModelSelectionError(failureMessage)
+              ? "model-selection"
+              : "provider-error";
+      await options.onFallbackModelUsed({
+        primaryModel: fromLabel,
+        fallbackModel: toLabel,
+        triggerPoint: "session-creation",
+        taskId: options.taskId,
+        taskTitle: options.taskTitle,
+        timestamp: new Date().toISOString(),
+        failureCategory,
+      });
+    };
+    // Position 1 = the configured primary (`selectedModel`).
+    let activeModel: typeof selectedModel = selectedModel;
+    let activeLabel: string = primaryModelLabel;
+    let chainSuccess: Awaited<ReturnType<typeof createSessionWithModel>> | undefined;
+    // Record the primary attempt FIRST in the attempt log so the chain log always
+    // includes position 1 (primary) — `chainAttemptLog.length` ends up as 1 + N
+    // entries on full exhaustion, matching the spec's `attempts === chain.length + 1`.
+    chainAttemptLog.push({
+      position: 1,
+      model: primaryModelLabel,
+      outcome: "recovered",
+      reason: "pending",
+    });
+    // The primary attempt is the first level. Its classification gates whether the
+    // chain proceeds at all: a non-retryable primary bubbles unchanged (no chain
+    // entries attempted) — this is the "Non-retryable error bubbles" test contract.
+    let primaryOk = false;
+    try {
+      sessionResult = await createSessionWithModel(activeModel);
+      primaryOk = true;
+      chainAttemptLog[0] = {
+        position: 1,
+        model: primaryModelLabel,
+        outcome: "recovered",
+        reason: "session created",
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const isUsage = isUsageLimitError(message);
+      const isAuth = isTransientAuthCredentialError(message);
+      const isRetryable = isUsage || isAuth || isRetryableModelSelectionError(message);
+      if (!isRetryable) {
+        // Non-retryable primary bubbles unchanged. Re-record position 1 as
+        // `bubble` for diagnostics; do NOT attempt any list entries.
+        chainAttemptLog[0] = {
+          position: 1,
+          model: primaryModelLabel,
+          outcome: "bubble",
+          reason: message.slice(0, 200),
+        };
+        // FNXC:ModelFallback 2026-09-04-00:00: non-retryable primary errors bubble raw (no chain entries tried, no exhausted error, no emission).
+        throw err;
+      }
+      // Retryable primary failure: classify for the log entry, then proceed to chain.
+      chainAttemptLog[0] = {
+        position: 1,
+        model: primaryModelLabel,
+        outcome: isUsage ? "skipped-rate-limit" : isAuth ? "skipped-auth" : "bubble",
+        reason: message.slice(0, 200),
+      };
+    }
+    if (primaryOk) {
+      chainSuccess = sessionResult;
+      chainActiveIndex = 0;
+      usingFallback = false;
+    } else {
+      // Walk the list, emitting a per-level transition BEFORE each entry attempt
+      // (the legacy single-pair emit fired on primary failure, before trying the
+      // fallback — the chain extends that to every entry).
+      for (let i = 0; i < resolvedChainList.length; i++) {
+        const { entry, model } = resolvedChainList[i]!;
+        const label = `${entry.provider}/${entry.modelId}`;
+        const position = i + 2; // 1-based, with primary at position 1.
+        const fromLabel = activeLabel;
+        // The reason for the transition is the most-recent failure: for the
+        // first entry it's the primary's failure reason; for later entries it's
+        // the previous entry's skip reason.
+        const transitionReason = chainAttemptLog[chainAttemptLog.length - 1]?.reason
+          ?? "primary failed retryably";
+        await emitChainTransition(fromLabel, label, transitionReason);
+        const attempt = await tryChainLevel(position, model, entry, label);
+        if (attempt.ok) {
+          chainSuccess = attempt.result;
+          chainActiveIndex = i;
+          usingFallback = true;
+          chainResolvedEntry = {
+            provider: entry.provider,
+            modelId: entry.modelId,
+            ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+          };
+          break;
+        }
+        if (attempt.skip) {
+          activeLabel = label;
+          continue;
+        }
+        // Non-skip error: bubble immediately (preserves the current "non-retryable" exit).
+        // FNXC:ModelFallback 2026-09-04-00:00: any non-skip error from a chain entry bubbles raw — no exhausted error wrapping, no further entries.
+        throw attempt.error;
+      }
+    }
+    if (chainSuccess) {
+      sessionResult = chainSuccess;
+      // Apply the per-entry thinking level (if any) to the freshly created session.
+      // On the chain path the primary has no per-entry level (positions 2..N+1
+      // only), so the helper falls through to the legacy `defaultThinkingLevel`.
+      const applyEntry = chainResolvedEntry ?? (
+        chainActiveIndex === 0
+          ? undefined
+          : resolvedChainList[chainActiveIndex]?.entry
+      );
+      applyThinkingLevelIfSupported(
+        sessionResult.session as AgentSession,
+        chainResolvedEntry
+          ? `${chainResolvedEntry.provider}/${chainResolvedEntry.modelId}`
+          : primaryModelLabel,
+        applyEntry?.thinkingLevel,
+      );
+    } else {
+      // Chain exhausted: every list entry was skipped on rate-limit / transient-auth.
+      // The last "skipped" entry's message is surfaced as the underlying reason; the
+      // full per-attempt log is carried on the error for downstream consumers.
+      const lastSkipMessage = chainAttemptLog[chainAttemptLog.length - 1]?.reason
+        ?? "All chain entries skipped on rate-limit / transient-auth";
+      throw makeFallbackExhaustedError(
+        "session-creation",
+        chainAttemptLog.length,
+        new Error(lastSkipMessage),
+        chainAttemptLog,
+      );
+    }
+  } else {
+    // Legacy single-pair path (unchanged when chain is empty/unset).
+    try {
+      sessionResult = await createSessionWithModel(selectedModel);
+      // FNXC:EngineDiagnostics 2026-07-26-10:00: every agent session start emitted this at info; steady-state bookkeeping → debug (FUSION_DEBUG=pi).
+      piLog.debug(`Session created successfully (model=${selectedModel ? `${selectedModel.provider}/${selectedModel.id}` : "default"})`);
+    } catch (err: any) {
+      if (!fallbackModel || !selectedModel || !hasDistinctFallback || !isRetryableModelSelectionError(err?.message || "")) {
+        piLog.error(`Session creation failed: ${err.message}`);
+        throw err;
+      }
+      piLog.warn(`Primary model failed (${err.message}), trying fallback`);
+      usingFallback = true;
+      try {
+        sessionResult = await createSessionWithModel(fallbackModel);
+      } catch (_fallbackErr: unknown) {
+        // The final retry is intentionally primary and terminal even when fallback failed non-retryably.
+        usingFallback = false;
+        try {
+          sessionResult = await createSessionWithModel(selectedModel);
+        } catch (primaryRetryErr: unknown) {
+          throw makeFallbackExhaustedError("session-creation", 3, primaryRetryErr);
+        }
+      }
+      await emitFallbackUsed("session-creation", err);
+      piLog.debug("Fallback session created successfully");
+    }
+  }
+
+  let activeSession = sessionResult.session;
+  wrapSessionDisposeWithShutdown(activeSession);
+  installToolResultContentGuard(activeSession as AgentToolHookSession);
+  installMessageContentGuard(activeSession as AgentToolHookSession, sessionManager as unknown as SessionManagerLike);
+  (activeSession as any).__fusionMemoryAppendAvailable = options.customTools?.some((tool) => tool.name === FN_MEMORY_APPEND_TOOL_NAME) === true;
+  const promptableSession = activeSession as PromptableSession;
 
   const wireFallbackHooks = (targetSession: PromptableSession): void => {
     installToolResultContentGuard(targetSession as unknown as AgentToolHookSession);
@@ -3356,6 +3703,147 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
         const recoveredSession = await swapPromptSession(selectedModel);
         await promptSessionAndCheck(recoveredSession, prompt, effectivePromptOptions);
         return;
+      }
+
+      /*
+       * FNXC:ModelFallback 2026-09-04-00:00 (chain path at prompt-time):
+       * When the GDPR-001 chain is active, walk the remaining list entries (positions
+       * `chainActiveIndex + 1` … N) on a retryable prompt failure. Per-level single
+       * attempt; skip-on-usage-limit / skip-on-transient-auth advances to the next
+       * entry with NO sleep; any other error bubbles immediately. Emit a
+       * per-level `onFallbackModelUsed` for each transition (a skip still counts
+       * as a transition — the level changed, which is what consumers care about).
+       */
+      if (chainActive) {
+        if (!isRetryableModelSelectionError(errorMessage)
+          && !isUsageLimitError(errorMessage)
+          && !isTransientAuthCredentialError(errorMessage)) {
+          throw err;
+        }
+        // The currently-active level is `chainActiveIndex` (-1 = primary pre-recovery,
+        // 0..N-1 = entry index). Walk entries strictly after it.
+        for (let i = chainActiveIndex + 1; i < resolvedChainList.length; i++) {
+          const { entry, model } = resolvedChainList[i]!;
+          const label = `${entry.provider}/${entry.modelId}`;
+          const position = i + 2;
+          const fromLabel = chainActiveIndex === -1
+            ? (selectedModel ? `${selectedModel.provider}/${selectedModel.id}` : describeModel(promptableSession))
+            : `${resolvedChainList[chainActiveIndex]!.entry.provider}/${resolvedChainList[chainActiveIndex]!.entry.modelId}`;
+          const swapToEntry = async (): Promise<PromptableSession> => {
+            const swapped = await swapPromptSession(model);
+            applyThinkingLevelIfSupported(
+              swapped as AgentSession,
+              label,
+              entry.thinkingLevel,
+            );
+            return swapped;
+          };
+          if (isUsageLimitError(errorMessage) || isTransientAuthCredentialError(errorMessage)) {
+            // Skip the level without trying to prompt; emit the transition.
+            chainAttemptLog.push({
+              position,
+              model: label,
+              ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+              outcome: isUsageLimitError(errorMessage) ? "skipped-rate-limit" : "skipped-auth",
+              reason: errorMessage.slice(0, 200),
+            });
+            if (options.onFallbackModelUsed) {
+              const normalizedFailure = errorMessage.toLowerCase();
+              const failureCategory: FallbackModelUsedPayload["failureCategory"] =
+                normalizedFailure.includes("auth")
+                || normalizedFailure.includes("api key")
+                || normalizedFailure.includes("credential")
+                || normalizedFailure.includes("oauth")
+                || normalizedFailure.includes("401")
+                || normalizedFailure.includes("403")
+                  ? "authentication"
+                  : "rate-limit";
+              await options.onFallbackModelUsed({
+                primaryModel: fromLabel,
+                fallbackModel: label,
+                triggerPoint: "prompt-time",
+                taskId: options.taskId,
+                taskTitle: options.taskTitle,
+                timestamp: new Date().toISOString(),
+                failureCategory,
+              });
+            }
+            continue;
+          }
+          // Retryable model-selection failure: try this level.
+          try {
+            const swapped = await swapToEntry();
+            await promptSessionAndCheck(swapped, prompt, effectivePromptOptions);
+            chainAttemptLog.push({
+              position,
+              model: label,
+              ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+              outcome: "recovered",
+              reason: "prompt succeeded",
+            });
+            if (options.onFallbackModelUsed) {
+              await options.onFallbackModelUsed({
+                primaryModel: fromLabel,
+                fallbackModel: label,
+                triggerPoint: "prompt-time",
+                taskId: options.taskId,
+                taskTitle: options.taskTitle,
+                timestamp: new Date().toISOString(),
+                failureCategory: "model-selection",
+              });
+            }
+            chainActiveIndex = i;
+            usingFallback = true;
+            return;
+          } catch (levelErr: unknown) {
+            const levelMessage = levelErr instanceof Error ? levelErr.message : String(levelErr);
+            if (isUsageLimitError(levelMessage) || isTransientAuthCredentialError(levelMessage)) {
+              chainAttemptLog.push({
+                position,
+                model: label,
+                ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+                outcome: isUsageLimitError(levelMessage) ? "skipped-rate-limit" : "skipped-auth",
+                reason: levelMessage.slice(0, 200),
+              });
+              if (options.onFallbackModelUsed) {
+                const normalizedFailure = levelMessage.toLowerCase();
+                const failureCategory: FallbackModelUsedPayload["failureCategory"] =
+                  normalizedFailure.includes("auth")
+                  || normalizedFailure.includes("api key")
+                  || normalizedFailure.includes("credential")
+                  || normalizedFailure.includes("oauth")
+                  || normalizedFailure.includes("401")
+                  || normalizedFailure.includes("403")
+                    ? "authentication"
+                    : "rate-limit";
+                await options.onFallbackModelUsed({
+                  primaryModel: fromLabel,
+                  fallbackModel: label,
+                  triggerPoint: "prompt-time",
+                  taskId: options.taskId,
+                  taskTitle: options.taskTitle,
+                  timestamp: new Date().toISOString(),
+                  failureCategory,
+                });
+              }
+              continue;
+            }
+            // Non-skip error: bubble immediately, raw.
+            chainAttemptLog.push({
+              position,
+              model: label,
+              ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+              outcome: "bubble",
+              reason: levelMessage.slice(0, 200),
+            });
+            throw levelErr;
+          }
+        }
+        // Out of remaining list entries — every remaining entry was skipped.
+        const lastReason = chainAttemptLog[chainAttemptLog.length - 1]?.reason
+          ?? errorMessage.slice(0, 200)
+          ?? "All chain entries skipped on rate-limit / transient-auth";
+        throw makeFallbackExhaustedError("prompt-time", chainAttemptLog.length, new Error(lastReason), chainAttemptLog);
       }
 
       if (!fallbackModel || usingFallback || !isRetryableModelSelectionError(errorMessage)) {
