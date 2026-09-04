@@ -307,6 +307,22 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
     options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
     description: "Thinking effort for the executor fallback model. Empty inherits from shared fallback or executor thinking.",
   },
+  /*
+   * FNXC:Settings-FallbackModels 2026-09-04-00:00:
+   * GDPR-001 ordered fallback-model list for the execution lane. Serialized `text` payload
+   * (newline-separated `provider:modelId[:thinkingLevel]` entries) because `validateValue`
+   * only accepts string/text/number/boolean/enum/multi-enum; an array-of-objects would be
+   * rejected by the never-exhaustiveness default. The list wins over the legacy single pair
+   * (`executionFallbackProvider` + `executionFallbackModelId`) when non-empty; the legacy pair
+   * remains the resolution default for back-compat. Parsed at resolution time; malformed lines
+   * are skipped with a bounded warning (a resilience setting must never wedge session creation).
+   */
+  {
+    id: "executionFallbackModels",
+    name: "Executor fallback models (ordered list)",
+    type: "text",
+    description: "Ordered list of execution fallback models, one per line, format `provider:modelId[:thinkingLevel]`. Optional third field sets the per-entry thinking level (e.g. `openrouter:anthropic/claude-3.5-sonnet:high`). Blank lines ignored. Malformed lines skipped with a warning. Empty/unset preserves the legacy single fallback pair.",
+  },
   {
     id: "planningProvider",
     name: "Planning provider",
@@ -361,6 +377,18 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
     options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
     description: "Thinking effort for the planning fallback model. Empty inherits from the task or default thinking level.",
   },
+  /*
+   * FNXC:Settings-FallbackModels 2026-09-04-00:00:
+   * GDPR-001 ordered fallback-model list for the planning lane. See executionFallbackModels
+   * for the encoding and back-compat contract; the list wins over the legacy planning fallback
+   * pair (`planningFallbackProvider` + `planningFallbackModelId`) when non-empty.
+   */
+  {
+    id: "planningFallbackModels",
+    name: "Planning fallback models (ordered list)",
+    type: "text",
+    description: "Ordered list of planning fallback models, one per line, format `provider:modelId[:thinkingLevel]`. Optional third field sets the per-entry thinking level. Blank lines ignored. Malformed lines skipped with a warning. Empty/unset preserves the legacy single fallback pair.",
+  },
   {
     id: "validatorProvider",
     name: "Validator provider",
@@ -410,6 +438,18 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
     type: "enum",
     options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
     description: "Thinking effort for the validator fallback model. Empty inherits from the task or default thinking level.",
+  },
+  /*
+   * FNXC:Settings-FallbackModels 2026-09-04-00:00:
+   * GDPR-001 ordered fallback-model list for the validator lane. See executionFallbackModels
+   * for the encoding and back-compat contract; the list wins over the legacy validator
+   * fallback pair (`validatorFallbackProvider` + `validatorFallbackModelId`) when non-empty.
+   */
+  {
+    id: "validatorFallbackModels",
+    name: "Validator fallback models (ordered list)",
+    type: "text",
+    description: "Ordered list of validator fallback models, one per line, format `provider:modelId[:thinkingLevel]`. Optional third field sets the per-entry thinking level. Blank lines ignored. Malformed lines skipped with a warning. Empty/unset preserves the legacy single fallback pair.",
   },
 ];
 
