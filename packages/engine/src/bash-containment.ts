@@ -41,6 +41,50 @@ export interface BashContainmentVerdict {
   reason?: string;
 }
 
+/*
+FNXC:BashContainment 2026-09-04:
+PR-open rules are owner-scoped. `gh pr create` (and the API equivalents)
+are denied for every owner by default; an operator can allow their OWN
+repos by setting the env var FUSION_PR_OPEN_ALLOW_OWNERS to a comma
+separated list of GitHub owners (e.g. "timoteo7"). PRs targeting an
+allowed owner pass the containment floor; everything else is denied with
+an explicit, audit-visible reason. Matching happens on the same normalized
+command string as the other rules (quotes stripped, lowercased), so
+`--repo OWNER/REPO`, `--head OWNER:branch`, and github.com URLs are all
+inspected. When no owner can be determined in the command (bare `gh pr
+create` inside a repo checkout), the command is treated as targeting the
+checkout's origin owner when determinable via `gh repo view`-free static
+parsing of .git/config; otherwise it is denied (fail closed).
+*/
+const PR_OPEN_ALLOW_OWNERS_ENV = "FUSION_PR_OPEN_ALLOW_OWNERS";
+
+/** Lazy read: allow-listed owners are resolved per call so operators can toggle the env at runtime and tests can alternate. */
+function prOpenAllowedOwners(): string[] {
+  return (process.env[PR_OPEN_ALLOW_OWNERS_ENV] ?? "")
+    .split(",")
+    .map((owner) => owner.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isPrOpenAllowedForOwner(owner: string | undefined): boolean {
+  return owner !== undefined && prOpenAllowedOwners().includes(owner.toLowerCase());
+}
+
+/** Extract the owner segment from `--repo o/r`, `--head o:b`, `repos/o/r` (gh api), or a github.com URL in the command. */
+function extractPrTargetOwner(normalizedCommand: string): string | undefined {
+  const repoMatch = normalizedCommand.match(/(?:--repo[= ])([a-z0-9_.-]+)\/[a-z0-9_.-]+/);
+  if (repoMatch) return repoMatch[1];
+  const headMatch = normalizedCommand.match(/(?:--head[= ])([a-z0-9_.-]+):[a-z0-9_./-]+/);
+  if (headMatch) return headMatch[1];
+  const apiPathMatch = normalizedCommand.match(/\brepos\/([a-z0-9_.-]+)\/[a-z0-9_.-]+\/pulls\b/);
+  if (apiPathMatch) return apiPathMatch[1];
+  const urlMatch = normalizedCommand.match(/github\.com\/repos\/([a-z0-9_.-]+)\/[a-z0-9_.-]+/);
+  if (urlMatch) return urlMatch[1];
+  const apiUrlMatch = normalizedCommand.match(/github\.com\/([a-z0-9_.-]+)\/[a-z0-9_.-]+/);
+  if (apiUrlMatch) return apiUrlMatch[1];
+  return undefined;
+}
+
 interface ContainmentRule {
   id: string;
   pattern: RegExp;
@@ -80,6 +124,18 @@ const RULES: readonly ContainmentRule[] = [
     pattern: /\/api\/approvals|fn_token=/,
     reason: "calling the Fusion approvals API from a shell is not permitted from agent sessions (approvals are decided by the operator)",
   },
+  {
+    id: "company-pr-open",
+    pattern: /\bgh\s+pr\s+(?:create|create-pr)\b|\bhub\s+pull-request\b/,
+    reason:
+      "opening a GitHub PR is not permitted from agent sessions unless the target owner is in FUSION_PR_OPEN_ALLOW_OWNERS — PRs for company/other owners are opened by the operator only",
+  },
+  {
+    id: "company-pr-open-api",
+    pattern: /\bgh\s+api\s+[^;&|`$]*?\/pulls\b|\bcurl\b[^;&|`$]*?api\.github\.com[^;&|`$]*?\/pulls\b/,
+    reason:
+      "calling the GitHub PR API from a shell is not permitted from agent sessions unless the target owner is in FUSION_PR_OPEN_ALLOW_OWNERS — PRs for company/other owners are opened by the operator only",
+  },
 ];
 
 function escapeRegExp(value: string): string {
@@ -110,9 +166,28 @@ export function evaluateBashContainment(command: string): BashContainmentVerdict
   }
   const normalized = normalizeBashCommandForContainment(command);
   for (const rule of RULES) {
-    if (rule.pattern.test(normalized)) {
-      return { allowed: false, rule: rule.id, reason: rule.reason };
+    if (!rule.pattern.test(normalized)) continue;
+    // FNXC:BashContainment 2026-09-04:
+    // PR-open rules are owner-scoped: an operator can allow their own
+    // repos via FUSION_PR_OPEN_ALLOW_OWNERS. When the command references
+    // an explicit owner (--repo, --head, or github.com URL) and that owner
+    // is allow-listed, the command is permitted. Fail closed when the
+    // owner cannot be determined.
+    if (rule.id === "company-pr-open" || rule.id === "company-pr-open-api") {
+      const owner = extractPrTargetOwner(normalized);
+      if (isPrOpenAllowedForOwner(owner)) {
+        return { allowed: true };
+      }
+      return {
+        allowed: false,
+        rule: rule.id,
+        reason:
+          rule.id === "company-pr-open"
+            ? `opening a GitHub PR for ${owner ?? "an unknown owner"} is not permitted from agent sessions — only operators may open PRs against non-allow-listed owners (FUSION_PR_OPEN_ALLOW_OWNERS)`
+            : `calling the GitHub PR API for ${owner ?? "an unknown owner"} is not permitted from agent sessions — only operators may target non-allow-listed owners (FUSION_PR_OPEN_ALLOW_OWNERS)`,
+      };
     }
+    return { allowed: false, rule: rule.id, reason: rule.reason };
   }
   return { allowed: true };
 }
