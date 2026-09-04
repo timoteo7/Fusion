@@ -637,6 +637,45 @@ export { buildSessionSkillContextSync, type SessionSkillContextResult } from "./
 export { AgentReflectionService, type AgentReflectionServiceOptions } from "./agents/agent-reflection.js";
 export { AgentSelfImproveService, type AgentSelfImproveServiceOptions } from "./agents/agent-self-improve.js";
 export {
+  type EvolutionEvent,
+  type HermesAdapter,
+  type HermesRefusalReason,
+  type RunHermesFn,
+  type HermesRunnerOutput,
+  type CreateHermesAdapterOptions,
+  type BuildArtifactInput,
+  createHermesAdapter,
+  defaultRunHermes,
+  parseHermesOutput,
+  buildArtifactFromCandidate,
+  FakeHermesAdapter,
+  makeFakeHermesArtifact,
+} from "./agents/hermes-adapter.js";
+export {
+  type HerdrEvent,
+  type HerdrAdapter,
+  type HerdrRefusalReason,
+  type HerdrRunnerOutput,
+  type RunHerdrFn,
+  type CreateHerdrAdapterOptions,
+  createHerdrAdapter,
+  defaultRunHerdr,
+  parseHerdrOutput,
+  FakeHerdrAdapter,
+  makeFakeHerdrEvidence,
+} from "./agents/herdr-adapter.js";
+export {
+  EvolutionCycle,
+  defaultProposeCandidate,
+  DEFAULT_EVOLUTION_CYCLE_MIN_INTERVAL_MS,
+} from "./agents/evolution-cycle.js";
+export type {
+  EvolutionSignalCluster,
+  RunEvolutionCycleInput,
+  RunEvolutionCycleResult,
+  EvolutionCycleOptions,
+} from "./agents/evolution-cycle.js";
+export {
   buildAgentChatPrompt,
   resolveAgentInstructionsWithRatings,
   resolveAgentInstructions,

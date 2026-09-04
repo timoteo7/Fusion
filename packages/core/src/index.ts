@@ -910,6 +910,66 @@ export {
 export type { AgentAssignmentPolicy, ImplementationTaskBindContext, ImplementationTaskBindVerdict, WorkflowRoleCapabilityOptions } from "./agents/agent-role-policy.js";
 export { ReflectionStore } from "./agents/reflection-store.js";
 export type { ReflectionStoreEvents } from "./agents/reflection-store.js";
+export { EvolutionStore } from "./agents/evolution-store.js";
+export type {
+  EvolutionStoreEvents,
+  EvolutionStoreOptions,
+  CreateEvolutionSignalInput,
+  AppendEvolutionArtifactInput,
+  EvolutionSignalFilter,
+} from "./agents/evolution-store.js";
+export {
+  redactEvolutionArtifact,
+  computeEvolutionCandidateChecksum,
+  canonicalizeCandidate,
+} from "./agents/evolution-types.js";
+export {
+  EvolutionTrialService,
+  DEFAULT_EVOLUTION_TRIAL_CRITERIA,
+  decideEvolutionTrial,
+  computeEvolutionAuditId,
+  redactEvolutionAuditEvent,
+} from "./agents/evolution-trial.js";
+export type {
+  EvolutionTrialInput,
+  RunChecksFn,
+  EvolutionAuditEmitter,
+  EvolutionAuditEvent,
+  EvolutionTrialResult,
+} from "./agents/evolution-trial.js";
+export {
+  createEvolutionApplyGate,
+  refusingLiveWriter,
+  recordingLiveWriter,
+  type EvolutionApplyRefusalReason,
+  type EvolutionApplyOutcome,
+  type WriteLiveStateFn,
+  type ApprovalRequestStoreLike,
+  type CreateEvolutionApplyGateOptions,
+  type EvolutionApplyAuditMetadata,
+} from "./agents/evolution-apply-gate.js";
+export type {
+  EvolutionSignal,
+  EvolutionSignalOutcome,
+  EvolutionSignalSource,
+  EvolutionReviewVerdict,
+  EvolutionFailureCategory,
+  EvolutionChangeType,
+  EvolutionCandidate,
+  EvolutionEvidence,
+  HermesEvidence,
+  HerdrEvidence,
+  EvolutionRun,
+  EvolutionRunMetrics,
+  EvolutionDecisionCriterion,
+  EvolutionDecision,
+  EvolutionTrial,
+  EvolutionArtifact,
+  EvolutionTrigger,
+  EvolutionApproval,
+  EvolutionApprovalStatus,
+} from "./agents/evolution-types.js";
+
 export { MessageStore } from "./stores/message-store.js";
 export type { MessageStoreEvents } from "./stores/message-store.js";
 export { ApprovalRequestStore } from "./agents/approval-request-store.js";
