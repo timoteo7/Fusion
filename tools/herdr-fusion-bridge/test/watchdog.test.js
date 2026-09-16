@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Watchdog, createWatchdog, isRealStall } from '../src/watchdog.js';
+import { Watchdog, createWatchdog, isRealStall, taskSignature } from '../src/watchdog.js';
 import { fakeClock } from '../src/clock.js';
 import { loadConfig } from '../src/config.js';
 
@@ -129,4 +129,26 @@ test('watchdog never creates dangling timers (no clock side effects)', () => {
   clock.advance(2000);
   assert.equal(wd.isStalled('T-1', clock.now()), true);
   assert.equal(clock.pendingTimers(), 0);
+});
+
+test('taskSignature is a stable (state, seq) string; missing fields normalize to empty', () => {
+  // Same inputs → same string, so the watchdog's signature diff is a stable
+  // equality check across the SSE onEvent path and the poll path.
+  assert.equal(taskSignature({ state: 'active', seq: 5 }), 'active|5');
+  assert.equal(taskSignature({ state: 'active', seq: 5 }), 'active|5');
+  // Missing state → empty state segment, NOT a throw. Both paths can call
+  // taskSignature with sparse observations (e.g. a poll-path observation
+  // that has no state yet).
+  assert.equal(taskSignature({ state: null, seq: 5 }), '|5');
+  assert.equal(taskSignature({ state: undefined, seq: 5 }), '|5');
+  // Missing seq → empty seq segment. A 'active' and a 'active' with no seq
+  // match, so a poll path that loses the seq still detects a state change.
+  assert.equal(taskSignature({ state: 'active', seq: null }), 'active|');
+  assert.equal(taskSignature({ state: 'active' }), 'active|');
+  assert.equal(taskSignature({ state: 'active', seq: undefined }), 'active|');
+  // Fully empty → empty string. observeSignature on an empty signature
+  // still diffs against the previous one (so a transition from real to
+  // empty IS a change).
+  assert.equal(taskSignature({}), '|');
+  assert.equal(taskSignature(), '|');
 });

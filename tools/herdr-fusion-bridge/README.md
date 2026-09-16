@@ -117,6 +117,44 @@ tracked as context only and never resets the stall window. A task that
 generates an unbounded stream of log lines while making no state change is
 exactly the "real stall" this bridge reports after `HBRIDGE_WATCHDOG_TIMEOUT_MS`.
 
+### Wired stall detection (Watchdog → Supervisor)
+
+The watchdog is constructed **before** the supervisor and passed in as an
+optional dependency (`new Supervisor({ ..., watchdog })`). Each tick runs a
+bounded stall scan AFTER the reconcile step:
+
+1. **Poll path signatures.** The supervisor's `reconcileOne` calls
+   `watchdog.observeSignature(taskId, taskSignature({state, seq}))` after the
+   correlation state is updated, so a discrete change observed on the poll
+   path (e.g. Fusion listTasks) re-arms the stall window. The shared
+   `taskSignature({state, seq})` helper in `src/watchdog.js` is the single
+   source of truth for the (state, seq) pair the watchdog diffs; the SSE
+   onEvent path in `src/orchestrator.js` calls the same helper, so SSE and
+   poll paths converge on identical signatures.
+2. **Bounded scan.** After the reconcile loop, the supervisor iterates the
+   poll observations and for each task with `watchdog.hasProgress(taskId)`
+   and a non-terminal state, asks `watchdog.isStalled(taskId, now)`. A stall
+   emits one `stalled` notification per scan with the fixture's two-field
+   payload `{ lastProgressMs, timeoutMs }` (see `test/fixtures/events.json`).
+3. **Dedup.** The `DedupNotifier` gate owns the dedup window
+   (`dedupWindowMs`, default 5000ms); a per-tick re-emit while a stall
+   persists collapses to a single operator-visible notification per
+   `dedupWindowMs` episode. A persisting stall re-emits after the window
+   expires; a discrete state/seq change (which re-credits `lastProgressAt`)
+   re-arms the window so a fresh stall re-emits cleanly.
+4. **Terminal exclusion.** Tasks in `completed` / `done` / `error` / `failed`
+   are skipped by the scan. A terminal task sits frozen forever and would be
+   a false positive. `blocked` is **not** terminal — a stuck blocked task
+   is a real stall and the spec classifies it as a separate event kind.
+5. **Early-return safety.** The engine-absent and transport-cooldown
+   early-returns in `_tickOnce` precede the stall scan, so a down engine or
+   cooled-down transport never produces a stall scan iteration and never
+   emits a spurious `stalled`.
+
+The supervisor is backwards compatible: `watchdog` is optional and the
+existing Supervisor call sites that do not pass it (or do not need stall
+reporting) continue to work unchanged.
+
 ### Steering contract
 
 `steer --task=<id> --command=<cmd>` (`--force` bypasses the dedup window, but

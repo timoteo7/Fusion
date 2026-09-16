@@ -15,7 +15,7 @@
 //     every reconcile, so dedup markers survive a restart.
 
 import { Supervisor } from './bridge.js';
-import { createWatchdog } from './watchdog.js';
+import { createWatchdog, taskSignature } from './watchdog.js';
 import { PersistentState } from './state.js';
 import { OrphanRecovery } from './watchers/orphan-recovery.js';
 import { SseWatcher } from './watchers/sse-watcher.js';
@@ -57,9 +57,16 @@ export function createBridge({
     });
   theState.load();
 
+  // Construct the watchdog BEFORE the Supervisor so the Supervisor's stall
+  // scan (step 4 of _tickOnce) can consult it. The previous ordering
+  // (Supervisor first, Watchdog second) was a structural bug: even with a
+  // reference passed in, the supervisor was already frozen without the
+  // watchdog reference.
+  const watchdog = createWatchdog(config, clock);
+
   const sup =
     supervisor ||
-    new Supervisor({ fusion, herdr, notifier, logger, config, clock });
+    new Supervisor({ fusion, herdr, notifier, logger, config, clock, watchdog });
 
   const theStepper =
     stepper ||
@@ -75,8 +82,6 @@ export function createBridge({
       engineGate: () => sup.enginePresent,
     });
 
-  const watchdog = createWatchdog(config, clock);
-
   const watcher =
     sseWatcher ||
     new SseWatcher({
@@ -86,13 +91,20 @@ export function createBridge({
       clock,
       onEvent: (event) => {
         // Feed the bridge: a discrete state change credits real progress; log
-        // chatter is observed as context ONLY (never liveness-bearing).
+        // chatter is observed as context ONLY (never liveness-bearing). The
+        // shared `taskSignature({state, seq})` helper from src/watchdog.js is
+        // the single source of truth for the signature shape — the same
+        // helper the supervisor's poll-path reconcileOne uses, so a discrete
+        // change observed on either path re-arms the stall window.
         const d = event && event.data ? event.data : {};
         const taskId = d.taskId || null;
         if (taskId) {
-          const signature = `${d.state || ''}|${d.seq != null ? d.seq : ''}`;
+          const signature = taskSignature({ state: d.state, seq: d.seq });
           if (watchdog.observeSignature(taskId, signature)) {
-            sup.recordProgress && sup.recordProgress(taskId);
+            // A discrete change was credited inside observeSignature; the
+            // supervisor's poll path will see the same signature and not
+            // double-credit. No extra Supervisor.recordProgress call is
+            // needed (and Supervisor has no such method).
           }
           if (d.logLine) {
             watchdog.observeLogLine(taskId);

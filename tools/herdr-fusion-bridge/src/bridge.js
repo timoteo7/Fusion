@@ -13,6 +13,7 @@
 // long-running process; `start()` schedules ticks via the clock's setInterval.
 
 import { buildCorrelationKey } from './correlator.js';
+import { taskSignature } from './watchdog.js';
 
 export class Supervisor {
   constructor({
@@ -22,6 +23,7 @@ export class Supervisor {
     logger,
     config,
     clock = null,
+    watchdog = null,
   } = {}) {
     this.fusion = fusion;
     this.herdr = herdr;
@@ -30,6 +32,13 @@ export class Supervisor {
     this.config = config;
     this.clock = clock || { now: () => Date.now() };
     this.now = () => this.clock.now();
+    // Optional liveness watchdog: when present, _tickOnce runs a bounded stall
+    // scan (step 4) that consults Watchdog.isStalled and emits one deduplicated
+    // `stalled` notification per (task, real-stall episode). The poll path
+    // also feeds its own observations into the watchdog so SSE outages do
+    // not blind stall detection. Optional for backward compatibility with
+    // existing call sites and tests that do not need stall reporting.
+    this.watchdog = watchdog;
 
     this.running = false;
     this.timer = null; // the tick interval handle
@@ -152,6 +161,35 @@ export class Supervisor {
       result.events.push(...events);
     }
 
+    // 4. Bounded stall scan (only when a watchdog is wired). Consults
+    //    Watchdog.isStalled(taskId, now) for each observation with a real
+    //    progress baseline, skipping terminal-state tasks (which sit in a
+    //    frozen terminal forever and are not stalls), and emits one
+    //    deduplicated `stalled` notification per scan. The dedup window is
+    //    owned by the DedupNotifier so a per-tick re-emit collapses to a
+    //    single operator-visible notification per episode; a persisting
+    //    stall re-emits after the window expires, and a discrete state/seq
+    //    change (credited in step 3 via watchdog.observeSignature) re-arms
+    //    the window so a fresh stall re-emits cleanly.
+    if (this.watchdog) {
+      for (const obs of observations) {
+        if (!obs || !obs.taskId) continue;
+        if (!this.watchdog.hasProgress(obs.taskId)) continue;
+        if (isTerminalState(obs.state)) continue;
+        if (!this.watchdog.isStalled(obs.taskId, now)) continue;
+        const stallPayload = {
+          lastProgressMs: this.watchdog.lastProgressAt(obs.taskId),
+          timeoutMs: this.watchdog.timeout,
+        };
+        this.emit('stalled', obs, result, {
+          now,
+          note: `no real progress for ${this.watchdog.stallElapsed(obs.taskId, now)}ms`,
+          payload: stallPayload,
+        });
+        result.events.push({ kind: 'stalled', taskId: obs.taskId });
+      }
+    }
+
     this.lastTickResult = result;
     return result;
   }
@@ -248,6 +286,17 @@ export class Supervisor {
       this.knownAssociations.set(key, obs.paneId);
     }
     this.knownTasks.set(obs.taskId, { ...obs });
+
+    // Feed the poll path's discrete signature into the watchdog. The shared
+    // `taskSignature({state, seq})` helper is the single source of truth for
+    // the (state, seq) pair the watchdog diffs, so a discrete change observed
+    // on the poll path re-arms the stall window even when the SSE stream is
+    // down. The diff returns true only on a genuine discrete change; identical
+    // observations back-to-back never re-credit progress.
+    if (this.watchdog) {
+      this.watchdog.observeSignature(obs.taskId, taskSignature(obs), now);
+    }
+
     return events;
   }
 
@@ -255,7 +304,7 @@ export class Supervisor {
   // Event emission + transport cooldown
   // -------------------------------------------------------------------------
 
-  emit(kind, obs, result, { now = this.now(), note = '' } = {}) {
+  emit(kind, obs, result, { now = this.now(), note = '', payload: extra = null } = {}) {
     const payload = {
       kind,
       ts: now,
@@ -264,6 +313,13 @@ export class Supervisor {
       paneId: obs ? obs.paneId : null,
       note,
     };
+    // Per-kind structured payload (e.g. stalled → {lastProgressMs, timeoutMs}).
+    // The fixture in test/fixtures/events.json defines per-kind payload shapes;
+    // the supervisor attaches them only when the caller supplies one, so
+    // existing emissions are byte-for-byte unchanged.
+    if (extra !== null && extra !== undefined) {
+      payload.payload = extra;
+    }
     this.logger.info(kind, payload);
     if (this.notifier) {
       // The DedupNotifier handles dedup. We wrap in try/catch so a notifier
@@ -301,4 +357,15 @@ export function stateToKind(state) {
   if (state === 'error' || state === 'failed') return 'error';
   if (state === 'completed' || state === 'done') return 'completed';
   return 'progress';
+}
+
+// A terminal task state never emits a `stalled` notification even when the
+// watchdog would otherwise trip on it. Terminal tasks sit in a frozen terminal
+// forever and a stall signal would be a false positive. Blocked is NOT
+// terminal: a task blocked longer than the timeout is genuinely stalled (the
+// spec classifies blocked as a separate, legitimate event kind; the watchdog
+// still trips for stuck blocked tasks).
+export function isTerminalState(state) {
+  if (!state) return false;
+  return state === 'completed' || state === 'done' || state === 'error' || state === 'failed';
 }

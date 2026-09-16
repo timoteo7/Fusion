@@ -107,6 +107,17 @@ export function createWatchdog(config, clock) {
   return new Watchdog({ watchDogTimeoutMs: config.watchDogTimeoutMs, clock });
 }
 
+// Single source of truth for a task's "real progress" signature, shared by the
+// SSE onEvent path AND the poll-path observation handler. A signature is the
+// (state, seq) pair the watchdog diffs to detect a discrete change — a log
+// line is NEVER part of the signature, so log churn cannot mask a stall.
+// Returned as a `state|seq` string so the diff in `Watchdog.signatures` is a
+// simple equality check. `seq` is normalized to an empty string when missing
+// so two "no-seq" observations match.
+export function taskSignature({ state, seq } = {}) {
+  return `${state || ''}|${seq != null ? seq : ''}`;
+}
+
 // Determine whether a task is a real stall: no discrete change within the
 // window, even when logs are actively flowing. Pure helper for tests/reports.
 export function isRealStall({
