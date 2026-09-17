@@ -13,6 +13,10 @@
 //     stall window.
 //   • PersistentState is loaded at construction and saved on stop() and after
 //     every reconcile, so dedup markers survive a restart.
+//   • v2 process detection hangs off the same tick with its own `processEvents`
+//     stream and optional `processStreamAdapter`; the v1 notification stream,
+//     task-event stream, and reconcile loop are untouched, and a bridge built
+//     without a process adapter behaves exactly as it did before v2.
 
 import { Supervisor } from './bridge.js';
 import { createWatchdog, taskSignature } from './watchdog.js';
@@ -21,6 +25,9 @@ import { OrphanRecovery } from './watchers/orphan-recovery.js';
 import { SseWatcher } from './watchers/sse-watcher.js';
 import { SteeringController } from './steering.js';
 import { buildCorrelationKey } from './correlator.js';
+import { ProcessDetector } from './process-detector.js';
+import { NullProcessStreamAdapter } from './process-stream-adapter.js';
+import { ProcessEventStream } from './adapters/notifier.js';
 
 // Build the live parts for a config. Real adapters are env-configurable; tests
 // inject fakes via `parts`. This factory exists so the CLI and the tests share
@@ -38,6 +45,9 @@ export function createBridge({
   supervisor = null,
   stepper = null,
   waitFn = null,
+  processStreamAdapter = null,
+  processEventStream = null,
+  processDetector = null,
 } = {}) {
   if (!config) {
     throw new Error('createBridge requires a config');
@@ -64,9 +74,36 @@ export function createBridge({
   // watchdog reference.
   const watchdog = createWatchdog(config, clock);
 
+  // v2 process detection, wired like the rest: the processEvents stream is the
+  // sink (parallel to the v1 notification stream) and the detector is the
+  // pipeline that fills it. Both are OPTIONAL — without a processStreamAdapter
+  // the detector pulls a NullProcessStreamAdapter, whose collect() always
+  // returns [], so a bridge built exactly as v1 built it emits no process
+  // events and behaves identically. `processDetector` injection wins over
+  // `processStreamAdapter` (the same override rule as `supervisor`).
+  const theClock = clock || { now: () => Date.now() };
+  const theProcessEvents = processEventStream || new ProcessEventStream({ logger });
+  const theProcessDetector =
+    processDetector ||
+    new ProcessDetector({
+      adapter: processStreamAdapter || new NullProcessStreamAdapter(),
+      now: () => theClock.now(),
+      logger,
+    });
+
   const sup =
     supervisor ||
-    new Supervisor({ fusion, herdr, notifier, logger, config, clock, watchdog });
+    new Supervisor({
+      fusion,
+      herdr,
+      notifier,
+      logger,
+      config,
+      clock,
+      watchdog,
+      processDetector: theProcessDetector,
+      processEvents: theProcessEvents,
+    });
 
   const theStepper =
     stepper ||
@@ -135,6 +172,8 @@ export function createBridge({
     stepper: theStepper,
     watchdog,
     orphanRecovery: recovery,
+    processDetector: theProcessDetector,
+    processEvents: theProcessEvents,
   });
 }
 
@@ -152,6 +191,8 @@ export class Bridge {
     stepper = null,
     watchdog = null,
     orphanRecovery = null,
+    processDetector = null,
+    processEvents = null,
   } = {}) {
     this.config = config;
     this.fusion = fusion;
@@ -165,6 +206,10 @@ export class Bridge {
     this.stepper = stepper;
     this.watchdog = watchdog;
     this.orphanRecovery = orphanRecovery;
+    // v2: the process-event sink. It holds no timers and no handles, so the
+    // shutdown contract is unchanged and stop() has nothing extra to release.
+    this.processDetector = processDetector;
+    this.processEvents = processEvents;
     this.started = false;
     this.stoppedAt = null;
   }

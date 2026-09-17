@@ -7,6 +7,10 @@
 //     and never a busy re-probe every tick.
 //   • Event emission (log + notify) for start/progress/blocked/error/stalled/
 //     completed/engine_absent, with dedup delegated to the DedupNotifier.
+//   • v2 process observations: when a ProcessDetector is wired, the same tick
+//     also pulls the process stream and merges its rising-edge, task-associated
+//     process events into `result.processEvents` (never into `result.events`,
+//     so the v1 task-event stream stays byte-compatible).
 //
 // The Supervisor is agnostic to the clock it receives — the fake clock lets
 // tests advance time deterministically with no real sleeps. It never launches a
@@ -24,6 +28,8 @@ export class Supervisor {
     config,
     clock = null,
     watchdog = null,
+    processDetector = null,
+    processEvents = null,
   } = {}) {
     this.fusion = fusion;
     this.herdr = herdr;
@@ -39,6 +45,13 @@ export class Supervisor {
     // not blind stall detection. Optional for backward compatibility with
     // existing call sites and tests that do not need stall reporting.
     this.watchdog = watchdog;
+    // Optional v2 process detection: when present, _tickOnce pulls the process
+    // stream (step 5) and merges its rising-edge process events. `processEvents`
+    // is the stream sink they are published to (see ProcessEventStream in
+    // src/adapters/notifier.js). Both are optional, so every pre-v2
+    // construction behaves exactly as before.
+    this.processDetector = processDetector;
+    this.processEvents = processEvents;
 
     this.running = false;
     this.timer = null; // the tick interval handle
@@ -110,6 +123,7 @@ export class Supervisor {
         engine: null,
         tasks: 0,
         events: [],
+        processEvents: [],
         skipped: true,
         reason: 'tick_in_flight',
       };
@@ -127,7 +141,7 @@ export class Supervisor {
   async _tickOnce() {
     this.tickCount += 1;
     const now = this.now();
-    const result = { tick: this.tickCount, engine: null, tasks: 0, events: [], skipped: false };
+    const result = { tick: this.tickCount, engine: null, tasks: 0, events: [], processEvents: [], skipped: false };
 
     // 1. Engine detection, bounded and re-spaced.
     const engine = await this.ensureEnginePresence(now);
@@ -187,6 +201,27 @@ export class Supervisor {
           payload: stallPayload,
         });
         result.events.push({ kind: 'stalled', taskId: obs.taskId });
+      }
+    }
+
+    // 5. Process observations (v2). The detector pulls the process stream,
+    //    validates and associates every observation, and returns the
+    //    rising-edge process events for this same tick. They are merged into
+    //    `result.processEvents` — never into `result.events`, so the v1
+    //    task-event stream stays byte-compatible for existing consumers — and
+    //    published to the processEvents stream and the notifier sink. Safe-fail:
+    //    a detector that throws is logged, never propagated into the tick loop.
+    if (this.processDetector) {
+      try {
+        const processEvents = await this.processDetector.collect(now);
+        for (const event of processEvents) {
+          result.processEvents.push(event);
+          this.emitProcess(event, { now });
+        }
+      } catch (err) {
+        this.logger.warn('process_stream_error', {}, {
+          error: String(err && err.message ? err.message : err),
+        });
       }
     }
 
@@ -324,6 +359,32 @@ export class Supervisor {
     if (this.notifier) {
       // The DedupNotifier handles dedup. We wrap in try/catch so a notifier
       // failure never bubbles into the tick loop (safe-fail).
+      this.notifier.notify(payload).catch(() => {});
+    }
+  }
+
+  // Publish ONE v2 process event. The event goes to the processEvents stream
+  // (when wired) and through the same notifier sink the v1 events use, with
+  // `kind` set to the process kind (process.started … process.exited) and the
+  // two-field progress payload carried through unchanged. Safe-fail exactly
+  // like emit(): a throwing sink never bubbles into the tick loop.
+  emitProcess(event, { now = this.now() } = {}) {
+    const payload = {
+      kind: event.kind,
+      ts: now,
+      schemaVersion: event.schemaVersion,
+      taskId: event.taskId,
+      processId: event.processId,
+      note: `associated via ${event.associationSource || 'process stream'}`,
+    };
+    if (event.payload) {
+      payload.payload = { ...event.payload };
+    }
+    this.logger.info(event.kind, payload);
+    if (this.processEvents && typeof this.processEvents.publish === 'function') {
+      this.processEvents.publish(event);
+    }
+    if (this.notifier) {
       this.notifier.notify(payload).catch(() => {});
     }
   }

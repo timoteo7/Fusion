@@ -5,6 +5,12 @@
 // (correlationId, kind) within HBRIDGE_DEDUP_WINDOW_MS and applies bounded
 // delivery backoff. A down integration hook fails safe: it records an alert and
 // stops boxing (bounded retries), never a tight loop.
+//
+// v2 adds the processEvents STREAM (see ProcessEventStream at the bottom): an
+// EventEmitter sink fed in parallel to the v1 notification stream. Nothing in
+// the v1 notifier contract changes.
+
+import { EventEmitter } from 'node:events';
 
 import { buildCorrelationKey } from '../correlator.js';
 
@@ -226,5 +232,57 @@ export class CliNotifier {
     } catch {
       return { ok: false, retries: 0 };
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ProcessEventStream — the v2 process-event sink
+// ---------------------------------------------------------------------------
+
+// The `processEvents` stream: an EventEmitter that fans the detector's
+// rising-edge process events out to consumers, in parallel with the v1
+// notification stream. The v1 `events` stream (the supervisor's per-tick task
+// events, delivered through a Notifier) is untouched by it.
+//
+// Dedup is NOT this class's job: the detector owns rising-edge dedup and
+// association, so a consumer that only listens here still sees exactly one
+// event per process-kind rise (the same contract the v1 notification stream
+// gets from the DedupNotifier). This sink only records and delivers what
+// survived, so it can never turn a repeat into a second emission.
+//
+// A consumer listens either on the whole stream or per kind:
+//   stream.on('processEvent', (event) => ...)
+//   stream.on('process.stalled', (event) => ...)
+export class ProcessEventStream extends EventEmitter {
+  constructor({ logger = null } = {}) {
+    super();
+    this.logger = logger;
+    this.published = [];
+  }
+
+  // Publish one already-deduped, already-associated v2 process event.
+  publish(event) {
+    this.published.push(event);
+    this.emit('processEvent', event);
+    if (event && event.kind) {
+      this.emit(event.kind, event);
+    }
+    return event;
+  }
+
+  // How many events were published (optionally filtered by kind).
+  count(kind) {
+    if (kind === undefined) {
+      return this.published.length;
+    }
+    return this.published.filter((e) => e.kind === kind).length;
+  }
+
+  kinds() {
+    return this.published.map((e) => e.kind);
+  }
+
+  close() {
+    this.removeAllListeners();
   }
 }
