@@ -17,6 +17,7 @@ import {
   computeQueueHash,
   createGhRunner,
   isBotAuthor,
+  main,
   parseGreptileScore,
   reconcileCandidates,
   renderMarkdown,
@@ -340,4 +341,65 @@ test("buildQueue reports a candidate that fails gh pr view re-verification", () 
   assert.equal(problems, 1);
   assert.equal(snapshot.prs.length, 0);
   assert.deepEqual(snapshot.discovery.ineligible, ["o/r#21"]);
+});
+
+/**
+ * FNXC:PRQueue 2026-09-17-10:31:
+ * FUSI-001's acceptance criteria require `--strict` to fail loudly (exit 2)
+ * when the queue is incomplete, and require a negative control proving the
+ * failure is real rather than unconditional. This drives the CLI seam with
+ * injected `gh` runners and capture-only streams: the same invocation returns
+ * 0 on a clean queue and 2 on a queue with an ineligible candidate or a PR row
+ * missing a required field, so the exit code discriminates instead of being a
+ * constant.
+ */
+test("main --strict negative control: exit 0 on a clean queue, exit 2 when incomplete", () => {
+  const sink = { write: () => true };
+  const view = (overrides) => ({
+    state: "OPEN",
+    isDraft: false,
+    mergeStateStatus: "CLEAN",
+    author: { login: "timoteo7" },
+    comments: [],
+    reviews: [],
+    statusCheckRollup: [],
+    ...overrides,
+  });
+  const candidate = (number, title) => ({
+    searchPrs: [{ number, repository: { nameWithOwner: "o/r" }, title, url: `u${number}` }],
+    searchIssues: [
+      { number, repository: { nameWithOwner: "o/r" }, title, url: `u${number}`, isPullRequest: true },
+    ],
+    repoList: {
+      "o/r": [{ number, title, url: `u${number}`, headRefName: `b${number}`, isDraft: false }],
+    },
+    threads: { [number]: [] },
+  });
+  const clean = fakeGh({
+    ...candidate(41, "ok"),
+    views: { 41: view({ number: 41, title: "ok", url: "u41", headRefName: "b41" }) },
+  });
+  const ineligible = fakeGh({
+    ...candidate(42, "closed"),
+    views: {
+      42: view({ number: 42, title: "closed", url: "u42", headRefName: "b42", state: "CLOSED" }),
+    },
+  });
+  const missingField = fakeGh({
+    ...candidate(43, "no branch"),
+    // `headRefName` intentionally absent: the row cannot satisfy the queue contract.
+    views: { 43: view({ number: 43, title: "no branch", url: "u43" }) },
+  });
+
+  assert.equal(main(["--stdout"], { gh: clean, stdout: sink, stderr: sink }), 0);
+  assert.equal(main(["--stdout", "--strict"], { gh: clean, stdout: sink, stderr: sink }), 0);
+
+  // Negative control: without `--strict` the same broken queue still exits 0.
+  assert.equal(main(["--stdout"], { gh: ineligible, stdout: sink, stderr: sink }), 0);
+  assert.equal(main(["--stdout", "--strict"], { gh: ineligible, stdout: sink, stderr: sink }), 2);
+
+  assert.equal(main(["--stdout", "--strict"], { gh: missingField, stdout: sink, stderr: sink }), 2);
+  const { incomplete, problems } = buildQueue({ gh: missingField });
+  assert.deepEqual(incomplete, ["o/r#43: branch"]);
+  assert.equal(problems, 1);
 });

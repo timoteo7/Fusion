@@ -15,7 +15,7 @@ PR authored by `timoteo7`:
 ```bash
 node scripts/pr-queue/discover-open-prs.mjs                 # writes the two artifacts
 node scripts/pr-queue/discover-open-prs.mjs --stdout        # prints queue.json to stdout
-node scripts/pr-queue/discover-open-prs.mjs --strict        # exit 1 on any completeness doubt
+node scripts/pr-queue/discover-open-prs.mjs --strict        # exit 2 on any completeness doubt
 node scripts/pr-queue/discover-open-prs.mjs --out /tmp/q    # alternate output directory
 ```
 
@@ -50,8 +50,9 @@ Discovery runs through three independent paths and reconciles them:
 Every candidate is then re-verified through `gh pr view` — it must still be
 `OPEN` and authored by `timoteo7`, otherwise it is recorded under
 `discovery.ineligible` instead of being silently dropped. Path errors,
-cross-path discrepancies, and ineligible candidates are always reported;
-`--strict` turns them into a non-zero exit instead of a warning.
+cross-path discrepancies, ineligible candidates, and PR rows missing a
+required field (`discovery.incomplete`) are always reported; `--strict` turns
+them into exit code 2 instead of a warning.
 
 ## Determinism
 

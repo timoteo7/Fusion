@@ -20,7 +20,7 @@ reconciled against each other, and every candidate is re-verified through
 Greptile review has touched yet is labelled with the literal
 `aguardando primeira revisão` and stays tracked, so a later score below 5 or a
 new bot comment pulls it into scope on the next run with no manual re-listing.
-`--strict` converts silent loss into a loud failure (exit 1) instead of
+`--strict` converts silent loss into a loud failure (exit 2) instead of
 dropping an eligible PR quietly.
 
 The tool is read-only by construction: it only ever runs `gh ... view/list/
@@ -34,6 +34,9 @@ volatile fields (fetch timestamps, index-lag `foundBy` sets, comment
 created/updated timestamps). A changed score, a newly resolved thread, a
 changed check conclusion, or a branch/draft flip all move the hash; a mere
 re-fetch does not.
+
+FNXC:PRQueue 2026-09-17-10:31:
+FUSI-001's acceptance criteria require `--strict` to fail with exit code 2 (not 1) when a PR is missing from a discovery path or a collected PR row lacks a required field, and require a negative-control test proving that failure is real rather than unconditional. The pipeline therefore also reports `discovery.incomplete` next to path errors, discrepancies and ineligible candidates, `main` returns 2 for any completeness problem under `--strict`, and `main` is exported with an injectable `gh` runner plus output streams so tests assert both the clean (0) and failing (2) codes with no network and no filesystem writes.
 */
 
 import { execFileSync } from "node:child_process";
@@ -484,6 +487,20 @@ function discover(gh, { limit }) {
 }
 
 /**
+ * FNXC:PRQueue 2026-09-17-10:31:
+ * FUSI-001's `--strict` contract must fail on a PR row that lacks a field its
+ * consumers read — not only on discovery-path disagreements. These are the
+ * fields the queue contract (and FUSI-002/003/004) depend on per row.
+ */
+const REQUIRED_PR_FIELDS = ["repo", "number", "branch", "greptile", "threads", "ci"];
+
+function missingPrFields(pr) {
+  return REQUIRED_PR_FIELDS.filter(
+    (field) => pr[field] === undefined || pr[field] === null || pr[field] === "",
+  );
+}
+
+/**
  * Run the full pipeline against a `gh` runner: discover through the three
  * paths, reconcile, re-verify every candidate through `gh pr view`, collect
  * per-PR state, and assemble the snapshot. Exported so tests can drive the
@@ -494,10 +511,16 @@ export function buildQueue({ gh, limit = 200 }) {
   const discovery = discover(gh, { limit });
   const prs = [];
   const ineligible = [];
+  const incomplete = [];
   for (const candidate of discovery.candidates) {
     const { eligible, pr } = collectPrState(gh, candidate);
-    if (eligible) prs.push(pr);
-    else ineligible.push(`${pr.repo}#${pr.number}`);
+    if (!eligible) {
+      ineligible.push(`${pr.repo}#${pr.number}`);
+      continue;
+    }
+    const missing = missingPrFields(pr);
+    if (missing.length > 0) incomplete.push(`${pr.repo}#${pr.number}: ${missing.join(",")}`);
+    prs.push(pr);
   }
   const snapshot = buildSnapshot({
     prs,
@@ -512,12 +535,18 @@ export function buildQueue({ gh, limit = 200 }) {
       discrepancies: discovery.discrepancies,
       errors: discovery.errors,
       ineligible,
+      incomplete,
     },
   });
   return {
     snapshot,
     ineligible,
-    problems: discovery.errors.length + discovery.discrepancies.length + ineligible.length,
+    incomplete,
+    problems:
+      discovery.errors.length +
+      discovery.discrepancies.length +
+      ineligible.length +
+      incomplete.length,
   };
 }
 
@@ -530,19 +559,22 @@ Regenerates the authoritative queue of open PRs authored by ${QUEUE_AUTHOR}:
 Options:
   --out <dir>   output directory (default: ${DEFAULT_OUT_DIR})
   --limit <n>   per-gh-call page size (default: 200)
-  --strict      exit 1 on any discovery error, path discrepancy, or ineligible candidate
+  --strict      exit 2 on any discovery error, path discrepancy, ineligible candidate, or incomplete PR row
   --stdout      print the JSON snapshot to stdout instead of writing files
   --help        show this help
 `;
 
-function main(argv) {
+export function main(
+  argv,
+  { gh = createGhRunner(), stdout = process.stdout, stderr = process.stderr } = {},
+) {
   const args = [...argv];
   const getFlag = (name, fallback) => {
     const index = args.indexOf(name);
     return index === -1 ? fallback : args[index + 1];
   };
   if (args.includes("--help") || args.includes("-h")) {
-    process.stdout.write(HELP);
+    stdout.write(HELP);
     return 0;
   }
   const outDir = getFlag("--out", DEFAULT_OUT_DIR);
@@ -550,25 +582,24 @@ function main(argv) {
   const strict = args.includes("--strict");
   const toStdout = args.includes("--stdout");
 
-  const gh = createGhRunner();
   const { snapshot, problems } = buildQueue({ gh, limit });
 
   if (toStdout) {
-    process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+    stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
   } else {
     mkdirSync(outDir, { recursive: true });
     writeFileSync(join(outDir, "queue.json"), `${JSON.stringify(snapshot, null, 2)}\n`);
     writeFileSync(join(outDir, "queue.md"), renderMarkdown(snapshot));
-    process.stdout.write(
+    stdout.write(
       `pr-queue: ${snapshot.prs.length} open PR(s) → ${join(outDir, "queue.json")} (${snapshot.queueHash.slice(0, 19)}…)\n`,
     );
   }
 
   if (problems > 0) {
-    process.stderr.write(
-      `pr-queue: ${problems} problem(s): ${snapshot.discovery.errors.length} path error(s), ${snapshot.discovery.discrepancies.length} discrepancy(ies), ${snapshot.discovery.ineligible.length} ineligible candidate(s)\n`,
+    stderr.write(
+      `pr-queue: ${problems} problem(s): ${snapshot.discovery.errors.length} path error(s), ${snapshot.discovery.discrepancies.length} discrepancy(ies), ${snapshot.discovery.ineligible.length} ineligible candidate(s), ${(snapshot.discovery.incomplete ?? []).length} incomplete PR row(s)\n`,
     );
-    if (strict) return 1;
+    if (strict) return 2;
   }
   return 0;
 }
