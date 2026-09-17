@@ -408,6 +408,36 @@ describe('ProcessDetector stall scan (fake clock)', () => {
     clock.advance(60000);
     assert.deepEqual(await detector.collect(clock.now()), [], 'the completed process is not a stall');
   });
+
+  it('a stall reported by the stream is never synthesized twice by the scan', async () => {
+    const { detector, adapter, clock } = makeDetector({ stallTimeoutMs: 1000 });
+    adapter.push(baseEvent({
+      kind: 'process.stalled',
+      processId: 'proc-1',
+      correlationToken: 'T-1',
+      payload: { lastProgressMs: 0, timeoutMs: 0 },
+    }));
+    const first = await detector.collect(clock.now());
+    assert.deepEqual(first.map((e) => e.kind), ['process.stalled']);
+    assert.equal(first[0].associationSource, 'correlationToken');
+    // The frozen cursor is still past its window on later ticks, but the
+    // episode was already reported: the scan stays silent.
+    clock.advance(5000);
+    assert.deepEqual(await detector.collect(clock.now()), [], 'one stall per episode');
+    // Real progress re-arms the next episode.
+    adapter.push(baseEvent({
+      kind: 'process.heartbeat',
+      processId: 'proc-1',
+      correlationToken: 'T-1',
+      timestamp: 5000,
+      payload: { lastProgressMs: 5000, timeoutMs: 1000 },
+    }));
+    const rearmed = await detector.collect(clock.now());
+    assert.deepEqual(rearmed.map((e) => e.kind), ['process.heartbeat']);
+    clock.advance(1000);
+    const next = await detector.collect(clock.now());
+    assert.deepEqual(next.map((e) => e.kind), ['process.stalled'], 'advancing progress re-armed the stall');
+  });
 });
 
 describe('ProcessDetector bounds and safe-fail', () => {

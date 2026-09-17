@@ -20,6 +20,8 @@
 // REAL progress. When the cursor stays older than the process's stall window
 // the detector synthesizes one `process.stalled` per episode (the marker is
 // cleared when the cursor advances, and a terminal kind clears the episode).
+// An event that already reports the stall marks the same episode, so it is
+// never synthesized twice.
 //
 // The detector NEVER uses real timers. It takes an injectable `now` clock and
 // is driven by the Supervisor's tick, so tests advance a fake clock and get
@@ -179,11 +181,18 @@ export class ProcessDetector {
         previous.lastProgressMs !== null &&
         progress.lastProgressMs !== null &&
         progress.lastProgressMs > previous.lastProgressMs;
+      // An observation that already REPORTS the stall marks the episode too, so
+      // the stall scan never synthesizes a second process.stalled for it.
+      const observedStall = observation.kind === 'process.stalled';
       this.state.set(pid, {
         taskId: association.taskId,
         lastProgressMs: progress.lastProgressMs,
         timeoutMs: progress.timeoutMs,
-        stallReported: advanced ? false : Boolean(previous && previous.stallReported),
+        stallReported: observedStall
+          ? true
+          : advanced
+            ? false
+            : Boolean(previous && previous.stallReported),
       });
     }
 
