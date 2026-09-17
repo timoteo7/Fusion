@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 2,
+  "description": "Canonical v2 PROCESS event schema for the herdr-fusion-bridge, plus a deterministic observation stream. A process event describes one Fusion process (agent invocation, workflow session, executor run) — never task-board state, which stays schemaVersion 1 in events.json. Every v2 event carries schemaVersion 2 so a v1 consumer can never mistake it for a task event; the validator rejects any other version instead of coercing it.",
+  "fields": {
+    "schemaVersion": "number, must be exactly 2",
+    "kind": "string, one of exactly six: process.started | process.heartbeat | process.stalled | process.completed | process.failed | process.exited",
+    "processId": "string | null, required. '' and null are the SAME unknown-process bucket and dedup against each other",
+    "timestamp": "number, epoch millis when the process emitted the observation",
+    "correlationToken": "string, optional. When present it is the Fusion taskId the process serves and wins over the adapter resolver",
+    "payload": "object, optional. EXACTLY { lastProgressMs, timeoutMs } — a three-field variant is prohibited"
+  },
+  "kinds": {
+    "process.started": {
+      "meaning": "the process is running",
+      "terminal": false
+    },
+    "process.heartbeat": {
+      "meaning": "the process is alive and reports its progress cursor; the heartbeat alone is NOT real progress",
+      "terminal": false
+    },
+    "process.stalled": {
+      "meaning": "no REAL progress within the process's stall window",
+      "terminal": false
+    },
+    "process.completed": {
+      "meaning": "the process finished successfully",
+      "terminal": true
+    },
+    "process.failed": {
+      "meaning": "the process failed",
+      "terminal": true
+    },
+    "process.exited": {
+      "meaning": "the process exited / was reaped",
+      "terminal": true
+    }
+  },
+  "processes": {
+    "proc-alpha": "T-1",
+    "proc-beta": "T-2"
+  },
+  "unresolvableProcessId": "proc-ghost",
+  "stream": [
+    {
+      "schemaVersion": 2,
+      "kind": "process.started",
+      "processId": "proc-alpha",
+      "timestamp": 1000,
+      "correlationToken": "T-1"
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.started",
+      "processId": "proc-beta",
+      "timestamp": 1000
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.started",
+      "processId": "proc-beta",
+      "timestamp": 1100
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.heartbeat",
+      "processId": "proc-alpha",
+      "timestamp": 2000,
+      "payload": { "lastProgressMs": 0, "timeoutMs": 60000 }
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.heartbeat",
+      "processId": "proc-ghost",
+      "timestamp": 2000,
+      "payload": { "lastProgressMs": 0, "timeoutMs": 60000 }
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.stalled",
+      "processId": "proc-beta",
+      "timestamp": 3000,
+      "payload": { "lastProgressMs": 0, "timeoutMs": 2000 }
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.completed",
+      "processId": "proc-alpha",
+      "timestamp": 4000,
+      "correlationToken": "T-1"
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.failed",
+      "processId": "proc-beta",
+      "timestamp": 5000
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.exited",
+      "processId": "proc-beta",
+      "timestamp": 5500
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.started",
+      "processId": "proc-beta",
+      "timestamp": 6000
+    },
+    {
+      "schemaVersion": 2,
+      "kind": "process.exited",
+      "processId": "proc-alpha",
+      "timestamp": 7000,
+      "correlationToken": "T-1"
+    }
+  ]
+}
