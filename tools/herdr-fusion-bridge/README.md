@@ -28,6 +28,9 @@ tools/herdr-fusion-bridge/
 │   ├── logger.js               # structured JSON logger, createLogger()
 │   ├── correlator.js           # correlation keys + event kinds
 │   ├── watchdog.js             # liveness watchdog (discrete change = progress)
+│   ├── process-events.js       # v2 process-event schema + validateProcessEvent
+│   ├── process-stream-adapter.js # v2 process-observation seam (+ Null default)
+│   ├── process-detector.js     # v2 ProcessDetector (dedup + association + stalls)
 │   ├── state.js                # PersistentState + FsStore (atomic tmp+rename)
 │   ├── steering.js             # SteeringController (engine-gated, deduped)
 │   ├── bridge.js               # Supervisor (tick loop, engine detection)
@@ -35,12 +38,14 @@ tools/herdr-fusion-bridge/
 │   ├── adapters/
 │   │   ├── fusion-client.js    # SseFusionClient, ProcessFusionDetector
 │   │   ├── herdr-client.js     # CliHerdrClient (herdr CLI), runCaptured()
-│   │   ├── notifier.js         # HttpNotifier, CliNotifier, DedupNotifier
+│   │   ├── notifier.js         # HttpNotifier, CliNotifier, DedupNotifier, ProcessEventStream
 │   │   └── fakes.js            # fakes: FakeFusionClient/Herdr/Notifier
 │   └── watchers/
 │       ├── sse-watcher.js      # SSE consumer with exponential backoff
 │       └── orphan-recovery.js # idempotent orphan reconciliation
 └── test/                       # node:test matrix (all terminating)
+    ├── adapters/fake-process-stream.js # deterministic v2 stream adapter
+    └── fixtures/process-events.json    # v2 schema (schemaVersion 2) + stream
 ```
 
 ## Quick start (operator)
@@ -169,6 +174,125 @@ NEVER the engine gate):
 
 ---
 
+## v2 process detection (`processEvents`)
+
+The event schema above reports **task-board state**. v2 adds a second, parallel
+stream that reports **process state** — the agent invocation, workflow session,
+or executor run working a task — so an operator can tell whether the process
+behind a card is running, progressing, stalled, failed, or exited, instead of
+only which column the card sits in.
+
+**Schema isolation.** v1 task events keep the schema above and the
+`schemaVersion: 1` fixture; every v2 process event is `schemaVersion: 2` and
+carries a `process.*` kind. The validator rejects a mismatched version rather
+than coercing it, so a v1 consumer can never mistake a process event for a task
+event. The canonical v2 schema (per-kind meanings, the two-field payload) is
+[`test/fixtures/process-events.json`](test/fixtures/process-events.json).
+
+### The six process kinds (exactly six — no seventh may be emitted)
+
+| `kind` | Terminal | Meaning |
+| --- | --- | --- |
+| `process.started` | no | The process is running. |
+| `process.heartbeat` | no | The process is alive and reports its progress cursor. A heartbeat alone is **not** real progress. |
+| `process.stalled` | no | No **real** progress within the process's stall window. |
+| `process.completed` | yes | The process finished successfully. |
+| `process.failed` | yes | The process failed. |
+| `process.exited` | yes | The process exited / was reaped. |
+
+### What a v2 event carries
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schemaVersion` | number | Always `2`. |
+| `kind` | string | One of the six kinds above. |
+| `processId` | string | The process identity; `""` when unknown. `null` and `""` are the **same** bucket and dedup against each other. |
+| `timestamp` | number | Epoch millis when the process emitted the observation. |
+| `taskId` | string | The Fusion task the process serves — always non-empty, because an unassociated event is never emitted. |
+| `associationSource` | string | `correlationToken`, `adapter`, or `stall-scan`. |
+| `correlationToken` | string | Optional; echoed from the observation when present. |
+| `payload` | object | Optional; **exactly** `{ lastProgressMs, timeoutMs }`. A three-field variant is prohibited. |
+
+### Reading the stream
+
+- **`bridge.processEvents`** — an `EventEmitter` (via `createBridge`). Listen on
+  the whole stream (`stream.on('processEvent', (e) => …)`) or per kind
+  (`stream.on('process.stalled', (e) => …)`); `stream.published`,
+  `stream.kinds()` and `stream.count(kind)` expose what was delivered.
+- **`result.processEvents`** — the same events for one tick, alongside the
+  untouched v1 `result.events`. Process kinds never appear in `result.events`.
+- **Notifications** — each process event also goes through the configured
+  notifier sink with `kind` set to the process kind (e.g. `process.started`),
+  so an operator's existing hook receives both streams.
+
+Dedup is done by the detector, not the sink: a consumer sees exactly one event
+per process-kind rise, the same guarantee the v1 notification stream gets from
+`DedupNotifier`.
+
+### The adapter seam
+
+`ProcessStreamAdapter` (`src/process-stream-adapter.js`) is the process
+observation source — the bridge never reads a live process table directly:
+
+- `collect(now)` → an array of process observations for this pull;
+- `getTaskForProcess(processId)` → the `taskId` that process serves, or `null`.
+
+`NullProcessStreamAdapter` is the default: `collect()` always returns `[]`, so a
+bridge built without a process stream behaves exactly as it did before v2.
+
+### Wiring
+
+```js
+const bridge = createBridge({
+  config, fusion, herdr, notifier, logger, clock, state,
+  processStreamAdapter,   // optional; defaults to NullProcessStreamAdapter
+});
+```
+
+`processStreamAdapter` is **optional** — `fusion` and `herdr` stay required
+exactly as in v1. Lower-level wiring, for tests: `new Supervisor({ …,
+processDetector, processEvents })`, both optional.
+
+> **Not yet live.** The real Fusion/Herdr process stream is a later task; the
+> CLI currently constructs the null default, so today's daemon emits **no**
+> process events. This release ships the detection contract — proven by the
+> deterministic fake adapter plus the fixture — not a live attachment.
+
+### Association precedence
+
+An event is emitted only once it is bound to the task it serves:
+
+1. `correlationToken` on the observation — wins outright, the adapter resolver
+   is never consulted;
+2. `adapter.getTaskForProcess(processId)`;
+3. otherwise **DROP** with a `console.warn`. A dropped event is never emitted,
+   never published on the stream, and never delivered as a notification.
+
+### Rising-edge dedup
+
+Repeated observations of the same `kind` for the same process are **not**
+re-emitted (a chatty process stream cannot become a chatty notification
+stream); they are still tracked, because a heartbeat carries the progress
+cursor. Terminal kinds (`process.completed`, `process.failed`,
+`process.exited`) clear the episode, so a later `process.started` re-arms as a
+fresh rise. `null` and `""` process ids share one bucket.
+
+### Stall detection
+
+- `heartbeatIntervalMs` (**default 30000**) bounds the pull: at most one
+  `collect()` per window, never a tight probe loop.
+- `stallTimeoutMs` (**default 120000**) is the stall window used when an event
+  carries no `timeoutMs` of its own; an event's own window wins.
+- A stall is one `process.stalled` per episode: an advancing progress cursor
+  clears the marker (and an event that already reports the stall marks it, so
+  it is never synthesized twice). A heartbeat with a frozen cursor changes
+  nothing — exactly the v1 rule that **log churn is never progress**.
+
+The detector holds no timers: it is driven by the Supervisor's tick with an
+injectable `now`, so every time-based behavior is testable on a fake clock.
+
+---
+
 ## Safe-fail matrix
 
 The bridge NEVER spins on a down integration. Behavior when an integration is
@@ -181,6 +305,8 @@ unavailable:
 | herdr CLI unavailable | `listPanes` returns empty and the failure is logged; correlation reports `association_stale` instead of throwing. |
 | Hermes hook down | Notification delivery retries with bounded exponential backoff, then fails safe (logged, not thrown); the supervision loop keeps running. |
 | Correlation unresolvable | The unresolvable dimension becomes `"unknown"` (never dropped); the event is still correlated on the remaining dimensions. |
+| Process observation unresolvable (v2) | The process event is dropped with a `console.warn`; it is never emitted, published, or notified. The rest of the tick continues. |
+| Process stream `collect()` throws (v2) | The detector warns and returns no events for that tick; the tick loop logs `process_stream_error` and keeps running. |
 | State file unwritable | Reconcile still runs, save is skipped with a logged error, shutdown never blocks. |
 | Disabled via HBRIDGE_DISABLE_* | The integration is skipped entirely (logged once); the rest of the bridge keeps supervising. |
 
@@ -211,6 +337,10 @@ Additional hard guarantees:
 - **Hermes (out)**: `HttpNotifier` POSTs a JSON notification to the
   integration hook; `CliNotifier` is the CLI fallback. Both are wrapped in
   `DedupNotifier` (window dedup + bounded delivery backoff).
+- **Process stream (in, v2)**: `ProcessStreamAdapter.collect(now)` yields v2
+  process observations and `getTaskForProcess(pid)` resolves the task they
+  serve. `NullProcessStreamAdapter` is the no-op default; `ProcessEventStream`
+  is the outbound sink the detector publishes to.
 
 ## CLI reference
 
@@ -244,7 +374,7 @@ timeout 150 node --test "tools/herdr-fusion-bridge/test/**/*.test.js"
 `MODULE_NOT_FOUND`. If a subshell expansion does not work in your shell, pass
 the expanded list directly: `timeout 150 node --test tools/herdr-fusion-bridge/test/*.test.js`.)
 
-124 tests, all terminating: every time-based behavior is driven by an injected
+173 tests, all terminating: every time-based behavior is driven by an injected
 fake clock (no real sleeps), every stream/stream-loop is gated by test-controlled
 releases, and shutdown tests assert zero pending timers. The matrix covers:
 
@@ -256,7 +386,13 @@ releases, and shutdown tests assert zero pending timers. The matrix covers:
 - SSE reconnect backoff (monotonic, capped, jittered), dedup, clean abort,
 - steering (engine gate, dedup, force, bounded retries, monotonic seq),
 - notification dedup + bounded delivery backoff over a down hook,
-- clean shutdown (handles, persistence, idempotence, signal equivalence).
+- clean shutdown (handles, persistence, idempotence, signal equivalence),
+- **v2 process detection** — the validator (six kinds, `schemaVersion: 2`,
+  two-field payload), rising-edge dedup, terminal re-arm, `null`/`""`
+  equivalence, one stall per episode on a fake clock, association precedence
+  and drop-with-warn, and the bridge-level contract: fixture replay, v1 stream
+  isolation inside the same tick, and `createBridge` with and without a
+  `processStreamAdapter`.
 
 ### Symptom-regression checks (how the tests were verified to catch defects)
 
@@ -269,3 +405,5 @@ symptom test went **red**, then green after restore:
 | SSE reconnect backoff removed | `reconnect happens after a stream ends, gated by backoff (no busy loop)`, `backoffFor is clamped to backoffMaxMs` |
 | Steering engine gate removed | `steering is skipped and emits one steer_skipped…`, `heartbeat is skipped when the engine is absent` |
 | Notification dedup disabled | `DedupNotifier deduplicates identical notifications within the window`, `duplicate events within the window are deduplicated…`, `the dedup window expires and the same event is re-emitted afterwards` |
+| v2 rising-edge gate removed (`repeated` forced false) | `emits a repeated same-kind observation exactly once`, `a null and an empty processId dedup against each other (one emission)`, `a repeated terminal kind stays deduped`, `the v2 fixture exercises all six kinds…`, `process events: repeated same-kind observations rise once at the bridge surface`, `process events: null and empty processId dedup against each other` |
+| v2 stall marker not set by a reported `process.stalled` | `a stall reported by the stream is never synthesized twice by the scan`, `process events: consumers can listen per kind on the processEvents stream` |
