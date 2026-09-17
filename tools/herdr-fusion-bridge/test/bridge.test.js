@@ -11,8 +11,14 @@ import { Supervisor, stateToKind } from '../src/bridge.js';
 import { fakeClock } from '../src/clock.js';
 import { createLogger, memorySink } from '../src/logger.js';
 import { FakeFusionClient, FakeHerdrClient, FakeNotifier } from '../src/adapters/fakes.js';
-import { DedupNotifier, DeliveryBackoff } from '../src/adapters/notifier.js';
+import { DedupNotifier, DeliveryBackoff, ProcessEventStream } from '../src/adapters/notifier.js';
 import { Watchdog } from '../src/watchdog.js';
+import { PROCESS_KINDS } from '../src/process-events.js';
+import { ProcessDetector } from '../src/process-detector.js';
+import { PersistentState } from '../src/state.js';
+import { createBridge } from '../src/orchestrator.js';
+
+import { FakeProcessStreamAdapter, loadProcessFixture } from './adapters/fake-process-stream.js';
 
 import { loadConfig } from '../src/config.js';
 
@@ -408,4 +414,291 @@ test('stall scan: engine-absent and transport-cooldown ticks emit nothing (early
   await sup2.tick(); // in cooldown: skip
   const stalled2 = fakeDelegate2.notifications.filter((n) => n.kind === 'stalled');
   assert.equal(stalled2.length, 0, 'transport-cooldown: no stalled emitted while in cooldown');
+});
+
+// ---------------------------------------------------------------------------
+// process events (v2)
+// ---------------------------------------------------------------------------
+// Everything below is ADDITIVE: the v1 task-event contract above is unchanged.
+// The same Supervisor is driven with a deterministic process-stream adapter so
+// the bridge-level contract is asserted where an operator would see it —
+// result.processEvents, the processEvents stream, and the notified payload —
+// with no real timers anywhere.
+
+function makeProcessHarness({
+  heartbeatIntervalMs = 0,
+  stallTimeoutMs = 120000,
+  enginePresent = true,
+  adapter = null,
+  config = null,
+  watchdog = null,
+} = {}) {
+  const clock = fakeClock(0);
+  const cfg = config || makeCfg();
+  const fusion = new FakeFusionClient();
+  fusion.setEnginePresent(enginePresent);
+  const herdr = new FakeHerdrClient();
+  const notifier = new FakeNotifier();
+  const sink = memorySink();
+  const logger = createLogger({ sink, clock });
+  const stream = adapter || new FakeProcessStreamAdapter();
+  const warnings = [];
+  const detector = new ProcessDetector({
+    adapter: stream,
+    heartbeatIntervalMs,
+    stallTimeoutMs,
+    now: () => clock.now(),
+    warn: (...args) => warnings.push(args.join(' ')),
+  });
+  const processEvents = new ProcessEventStream();
+  const published = [];
+  processEvents.on('processEvent', (e) => published.push(e));
+  const sup = new Supervisor({
+    fusion,
+    herdr,
+    notifier,
+    logger,
+    config: cfg,
+    clock,
+    watchdog,
+    processDetector: detector,
+    processEvents,
+  });
+  return { sup, clock, cfg, fusion, herdr, notifier, logger, stream, detector, processEvents, published, warnings };
+}
+
+// A valid v2 observation; each test states only what it varies.
+function v2Event(overrides = {}) {
+  return {
+    schemaVersion: 2,
+    kind: 'process.started',
+    processId: 'proc-7',
+    timestamp: 0,
+    ...overrides,
+  };
+}
+
+test('process events: repeated same-kind observations rise once at the bridge surface', async () => {
+  const { sup, stream, processEvents } = makeProcessHarness();
+  stream.push(
+    v2Event({ correlationToken: 'T-1' }),
+    v2Event({ correlationToken: 'T-1', timestamp: 10 }),
+    v2Event({ correlationToken: 'T-1', timestamp: 20 }),
+  );
+  const r1 = await sup.tick();
+  assert.equal(r1.processEvents.length, 1, 'three repeats of one kind emit once');
+  assert.equal(r1.processEvents[0].kind, 'process.started');
+  assert.equal(r1.processEvents[0].schemaVersion, 2);
+  assert.equal(r1.processEvents[0].taskId, 'T-1');
+  assert.equal(processEvents.count(), 1);
+
+  // The next tick repeats the SAME kind: still silent.
+  stream.push(v2Event({ correlationToken: 'T-1', timestamp: 30 }));
+  const r2 = await sup.tick();
+  assert.deepEqual(r2.processEvents, [], 'a repeat across ticks is not re-emitted');
+  assert.equal(processEvents.count(), 1, 'the stream saw exactly one event');
+});
+
+test('process events: a correlationToken associates the event and it reaches the notifier', async () => {
+  const { sup, stream, notifier, processEvents } = makeProcessHarness();
+  stream.push(v2Event({ correlationToken: 'T-9' }));
+  const r = await sup.tick();
+  assert.equal(r.processEvents.length, 1);
+  assert.equal(r.processEvents[0].taskId, 'T-9');
+  assert.equal(r.processEvents[0].associationSource, 'correlationToken');
+  assert.deepEqual(stream.lookups, [], 'a token-associated event never consults the resolver');
+  assert.equal(processEvents.count(), 1);
+  const delivered = notifier.notifications.filter((n) => n.kind === 'process.started');
+  assert.equal(delivered.length, 1, 'the process event reached the notification sink');
+  assert.equal(delivered[0].taskId, 'T-9');
+  assert.equal(delivered[0].processId, 'proc-7');
+});
+
+test('process events: the adapter resolver associates a token-less event', async () => {
+  const { sup, stream } = makeProcessHarness();
+  stream.addAssociation('proc-7', 'T-2');
+  stream.push(v2Event({ processId: 'proc-7' }));
+  const r = await sup.tick();
+  assert.equal(r.processEvents.length, 1);
+  assert.equal(r.processEvents[0].taskId, 'T-2');
+  assert.equal(r.processEvents[0].associationSource, 'adapter');
+  assert.deepEqual(stream.lookups, ['proc-7'], 'the resolver was consulted once, with the normalized id');
+});
+
+test('process events: an unresolvable process is dropped with a warn and never emitted', async () => {
+  const { sup, stream, notifier, processEvents, warnings, detector } = makeProcessHarness();
+  stream.push(v2Event({ processId: 'proc-ghost' }));
+  const r = await sup.tick();
+  assert.deepEqual(r.processEvents, [], 'an unassociated event is not emitted');
+  assert.equal(processEvents.count(), 0, 'nothing reached the processEvents stream');
+  assert.equal(notifier.count(), 0, 'nothing was notified');
+  assert.equal(detector.dropped.length, 1);
+  assert.equal(detector.dropped[0].reason, 'unassociated');
+  assert.ok(warnings.some((w) => /dropped/.test(w)), 'the drop was warned about');
+});
+
+test('process events: a terminal kind clears the episode so a later start re-arms', async () => {
+  const { sup, stream } = makeProcessHarness();
+  stream.addAssociation('proc-7', 'T-3');
+  stream.push(v2Event({ processId: 'proc-7' }));
+  const r1 = await sup.tick();
+  stream.push(v2Event({ processId: 'proc-7', kind: 'process.completed', timestamp: 100 }));
+  const r2 = await sup.tick();
+  stream.push(v2Event({ processId: 'proc-7', kind: 'process.started', timestamp: 200 }));
+  const r3 = await sup.tick();
+  assert.deepEqual(
+    [...r1.processEvents, ...r2.processEvents, ...r3.processEvents].map((e) => e.kind),
+    ['process.started', 'process.completed', 'process.started'],
+    'the restart after a terminal kind is a real rise again',
+  );
+});
+
+test('process events: null and empty processId dedup against each other', async () => {
+  const { sup, stream, processEvents } = makeProcessHarness();
+  stream.push(
+    v2Event({ processId: '', correlationToken: 'T-1' }),
+    v2Event({ processId: null, correlationToken: 'T-1', timestamp: 5 }),
+  );
+  const r = await sup.tick();
+  assert.equal(r.processEvents.length, 1, 'null and "" are the same unknown-process bucket');
+  assert.equal(r.processEvents[0].processId, '', 'the emitted id is normalized to ""');
+  assert.equal(processEvents.count(), 1);
+});
+
+test('process events: a synthesized stall carries the two-field progress payload', async () => {
+  const { sup, clock, stream, processEvents } = makeProcessHarness({ stallTimeoutMs: 5000 });
+  stream.push(v2Event({
+    kind: 'process.heartbeat',
+    correlationToken: 'T-1',
+    payload: { lastProgressMs: 0, timeoutMs: 5000 },
+  }));
+  await sup.tick();
+  await clock.advance(4999);
+  const early = await sup.tick();
+  assert.deepEqual(early.processEvents, [], 'not stalled while inside the window');
+  await clock.advance(1);
+  const stalled = await sup.tick();
+  assert.equal(stalled.processEvents.length, 1);
+  assert.equal(stalled.processEvents[0].kind, 'process.stalled');
+  assert.equal(stalled.processEvents[0].associationSource, 'stall-scan');
+  assert.equal(stalled.processEvents[0].taskId, 'T-1');
+  assert.deepEqual(
+    Object.keys(stalled.processEvents[0].payload).sort(),
+    ['lastProgressMs', 'timeoutMs'],
+    'exactly the two-field progress payload',
+  );
+  await clock.advance(1000);
+  const again = await sup.tick();
+  assert.deepEqual(again.processEvents, [], 'one stall per episode');
+  assert.equal(processEvents.count('process.stalled'), 1, 'the stream saw exactly one stall');
+});
+
+test('process events: consumers can listen per kind on the processEvents stream', async () => {
+  const { sup, stream, processEvents } = makeProcessHarness();
+  const stalls = [];
+  const all = [];
+  processEvents.on('process.stalled', (e) => stalls.push(e));
+  processEvents.on('processEvent', (e) => all.push(e.kind));
+  stream.push(v2Event({
+    kind: 'process.stalled',
+    correlationToken: 'T-1',
+    payload: { lastProgressMs: 0, timeoutMs: 0 },
+  }));
+  await sup.tick();
+  assert.equal(stalls.length, 1, 'the per-kind listener fired once');
+  assert.deepEqual(all, ['process.stalled'], 'and the stream listener saw the same single event');
+});
+
+test('process events: the v1 task-event stream is unaffected in the same tick', async () => {
+  const { sup, stream, fusion, herdr, notifier } = makeProcessHarness();
+  fusion.addTask({ taskId: 'T-1', state: 'in-progress', executorId: 'E-1', paneId: 'P-1' });
+  herdr.addPane({ paneId: 'P-1', alive: true });
+  stream.push(v2Event({ processId: 'proc-alpha', correlationToken: 'T-1' }));
+  const r = await sup.tick();
+  // v1 events still emit, and NO process kind leaks into the v1 stream.
+  assert.ok(r.events.length >= 1, 'the v1 task event still emits');
+  assert.equal(r.events.every((e) => !String(e.kind).startsWith('process.')), true);
+  // v2 events stay out of the v1 array and carry their own schema.
+  assert.equal(r.processEvents.length, 1);
+  assert.equal(r.processEvents[0].kind, 'process.started');
+  assert.equal(r.events.some((e) => e.kind === 'process.started'), false);
+  // Both streams reached the notifier, each under its own kind.
+  assert.ok(notifier.notifications.some((n) => n.taskId === 'T-1' && n.kind !== 'process.started'));
+  assert.equal(notifier.count('process.started'), 1);
+});
+
+test('process events: the v2 fixture replays through a bridge tick without a seventh kind', async () => {
+  const fixture = loadProcessFixture();
+  const adapter = FakeProcessStreamAdapter.fromFixture(fixture);
+  const { sup, detector, processEvents, warnings } = makeProcessHarness({ adapter });
+  const r = await sup.tick();
+  const kinds = r.processEvents.map((e) => e.kind);
+  assert.equal(kinds.length, 9, '11 observations: one duplicate deduped, one unresolvable dropped');
+  assert.deepEqual([...new Set(kinds)].sort(), [...PROCESS_KINDS].sort(), 'exactly the six canonical kinds');
+  assert.equal(detector.dropped.length, 1);
+  assert.equal(warnings.length, 1);
+  for (const event of r.processEvents) {
+    assert.equal(event.schemaVersion, 2);
+    assert.ok(event.taskId, 'every published event is associated to a task');
+  }
+  assert.equal(processEvents.count(), 9);
+  assert.equal(processEvents.kinds().filter((k) => k === 'process.stalled').length, 1);
+});
+
+test('process events: a bridge tick publishes nothing when the detector is not wired', async () => {
+  const { sup } = makeProcessHarness({ adapter: new FakeProcessStreamAdapter() });
+  const unwired = new Supervisor({
+    fusion: sup.fusion,
+    herdr: sup.herdr,
+    notifier: sup.notifier,
+    logger: sup.logger,
+    config: sup.config,
+    clock: sup.clock,
+  });
+  const r = await unwired.tick();
+  assert.deepEqual(r.processEvents, [], 'the v2 result field exists but stays empty');
+  assert.ok(Array.isArray(r.events), 'the v1 result shape is unchanged');
+});
+
+test('createBridge: the process stream is optional and the v1 clients stay required', async () => {
+  const clock = fakeClock(0);
+  const cfg = makeCfg();
+  const fusion = new FakeFusionClient();
+  fusion.setEnginePresent(true);
+  fusion.addTask({ taskId: 'T-1', state: 'in-progress', executorId: 'E-1', paneId: 'P-1' });
+  const herdr = new FakeHerdrClient();
+  herdr.addPane({ paneId: 'P-1', alive: true });
+  const store = { read: () => null, write: () => {} };
+  const state = new PersistentState({ file: 'tmp-test-state.json', store, now: () => clock.now() });
+  const logger = createLogger({ sink: memorySink(), clock });
+
+  // v1 requirement unchanged: the task-state clients are still mandatory.
+  assert.throws(() => createBridge({ config: cfg }), /FusionClient/);
+  assert.throws(() => createBridge({ config: cfg, fusion }), /HerdrClient/);
+
+  // No processStreamAdapter: the null default means no process events at all.
+  const bare = createBridge({ config: cfg, fusion, herdr, notifier: new FakeNotifier(), logger, clock, state });
+  assert.ok(bare.processEvents, 'the processEvents stream is exposed');
+  assert.equal(bare.processDetector.adapter.constructor.name, 'NullProcessStreamAdapter');
+  await bare.supervisor.tick();
+  assert.deepEqual(bare.supervisor.lastTickResult.processEvents, []);
+  assert.equal(bare.processEvents.count(), 0);
+
+  // With a process adapter, process events flow through createBridge's wiring.
+  const stream = new FakeProcessStreamAdapter();
+  stream.push(v2Event({ processId: 'proc-alpha', correlationToken: 'T-1' }));
+  const wired = createBridge({
+    config: cfg,
+    fusion,
+    herdr,
+    notifier: new FakeNotifier(),
+    logger,
+    clock,
+    state,
+    processStreamAdapter: stream,
+  });
+  await wired.supervisor.tick();
+  assert.equal(wired.processEvents.count(), 1, 'the injected adapter fed the stream');
+  assert.equal(wired.processEvents.published[0].taskId, 'T-1');
+  assert.equal(wired.processEvents.published[0].kind, 'process.started');
 });
