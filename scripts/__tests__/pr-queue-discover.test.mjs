@@ -279,11 +279,12 @@ test("canonicalQueueHash is stable across run metadata and sensitive to real sta
   assert.match(hash, /^sha256:[0-9a-f]{64}$/);
   assert.equal(hash, canonicalQueueHash([...prs].reverse()), "key order and array order must not matter");
 
-  const withBotThread = structuredClone(prs);
+  // JSON round-trip rather than structuredClone: the repo's eslint env does not define that global.
+  const withBotThread = JSON.parse(JSON.stringify(prs));
   withBotThread[1].threads.unresolved_bot.push({ id: "T1" });
   assert.notEqual(hash, canonicalQueueHash(withBotThread));
 
-  const withComment = structuredClone(prs);
+  const withComment = JSON.parse(JSON.stringify(prs));
   withComment[1].greptile.comment_ids = ["IC_kw"];
   assert.notEqual(hash, canonicalQueueHash(withComment));
 });
