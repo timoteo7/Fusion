@@ -57,6 +57,23 @@ export type OverseerObservationSignal = "progressing" | "stuck" | "failed" | "bl
  */
 export const EXECUTOR_FAILED_INCOMPLETE_REASON = "Executor stage parked failed with work incomplete";
 
+/**
+ * FNXC:PlannerOversight 2026-09-18-02:03:
+ * The CONSTANT reason string for the executor stage's "no live session behind the card"
+ * observation. Dedup-safe for the same reason as `EXECUTOR_FAILED_INCOMPLETE_REASON`: the FN-7577
+ * feed keys on `stage|signal|reason`, so it must never embed a duration or task detail.
+ */
+export const EXECUTOR_SESSION_NOT_LIVE_REASON = "Executor stage has no live agent session";
+
+/**
+ * FNXC:PlannerOversight 2026-09-18-02:03:
+ * A card that JUST entered the wip lane has not claimed its session yet, so a not-live reading is
+ * expected for a short window and must not bounce a session that was about to start. The
+ * dead-session signal therefore waits for the younger of this floor and the operator's own stall
+ * threshold — never earlier, and never the 2h column-entry wait the FN-7743 proxy imposes.
+ */
+const DEAD_SESSION_GRACE_MS = 5 * 60_000;
+
 /** A link back to the concrete evidence an observation was derived from. */
 export interface OverseerSourceLink {
   kind: "agent-log" | "review-comment" | "failed-check" | "merge-error" | "pr-state";
@@ -211,6 +228,22 @@ export function resolveWatchedStage(
 export interface ExecutorStallSignalInput {
   now: () => number;
   executorStuckAfterMs: number;
+  /*
+  FNXC:PlannerOversight 2026-09-18-02:03:
+  A card can sit in the wip lane with NO live session behind it: the executor died, or the engine
+  restarted and took the in-place stuck-session detector's in-memory state with it (WIP liveness is
+  owned only by that detector — see the `recoverInProgressLimbo` tombstone in self-healing.ts).
+  Before this probe existed the only surviving store-backed proxy was the FN-7743 timestamp below,
+  which is measured from COLUMN ENTRY and defaults to 2h, so such a card reported `progressing`
+  ("Task is actively executing in-progress work") for up to two hours and autonomous recovery never
+  engaged. Observed 2026-09-17: a card sat in-progress with zero live agent sessions, its last real
+  work ~1h30 old, and every poll still reported `progressing`.
+  The poll seam passes the same predicate the retry handler already gates on
+  (`isTaskLiveForOverseerRetry`), so observation and action cannot disagree about liveness.
+  Tri-state on purpose: `undefined` (probe not wired) preserves the previous behaviour exactly,
+  which keeps this inert for every caller that does not pass it.
+  */
+  isTaskLive?: (taskId: string) => boolean | undefined;
 }
 
 /**
@@ -303,6 +336,35 @@ function deriveSignalAndSources(
         };
       }
 
+      const activityTimestamp = task.columnMovedAt ?? task.updatedAt;
+      const activityAtMs = activityTimestamp ? Date.parse(activityTimestamp) : NaN;
+
+      /*
+      FNXC:PlannerOversight 2026-09-18-02:03:
+      Dead-session observation, ahead of the FN-7743 proxy below. Why ahead: the proxy answers "has
+      this card been quiet long enough?", which needs 2h measured from column entry even when the
+      card has been provably sessionless the whole time. A wired `isTaskLive` probe answers the
+      sharper question the operator actually cares about ("is anything running this card at all?"),
+      so it is checked first and yields the SAME `stuck` signal the proxy yields — same bounded
+      `retry_step` recovery, no new policy. The reason is constant (never a duration) so the FN-7577
+      feed dedup stays effective, and a not-wired probe (undefined) or a missing/malformed timestamp
+      changes nothing: never fabricate a stall.
+      */
+      if (stallInput.isTaskLive && Number.isFinite(activityAtMs)) {
+        const deadSessionFloorMs = Math.min(stallInput.executorStuckAfterMs, DEAD_SESSION_GRACE_MS);
+        if (
+          deadSessionFloorMs > 0
+          && stallInput.now() - activityAtMs >= deadSessionFloorMs
+          && stallInput.isTaskLive(taskId) === false
+        ) {
+          return {
+            signal: "stuck",
+            reason: EXECUTOR_SESSION_NOT_LIVE_REASON,
+            sources: [{ kind: "agent-log", ref: taskId }],
+          };
+        }
+      }
+
       // FNXC:PlannerOversight 2026-07-09-00:00:
       // FN-7743: a non-paused in-progress task whose executor session has gone
       // silent (dead/hung agent, no commits/heartbeat) was previously ALWAYS
@@ -314,8 +376,6 @@ function deriveSignalAndSources(
       // degrades to "progressing" — never fabricate a stall. The reason is
       // bucketed to whole hours so the FN-7577 `stage|signal|reason` feed dedup
       // stays effective (it must not embed an ever-changing millisecond value).
-      const activityTimestamp = task.columnMovedAt ?? task.updatedAt;
-      const activityAtMs = activityTimestamp ? Date.parse(activityTimestamp) : NaN;
       if (Number.isFinite(activityAtMs) && stallInput.executorStuckAfterMs > 0) {
         const inactiveMs = stallInput.now() - activityAtMs;
         if (inactiveMs >= stallInput.executorStuckAfterMs) {
@@ -498,7 +558,7 @@ export class PlannerOverseerMonitor {
   async observeTask(
     task: OverseerTaskRef,
     level: PlannerOversightLevel,
-    options?: { now?: () => number; executorStuckAfterMs?: number; columnFlags?: TraitFlags },
+    options?: { now?: () => number; executorStuckAfterMs?: number; columnFlags?: TraitFlags; isTaskLive?: (taskId: string) => boolean | undefined },
   ): Promise<OverseerStageObservation | null> {
     try {
       if (level === "off") {
@@ -512,7 +572,7 @@ export class PlannerOverseerMonitor {
 
       const now = options?.now ?? Date.now;
       const executorStuckAfterMs = options?.executorStuckAfterMs ?? DEFAULT_PLANNER_OVERSEER_EXECUTOR_STUCK_AFTER_MS;
-      const { signal, reason, sources } = deriveSignalAndSources(task.id, stage, task, { now, executorStuckAfterMs });
+      const { signal, reason, sources } = deriveSignalAndSources(task.id, stage, task, { now, executorStuckAfterMs, isTaskLive: options?.isTaskLive });
       const observation: OverseerStageObservation = {
         taskId: task.id,
         stage,
