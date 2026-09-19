@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import type { Task } from "@fusion/core";
+import type { Task, WorkflowIrResolverStore } from "@fusion/core";
+/*
+FNXC:CapacitySlotLeak 2026-09-19-04:07:
+The store-backed capacity helpers are the seam that turns a planner liveness proof into a capacity
+decision; these tests register probes directly instead of building a whole TriageProcessor.
+*/
+import { registerPlanningLivenessProbe } from "../agents/planning-liveness.js";
 import {
   AgentSemaphore,
   ProjectAdmissionCoordinator,
@@ -10,10 +16,13 @@ import {
   PRIORITY_SPECIFY,
   clearPreHeldExecutorSlotsForTests,
   computeTopLevelConcurrencyClaimed,
+  computeTopLevelConcurrencyClaimedFromStore,
   getPreHeldExecutorSlotsForTests,
   dropPreHeldExecutorSlot,
   hasPreHeldExecutorSlot,
   persistedTopLevelAgentSlots,
+  persistedTopLevelAgentTaskIdsFromStore,
+  persistedWorktreeHolderTaskIdsFromStore,
   recoverIdleSemaphoreLeakCandidate,
   registerPreHeldExecutorSlot,
   resolveAgentCapacityLimit,
@@ -1524,5 +1533,45 @@ describe("ProjectAdmissionCoordinator", () => {
       { taskId: "FN-older-planning", lane: "planning" as const, createdAt: "2020-01-01T00:00:00.000Z" },
     ].sort(compareAdmissionCandidates);
     expect(ordered.map((item) => item.taskId)).toEqual(["FN-older-planning", "FN-2", "FN-12", "also-bad", "bad"]);
+  });
+});
+
+/*
+FNXC:CapacitySlotLeak 2026-09-19-04:07:
+Requisito (relato do operador): "um card sem sessão viva não pode segurar vaga de capacidade; caso
+contrário o planejador se auto-bloqueia e o board inteiro congela".
+
+Store-backed capacity must distinguish a live planning claim from the durable remains of a dead one.
+Regression here is the whole-board freeze of 2026-09-18 (`claimed=2, processing=0`), so both directions
+are pinned: the orphan must NOT hold a slot, and a claim whose planner is live MUST still hold one.
+*/
+describe("store-backed planning capacity", () => {
+  const planningRow = (id: string): Task => ({
+    id,
+    column: "todo",
+    status: "planning",
+    dependencies: [],
+    steps: [],
+  } as unknown as Task);
+  const tasks = [planningRow("FN-CAP-ORPHAN"), planningRow("FN-CAP-LIVE"), { id: "FN-CAP-WAITING", column: "todo", dependencies: [], steps: [] } as unknown as Task];
+  const store = {} as unknown as WorkflowIrResolverStore;
+
+  it("counts a planning claim only while a planner probe reports it live", async () => {
+    const unregister = registerPlanningLivenessProbe((taskId) => taskId === "FN-CAP-LIVE");
+    try {
+      expect(await persistedTopLevelAgentTaskIdsFromStore(store, tasks)).toEqual(["FN-CAP-LIVE"]);
+      // The live claim stays a real holder, and pre-planning claims stay additive on top of it.
+      expect(await computeTopLevelConcurrencyClaimedFromStore({ store, tasks, pendingSpecifyCount: 1 })).toBe(2);
+      expect(await computeTopLevelConcurrencyClaimedFromStore({ store, tasks })).toBe(1);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("releases an orphaned planning claim from both the project cap and the worktree gate", async () => {
+    // No probe registered: no planner exists in this process, so no planning status may hold capacity.
+    expect(await persistedTopLevelAgentTaskIdsFromStore(store, tasks)).toEqual([]);
+    expect(await persistedWorktreeHolderTaskIdsFromStore(store, tasks)).toEqual([]);
+    expect(await computeTopLevelConcurrencyClaimedFromStore({ store, tasks })).toBe(0);
   });
 });

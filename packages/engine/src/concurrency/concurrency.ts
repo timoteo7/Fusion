@@ -9,6 +9,7 @@ import {
   type Task,
   type WorkflowIrResolverStore,
 } from "@fusion/core";
+import { isPlanningLive } from "../agents/planning-liveness.js";
 import { createLogger } from "../logger.js";
 
 const concurrencyLog = createLogger("concurrency");
@@ -555,11 +556,25 @@ FNXC:WorktreeCapacity 2026-08-01-04:38:
 Expose the ids behind the canonical live-task count so capacity diagnostics and arithmetic use the
 same enriched predicate as the dashboard. Retained worktree metadata is deliberately not an input.
 */
+/*
+FNXC:CapacitySlotLeak 2026-09-19-04:07:
+Store-backed capacity is the only place that can prove a planning claim is real, so the proof travels
+with the shape. `status:"planning"` is durable and outlives its planner; `isPlanningLive` asks the
+process-wide registry (every TriageProcessor registers a probe in its constructor) whether a planner
+session for that task is actually running here. Without this, an orphaned planning row pinned every
+project slot and planning starved itself ("um card sem sessão viva não pode segurar vaga de capacidade";
+`isRunningAgentTask` in @fusion/core carries the full report). Removal is still owned by the durable
+`status` repair (`sweepStalePlanningStatuses`); this seam only stops a stale row from claiming capacity.
+
+Scope is deliberate: this is the enriched, store-backed path used by every engine capacity consumer
+(triage admission, the executor spawn tool, the scheduler's worktree gate, holder diagnostics). The
+synchronous semaphore leak valve and the display counts stay on the flag-less fallback.
+*/
 async function enrichedTopLevelAgentTasksFromStore(store: WorkflowIrResolverStore, tasks: Task[]) {
   const irCache = new Map();
   return Promise.all(tasks.map(async (task) => {
     const ir = await resolveWorkflowIrForTask(store, task.id, irCache);
-    return enrichRunningAgentTaskShape(task, ir);
+    return { ...enrichRunningAgentTaskShape(task, ir), planningIsLive: isPlanningLive(task.id) };
   }));
 }
 
