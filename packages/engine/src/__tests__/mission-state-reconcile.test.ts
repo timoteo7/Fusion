@@ -718,4 +718,65 @@ describe("reconcileMissionState", () => {
     expect(feature.status).toBe("done");
     expect(pass2.statusUpdates).toBe(0);
   });
+
+  /*
+  FNXC:MissionFeatureNoopWrite 2026-09-19-05:48:
+  The reported storm rewrote every taskId-bearing feature of a mission in a fixed order, twice per
+  ~296 s period, while only `updatedAt` advanced — the shape of a spec-alignment projection that
+  re-issues the same empty write on every pass. This pins the reconcile layer's half of the store
+  contract: once a pass's projection is persisted, an identical second pass issues no feature write
+  at all and the feature's `updatedAt` does not move.
+  */
+  it("issues no feature write on a second pass over an already-aligned mission", async () => {
+    const task = {
+      id: "FN-1", title: "Delivery", column: "in-progress", status: undefined,
+      missionId: "M-1", sliceId: "SL-1", updatedAt: "2026-09-19T00:00:00.000Z",
+    };
+    const feature: Record<string, unknown> = {
+      id: "F-1", title: "Delivery", sliceId: "SL-1", taskId: task.id, status: "in-progress",
+      loopState: "implementing", implementationAttemptCount: 1, validatorAttemptCount: 0,
+      createdAt: "2026-09-19T00:00:00.000Z", updatedAt: "2026-09-19T00:00:00.000Z",
+    };
+    // Recording double: both writers persist what they are given, so pass 2 observes the projection
+    // pass 1 applied instead of re-deriving it from a stale pre-image.
+    const updateFeature = vi.fn().mockImplementation((_id: string, updates: Record<string, unknown>) => {
+      Object.assign(feature, updates, { updatedAt: new Date().toISOString() });
+      return Promise.resolve(feature);
+    });
+    const updateFeatureStatus = vi.fn().mockImplementation((_id: string, status: string) => {
+      Object.assign(feature, { status }, { updatedAt: new Date().toISOString() });
+      return Promise.resolve(feature);
+    });
+    const missionStore = {
+      listMissions: vi.fn().mockResolvedValue([{ id: "M-1", status: "active" }]),
+      getMissionWithHierarchy: vi.fn().mockResolvedValue({
+        id: "M-1", milestones: [{ slices: [{ id: "SL-1", features: [feature] }] }],
+      }),
+      listAssertionsForFeature: vi.fn().mockResolvedValue([]),
+      updateFeature,
+      updateFeatureStatus,
+    };
+    const taskStore = {
+      listTasks: vi.fn().mockResolvedValue([task]),
+      getTask: vi.fn().mockResolvedValue(task),
+      getLatestSpecDriftReport: vi.fn().mockResolvedValue(undefined),
+    };
+    const deps = { taskStore: taskStore as never, missionStore };
+
+    const pass1 = await reconcileMissionState(deps, { source: "self-healing" });
+    expect(pass1.featuresScanned).toBe(1);
+    // Pass 1 applies the spec-alignment projection the store had not persisted yet: this is the
+    // exact write shape the reported storm was made of.
+    expect(updateFeature).toHaveBeenCalledTimes(1);
+    expect(updateFeature).toHaveBeenCalledWith("F-1", { specAlignment: "unavailable" }, expect.anything());
+    expect(updateFeatureStatus).not.toHaveBeenCalled();
+    const updatedAtAfterFirstPass = feature.updatedAt;
+
+    const pass2 = await reconcileMissionState(deps, { source: "self-healing" });
+
+    expect(updateFeature).toHaveBeenCalledTimes(1);
+    expect(updateFeatureStatus).not.toHaveBeenCalled();
+    expect(feature.updatedAt).toBe(updatedAtAfterFirstPass);
+    expect(pass2.statusUpdates).toBe(0);
+  });
 });
