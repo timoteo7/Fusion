@@ -7506,6 +7506,76 @@ describe("SelfHealingManager", () => {
       managerWithRecovery.stop();
     });
 
+    /*
+    FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+    The sweep announced "Recovering specified triage task <id>" on every poll for cards it never
+    recovered, and recorded no outcome when the recovery declined or when its own gates skipped the
+    candidate. The recorded engine log held 180 announcements and zero reasons, so an operator could
+    not tell "still working" from "refused, and here is the gate". Both paths must say why.
+    */
+    it("records why a specified planning card was announced for recovery and then left alone", async () => {
+      const declined = {
+        id: "FN-DECLINED",
+        column: "todo",
+        status: null,
+        paused: false,
+        steps: [{ title: "Implement", status: "pending" }],
+        log: [],
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      } as unknown as Task;
+      const recoverFn = vi.fn().mockResolvedValue(false);
+      const recoveryStore = createMockStore({
+        listTasks: vi.fn().mockResolvedValue([declined]),
+        getTask: vi.fn().mockResolvedValue(declined),
+      });
+      const manager = new SelfHealingManager(recoveryStore, {
+        rootDir: "/tmp/test-project",
+        recoverApprovedTriageTask: recoverFn,
+        getPlanningTaskIds: () => new Set<string>(),
+      });
+      vi.setSystemTime(new Date("2026-01-01T00:31:00.000Z"));
+      selfHealingLoggerMock.warn.mockClear();
+
+      await expect(manager.recoverApprovedTriageTasks()).resolves.toBe(0);
+      expect(recoverFn).toHaveBeenCalledWith(declined);
+      expect(selfHealingLoggerMock.warn).toHaveBeenCalledWith(expect.stringContaining("specified triage recovery declined"));
+
+      manager.stop();
+    });
+
+    it("records why a specified planning candidate stopped reading as still in planning", async () => {
+      const advanced = {
+        id: "FN-ADVANCED",
+        column: "todo",
+        status: null,
+        paused: false,
+        steps: [{ title: "Implement", status: "pending" }],
+        workflowStepResults: [
+          { workflowStepId: "plan-review", workflowStepName: "Plan Review", phase: "pre-merge", status: "passed", verdict: "APPROVE" },
+        ],
+        log: [],
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      } as unknown as Task;
+      const recoverFn = vi.fn().mockResolvedValue(true);
+      const recoveryStore = createMockStore({
+        listTasks: vi.fn().mockResolvedValue([advanced]),
+        getTask: vi.fn().mockResolvedValue(advanced),
+      });
+      const manager = new SelfHealingManager(recoveryStore, {
+        rootDir: "/tmp/test-project",
+        recoverApprovedTriageTask: recoverFn,
+        getPlanningTaskIds: () => new Set<string>(),
+      });
+      vi.setSystemTime(new Date("2026-01-01T00:31:00.000Z"));
+      selfHealingLoggerMock.warn.mockClear();
+
+      await expect(manager.recoverApprovedTriageTasks()).resolves.toBe(0);
+      expect(recoverFn).not.toHaveBeenCalled();
+      expect(selfHealingLoggerMock.warn).toHaveBeenCalledWith(expect.stringContaining("no longer reads as still in the planning stage"));
+
+      manager.stop();
+    });
+
     it.each([
       ["recent", { updatedAt: "2026-01-01T00:04:30.000Z" }, new Set<string>()],
       ["paused", { paused: true }, new Set<string>()],
