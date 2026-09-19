@@ -3288,6 +3288,84 @@ describe("specified triage recovery", () => {
     expect(store.moveTask).toHaveBeenCalledWith("FN-001", "todo");
   });
 
+  /*
+  FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+  Reproduces the board symptom: a specified card parked in planning is announced by the
+  stale-planning sweep on every poll and never recovers. Root cause was the graph fence reading
+  `listWorkflowWorkItemsForTask(...).length === 0` as "no live graph run"; that reader returns the
+  card's whole history, so four terminal rows (succeeded/failed/cancelled/exhausted) refused the
+  recovery in silence. Terminal rows are finished work and must not block. A non-terminal row still
+  does, and the refusal must name itself.
+  */
+  it("recovers a legacy null-status plan whose only graph work items are terminal", async () => {
+    const store = createMockStore({
+      listWorkflowWorkItemsForTask: vi.fn().mockResolvedValue([
+        { id: "wi-1", state: "succeeded" },
+        { id: "wi-2", state: "failed" },
+        { id: "wi-3", state: "cancelled" },
+        { id: "wi-4", state: "exhausted" },
+      ] as never),
+      hasWorkflowRunStepInstancesForTask: vi.fn().mockResolvedValue(false),
+    });
+    const processor = new TriageProcessor(store, rootDir);
+
+    const recovered = await processor.recoverApprovedTask({
+      id: "FN-001",
+      description: "Unapproved draft after early status clear",
+      column: "triage",
+      status: null,
+      dependencies: [],
+      steps: [],
+      currentStep: 0,
+      log: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:02:00.000Z",
+    });
+
+    expect(recovered).toBe(true);
+    expect(store.moveTask).toHaveBeenCalledWith("FN-001", "todo");
+    expect(store.logEntry).not.toHaveBeenCalledWith("FN-001", expect.stringContaining("Planning recovery withheld"));
+  });
+
+  it("withholds the legacy null-status plan while a non-terminal work item exists and records why", async () => {
+    const store = createMockStore({
+      listWorkflowWorkItemsForTask: vi.fn().mockResolvedValue([
+        { id: "wi-1", state: "succeeded" },
+        { id: "wi-2", state: "running" },
+      ] as never),
+      hasWorkflowRunStepInstancesForTask: vi.fn().mockResolvedValue(false),
+    });
+    const processor = new TriageProcessor(store, rootDir);
+
+    const task = {
+      id: "FN-001",
+      description: "Graph-owned plan",
+      column: "triage",
+      status: null,
+      dependencies: [],
+      steps: [],
+      currentStep: 0,
+      log: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:02:00.000Z",
+    };
+
+    await expect(processor.recoverApprovedTask(task as never)).resolves.toBe(false);
+    expect(store.moveTask).not.toHaveBeenCalled();
+    expect(store.logEntry).toHaveBeenCalledWith(
+      "FN-001",
+      expect.stringContaining("Planning recovery withheld"),
+    );
+    expect(store.logEntry).toHaveBeenCalledWith("FN-001", expect.stringContaining("running"));
+
+    // The sweep retries every poll; the same refusal must not flood the card's own log.
+    await processor.recoverApprovedTask(task as never);
+    expect(
+      (store.logEntry as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([id, message]) => id === "FN-001" && String(message).includes("Planning recovery withheld")),
+    ).toHaveLength(1);
+  });
+
   it("defers legacy null-status recovery when graph step instances already exist", async () => {
     const store = createMockStore({
       listWorkflowWorkItemsForTask: vi.fn().mockResolvedValue([]),
