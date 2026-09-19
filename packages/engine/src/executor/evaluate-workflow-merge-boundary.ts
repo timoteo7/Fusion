@@ -25,14 +25,35 @@ export type WorkflowMergeBoundaryProof = {
   complete: boolean;
 };
 
+/**
+ * FNXC:WorkflowMerge 2026-09-19-03:58:
+ * Resultados pre-merge podem vir de passos opcionais habilitados (source="optional-group"); a prova
+ * de fronteira deve enxerga-los, senao tarefas com reviews aprovados ficam presas em
+ * merge-boundary-unproven.
+ *
+ * Pre-merge results are produced by TWO graph runtimes: `node` (graph-authored node progress) and
+ * `optional-group` (an enabled optional step such as the builtin Plan Review / Code Review groups).
+ * Both are graph-native evidence that the graph ran, so the proof must accept both. Measured on a
+ * live card (project proj_9ef728e7cc084681) whose only two workflowStepResults were
+ * `phase="pre-merge"`, `status="passed"`, `source="optional-group"` (plan-review, code-review) with
+ * enabledWorkflowSteps ["plan-review","code-review"]: this filter dropped them, the failure reported
+ * `no-node-result`, and the card was parked at `merge-boundary-unproven — operator action required`.
+ *
+ * Nothing else is loosened: a non-pre-merge (e.g. post-merge) result stays out of the proof, and
+ * terminality (`allResultsTerminal`) plus foreach instance coverage stay mandatory. Legacy compiled
+ * workflow-step results carry no `source` and are deliberately not graph-native evidence.
+ */
+export function isGraphNativePreMergeResult(result: CoreWorkflowStepResult): boolean {
+  return (result.source === "node" || result.source === "optional-group")
+    && (result.phase ?? "pre-merge") === "pre-merge";
+}
+
 export async function evaluateWorkflowMergeBoundary(
   deps: EvaluateWorkflowMergeBoundaryDeps,
   task: TaskDetail,
   runId?: string,
 ): Promise<WorkflowMergeBoundaryProof> {
-  const relevant = (task.workflowStepResults ?? []).filter((result) =>
-    result.source === "node" && (result.phase ?? "pre-merge") === "pre-merge",
-  );
+  const relevant = (task.workflowStepResults ?? []).filter(isGraphNativePreMergeResult);
   // FNXC:WorkflowMerge 2026-07-27-12:30: FN-8601 keeps required presence
   // independent from terminality: a failed node result proves execution occurred,
   // while allResultsTerminal separately rejects it at the merge boundary.
