@@ -474,7 +474,14 @@ export async function handleGraphFailure(
             graphResumeRetryCount: nextRetries,
           }, deps.getRunContextFor(task.id));
           const scheduleRetry = () => {
-            deps.execute(live).catch((err: unknown) =>
+            void (async () => {
+              const current = await deps.store.getTask(task.id);
+              if (!current || current.deletedAt || current.paused || current.userPaused) {
+                executorLog.log(`${task.id}: skipping Plan Review provider retry because the task is no longer runnable`);
+                return;
+              }
+              await deps.execute(current);
+            })().catch((err: unknown) =>
               executorLog.error(`Failed Plan Review provider retry for ${task.id}:`, err),
             );
           };
