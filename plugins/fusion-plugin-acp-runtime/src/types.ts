@@ -205,6 +205,9 @@ export interface AgentPromptResult {
 export interface AgentSessionResult {
   session: AgentSession;
   sessionFile?: string;
+  // Mirrors the engine contract (agent-runtime.ts AgentSessionResult.settleFallbackDispatch):
+  // optional, finite, per-prompt admission-close boundary triage awaits before Plan Review.
+  settleFallbackDispatch?: () => Promise<void>;
 }
 
 /** The Fusion runtime contract this plugin implements (mirrors the engine interface). */

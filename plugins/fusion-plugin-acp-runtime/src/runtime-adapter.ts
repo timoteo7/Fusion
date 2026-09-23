@@ -271,7 +271,18 @@ export class AcpRuntimeAdapter implements AgentRuntime {
       },
     };
 
-    return { session };
+    /*
+    FNXC:AcpFallbackSettlement 2026-09-23-15:26:
+    The planner (triage.ts) requires every runtime to provide `settleFallbackDispatch` — a finite,
+    runtime-owned admission-close signal for the fallback-dispatch lifecycle. The pi runtime provides
+    a no-op (pi.ts:3759). The ACP adapter returned only `{ session }`, so
+    `typeof settleFallbackDispatch !== "function"` tripped `fallbackDispatchBoundaryMissing` and the
+    planning attempt failed closed with "Planner runtime acp did not provide a fallback-dispatch
+    settlement boundary" (FUSI-021/022/023), burning the retry budget. Providing the boundary lets
+    triage observe every admitted callback before accepting the attempt. The ACP turn is already
+    drained by the awaited SDK prompt promise, so the settlement itself is a no-op (mirrors pi).
+    */
+    return { session, settleFallbackDispatch: async () => undefined };
   }
 
   async promptWithFallback(
