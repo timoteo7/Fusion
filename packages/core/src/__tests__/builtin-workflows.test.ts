@@ -3,17 +3,23 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from
 import {
   BUILTIN_WORKFLOWS,
   defaultEnabledBuiltinWorkflowIds,
+  effectiveEnabledBuiltinWorkflowIds,
   getBuiltinWorkflow,
   getRequiredPluginIdForBuiltinWorkflow,
+  isBuiltinWorkflowEnabled,
   isBuiltinWorkflowId,
   isBuiltinWorkflowPluginGated,
   isBuiltinWorkflowDeprecated,
+  isBuiltinWorkflowToggleEligible,
+  resolveEffectiveDefaultWorkflowId,
+  toggleEligibleBuiltinWorkflowIds,
+  validateEnabledBuiltinWorkflowIds,
 } from "../workflows/builtin-workflows.js";
 import { BUILTIN_CODING_WORKFLOW_IR } from "../workflows/builtin-coding-workflow-ir.js";
 import { BUILTIN_STEPWISE_CODING_WORKFLOW_IR } from "../workflows/builtin-stepwise-coding-workflow-ir.js";
 import { BUILTIN_PR_WORKFLOW_IR } from "../workflows/builtin-pr-workflow-ir.js";
 import { BROWSER_VERIFICATION_GROUP_ID, BROWSER_VERIFICATION_STEP_NODE_ID } from "../workflows/builtin-browser-verification-group.js";
-import { CODE_REVIEW_STEP_NODE_ID } from "../workflows/builtin-code-review-group.js";
+import { CODE_REVIEW_STEP_NODE_ID, DEFAULT_CODE_REVIEW_MAX_REVISIONS } from "../workflows/builtin-code-review-group.js";
 import { PLAN_REVIEW_GROUP_ID, PLAN_REVIEW_STEP_NODE_ID } from "../workflows/builtin-plan-review-group.js";
 import { builtinPromptConfig, BUILTIN_SEAM_PROMPTS } from "../workflows/builtin-workflow-prompts.js";
 import { BUILTIN_WORKFLOW_SETTINGS } from "../workflows/builtin-workflow-settings.js";
@@ -231,7 +237,9 @@ describe("built-in workflows", () => {
               ? 3
               : workflow.id === "builtin:compound-engineering" && gate === "code-review"
                 ? 2
-                : "unbounded",
+                : gate === "code-review"
+                  ? DEFAULT_CODE_REVIEW_MAX_REVISIONS
+                  : "unbounded",
         });
       }
     }
@@ -240,7 +248,7 @@ describe("built-in workflows", () => {
   /*
   FNXC:WorkflowCompletion 2026-08-25-10:20:
   The invariant is that every built-in PRODUCES a card summary, not that it owns a node called
-  `completion-summary`. `builtin:coding-ideas-v2` folds the summary into its Documentation milestone,
+  `completion-summary`. `builtin:coding-ideas` folds the summary into its Documentation milestone,
   writing it in the same pass as the delivery note and saving a model call per card. Pinning the node
   id would have forced a second read-only session that exists only to satisfy a test.
   What must NOT weaken: a workflow with neither a summary node nor a summary-writing milestone still
@@ -281,13 +289,10 @@ describe("built-in workflows", () => {
     for (const workflow of BUILTIN_WORKFLOWS) {
       if (workflow.kind === "fragment") continue;
       /*
-      FNXC:WorkflowCatalog 2026-08-25-14:40:
-      Coding (Ideas) is an intentionally minimal pipeline with no post-merge verification, and
-      `builtin:coding-ideas-v2` DERIVES from it — it inherits the absence rather than declining the
-      node. Its own review lane is where verification is judged; adding a post-merge node would
-      re-open the checks after the merge that its review already covered.
+      FNXC:WorkflowCatalog 2026-09-06-02:15:
+      The surviving Coding (Ideas) workflow derives from a reduced composition with no post-merge verification. Its own review lane is where verification is judged; adding a post-merge node would re-open checks after the merge that review already covered.
       */
-      if (workflow.id === "builtin:coding-ideas" || workflow.id === "builtin:coding-ideas-v2") continue;
+      if (workflow.id === "builtin:coding-ideas") continue;
       const mergeNode = workflow.ir.nodes.find((node) => node.id === "merge-attempt" || node.id === "merge");
       if (!mergeNode) continue;
 
@@ -472,13 +477,32 @@ describe("built-in workflows", () => {
     );
   });
 
-  it("keeps builtin:coding-ideas selectable as the simple five-stage pipeline", () => {
-    const codingIdeas = getBuiltinWorkflow("builtin:coding-ideas");
-    expect(codingIdeas).toBeDefined();
-    expect(codingIdeas!.kind).toBe("workflow");
-    expect(() => parseWorkflowIr(codingIdeas!.ir)).not.toThrow();
-    expect(isBuiltinWorkflowDeprecated("builtin:coding-ideas")).toBe(false);
-    expect(defaultEnabledBuiltinWorkflowIds()).toContain("builtin:coding-ideas");
+  it("publishes the current revision under one stable Ideas identity", () => {
+    expect(BUILTIN_WORKFLOWS.filter((workflow) => workflow.id === "builtin:coding-ideas")).toHaveLength(1);
+    expect(getBuiltinWorkflow("builtin:coding-ideas-v2")).toBeUndefined();
+    expect(getBuiltinWorkflow("builtin:coding")?.name).toBe("Coding (Auto)");
+    expect(getBuiltinWorkflow("builtin:coding-ideas")?.name).toBe("Coding (Ideas)");
+    expect(getBuiltinWorkflow("builtin:coding-ideas")?.id).toBe("builtin:coding-ideas");
+    expect(BUILTIN_WORKFLOWS.some((workflow) => workflow.name.includes("V2"))).toBe(false);
+  });
+
+  it("uses the canonical identity for activation and defaults", () => {
+    expect(() => validateEnabledBuiltinWorkflowIds(["builtin:coding-ideas"])).not.toThrow();
+    expect(() => validateEnabledBuiltinWorkflowIds(["builtin:coding-ideas-v2"])).toThrow();
+    expect(() => validateEnabledBuiltinWorkflowIds(["builtin:coding-ideas", "builtin:coding-ideas"])).toThrow(/duplicate/);
+
+    for (const configured of [
+      ["builtin:coding-ideas"],
+      ["builtin:coding-ideas", "builtin:coding"],
+    ]) {
+      const effective = effectiveEnabledBuiltinWorkflowIds(configured);
+      expect(effective.filter((id) => id === "builtin:coding-ideas")).toHaveLength(1);
+    }
+
+    expect(resolveEffectiveDefaultWorkflowId("builtin:coding-ideas", undefined)).toBe("builtin:coding-ideas");
+    expect(isBuiltinWorkflowToggleEligible("builtin:coding-ideas")).toBe(true);
+    expect(toggleEligibleBuiltinWorkflowIds()).toContain("builtin:coding-ideas");
+    expect(isBuiltinWorkflowEnabled("builtin:coding-ideas", ["builtin:coding-ideas"])).toBe(true);
   });
 
   it("orders builtin:brainstorming's ask-user/exit-gate loop ahead of the plan/execute spine", () => {
@@ -559,7 +583,7 @@ describe("built-in workflows", () => {
     const coding = getBuiltinWorkflow("builtin:coding");
     expect(coding).toBeDefined();
     expect(coding!.id).toBe("builtin:coding");
-    expect(coding!.name).toBe("Coding");
+    expect(coding!.name).toBe("Coding (Auto)");
     expect(coding!.description).toContain("optional final code review");
     expect(coding!.kind).toBe("workflow");
     expect(coding!.createdAt).toBe("2026-01-01T00:00:00.000Z");
@@ -626,7 +650,6 @@ describe("built-in workflows", () => {
           { id: "in-progress", traits: ["wip", "abort-on-exit", "timing"] },
           { id: "in-review", traits: ["merge-blocker", "human-review", "stall-detection", "merge"] },
           { id: "done", traits: ["complete"] },
-          { id: "archived", traits: ["archived"] },
         ],
       ],
       [
@@ -637,7 +660,6 @@ describe("built-in workflows", () => {
           { id: "drafting", traits: ["wip", "abort-on-exit", "timing"] },
           { id: "editorial-review", traits: ["merge-blocker", "human-review", "stall-detection", "merge"] },
           { id: "published", traits: ["complete"] },
-          { id: "archived", traits: ["archived"] },
         ],
       ],
       [
@@ -650,7 +672,6 @@ describe("built-in workflows", () => {
           { id: "in-progress", traits: ["wip", "abort-on-exit", "timing"] },
           { id: "in-review", traits: ["merge-blocker", "human-review", "stall-detection", "merge"] },
           { id: "done", traits: ["complete"] },
-          { id: "archived", traits: ["archived"] },
         ],
       ],
       [
@@ -661,7 +682,6 @@ describe("built-in workflows", () => {
           { id: "in-progress", traits: ["wip", "abort-on-exit", "timing"] },
           { id: "in-review", traits: ["merge-blocker", "human-review", "stall-detection", "merge"] },
           { id: "done", traits: ["complete"] },
-          { id: "archived", traits: ["archived"] },
         ],
       ],
       [
@@ -673,7 +693,6 @@ describe("built-in workflows", () => {
           { id: "enrichment", traits: ["timing"] },
           { id: "outreach", traits: ["human-review", "stall-detection"] },
           { id: "converted", traits: ["complete"] },
-          { id: "archived", traits: ["archived"] },
         ],
       ],
       [
@@ -683,7 +702,6 @@ describe("built-in workflows", () => {
           { id: "in-progress", traits: ["wip", "timing"] },
           { id: "await-review", traits: ["merge-blocker", "stall-detection"] },
           { id: "done", traits: ["complete"] },
-          { id: "archived", traits: ["archived"] },
         ],
       ],
     ]);
@@ -708,7 +726,7 @@ describe("built-in workflows", () => {
 
     /*
     FNXC:MergedPlanningColumn 2026-07-29-12:10 (U11):
-    Five columns, not the legacy six. This is the assertion that would have caught the merge
+    Four columns, not the legacy split lifecycle. This is the assertion that would have caught the merge
     landing on the wrong constant, so it is updated rather than deleted: it still pins the exact
     column set and trait order of the OPERATOR'S default board.
     */
@@ -717,14 +735,12 @@ describe("built-in workflows", () => {
       "in-progress",
       "in-review",
       "done",
-      "archived",
     ]);
     expect(ir.columns.map((column) => column.traits.map((trait) => trait.trait))).toEqual([
       ["intake", "hold", "reset-on-entry"],
       ["wip", "abort-on-exit", "timing"],
       ["merge-blocker", "human-review", "stall-detection", "merge"],
       ["complete"],
-      ["archived"],
     ]);
 
     const byId = new Map(ir.nodes.map((node) => [node.id, node]));
@@ -798,11 +814,11 @@ describe("built-in workflows", () => {
     expect(ir.settings).toEqual(BUILTIN_WORKFLOW_SETTINGS);
     expect(ir.settings?.find((setting) => setting.id === "planReviewMaxRevisions")).toMatchObject({
       type: "number",
-      description: expect.stringMatching(/unbounded/i),
+      description: expect.stringMatching(/finite safety backstop/i),
     });
     expect(ir.settings?.find((setting) => setting.id === "codeReviewMaxRevisions")).toMatchObject({
       type: "number",
-      description: expect.stringMatching(/workflow's authored default/i),
+      description: expect.stringMatching(/workflow's authored bounded default/i),
     });
   });
 
@@ -824,7 +840,6 @@ describe("built-in workflows", () => {
       "drafting",
       "editorial-review",
       "published",
-      "archived",
     ]);
 
     const editorialReview = ir.columns.find((column) => column.id === "editorial-review");
@@ -930,18 +945,15 @@ describe("built-in workflows", () => {
     expect(getBuiltinWorkflow("builtin:pr-workflow")!.kind).toBe("fragment");
     expect(defaultEnabledBuiltinWorkflowIds().length).toBeGreaterThanOrEqual(5);
     /*
-    FNXC:WorkflowCatalog 2026-08-25-14:40:
-    `builtin:coding-ideas-v2` sits third, immediately after the Ideas workflow it derives from, which
-    is where a reader looking for the coding lane expects it. It displaced `builtin:review-heavy`
-    from this five-entry window; the window exists to pin ORDER STABILITY and `builtin:coding` first,
-    not to freeze the catalog size, and `review-heavy` is still asserted as enabled below.
+    FNXC:WorkflowCatalog 2026-09-06-02:15:
+    Removing the duplicate Ideas entry promotes the surviving workflow to second while retaining catalog order for every other built-in. This five-entry window pins that deliberate shift and keeps builtin:coding first.
     */
     expect(defaultEnabledBuiltinWorkflowIds().slice(0, 5)).toEqual([
       "builtin:coding",
       "builtin:coding-ideas",
-      "builtin:coding-ideas-v2",
       "builtin:legacy-coding",
       "builtin:quick-fix",
+      "builtin:review-heavy",
     ]);
     expect(defaultEnabledBuiltinWorkflowIds()).toContain("builtin:review-heavy");
     expect(defaultEnabledBuiltinWorkflowIds()).toContain("builtin:stepwise-coding");

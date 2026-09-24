@@ -8,7 +8,7 @@
  * stays in lockstep with the named-column INSERT/UPSERT clauses generated below.
  */
 import type { Task } from "../types.js";
-import { normalizeTaskPriority } from "../tasks/task-priority.js";
+import { normalizeTaskQueueBoost } from "../tasks/task-queue-order.js";
 import { toJson, toJsonNullable, fromJson} from "../db/db.js";
 
 /** Database row shape for the tasks table (all columns). */
@@ -17,7 +17,10 @@ export interface TaskRow {
   lineageId: string | null;
   title: string | null;
   description: string;
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: inert historical column. Read-shape only — FN-509
+     removed every reader, and nothing writes it. Do not reintroduce it as a task field. */
   priority: string | null;
+  queueBoost: string | null;
   column: string;
   status: string | null;
   size: string | null;
@@ -120,6 +123,9 @@ export interface TaskRow {
   cumulativeActiveMs: number | null;
   cumulativePlanningMs: number | null;
   planningStartedAt: string | null;
+  /** FNXC:TaskPauseAccounting 2026-09-16-06:16: FN-457 durable paused-time accounting (display-only). */
+  cumulativePausedMs: number | null;
+  pausedStartedAt: string | null;
   columnDwellMs: string | null;
   workflowTransitionNotification: string | null;
   plannerOversightLevel: string | null;
@@ -153,6 +159,10 @@ export interface TaskRow {
   workspaceWorktrees: string | null;
   repositoryScope: string | null;
   externalBlock: string | null;
+  planningFailure: string | null;
+  humanPlanApproval: string | null;
+  /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514 per-card delivery lock, decision and rejection state. */
+  humanMergeApproval: string | null;
   noCommitsExpected: number | null;
   enabledWorkflowSteps: string | null;
   modifiedFiles: string | null;
@@ -235,7 +245,7 @@ PostgreSQL task JSONB conversion must use one registry for both descriptor write
 export const TASK_JSONB_COLUMNS: ReadonlySet<string> = new Set([
   "dependencies", "steps", "stepReports", "customFields", "log", "attachments", "steeringComments",
   "comments", "review", "reviewState", "workflowStepResults", "prInfo", "prInfos",
-  "issueInfo", "githubTracking", "gitlabTracking", "mergeDetails", "workspaceWorktrees", "repositoryScope", "externalBlock", "enabledWorkflowSteps",
+  "issueInfo", "githubTracking", "gitlabTracking", "mergeDetails", "workspaceWorktrees", "repositoryScope", "externalBlock", "planningFailure", "humanPlanApproval", "humanMergeApproval", "enabledWorkflowSteps",
   "modifiedFiles", "declaredSymbols", "scopeAutoWiden", "sourceMetadata", "tokenUsagePerModel",
   "tokenBudgetOverride", "columnDwellMs", "workflowTransitionNotification", "recommendations",
 ]);
@@ -263,7 +273,10 @@ export const TASK_COLUMN_DESCRIPTORS: TaskColumnDescriptor[] = [
   defineTaskColumn("lineageId", (_task, context) => context.lineageId),
   defineTaskColumn("title", (task) => task.title ?? null),
   defineTaskColumn("description", (task) => task.description ?? ""),
-  defineTaskColumn("priority", (task) => normalizeTaskPriority(task.priority)),
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 retired the `priority` descriptor. The SQL column
+     survives with its own default so historical rows stay readable, but nothing writes a level any
+     more and nothing reads one. The durable queue rank below replaces it. */
+  defineTaskColumn("queueBoost", (task) => toJsonNullable(normalizeTaskQueueBoost(task.queueBoost))),
   defineTaskColumn("column", (task) => task.column, '"column"'),
   defineTaskColumn("status", (task) => task.status ?? null),
   defineTaskColumn("size", (task) => task.size ?? null),
@@ -276,6 +289,11 @@ export const TASK_COLUMN_DESCRIPTORS: TaskColumnDescriptor[] = [
   defineTaskColumn("paused", (task) => task.paused ? 1 : 0),
   defineTaskColumn("pausedReason", (task) => task.pausedReason ?? null),
   defineTaskColumn("externalBlock", (task) => toJsonNullable(task.externalBlock)),
+  defineTaskColumn("planningFailure", (task) => toJsonNullable(task.planningFailure)),
+  /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 per-card decision state travels the shared descriptor seam like every other JSON lifecycle field. */
+  defineTaskColumn("humanPlanApproval", (task) => toJsonNullable(task.humanPlanApproval)),
+  /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514 delivery lock state travels the same shared descriptor seam. */
+  defineTaskColumn("humanMergeApproval", (task) => toJsonNullable(task.humanMergeApproval)),
   defineTaskColumn("wedgeNotification", (task) => toJsonNullable(task.wedgeNotification)),
   defineTaskColumn("userPaused", (task) => task.userPaused ? 1 : 0),
   defineTaskColumn("baseBranch", (task) => task.baseBranch ?? null),
@@ -370,6 +388,8 @@ export const TASK_COLUMN_DESCRIPTORS: TaskColumnDescriptor[] = [
   defineTaskColumn("cumulativeActiveMs", (task) => task.cumulativeActiveMs ?? null),
   defineTaskColumn("cumulativePlanningMs", (task) => task.cumulativePlanningMs ?? null),
   defineTaskColumn("planningStartedAt", (task) => task.planningStartedAt ?? null),
+  defineTaskColumn("cumulativePausedMs", (task) => task.cumulativePausedMs ?? null),
+  defineTaskColumn("pausedStartedAt", (task) => task.pausedStartedAt ?? null),
   /*
   FNXC:TaskLifecyclePersistence 2026-07-14-13:17:
   Persist the late task lifecycle fields through the shared descriptor seam so both SQLite and PostgreSQL retain per-column timing, workflow transition dedupe, oversight overrides, and manual-plan approval state after migration.

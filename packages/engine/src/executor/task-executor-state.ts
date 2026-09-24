@@ -71,6 +71,8 @@ export abstract class TaskExecutorState {
    */
   protected workflowGateActivityPrincipals = new Map<string, string>();
   protected executing = new Set<string>();
+  /** Deferred terminal-park callbacks currently in flight (restart-recovery intent chain). */
+  protected deferredTerminalParksInFlight = new Set<string>();
   protected resumingUnpaused = new Set<string>();
   protected approvalSuspended = new Set<string>();
   protected approvalResumeAfterUnwind = new Set<string>();
@@ -82,8 +84,6 @@ export abstract class TaskExecutorState {
   protected workflowLifecycleMovesInFlight = new Set<string>();
   protected pendingTaskDisposals = new Map<string, Promise<void>>();
   protected unregisterTaskMoveDisposer: (() => void) | undefined;
-  protected unregisterArchiveWorktreeDisposer: (() => void) | undefined;
-  protected unregisterArchiveWorkspaceWorktreeDisposer: (() => void) | undefined;
   protected activeSessions = new Map<string, ActiveExecutorSessionState>();
   protected activeStepExecutors = new Map<string, StepSessionExecutor>();
   protected activeStepExecutorSeenSteeringIds = new Map<string, Set<string>>();

@@ -68,6 +68,16 @@ function selectActivityView(value: ActivitySegmentTestValue) {
   fireEvent.click(screen.getByRole("menuitem", { name: ACTIVITY_VIEW_LABELS[value] }));
 }
 
+function visibleTestIds(testId: string): HTMLElement[] {
+  return screen.queryAllByTestId(testId).filter((node) => node.closest('[aria-hidden="true"]') == null);
+}
+
+function getVisibleByTestId(testId: string): HTMLElement {
+  const matches = visibleTestIds(testId);
+  expect(matches).toHaveLength(1);
+  return matches[0]!;
+}
+
 describe("TaskDetailModal", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -492,7 +502,7 @@ describe("TaskDetailModal", () => {
       const { baseElement: container } = render(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent", plannerOversightLevel: "off" })}
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -509,7 +519,7 @@ describe("TaskDetailModal", () => {
       expect(container.querySelector(".task-detail-content")).not.toHaveClass("task-detail-content--planner-chat-expanded");
       expect(container.querySelector(".activity-segmented-control")).toBeNull();
       expect(container.querySelector(".activity-segment")).toBeNull();
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
       expect(screen.queryByText("Agent Log")).toBeNull();
       expect(screen.queryByRole("combobox", { name: "Activity view" })).toBeNull();
       expect(container.querySelector(".detail-section--chat")).toBeNull();
@@ -674,12 +684,17 @@ describe("TaskDetailModal", () => {
       }
     });
 
-    it("Feed segment keeps action/outcome rendering intact", () => {
+    it("Feed segment keeps action/outcome rendering intact and shows only real run agents", () => {
       const { baseElement: container } = render(
         <TaskDetailModal
           task={makeTask({
             log: [
-              { timestamp: "2026-01-01T00:01:00Z", action: "Started work", outcome: "Step completed successfully" },
+              {
+                timestamp: "2026-01-01T00:01:00Z",
+                action: "Started work",
+                outcome: "Step completed successfully",
+                runContext: { agentId: "agent-executor" },
+              },
               { timestamp: "2026-01-01T00:00:00Z", action: "Created task" },
             ],
           })}
@@ -700,9 +715,12 @@ describe("TaskDetailModal", () => {
       expect(outcomes).toHaveLength(1);
       expect(Array.from(actions).map((entry) => entry.textContent)).toEqual(["Created task", "Started work"]);
       expect(outcomes[0].textContent).toBe("Step completed successfully");
+      expect(container.querySelectorAll(".detail-log-marker")).toHaveLength(2);
+      expect(container.querySelectorAll(".detail-log-agent")).toHaveLength(1);
+      expect(container.querySelector(".detail-log-agent")).toHaveTextContent("agent-executor");
     });
 
-    it("Activity timeline CSS keeps action/outcome high-contrast and timestamp secondary", () => {
+    it("Activity timeline CSS keeps action dominant and outcome/timestamps secondary", () => {
       const stylesCssText = readDashboardStylesSource();
       expect(stylesCssText).toContain(".detail-log-action");
 
@@ -712,8 +730,9 @@ describe("TaskDetailModal", () => {
       const timestampsRule = getCssRuleBlock(stylesCssText, ".detail-log-timestamps");
 
       expect(actionRule).toContain("color: var(--text);");
-      expect(outcomeRule).toContain("color: var(--text);");
-      expect(outcomeRule).toContain("background: var(--surface);");
+      expect(actionRule).toContain("font-weight: 600;");
+      expect(outcomeRule).toContain("color: var(--text-muted);");
+      expect(outcomeRule).toContain("background: var(--bg-secondary);");
       expect(timestampRule).toContain("color: var(--text-muted);");
       expect(timestampRule).not.toContain("color: var(--text);");
       expect(timestampsRule).toContain("flex-wrap: wrap;");
@@ -814,7 +833,7 @@ describe("TaskDetailModal", () => {
 
       // Agent log viewer should appear with one Raw fullscreen affordance and no duplicate Activity expand toggle.
       expect(container.querySelector("[data-testid='agent-log-viewer']")).toBeTruthy();
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
       expect(screen.getAllByTestId("agent-log-fullscreen-toggle")).toHaveLength(1);
       expect(screen.getByTestId("agent-log-fullscreen-toggle")).toHaveAttribute("aria-label", "Expand agent log to full screen");
       expect(container.querySelector(".activity-toolbar")).toBeNull();
@@ -846,8 +865,7 @@ describe("TaskDetailModal", () => {
       );
 
       // Default: planner Chat active → Raw Logs fetching stays disabled
-      const initialCall = mockUseAgentLogs.mock.calls[mockUseAgentLogs.mock.calls.length - 1];
-      expect(initialCall[1]).toBe(false);
+      expect(mockUseAgentLogs.mock.calls.some((call) => call[1] === false)).toBe(true);
 
       // Select Activity and Feed — Raw Logs fetching stays disabled
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
@@ -955,15 +973,12 @@ describe("TaskDetailModal", () => {
       const mobileCss = css.slice(css.indexOf("@media (max-width: 768px)"));
 
       const expandedTitleRule = getCssRuleBlock(css, ".task-detail-content--chat-expanded .detail-title-row");
-      const expandedMetaRule = getCssRuleBlock(css, ".task-detail-content--chat-expanded .detail-meta");
       const expandedTabsRule = getCssRuleBlock(css, ".task-detail-content--chat-expanded .detail-tabs");
-      const expandedActionsRule = getCssRuleBlock(css, ".task-detail-content--chat-expanded .modal-actions");
       const expandedHeaderRule = getCssRuleBlock(css, ".task-detail-content--chat-expanded .modal-header");
       const expandedBodyRule = getCssRuleBlock(css, ".task-detail-content--chat-expanded .detail-body--chat");
       const expandedSectionRule = getCssRuleBlock(css, ".task-detail-content--chat-expanded .detail-section--chat");
       const mobileTitleRule = getCssRuleBlock(mobileCss, ".task-detail-content--chat-expanded .detail-title-row");
       const mobileTabsRule = getCssRuleBlock(mobileCss, ".task-detail-content--chat-expanded .detail-tabs");
-      const mobileActionsRule = getCssRuleBlock(mobileCss, ".task-detail-content--chat-expanded .modal-actions");
 
       expect(css).not.toContain(".activity-toolbar");
       expect(css).not.toContain("activity-toolbar--expand-only");
@@ -977,16 +992,16 @@ describe("TaskDetailModal", () => {
       expect(mobileCss).not.toContain("  .detail-activity {\n    padding-inline-end:");
       expect(mobileCss).toContain("  .activity-expand-toggle--overlay {\n    top: var(--space-sm);\n    right: var(--space-sm);\n  }");
       expect(expandedTitleRule).not.toContain("display: none");
-      expect(expandedMetaRule).toContain("display: none");
+      expect(css).not.toContain(".task-detail-content--chat-expanded .detail-meta");
       expect(expandedTabsRule).toContain("display: flex");
-      expect(expandedActionsRule).toContain("display: none");
+      expect(css).toContain(".task-detail-content--chat-expanded .modal-actions:not(.task-detail-chat-footer)");
+      expect(css).toContain("display: none;");
       expect(expandedHeaderRule).toContain("justify-content: space-between");
       expect(expandedBodyRule).toContain("flex: 1");
       expect(expandedBodyRule).toContain("min-height: 0");
       expect(expandedSectionRule).toContain("margin-top: 0");
       expect(mobileTitleRule).not.toContain("display: none");
       expect(mobileTabsRule).toContain("display: flex");
-      expect(mobileActionsRule).toContain("display: none");
     });
 
     it("FN-6370/FN-6517 expands and collapses Activity Live without leaving chrome hidden", () => {
@@ -1004,31 +1019,31 @@ describe("TaskDetailModal", () => {
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
       const content = container.querySelector(".task-detail-content");
       const titleRow = container.querySelector(".detail-title-row");
-      const liveToggle = screen.getByTestId("task-chat-expand-toggle");
+      const liveToggle = getVisibleByTestId("task-chat-expand-toggle");
       expect(liveToggle).toHaveClass("task-chat-expand-toggle--overlay");
       expect(liveToggle.closest(".activity-toolbar")).toBeNull();
       expect(container.querySelector(".activity-toolbar")).toBeNull();
       expect(content).not.toHaveClass("task-detail-content--chat-expanded");
       expect(titleRow).toHaveTextContent("FN-099");
       expect(container.querySelector(".detail-tabs")).toBeTruthy();
-      expect(container.querySelector(".modal-actions")).toBeTruthy();
+      expect(container.querySelector(".task-detail-chat-footer .task-chat-composer")).toBeInTheDocument();
 
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(content).toHaveClass("task-detail-content--chat-expanded");
       expect(titleRow).toHaveTextContent("FN-099");
       expect(titleRow).toHaveTextContent("In Progress");
       expect(container.querySelector(".detail-tabs")).toBeTruthy();
-      expect(container.querySelector(".modal-actions")).toBeTruthy();
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Collapse activity");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-pressed", "true");
+      expect(container.querySelector(".task-detail-chat-footer .task-chat-composer")).toBeInTheDocument();
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Collapse activity");
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-pressed", "true");
 
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(content).not.toHaveClass("task-detail-content--chat-expanded");
       expect(titleRow).toHaveTextContent("FN-099");
       expect(container.querySelector(".detail-tabs")).toBeTruthy();
-      expect(container.querySelector(".modal-actions")).toBeTruthy();
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Expand activity to full modal");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-pressed", "false");
+      expect(container.querySelector(".task-detail-chat-footer .task-chat-composer")).toBeInTheDocument();
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Expand activity to full modal");
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-pressed", "false");
     });
 
     it("FN-7325 keeps Activity expansion available and sticky across Live, Feed, and Raw Logs", () => {
@@ -1038,7 +1053,7 @@ describe("TaskDetailModal", () => {
             prompt: "# Hello\n\nContent",
             log: [{ timestamp: "2026-01-01T00:00:00Z", action: "Expanded feed entry", outcome: "visible" }],
           })}
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1049,30 +1064,30 @@ describe("TaskDetailModal", () => {
 
       const content = container.querySelector(".task-detail-content");
       expect(screen.getByTestId("task-planner-chat-expand-toggle")).toHaveAttribute("aria-label", "Expand task chat");
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
 
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
       expectActivityView("current");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Expand activity to full modal");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveClass("task-chat-expand-toggle--overlay");
-      expect(screen.getByTestId("task-chat-expand-toggle").closest(".activity-toolbar")).toBeNull();
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Expand activity to full modal");
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveClass("task-chat-expand-toggle--overlay");
+      expect(getVisibleByTestId("task-chat-expand-toggle").closest(".activity-toolbar")).toBeNull();
       expect(container.querySelector(".activity-toolbar")).toBeNull();
 
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(content).toHaveClass("task-detail-content--chat-expanded");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Collapse activity");
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Collapse activity");
 
       selectActivityView("feed");
       expect(content).toHaveClass("task-detail-content--chat-expanded");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-pressed", "true");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveClass("activity-expand-toggle--overlay");
-      expect(screen.getByTestId("task-chat-expand-toggle").closest(".activity-toolbar")).toBeNull();
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-pressed", "true");
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveClass("activity-expand-toggle--overlay");
+      expect(getVisibleByTestId("task-chat-expand-toggle").closest(".activity-toolbar")).toBeNull();
       expect(screen.getByText("Expanded feed entry")).toBeInTheDocument();
       expect(container.querySelector(".detail-activity-list")).toBeTruthy();
 
       selectActivityView("raw-logs");
       expect(content).toHaveClass("task-detail-content--chat-expanded");
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
       expect(screen.getByTestId("agent-log-fullscreen-toggle")).toHaveAttribute("aria-label", "Expand agent log to full screen");
       expect(screen.getAllByTestId("agent-log-fullscreen-toggle")).toHaveLength(1);
       expect(container.querySelector("[data-testid='agent-log-viewer']")).toBeTruthy();
@@ -1090,7 +1105,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(container.querySelector(".task-detail-content")).toHaveClass("task-detail-content--chat-expanded");
 
       rerender(
@@ -1106,7 +1121,7 @@ describe("TaskDetailModal", () => {
 
       expect(container.querySelector(".task-detail-content")).not.toHaveClass("task-detail-content--chat-expanded");
       expectActivityView("feed");
-      expect(screen.getByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Expand activity to full modal");
+      expect(getVisibleByTestId("task-chat-expand-toggle")).toHaveAttribute("aria-label", "Expand activity to full modal");
     });
 
     it("FN-7320 removes branch group chrome only while Activity is expanded", () => {
@@ -1114,7 +1129,7 @@ describe("TaskDetailModal", () => {
       const { baseElement: container } = render(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent", branchContext })}
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1124,19 +1139,23 @@ describe("TaskDetailModal", () => {
       );
 
       const content = container.querySelector(".task-detail-content");
+      fireEvent.click(screen.getByRole("button", { name: "Plan" }));
       expect(content).not.toHaveClass("task-detail-content--chat-expanded");
       expect(screen.getByTestId("mock-branch-group-card")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Mock branch group toggle BG-7320" })).toBeInTheDocument();
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
 
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      expect(screen.queryByTestId("mock-branch-group-card")).toBeNull();
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(content).toHaveClass("task-detail-content--chat-expanded");
       expect(screen.queryByTestId("mock-branch-group-card")).toBeNull();
       expect(screen.queryByRole("button", { name: "Mock branch group toggle BG-7320" })).toBeNull();
 
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(content).not.toHaveClass("task-detail-content--chat-expanded");
+      expect(screen.queryByTestId("mock-branch-group-card")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Plan" }));
       expect(screen.getByTestId("mock-branch-group-card")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Mock branch group toggle BG-7320" })).toBeInTheDocument();
     });
@@ -1145,7 +1164,7 @@ describe("TaskDetailModal", () => {
       const { baseElement: container } = render(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent", branchContext: undefined })}
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1155,9 +1174,9 @@ describe("TaskDetailModal", () => {
       );
 
       expect(screen.queryByTestId("mock-branch-group-card")).toBeNull();
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(container.querySelector(".task-detail-content")).toHaveClass("task-detail-content--chat-expanded");
       expect(screen.queryByTestId("mock-branch-group-card")).toBeNull();
       expect(screen.queryByRole("button", { name: /Mock branch group toggle/ })).toBeNull();
@@ -1182,13 +1201,13 @@ describe("TaskDetailModal", () => {
       expect(content).not.toHaveClass("task-detail-content--chat-expanded");
       expect(titleRow).toHaveTextContent("FN-099");
 
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(content).toHaveClass("task-detail-content--embedded");
       expect(content).toHaveClass("task-detail-content--chat-expanded");
       expect(titleRow).toHaveTextContent("FN-099");
       expect(titleRow).toHaveTextContent("In Progress");
       expect(container.querySelector(".detail-tabs")).toBeTruthy();
-      expect(container.querySelector(".modal-actions")).toBeTruthy();
+      expect(container.querySelector(".task-detail-chat-footer .task-chat-composer")).toBeInTheDocument();
     });
 
     it("FN-6370 resets expanded Activity when the active tab changes", () => {
@@ -1204,7 +1223,7 @@ describe("TaskDetailModal", () => {
       );
 
       const content = container.querySelector(".task-detail-content");
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(content).toHaveClass("task-detail-content--chat-expanded");
 
       rerender(
@@ -1219,7 +1238,7 @@ describe("TaskDetailModal", () => {
       );
 
       expect(container.querySelector(".task-detail-content--chat-expanded")).toBeNull();
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
     });
 
     it("FN-6370 resets expanded Activity when entering edit mode", () => {
@@ -1235,19 +1254,20 @@ describe("TaskDetailModal", () => {
       );
 
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
-      fireEvent.click(screen.getByTestId("task-chat-expand-toggle"));
+      fireEvent.click(getVisibleByTestId("task-chat-expand-toggle"));
       expect(container.querySelector(".task-detail-content")).toHaveClass("task-detail-content--chat-expanded");
 
-      fireEvent.click(screen.getByLabelText("Edit task"));
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+      fireEvent.click(screen.getByTestId("task-detail-header-action-edit"));
       expect(container.querySelector(".task-detail-content--chat-expanded")).toBeNull();
-      expect(screen.queryByTestId("task-chat-expand-toggle")).toBeNull();
+      expect(visibleTestIds("task-chat-expand-toggle")).toHaveLength(0);
     });
 
     it("FN-6532 restores planner Chat first when Chat-first is enabled while preserving explicit Activity requests", () => {
       const { baseElement: container, rerender } = render(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent" })}
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1268,14 +1288,14 @@ describe("TaskDetailModal", () => {
       expect(plannerChatTab).toHaveClass("detail-tab-active");
       expect(activityTab).not.toHaveClass("detail-tab-active");
       expect(definitionTab).not.toHaveClass("detail-tab-active");
-      expect(container.querySelector(".detail-section--planner-chat [data-testid='task-planner-chat-panel']")).toBeTruthy();
+      expect(container.querySelector(".task-detail-planner-keep-alive [data-testid='task-planner-chat-panel']")).toBeTruthy();
       expect(container.querySelector(".detail-section--chat [data-testid='task-chat-tab']")).toBeNull();
 
       rerender(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent" })}
           initialTab="logs"
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1311,6 +1331,8 @@ describe("TaskDetailModal", () => {
       expect(screen.getByRole("button", { name: "Plan" })).toHaveClass("detail-tab-active");
       expect(screen.getByRole("button", { name: "Activity" })).not.toHaveClass("detail-tab-active");
       expect(container.querySelector(".detail-section--chat")).toBeNull();
+      expect(screen.queryByText("Definition body unique text.")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Read plan" }));
       expect(screen.getByText("Definition body unique text.")).toBeInTheDocument();
       expect(screen.queryByText("GitHub tracking")).toBeNull();
       expect(screen.queryByRole("heading", { name: "Dependencies" })).toBeNull();
@@ -1323,7 +1345,7 @@ describe("TaskDetailModal", () => {
       const { baseElement: container } = render(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent" })}
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1333,21 +1355,21 @@ describe("TaskDetailModal", () => {
       );
 
       expect(container.querySelector(".detail-body--planner-chat")).toBeTruthy();
-      expect(container.querySelector(".detail-section--planner-chat")).toBeTruthy();
+      expect(container.querySelector(".task-detail-planner-keep-alive")).toBeTruthy();
       expect(container.querySelector(".detail-body--chat")).toBeNull();
       expect(container.querySelector(".detail-section--chat")).toBeNull();
 
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
       const chatBody = container.querySelector(".detail-body--chat");
-      const chatSection = container.querySelector(".detail-section--chat");
+      const chatKeepAlive = container.querySelector(".task-detail-activity-keep-alive");
       expect(chatBody).toBeTruthy();
       expect(chatBody).not.toHaveClass("detail-body--agent-log");
-      expect(chatSection).toBeTruthy();
-      expect(chatSection!.querySelector("[data-testid='task-chat-tab']")).toBeTruthy();
+      expect(chatKeepAlive?.parentElement).toBe(chatBody);
+      expect(chatKeepAlive!.querySelector("[data-testid='task-chat-tab']")).toBeTruthy();
     selectActivityView("feed");
       selectActivityView("raw-logs");
       expect(container.querySelector(".detail-body--chat")).toBeNull();
-      expect(container.querySelector(".detail-section--chat")).toBeNull();
+      expect(chatKeepAlive).not.toBeVisible();
       expect(container.querySelector(".detail-body--agent-log")).toBeTruthy();
     });
 
@@ -1359,7 +1381,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent" })}
-          taskDetailChatFirst
+          taskDetailDefaultTab="chat"
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1397,7 +1419,8 @@ describe("TaskDetailModal", () => {
       fireEvent.click(screen.getByRole("button", { name: "Activity" }));
       expect(container.querySelector(".detail-body--chat")).toBeTruthy();
 
-      fireEvent.click(screen.getByLabelText("Edit task"));
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+      fireEvent.click(screen.getByTestId("task-detail-header-action-edit"));
       expect(container.querySelector(".detail-body--chat")).toBeNull();
       expect(container.querySelector(".detail-section--chat")).toBeNull();
     });
@@ -1436,7 +1459,7 @@ describe("TaskDetailModal", () => {
       expect(container.querySelector(".detail-body--agent-log")).toBeNull();
     });
 
-    it("wraps AgentLogViewer in detail-section--agent-log class", () => {
+    it("renders AgentLogViewer directly in the agent-log body", () => {
       const { baseElement: container } = render(
         <TaskDetailModal
           task={makeTask({ prompt: "# Hello\n\nContent" })}
@@ -1453,10 +1476,10 @@ describe("TaskDetailModal", () => {
     selectActivityView("feed");
       selectActivityView("raw-logs");
 
-      // The section wrapping AgentLogViewer should have the full-height class
-      const section = container.querySelector(".detail-section--agent-log");
-      expect(section).toBeTruthy();
-      expect(section!.querySelector("[data-testid='agent-log-viewer']")).toBeTruthy();
+      const body = container.querySelector(".detail-body--agent-log");
+      const viewer = container.querySelector("[data-testid='agent-log-viewer']");
+      expect(body).toBeTruthy();
+      expect(viewer?.parentElement).toBe(body);
     });
 
     it("does not apply detail-body--agent-log when editing", () => {
@@ -1478,8 +1501,8 @@ describe("TaskDetailModal", () => {
       expect(container.querySelector(".detail-body--agent-log")).toBeTruthy();
 
       // Now enter edit mode via the pencil button in the header
-      const editBtn = screen.getByLabelText("Edit task");
-      fireEvent.click(editBtn);
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+      fireEvent.click(screen.getByTestId("task-detail-header-action-edit"));
 
       // The detail-body--agent-log class should be removed while editing
       expect(container.querySelector(".detail-body--agent-log")).toBeNull();

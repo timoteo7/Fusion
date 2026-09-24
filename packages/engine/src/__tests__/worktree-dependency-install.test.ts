@@ -8,10 +8,12 @@ import {
   DEPENDENCY_INSTALL_RECORD_FILENAME,
   dependencyEvidenceFingerprint,
   detectUnrecognizedDependencyEvidence,
+  clearWorktreeDependencyDeterministicStop,
   ensureWorktreeDependencies,
   readDependencyInstallRecord,
   recordPlannerDependencyResolution,
   resolveWorktreeDependencyReadiness,
+  resolveWorktreeDependencyStateToken,
 } from "../worktree/worktree-dependency-install.js";
 
 const temporaryRoots: string[] = [];
@@ -55,6 +57,39 @@ afterEach(() => {
 });
 
 describe("worktree dependency installation", () => {
+  it("blocks only the second deterministic failure at unchanged state and permits explicit retry", async () => {
+    const root = fixture();
+    const run = vi.fn().mockResolvedValue(failure("No interpreter found for Python >=3.13"));
+    const base = { ...options(root, availableEnv("uv"), run), settings: { worktreeInitCommand: "uv sync --frozen" }, resolveWorktreeState: () => "plan-only:stable" };
+    expect((await ensureWorktreeDependencies(base)).readiness).toBe("unresolved");
+    expect((await ensureWorktreeDependencies(base)).readiness).toBe("config-blocked");
+    const before = run.mock.calls.length;
+    expect((await ensureWorktreeDependencies(base)).readiness).toBe("config-blocked");
+    expect(run).toHaveBeenCalledTimes(before);
+    expect(clearWorktreeDependencyDeterministicStop(root)).toBe(true);
+    expect((await ensureWorktreeDependencies(base)).readiness).toBe("unresolved");
+    expect(readDependencyInstallRecord(root)?.failures).toHaveLength(3);
+  });
+
+  it("does not block for indeterminate or changed worktree state", async () => {
+    const root = fixture();
+    const run = vi.fn().mockResolvedValue(failure("No interpreter found for Python >=3.13"));
+    const base = { ...options(root, availableEnv("uv"), run), settings: { worktreeInitCommand: "uv sync" } };
+    expect((await ensureWorktreeDependencies({ ...base, resolveWorktreeState: () => "indeterminate" })).readiness).toBe("unresolved");
+    expect((await ensureWorktreeDependencies({ ...base, resolveWorktreeState: () => "indeterminate" })).readiness).toBe("unresolved");
+    expect((await ensureWorktreeDependencies({ ...base, resolveWorktreeState: () => "state-one" })).readiness).toBe("unresolved");
+    expect((await ensureWorktreeDependencies({ ...base, resolveWorktreeState: () => "state-two" })).readiness).toBe("unresolved");
+  });
+
+  it("uses plan-only state only for Git's explicit non-repository diagnostic", async () => {
+    const nonRepository = fixture();
+    expect(await resolveWorktreeDependencyStateToken(nonRepository, ["plan-a"])).toMatch(/^plan-only:/);
+
+    const corruptRepository = mkdtempSync(join(tmpdir(), "fn-9294-corrupt-git-"));
+    temporaryRoots.push(corruptRepository);
+    writeFileSync(join(corruptRepository, ".git"), "this is not a valid gitfile");
+    expect(await resolveWorktreeDependencyStateToken(corruptRepository, ["plan-a"])).toBe("indeterminate");
+  });
   it("records a static site as not-needed without spawning a command", async () => {
     const root = fixture({ "index.html": "<!doctype html>" });
     const runner = vi.fn();
@@ -240,6 +275,35 @@ describe("worktree dependency installation", () => {
     const evidence = ["something.lock"];
     expect(resolveWorktreeDependencyReadiness(noneRoot, plan, evidence).readiness).toBe("unrecognized");
     expect(dependencyEvidenceFingerprint(noneRoot, evidence)).not.toBe("");
+  });
+
+  it("refuses incompatible Python metadata without running uv", async () => {
+    const root = fixture({ "uv.lock": "lock", "pyproject.toml": '[project]\nrequires-python = ">=3.99"\n[tool.uv]\npython-downloads = "never"' });
+    const runner = vi.fn().mockResolvedValue(success());
+    const readiness = await ensureWorktreeDependencies(options(root, availableEnv("uv", "python3.11"), runner));
+    expect(runner).not.toHaveBeenCalled();
+    expect(readiness.readiness).toBe("unresolved");
+    expect(readiness.entries).toEqual(expect.arrayContaining([expect.objectContaining({ ecosystem: "python-uv", outcome: "environment-incompatible", reason: expect.stringContaining(">=3.99") })]));
+  });
+
+  it("refuses ambiguous uv extras and only closes it after explicit selection", async () => {
+    const root = fixture({ "uv.lock": "lock", "pyproject.toml": '[project]\noptional-dependencies = { test = ["pytest", "coverage"] }\n[dependency-groups]\nlint = ["ruff"]' });
+    const runner = vi.fn().mockResolvedValue(success());
+    const initial = await ensureWorktreeDependencies(options(root, availableEnv("uv"), runner));
+    expect(runner).not.toHaveBeenCalled();
+    expect(initial.readiness).toBe("unresolved");
+    expect(initial.entries).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "configuration-required", reason: expect.stringContaining("test") })]));
+    expect(recordPlannerDependencyResolution({ worktreePath: root, action: "install", command: "uv sync --frozen", result: success() }).readiness).toBe("unresolved");
+    expect(recordPlannerDependencyResolution({ worktreePath: root, action: "install", command: "uv sync --frozen --all-extras --all-groups", result: success() }).readiness).toBe("satisfied");
+  });
+
+  it("keeps configured worktree initialization authoritative over uv metadata inference", async () => {
+    const root = fixture({ "uv.lock": "lock", "pyproject.toml": '[project.optional-dependencies]\ntest = ["pytest"]' });
+    const runner = vi.fn().mockResolvedValue(success());
+    const readiness = await ensureWorktreeDependencies({ ...options(root, availableEnv(), runner), settings: { worktreeInitCommand: "bootstrap-project" } });
+    expect(readiness.readiness).toBe("satisfied");
+    expect(readiness.plan).toEqual([expect.objectContaining({ ecosystem: "configured-init-command" })]);
+    expect(runner).toHaveBeenCalledWith("bootstrap-project", root, 300_000, expect.any(Object));
   });
 
   it("writes the record below the private Git directory without dirtying a real worktree", async () => {

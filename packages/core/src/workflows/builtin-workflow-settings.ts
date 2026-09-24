@@ -11,17 +11,8 @@ for the restart, which is the churn this bound exists to remove.
 export const DEFAULT_PLANNING_TIMEOUT_MS = 5_400_000;
 
 /*
-FNXC:PlanReviewReplan 2026-08-10-18:32:
-Built-in ceiling for consecutive Plan Review REVISE -> replan cycles when the resolved revision budget
-is unbounded, used when the `planReviewReplanCap` workflow value is unset.
-
-15 preserves the ceiling that was ACTUALLY in force before this constant existed. That backstop was
-`PLAN_REVIEW_FEEDBACK_HISTORY_LIMIT` — a bound on how much reviewer PROSE is replayed into the next
-planning prompt, whose own comment states it is "bounded independently of persistence and retry
-accounting". Two unrelated concerns were sharing one number, so trimming the prompt history would have
-silently tightened a safety ceiling. Splitting them is the point; the value is held at 15 so the split
-is a pure re-wiring rather than a silent behavior change. Operators can now lower it, which is what the
-`planReviewReplanCap` setting always claimed to do but never did — nothing read it.
+FNXC:PlanReviewReplan 2026-09-13-04:34:
+`planReviewReplanCap` remains the operator-configurable Plan Review ceiling and 15 remains its legacy fallback. Runtime admission chooses the lower of this value, an explicit revision budget, and the shared absolute review backstop; operators can tighten the policy but cannot raise it above the safety boundary.
 */
 export const DEFAULT_PLAN_REVIEW_REPLAN_CAP = 15;
 import {
@@ -49,7 +40,8 @@ import type { WorkflowSettingDefinition } from "./workflow-ir-types.js";
  *
  * `BUILTIN_REVIEW_REVISION_SETTINGS` is workflow-native review-loop policy.
  * These keys also never lived in project/global settings and intentionally omit
- * declaration defaults: an unset workflow value means unbounded remediation.
+ * declaration defaults: an unset value defers to authored policy, while every
+ * runtime result remains subject to the absolute review safety backstop.
  *
  * `BUILTIN_OVERSIGHT_SETTINGS` is workflow-native planner oversight policy.
  * These keys never lived in project/global settings and must never be added to
@@ -167,16 +159,15 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
     name: "Max post-review fixes",
     type: "number",
     /*
-     * FNXC:WorkflowOptionalStepCycle 2026-06-29-17:55:
-     * This global budget remains the fallback for custom optional gates that define neither a workflow setting nor node `maxRevisions`. Most built-in Code Review groups set `maxRevisions: "unbounded"`; Compound Engineering authors a two-pass cap so persistent CE reviewer findings park instead of rebounding forever.
+     * FNXC:WorkflowOptionalStepCycle 2026-09-13-04:34:
+     * This global budget remains the fallback for custom optional gates that define neither a workflow setting nor node `maxRevisions`. Standard Code Review authors three rounds, Compound Engineering authors two, and every path is clamped by the shared absolute safety backstop.
      *
      * FNXC:WorkflowOptionalStepCycle 2026-07-26-19:35:
      * Raised 3 -> 10 (operator request). Three passes is below the observed convergence length for
-     * Browser Verification and custom gates — the gates this fallback actually governs, since
-     * Plan Review and most Code Review groups resolve to "unbounded" when unset. Compound
-     * Engineering instead resolves its authored two-pass Code Review cap. Exhausting a budget parks
-     * the card for a human, so a too-low cap converts "needs another pass" into operator toil.
-     * This is a fallback, not a ceiling: an explicit workflow value or node `maxRevisions` still wins.
+     * Browser Verification and custom gates — the gates this fallback actually governs. Exhausting
+     * a budget parks the card for a human, so a too-low generic fallback converts "needs another
+     * pass" into operator toil. This is a fallback policy value; lower explicit workflow or node
+     * limits win, while the absolute backstop wins over higher values.
      */
     default: 10,
     description: "Maximum automatic fix passes after review/optional-step feedback; the step re-runs each pass until it passes or this budget is exhausted.",
@@ -236,7 +227,15 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
   // catalog-shrink rule they stay plain project settings and are NOT moved to
   // workflow settings. `reflectionEnabled` is kept because executor.ts reads it
   // (gate for reflection tools).
+];
 
+/*
+ * FNXC:ModelResolution 2026-09-14-19:07:
+ * Role model lanes remain workflow-declared but are no longer part of the U4 moved-key catalog.
+ * This lets the same keys persist independently at project scope instead of storing project choices
+ * under a workflow identity. Workflow values stay isolated in selectedWorkflowModelLanes at runtime.
+ */
+export const BUILTIN_WORKFLOW_MODEL_LANE_SETTINGS: WorkflowSettingDefinition[] = [
   /*
    * FNXC:CredentialInstanceSelection 2026-08-01-05:38:
    * Workflow lanes persist optional credential-instance ids beside their provider/model pairs.
@@ -411,6 +410,56 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
     options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
     description: "Thinking effort for the validator fallback model. Empty inherits from the task or default thinking level.",
   },
+  {
+    id: "mergerProvider",
+    name: "Merger provider",
+    type: "string",
+    description: "Provider for the merger phase. Empty inherits from the project lane.",
+  },
+  {
+    id: "mergerCredentialInstanceId",
+    name: "Merger credential instance",
+    type: "string",
+    description: "Optional credential instance for the merger model pair.",
+  },
+  {
+    id: "mergerModelId",
+    name: "Merger model",
+    type: "string",
+    description: "Model id for the merger phase. Empty inherits from the project lane.",
+  },
+  {
+    id: "mergerThinkingLevel",
+    name: "Merger thinking level",
+    type: "enum",
+    options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
+    description: "Thinking effort for the merger phase. Empty inherits from the project lane.",
+  },
+  {
+    id: "mergerFallbackProvider",
+    name: "Merger fallback provider",
+    type: "string",
+    description: "Fallback provider for the merger phase.",
+  },
+  {
+    id: "mergerFallbackCredentialInstanceId",
+    name: "Merger fallback credential instance",
+    type: "string",
+    description: "Optional credential instance for the merger fallback model pair.",
+  },
+  {
+    id: "mergerFallbackModelId",
+    name: "Merger fallback model",
+    type: "string",
+    description: "Fallback model id for the merger phase.",
+  },
+  {
+    id: "mergerFallbackThinkingLevel",
+    name: "Merger fallback thinking level",
+    type: "enum",
+    options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
+    description: "Thinking effort for the merger fallback model. Empty inherits from the project or global fallback lane.",
+  },
 ];
 
 export const BUILTIN_TRIAGE_POLICY_SETTINGS: WorkflowSettingDefinition[] = [
@@ -506,13 +555,13 @@ export const BUILTIN_REVIEW_REVISION_SETTINGS: WorkflowSettingDefinition[] = [
     id: "reviewerInlineFixes",
     name: "Reviewer inline fixes",
     type: "boolean",
-    default: true,
+    default: false,
     /*
-     * FNXC:WorkflowReviewers 2026-07-01-12:33:
-     * Default Coding reviewers should fix issues in the same review session when possible instead of always returning REVISE and bouncing the task back through executor remediation. Operators can turn this off per workflow to restore the old review-only behavior.
+     * FNXC:WorkflowReviewers 2026-09-03-05:40:
+     * Reviewers judge without repairing by default so findings return to the executor as named remediation work. Operators may enable this workflow value explicitly when they accept same-session reviewer edits.
      */
     description:
-      "Allow review-type workflow nodes to fix issues in their own reviewer session before returning a final verdict. Turn off to route findings back to executor remediation.",
+      "Keep review-type workflow nodes judge-only by default and route findings back to executor remediation. Turn on to allow same-session reviewer repairs before the final verdict.",
   },
   {
     id: "planReviewMaxRevisions",
@@ -521,11 +570,11 @@ export const BUILTIN_REVIEW_REVISION_SETTINGS: WorkflowSettingDefinition[] = [
     minimum: 0,
     integer: true,
     /*
-     * FNXC:WorkflowRevisionBudget 2026-06-30-19:45:
-     * Built-in Plan Review/spec remediation is unbounded when this workflow value is unset. Operators can store a non-negative integer per workflow to cap automatic replans, and `0` disables automatic Plan Review revision entirely without duplicating a read-only built-in workflow.
+     * FNXC:WorkflowRevisionBudget 2026-09-13-04:34:
+     * Unset Plan Review policy uses the finite absolute safety backstop. Operators can store a lower non-negative integer, and `0` disables automatic Plan Review revision entirely without duplicating a read-only built-in workflow.
      */
     description:
-      "Maximum automatic Plan Review/spec revision attempts for this workflow. Leave unset for unbounded; set 0 to disable automatic revision.",
+      "Maximum automatic Plan Review/spec revision attempts for this workflow. Leave unset to use the finite safety backstop; set 0 to disable automatic revision.",
   },
   {
     id: "codeReviewMaxRevisions",
@@ -534,11 +583,11 @@ export const BUILTIN_REVIEW_REVISION_SETTINGS: WorkflowSettingDefinition[] = [
     minimum: 0,
     integer: true,
     /*
-     * FNXC:WorkflowRevisionBudget 2026-06-30-19:45:
-     * An unset workflow value defers to the authored Code Review node: Compound Engineering defaults to two remediation passes while other built-ins may remain unbounded. Operators can store a non-negative integer per workflow to override the authored cap, and `0` disables automatic Code Review remediation for that workflow.
+     * FNXC:WorkflowRevisionBudget 2026-09-13-04:34:
+     * An unset workflow value defers to the authored Code Review node. Operators can store a lower non-negative integer, `0` to disable automatic remediation, or the unbounded sentinel to use the absolute safety backstop.
      */
     description:
-      "Maximum automatic Code Review remediation attempts for this workflow. Leave unset to use the workflow's authored default; set 0 to disable automatic revision.",
+      "Maximum automatic Code Review remediation attempts for this workflow. Leave unset to use the workflow's authored bounded default; set 0 to disable automatic revision.",
   },
   /*
    * FNXC:ReviewSeverityGate 2026-08-10-17:33:
@@ -774,6 +823,7 @@ export const BUILTIN_OVERSIGHT_SETTINGS: WorkflowSettingDefinition[] = [
 
 export const BUILTIN_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
   ...BUILTIN_MOVED_WORKFLOW_SETTINGS,
+  ...BUILTIN_WORKFLOW_MODEL_LANE_SETTINGS,
   ...BUILTIN_TRIAGE_POLICY_SETTINGS,
   ...BUILTIN_REVIEW_REVISION_SETTINGS,
   ...BUILTIN_OVERSIGHT_SETTINGS,

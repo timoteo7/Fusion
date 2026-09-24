@@ -17,14 +17,12 @@ Create a new task on the Fusion task board. The task enters the planning column 
 | `description` | string | ✓ | What needs to be done — be descriptive |
 | `depends` | array | — | Task IDs this depends on (e.g. ['FN-001', 'FN-002']) |
 | `agentId` | string | — | Agent ID to assign this task to (e.g. 'agent-abc123') |
-| `priority` | string(enum) | — | Task priority (low, normal, high, urgent) |
-| `workflow_id` | string | — | Workflow ID to select for the new task (e.g. 'WF-003' or 'builtin:coding'). Omit to inherit the project default workflow. Use fn_workflow_list to discover valid IDs. |
 | `github_tracking` | boolean | — | Per-task GitHub issue tracking override. true links a tracking issue to this task; false disables tracking even when the project/global default enables it. Omit to inherit the project/global default. |
 | `github_repo` | string | — | "owner/repo" override for the GitHub tracking issue's repository. Omit to use the project/global default repo. |
 
 ### fn_task_update
 
-Update fields on an existing task. Supports modifying the title, description, dependencies, assigned agent, priority, and workflow_id after task creation. Set workflow_id to a workflow ID to select it, or null to clear the workflow selection.
+Update fields on an existing task. Supports modifying the title, description, dependencies, assigned agent, and workflow_id after task creation. Set workflow_id to a workflow ID to select it, or null to clear the workflow selection.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -34,8 +32,6 @@ Update fields on an existing task. Supports modifying the title, description, de
 | `depends` | array | — | New dependency list — replaces existing dependencies (e.g. ['FN-001', 'FN-002']) |
 | `agentId` | union | — | Agent ID to assign this task to, or null to clear (e.g. 'agent-abc123') |
 | `nodeId` | union | — | Node ID override for this task, or null to clear |
-| `priority` | string(enum) | — | Task priority (low, normal, high, urgent) |
-| `workflow_id` | union | — | Workflow ID to select for this task (e.g. 'WF-003' or 'builtin:coding'), or null to clear the workflow selection and revert to the project default. Use fn_workflow_list to discover valid IDs. |
 
 ### fn_task_list
 
@@ -124,23 +120,6 @@ Request a refinement of a completed or in-review task. Creates a new follow-up t
 |-----------|------|----------|-------------|
 | `id` | string | ✓ | Task ID to refine (e.g. FN-001). Must be in 'done' or 'in-review' column. |
 | `feedback` | string | ✓ | Description of what needs to be refined or improved |
-
-### fn_task_archive
-
-Archive a task from any live column (move to archived). Archived tasks are preserved for historical reference but moved out of the main board view. If the task is still referenced as a lineage parent by another task, archiving is rejected unless removeLineageReferences:true is passed.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `id` | string | ✓ | Task ID to archive from any live column (e.g. FN-001). |
-| `removeLineageReferences` | boolean | — | When true, clear incoming lineage-parent references (child sourceParentTaskId) before archiving, so a task still referenced as a lineage parent can be archived. |
-
-### fn_task_unarchive
-
-Unarchive an archived task (move from archived → its restore column). Restores to the pre-archive column when available, with active execution columns downgraded to todo.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `id` | string | ✓ | Task ID to unarchive (e.g. FN-001). Must be in 'archived' column. |
 
 ### fn_task_delete
 
@@ -521,7 +500,7 @@ Activate a pending slice for implementation. Sets status to 'active' and enables
 
 ### fn_feature_link_task
 
-Link a feature to a fn task for implementation. Updates the feature status to 'triaged' and associates it with the task. If the target task is not on the active board (for example archived, deleted, or never created), the tool returns a clear validation error indicating that only active tasks can be linked.
+Link a feature to a fn task for implementation. Updates the feature status to 'triaged' and associates it with the task. If the target task is not on the active board (for example deleted, historical, or never created), the tool returns a clear validation error indicating that only active tasks can be linked.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

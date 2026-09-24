@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { UiListBox, UiListBoxItem } from "./ui";
 import { useTranslation } from "react-i18next";
 import { AgentAvatar } from "./AgentAvatar";
 import "./AgentMentionPopup.css";
@@ -55,10 +56,9 @@ export function AgentMentionPopup({
   }
 
   return (
-    <div
+    <UiListBox
       className={`agent-mention-popup agent-mention-popup--${position}`}
       data-testid="agent-mention-popup"
-      role="listbox"
       aria-label={t("agentMention.suggestionsLabel", "Agent mention suggestions")}
     >
       {visibleAgents.length === 0 ? (
@@ -71,21 +71,22 @@ export function AgentMentionPopup({
             </div>
           )}
           {memberAgents.map((agent, index) => (
-            <button
+            <UiListBoxItem
               key={agent.id}
-              type="button"
+              id={agent.id}
+              textValue={agent.name}
+              legacyAs="button"
               className={`agent-mention-item${index === highlightedIndex ? " agent-mention-item--highlighted" : ""}`}
               data-testid={`agent-mention-item-${agent.id}`}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => onSelect(agent)}
-              role="option"
               aria-selected={index === highlightedIndex}
             >
               <AgentAvatar agent={agent} size={20} />
               {roomMode && <span className="status-dot agent-mention-member-dot" aria-label={t("agentMention.roomMemberBadge", "Room member")} />}
               <span className="agent-mention-name">{agent.name}</span>
               <span className="agent-mention-role">{agent.role}</span>
-            </button>
+            </UiListBoxItem>
           ))}
           {roomMode && !showOtherSection && otherAgents.length > 0 && (
             <div className="agent-mention-hint" data-testid="agent-mention-other-hint">{t("agentMention.typeToSearch", "Type to search other agents")}</div>
@@ -96,26 +97,27 @@ export function AgentMentionPopup({
               {otherAgents.map((agent, index) => {
                 const globalIndex = memberAgents.length + index;
                 return (
-                  <button
+                  <UiListBoxItem
                     key={agent.id}
-                    type="button"
+                    id={agent.id}
+                    textValue={agent.name}
+                    legacyAs="button"
                     className={`agent-mention-item${globalIndex === highlightedIndex ? " agent-mention-item--highlighted" : ""}`}
                     data-testid={`agent-mention-item-${agent.id}`}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => onSelect(agent)}
-                    role="option"
                     aria-selected={globalIndex === highlightedIndex}
                   >
                     <AgentAvatar agent={agent} size={20} />
                     <span className="agent-mention-name">{agent.name}</span>
                     <span className="agent-mention-role">{agent.role}</span>
-                  </button>
+                  </UiListBoxItem>
                 );
               })}
             </>
           )}
         </>
       )}
-    </div>
+    </UiListBox>
   );
 }

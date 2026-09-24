@@ -57,7 +57,7 @@ vi.mock("../../api", () => ({
 }));
 
 vi.mock("../../hooks/useConfirm", () => ({
-  useConfirm: () => ({ confirm: vi.fn(), confirmWithChoice: vi.fn(), confirmWithSelect: vi.fn() }),
+  useConfirm: () => ({ confirmWithCheckbox: async (options?: { checkbox?: { defaultChecked?: boolean } }) => ({ choice: "cancel" as const, checkboxValue: options?.checkbox?.defaultChecked ?? false }), confirm: vi.fn(), confirmWithChoice: vi.fn(), confirmWithSelect: vi.fn() }),
 }));
 
 type Specificity = readonly [number, number, number];
@@ -334,8 +334,6 @@ function renderCursorFixtures(): CursorFixtures {
           onOpenPullRequest={noop}
           onUpdateTask={updateTask}
           onDeleteTask={updateTask}
-          onArchiveTask={updateTask}
-          onUnarchiveTask={updateTask}
           onRetryTask={updateTask}
           onResetTask={updateTask}
           onDuplicateTask={updateTask}
@@ -402,9 +400,6 @@ const taskControlClasses = [
   "card-answer-questions-btn",
   "card-menu-btn",
   "card-delete-btn",
-  "card-archive-btn",
-  "card-unarchive-btn",
-  "card-revert-btn",
   "card-send-back-btn",
 ] as const;
 

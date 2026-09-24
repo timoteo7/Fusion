@@ -9,7 +9,8 @@ import type {
   TaskDetail,
   WorkflowFieldDefinition,
 } from "@fusion/core";
-import { buildExecutionMemoryInstructions, buildMemoryPreSteeringNudge, isFastExecutionMode, resolveTaskOutputLanguage, type WorkspaceConfig } from "@fusion/core";
+/* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 delivers the approved operator note as implementation context. */
+import { buildExecutionMemoryInstructions, buildMemoryPreSteeringNudge, formatApprovedHumanPlanNoteSection, isFastExecutionMode, isFollowUpTask, resolveTaskOutputLanguage, type WorkspaceConfig } from "@fusion/core";
 import { buildFastLanePrompt } from "../execution/step-session-executor.js";
 import { executorLog } from "../logger.js";
 import type { PluginRunner } from "../plugins/plugin-runner.js";
@@ -84,9 +85,9 @@ export function buildExecutionPrompt(
   _pluginRunner?: PluginRunner,
   customFieldDefs?: WorkflowFieldDefinition[],
   workspaceConfig?: WorkspaceConfig | null,
-  options?: { pluginTaskContributions?: string },
+  options?: { pluginTaskContributions?: string; overlapResumeContext?: string },
 ): string {
-  if (isFastExecutionMode(task)) return buildFastLanePrompt(task, rootDir, settings, worktreePath);
+  if (isFastExecutionMode(task)) return buildFastLanePrompt(task, rootDir, settings, worktreePath, options?.overlapResumeContext);
   const prompt = scopePromptToWorktree(task.prompt, rootDir, worktreePath, workspaceConfig);
   const reviewLevel = parseReviewLevelFromPrompt(prompt);
   /*
@@ -103,6 +104,21 @@ export function buildExecutionPrompt(
     : "";
 
   const sourceIssueRef = buildSourceIssueRef(task.sourceIssue);
+
+  /*
+  FNXC:TaskFollowUp 2026-09-17-16:10:
+  FN-513 — a follow-up was SPECIFIED against what its source planned to deliver, which may have been
+  only a plan at the time. By the time this executor runs, the source may have shipped something
+  different, or not shipped at all. The instruction is therefore narrow: re-read the source and check
+  the assumptions against the code actually present before implementing.
+
+  It changes no gate. The scheduler and the dependency dispatch gate still own whether this task may
+  run at all — a source in implementation blocks it, while a source in review may already release it
+  under the existing workflow — so this prompt must never promise that the source has merged.
+  */
+  const followUpSourceSection = isFollowUpTask(task) && task.sourceParentTaskId
+    ? `\n## Follow-up source\n\nThis task is a follow-up of **${task.sourceParentTaskId}**, and its specification was written from that task's plan and its progress at planning time.\n\n- Re-read ${task.sourceParentTaskId} with \`fn_task_show ${task.sourceParentTaskId}\` before you start.\n- Confirm every assumption this spec inherits against the code ACTUALLY PRESENT in this worktree. A step the source planned may not have been delivered, or may have been delivered differently.\n- If an inherited assumption is wrong, implement against what is really there and record the divergence; do not re-implement ${task.sourceParentTaskId}'s own work, and do not modify it.\n`
+    : "";
 
   // Build step progress for resume
   const hasProgress = task.steps.length > 0 && task.steps.some((s) => s.status !== "pending");
@@ -225,7 +241,7 @@ git log --oneline
 
   /* FNXC:TaskOutputLanguage 2026-08-19-14:56: Executor settings are captured by the run before this prompt is built, so summary and recommendation prose do not drift mid-session. */
   const outputLanguageInstruction = resolveTaskOutputLanguage(settings, task.description).instruction;
-  const executionPrompt = `## Task Output Language
+  let executionPrompt = `## Task Output Language
 ${outputLanguageInstruction}
 Apply this to fn_task_done summary and populated recommendation title/description only; keep recommendation schema, ids, categories, tools, code, and task syntax canonical.
 
@@ -238,7 +254,7 @@ ${task.dependencies.length > 0 ? `Dependencies: ${task.dependencies.join(", ")}`
 ## PROMPT.md
 
 ${prompt}
-${attachmentsSection}${commandsSection}${memorySection}${progressSection}${steeringSection}${customFieldsSection}
+${attachmentsSection}${commandsSection}${memorySection}${progressSection}${followUpSourceSection}${options?.overlapResumeContext ? `\n## Overlap wait synchronization\n\n${options.overlapResumeContext}\n` : ""}${steeringSection}${customFieldsSection}
 ## Review level: ${reviewLevel}
 
 Workflow review gates are handled by the workflow graph outside this implementation session. Do not request per-step plan review or per-step code review from inside execution; complete the implementation steps and let the graph run enabled Plan Review, Browser Verification, and Code Review nodes at their configured positions.
@@ -254,7 +270,7 @@ You are running in an **isolated git worktree**. This means:
 - **All code changes must be made inside the current worktree directory.** Do not modify files outside the worktree.
 - **Exception — Project memory:** You MAY read and write to files under \`.fusion/memory/\` at the project root to save durable project learnings.
 - **Exception — Task attachments:** You MAY read files under \`.fusion/tasks/{taskId}/attachments/\` at the project root for context.
-- **Exception — Sibling task specs:** You MAY read \`.fusion/tasks/{taskId}/PROMPT.md\` and \`.fusion/tasks/{taskId}/task.json\` at the project root (read-only) to consult dependency tasks' specifications. If those files do not exist, the dependency has been archived — call \`fn_task_show\` with its ID to load the spec from the archive.
+- **Exception — Sibling task specs:** You MAY read \`.fusion/tasks/{taskId}/PROMPT.md\` and \`.fusion/tasks/{taskId}/task.json\` at the project root (read-only) to consult dependency tasks' specifications. If those files do not exist, call \`fn_task_show\` with the dependency ID; deleted tasks remain unavailable.
 - **Shell commands** run inside the worktree by default. Avoid using \`cd\` to navigate outside the worktree.
 
 ## Begin
@@ -278,6 +294,16 @@ If the repo has a typecheck command, run it before \`fn_task_done()\` and fix an
 Use \`fn_task_create\` for truly separate follow-up work, including unrelated/pre-existing broad-suite failures.
 If lint is configured and failing, fix that too before completion.
 Do not repeatedly rerun a broad failing or hanging workspace command without a new hypothesis and a narrower confirming command.`;
+
+  /*
+  FNXC:HumanPlanApproval 2026-09-15-06:24:
+  FN-408 — an operator who approved this plan may attach a note ("just be careful about X while
+  implementing"). It is delivered as implementation CONTEXT here rather than written into PROMPT.md,
+  so the approved plan keeps its exact text and fingerprint. The shared formatter emits nothing when
+  there is no current approved note, and never emits a note from a superseded plan or episode.
+  */
+  const humanPlanApprovalNote = formatApprovedHumanPlanNoteSection(task);
+  if (humanPlanApprovalNote) executionPrompt += `\n\n${humanPlanApprovalNote}`;
 
   if (workspaceConfig && workspaceConfig.repos.length > 0) {
     return executionPrompt + `\n\n## Workspace mode\n` +

@@ -2,11 +2,11 @@
 FNXC:MainContent 2026-06-24-00:00:
 MainContent is the dashboard main-content router extracted from AppInner's render path. Its hook-free switch still owns every ordinary destination, while Board, List, and Chat yield to MainViewKeepAlive so visited project views preserve local state without remaining active behind another route. The lazy view chunks (and their leading-underscore inventory convention) stay declared in App.tsx per the docs guard and are threaded in as props; the eager ChatView.css import remains in App.tsx so the styles bundle into the main CSS file.
 */
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import type { NativeStructurePreviewResult, NativeStructureRef, Task, TaskDetail } from "@fusion/core";
 import { TaskCard } from "../TaskCard";
 import { ListView } from "../ListView";
-import { TaskDetailContent } from "../TaskDetailModal";
+import { MainPanelTaskDetailHost, type AppMainPanelTaskDetailState } from "../TaskDetailHostBoundaries";
 import { applyLocalTaskPatch, mergeTaskSnapshot } from "../../hooks/useTasks";
 import { ProjectOverview } from "../ProjectOverview";
 import { MissionManager } from "../MissionManager";
@@ -18,14 +18,22 @@ import { BackendConnectionErrorPage } from "../BackendConnectionErrorPage";
 import { HeaderWorkflowSwitcherSlot } from "../HeaderWorkflowSwitcherSlot";
 import { GraphWorkflowSwitcherSlot, filterTasksByGraphWorkflowSelection } from "../GraphWorkflowSwitcherSlot";
 import { PluginDashboardViewHost } from "../../plugins/PluginDashboardViewHost";
-import { getPluginViewId, isPluginViewId } from "../../plugins/pluginViewRegistry";
+import { PluginDashboardHostChromeContext } from "../../plugins/PluginDashboardViewHeader";
+import { buildPluginTaskViewId, getPluginViewId, isPluginViewId } from "../../plugins/pluginViewRegistry";
+import { getPluginNavIcon } from "../pluginNavIcon";
 import { isNearDuplicateCanonicalInactive } from "../../../../core/src/duplicates/near-duplicate-canonical";
 import { fetchMission, fetchMissions, fetchInsights, fetchTaskDetail, listEvals } from "../../api";
 import { attachNativeStructureRefToDrag } from "../../utils/nativeStructureDrag";
 import type { DetailTaskTab } from "../../hooks/useModalManager";
+import type { TaskView } from "../../hooks/useViewState";
+import type { PluginDashboardViewEntry } from "../../api";
 import type { SectionId } from "../SettingsModal";
 import type { MainContentProps } from "./types";
 import { MainViewKeepAlive, isKeepAliveMainViewId, type KeepAliveMainViewId } from "./MainViewKeepAlive";
+import { MobileDrawer } from "../MobileDrawer";
+/* FNXC:ToolSurfaces 2026-09-15-16:04: FN-426 — Files and Git Manager destinations; both reuse bodies already in the main bundle. */
+import { FilesView } from "../FilesView";
+import { GitManagerView } from "../GitManagerView";
 
 /*
 FNXC:CommandCenterAgentActivity 2026-08-10-01:54:
@@ -33,6 +41,272 @@ A monotonic request id makes repeated clicks for the same agent observable to Ag
 */
 let agentAnchorRequestSeq = 0;
 export function nextAgentAnchorRequestId(): number { return ++agentAnchorRequestSeq; }
+
+/*
+FNXC:WorkflowEditorEmbedding 2026-09-15-05:29:
+FN-407 made the Workflows view the single workflow-editor surface. Entry points that name a workflow (a task's
+Edit workflow) or a panel (Settings' Open workflow settings) hand those over as VIEW PARAMETERS rather than modal
+state. Clearing them on unmount is what makes a later plain "Workflows" nav entry open clean instead of
+resurrecting the previously preselected workflow. Declared at module scope so navigating away and back does not
+remount the editor as a brand-new element type.
+*/
+function WorkflowsMainView({
+  View,
+  addToast,
+  projectId,
+  initialPanel,
+  initialWorkflowId,
+  onClose,
+  onClearParams,
+}: {
+  View: MainContentProps["_WorkflowEditorView"];
+  addToast: MainContentProps["addToast"];
+  projectId?: string;
+  initialPanel?: "settings";
+  initialWorkflowId?: string;
+  onClose: () => void;
+  onClearParams: () => void;
+}) {
+  useEffect(() => onClearParams, [onClearParams]);
+  return (
+    <PageErrorBoundary>
+      <Suspense fallback={null}>
+        <View
+          isOpen={true}
+          onClose={onClose}
+          addToast={addToast}
+          projectId={projectId}
+          initialPanel={initialPanel}
+          initialWorkflowId={initialWorkflowId}
+        />
+      </Suspense>
+    </PageErrorBoundary>
+  );
+}
+
+const MOBILE_DRAWER_TITLES: Partial<Record<string, string>> = {
+  "command-center": "Dashboard",
+  planning: "Planning",
+  chat: "Chat",
+  mailbox: "Mailbox",
+  list: "List",
+  agents: "Agents",
+  missions: "Missions",
+  notes: "Notes",
+  secrets: "Secrets",
+  skills: "Skills & Snippets",
+  insights: "Insights",
+  memory: "Memory",
+  research: "Research",
+  evals: "Evals",
+  ideation: "Ideation",
+  goalsView: "Goals",
+  "dev-server": "Dev Server",
+  settings: "Settings",
+  workflows: "Workflows",
+  schedules: "Automation",
+  "github-import": "Import from GitHub",
+  /* FNXC:HistoryModalSurface 2026-09-15-04:29: FN-403 removed the `patchnode` entry — History never renders inside the main-content drawer; it owns its own modal/drawer surface. */
+  "task-detail": "Task detail",
+};
+
+export function resolveMobileDrawerTitle(taskView: TaskView, pluginDashboardViews: PluginDashboardViewEntry[]): string {
+  if (isPluginViewId(taskView)) {
+    return pluginDashboardViews.find((entry) => buildPluginTaskViewId(entry.pluginId, entry.view.viewId) === taskView)?.view.label ?? "Plugin";
+  }
+  return MOBILE_DRAWER_TITLES[taskView] ?? "Workspace";
+}
+
+interface MainContentDrawerProps {
+  taskView: TaskView;
+  open: boolean;
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}
+
+/*
+FNXC:MobileDrawer 2026-09-16-02:23:
+FN-445 — scroll ownership is a PER-DESTINATION property of this drawer, not a constant. `MobileDrawer` documents that
+only a view providing its own bounded internal scroller may suppress the drawer body's scroller; every ordinary long
+view still depends on that body as its reachable vertical scroller, so the flag stays false by default.
+
+Files is the first destination that genuinely qualifies: `FilesView` composes `ViewLayout` with `contentOwnsScroll`
+and ends in `.file-browser-list`, a bounded scroller. With the body ALSO scrolling, the two competed for the same
+vertical gesture on a phone and the end of a long directory stayed unreachable. FN-427 fixed only the standalone
+`FileBrowserModal` window, never this host — which is why the operator still could not scroll the list.
+
+Keep this set minimal and evidence-driven: every added destination must bring its own proof that its hosted view
+really owns a complete bounded scroll chain.
+
+FNXC:MobileDrawer 2026-09-17-09:26:
+FN-502 adds `agents` with that proof. `AgentsView` composes `ViewLayout ... contentOwnsScroll` and ends in its own
+bounded scroller: `.agents-view-content` (`flex: 1; min-height: 0; overflow-y: auto`) in list and board, the same box
+wrapping `.agent-org-chart-viewport` in org, and `.agent-detail-content` inside the detail pane. The rail no longer
+flips `.view-sidebar` into a column, so that scroller is genuinely bounded again; with the drawer body ALSO scrolling,
+the two competed for the same vertical gesture and the end of a long agent list stayed unreachable.
+*/
+export const MOBILE_DRAWER_CONTENT_SCROLL_VIEWS: ReadonlySet<TaskView> = new Set<TaskView>(["files", "agents"]);
+
+export function mobileDrawerContentOwnsScroll(taskView: TaskView): boolean {
+  return MOBILE_DRAWER_CONTENT_SCROLL_VIEWS.has(taskView);
+}
+
+/*
+FNXC:MobileDrawer 2026-09-10-23:59:
+Ordinary and plugin destinations share this production bridge so header ownership is derived from the routed task view in one place. Browser smoke mounts this same bridge, preventing fixture copies from silently disagreeing with MainContent.
+*/
+export function MainContentDrawer({ taskView, open, title, onClose, children }: MainContentDrawerProps) {
+  /*
+  FNXC:StandardizedPluginViews 2026-09-13-22:40:
+  When the drawer paints the fallback title for a plugin destination it owns that header, so the plugin
+  host must contribute only actions and body. Publishing the same derivation both ways keeps one visual
+  header authority per surface instead of stacking two titles.
+  */
+  const drawerOwnsHeader = isPluginViewId(taskView);
+  return (
+    <MobileDrawer
+      open={open}
+      title={title}
+      onClose={onClose}
+      keepMounted
+      testId="mobile-drawer-main-content"
+      contentOwnsHeader={!drawerOwnsHeader}
+      contentOwnsScroll={mobileDrawerContentOwnsScroll(taskView)}
+    >
+      <PluginDashboardHostChromeContext.Provider value={{ hostOwnsHeader: drawerOwnsHeader }}>
+        {children}
+      </PluginDashboardHostChromeContext.Provider>
+    </MobileDrawer>
+  );
+}
+
+type AppOwnedMainPanelBinding =
+  | "mainPanelDetailTask"
+  | "mainPanelDetailInitialTab"
+  | "setMainPanelDetailTask"
+  | "openTaskDetailInMainPanel"
+  | "closeTaskDetailMainPanel";
+
+export type AppMainPanelTaskDetailMainContentProps = Omit<MainContentProps, AppOwnedMainPanelBinding>;
+
+export interface AppMainPanelTaskDetailCompositionProps {
+  state: AppMainPanelTaskDetailState;
+  mainContentProps: AppMainPanelTaskDetailMainContentProps;
+}
+
+/*
+FNXC:TaskDetailPresentation 2026-09-11-14:13:
+The production MainContent composition owns the final projection of App's task-detail state. Tests mount this component directly so omitting or replacing the authoritative open, close, tab, snapshot, or setter binding breaks the same path App ships.
+*/
+export function AppMainPanelTaskDetailComposition({ state, mainContentProps }: AppMainPanelTaskDetailCompositionProps) {
+  return (
+    <MainContent
+      {...mainContentProps}
+      mainPanelDetailTask={state.task}
+      mainPanelDetailInitialTab={state.initialTab}
+      setMainPanelDetailTask={state.setTask}
+      openTaskDetailInMainPanel={state.open}
+      closeTaskDetailMainPanel={state.close}
+    />
+  );
+}
+
+/*
+FNXC:ListInRightDock 2026-09-14-03:31:
+FN-382: the List surface is defined ONCE here and mounted by two hosts — the main-content route (phone, and any
+fallback route) and the non-mobile right dock. Extracting it keeps a single wiring of tasks, handlers, workflow
+controls and Quick Entry, so reading or creating a task from the dock cannot drift from the dedicated view.
+*/
+export function MainContentListView(props: AppMainPanelTaskDetailMainContentProps & { listHost?: "route" | "dock"; showWorkflowControls?: boolean }) {
+  const {
+    tasks,
+    isRemote,
+    remoteData,
+    currentProject,
+    retryTask,
+    onOpenChatWithPrefill,
+    deleteTask,
+    pauseTask,
+    unpauseTask,
+    revertTask,
+    restoreTaskRevert,
+    mergeTask,
+    resetTask,
+    duplicateTask,
+    ingestCreatedTasks,
+    openDetailTask,
+    popOutTaskDetail,
+    addToast,
+    globalPaused,
+    openNewTaskWithNav,
+    availableModels,
+    favoriteProviders,
+    favoriteModels,
+    handleToggleFavorite,
+    handleToggleModelFavorite,
+    searchQuery,
+    lastFetchTimeMs,
+    autoMerge,
+    mergeStrategy,
+  } = props;
+
+  return (
+    <PageErrorBoundary>
+      <ListView
+        tasks={isRemote && remoteData.tasks.length > 0 ? remoteData.tasks : tasks}
+        projectId={currentProject?.id}
+        onRetryTask={retryTask}
+        onOpenChatWithPrefill={onOpenChatWithPrefill}
+        onDeleteTask={deleteTask}
+        onPauseTask={pauseTask}
+        onUnpauseTask={unpauseTask}
+        onRevertTask={revertTask}
+        onRestoreRevertTask={restoreTaskRevert}
+        onMergeTask={mergeTask}
+        onResetTask={resetTask}
+        onDuplicateTask={duplicateTask}
+        /* FNXC:TaskRefine 2026-09-14-22:23: FN-400 — the row hosts its own Refine composer; only the created child comes back up. */
+        onRefinementCreated={(task) => ingestCreatedTasks([task])}
+        onOpenDetail={(task, options) => openDetailTask(task, undefined, options)}
+        onPopOut={popOutTaskDetail}
+        addToast={addToast}
+        globalPaused={globalPaused}
+        onNewTask={openNewTaskWithNav}
+        availableModels={availableModels}
+        favoriteProviders={favoriteProviders}
+        favoriteModels={favoriteModels}
+        onToggleFavorite={handleToggleFavorite}
+        onToggleModelFavorite={handleToggleModelFavorite}
+        searchQuery={searchQuery}
+        lastFetchTimeMs={lastFetchTimeMs}
+        autoMerge={autoMerge}
+        mergeStrategy={mergeStrategy}
+        /*
+        FNXC:ListInRightDock 2026-09-14-05:12:
+        Only the ROUTE host portals its workflow selector into the shared header slot. The dock host renders its own
+        inline, otherwise the current destination and the dock would both publish a switcher into that slot and the
+        header would carry two identical controls.
+        */
+        workflowControlsInHeader={props.listHost !== "dock"}
+        /*
+        FNXC:WorkflowControls 2026-09-16-23:24:
+        FN-483 : le repli de route hérite de la même règle que la List conservée — quand un Board de fond téléphone
+        possède déjà le slot, cette instance ne rend aucun contrôle, ni portalé ni en ligne.
+        */
+        showWorkflowControls={props.showWorkflowControls ?? true}
+        compact={props.listHost === "dock"}
+        /*
+        FNXC:ListInRightDock 2026-09-14-08:05:
+        Only ONE List instance may claim the shared header workflow slot. The dock host is never the active route, so
+        it declares itself inactive; ListView portals its selector solely from the active route host, which is what
+        kept the mobile header from showing the switcher twice.
+        */
+        active={props.listHost !== "dock"}
+      />
+    </PageErrorBoundary>
+  );
+}
 
 export function MainContent(props: MainContentProps) {
   const {
@@ -46,6 +320,8 @@ export function MainContent(props: MainContentProps) {
   taskView,
   pluginDashboardViews,
   modalManager,
+  /* FNXC:TaskRevert 2026-09-15-10:00 (FN-416): restore-the-revert reaches the main-panel detail host. */
+  restoreTaskRevert,
   handleChangeTaskView,
   refreshAppSettings,
   addToast,
@@ -53,20 +329,21 @@ export function MainContent(props: MainContentProps) {
   themeMode,
   setThemeMode,
   colorTheme,
+  uiStyle,
+  setUiStyle,
   setColorTheme,
   dashboardFontScalePct,
   setDashboardFontScalePct,
   shadcnCustomColors,
   setShadcnCustomColors,
   resolvedThemeMode,
-  setQuickChatButtonModeImmediate,
   setChatMessageLayoutImmediate,
-  setOpenTasksInRightSidebarImmediate,
-  setOpenMobileTasksInPopupImmediate,
-  setTaskPopupsBoardListOnlyImmediate,
+  rightSidebarEnabled,
+  setRightSidebarEnabledImmediate,
   setShowCostBadgeOnCardsImmediate,
-  setTaskDetailChatFirstImmediate,
+  setTaskDetailDefaultTabImmediate,
   setMobileNavPrimaryItemsImmediate,
+  setMobileNavMenuSwipeGestureImmediate,
   reopenOnboardingWithNav,
   viewMode,
   projects,
@@ -89,15 +366,12 @@ export function MainContent(props: MainContentProps) {
   openFileInBrowser,
   prAuthAvailable,
   autoMerge,
-  mergeStrategy,
   settingsLoaded,
-  openTasksInRightSidebar,
-  openMobileTasksInPopup,
-  taskPopupsBoardListOnly,
   showCostBadgeOnCards,
-  taskDetailChatFirst,
+  taskDetailDefaultTab,
   chatMessageLayout,
   skillsEnabled,
+  experimentalFeatures: _experimentalFeatures,
   mailComposerPrefill,
   onOpenChatWithPrefill,
   setMailboxUnreadCount,
@@ -116,6 +390,7 @@ export function MainContent(props: MainContentProps) {
   handleOpenTaskLogs,
   popOutTaskDetail,
   selectedPrId,
+  gitManagerInitialSection,
   insightsEnabled,
   handleInsightTaskCreate,
   researchEnabled,
@@ -123,36 +398,26 @@ export function MainContent(props: MainContentProps) {
   researchReadinessVersion,
   evalsEnabled,
   ideationEnabled,
+  whiteboardEnabled,
   memoryEnabled,
   goalsEnabled,
   handleOpenMission,
   openPlanningWithInitialPlanWithNav,
   ingestCreatedTasks,
   nodesEnabled,
-  openWorkflowEditorWithNav,
   handleGitHubImport,
   devServerEnabled,
   mainPanelDetailTask,
-  moveTask,
   pauseTask,
   openTaskDetailInMainPanel,
-  handleBoardQuickCreate,
-  openNewTaskWithNav,
   globalPaused,
   updateTask,
   retryTask,
-    archiveTask,
-  revertTask,
   deleteTask,
-  searchQuery,
-  availableModels,
-  favoriteProviders,
-  favoriteModels,
-  handleToggleFavorite,
-  handleToggleModelFavorite,
-  lastFetchTimeMs,
-  openCreateWorkflowWithNav,
-  sidebarActive,
+  sidebarActive: _sidebarActive,
+  chatPageHost,
+  notesController,
+  registerNotesGuard,
   isMobile,
   mainPanelDetailInitialTab,
   closeTaskDetailMainPanel,
@@ -164,16 +429,17 @@ export function MainContent(props: MainContentProps) {
   AgentsView,
   CommandCenter,
   DevServerView,
-  DocumentsView,
+  NotesView,
+  WhiteboardView,
   EvalsView,
   GoalsView,
-  PatchnodeView,
   InsightsView,
   MemoryView,
   PullRequestView,
   ResearchView,
   SecretsView,
   SkillsView,
+  SnippetsView,
   _AutomationsView,
   _ImportTasksView,
   _SettingsView,
@@ -267,8 +533,26 @@ export function MainContent(props: MainContentProps) {
   }, [handleChangeTaskView, setGoalAnchorId, setMissionTargetId]);
 
   const projectKey = currentProject?.id ?? "all-projects";
+  const mobileDrawerEnabled = isMobile && viewMode === "project" && currentProject !== null;
+  /*
+  FNXC:ChatSurfaceUnification 2026-09-15-14:41:
+  `taskView="chat"` belongs to the main keep-alive tree only while THIS shell is the resolved primary Chat host:
+  the mobile drawer, or (FN-419) the `sidebar` navigation placement where Chat is an ordinary main page like Notes.
+  A dock-hosted shell still excludes Chat so a restored route or breakpoint transition cannot mount a second primary
+  Chat behind the registry-backed window. The drawer WRAPPER stays strictly `mobileDrawerEnabled`: sidebar placement
+  mounts Chat as a page, never inside a drawer.
+
+  FNXC:ChatSurfaceUnification 2026-09-16-20:16:
+  FN-468 makes the resolved host authoritative for the whole mobile shell: `"mobile-page"` is now returned for the
+  tablet band too, where neither the dock nor the sidebar exists. Keying on the host (instead of the phone-only
+  `mobileDrawerEnabled`) is what stops the pill's Chat destination from rendering an empty main panel at 769-1023px.
+  The drawer WRAPPER below still reads `mobileDrawerEnabled`, so the tablet gets a page and never a drawer.
+  */
+  const chatPageHostEnabled = mobileDrawerEnabled
+    || chatPageHost === "sidebar-page"
+    || chatPageHost === "mobile-page";
   const selectedKeepAliveId: KeepAliveMainViewId | null = isKeepAliveMainViewId(taskView)
-    ? taskView
+    ? taskView === "chat" && !chatPageHostEnabled ? null : taskView
     : taskView === "task-detail" && mainPanelDetailTask === null
       ? "board"
       : null;
@@ -276,9 +560,19 @@ export function MainContent(props: MainContentProps) {
   const [keepAliveViews, setKeepAliveViews] = useState<{ projectKey: string; ids: KeepAliveMainViewId[] }>(
     () => ({ projectKey, ids: [] }),
   );
-  const previousIds = keepAliveViews.projectKey === projectKey ? keepAliveViews.ids : [];
-  const mountedKeepAliveIds = !earlyHidden && selectedKeepAliveId && !previousIds.includes(selectedKeepAliveId)
-    ? [...previousIds, selectedKeepAliveId]
+  const storedKeepAliveIds = keepAliveViews.projectKey === projectKey ? keepAliveViews.ids : [];
+  const previousIds = !chatPageHostEnabled && storedKeepAliveIds.includes("chat")
+    ? storedKeepAliveIds.filter((id) => id !== "chat")
+    : storedKeepAliveIds;
+  const requiredKeepAliveIds = [
+    ...(mobileDrawerEnabled ? ["board" as const] : []),
+    ...(selectedKeepAliveId ? [selectedKeepAliveId] : []),
+  ];
+  const mountedKeepAliveIds = !earlyHidden
+    ? requiredKeepAliveIds.reduce<KeepAliveMainViewId[]>(
+        (ids, id) => ids.includes(id) ? ids : [...ids, id],
+        previousIds,
+      )
     : previousIds;
   if (keepAliveViews.projectKey !== projectKey || mountedKeepAliveIds !== keepAliveViews.ids) {
     setKeepAliveViews({ projectKey, ids: mountedKeepAliveIds });
@@ -289,14 +583,45 @@ export function MainContent(props: MainContentProps) {
   The overview and backend-error pages must deactivate retained views as well as hide them.
   Fold that early-hide condition into activeId here, rather than passing a second visibility input,
   so a hidden Board cannot retain the shared header slot and hidden Chat cannot mark messages read.
+
+  FNXC:ChatSurfaceUnification 2026-09-14-12:57:
+  Keep the mobile-drawer wrapper mounted across an early error so Chat state and DOM identity survive,
+  but explicitly deactivate its Board background. A live drawer needs Board beneath it; an overview
+  or connection error must instead release Board's shared header without reparenting retained Chat.
   */
   const activeKeepAliveId = earlyHidden ? null : selectedKeepAliveId;
+  /*
+  FNXC:WorkflowControls 2026-09-16-23:24:
+  FN-483 : un Board de fond téléphone réellement actif est l'unique propriétaire du sélecteur contextuel du Header.
+  Toutes les surfaces hébergées AU-DESSUS de lui (List de repli, Graph, Missions) suppriment alors leur propre
+  contrôle sans perdre leurs effets de sélection. Même dérivation que `backgroundActive` du drawer ci-dessous, et que
+  `boardBackgroundActive` passé au Header par App.
+  */
+  const boardBackgroundOwnsHeaderSlot = mobileDrawerEnabled && !earlyHidden;
+  const closeMobileDrawer = () => {
+    if (taskView === "task-detail") {
+      closeTaskDetailMainPanel();
+      return;
+    }
+    if (taskView === "settings") {
+      modalManager.closeSettings();
+      void refreshAppSettings();
+    }
+    handleChangeTaskView("board");
+  };
+  const mobileDrawerTitle = resolveMobileDrawerTitle(taskView, pluginDashboardViews);
   const mainViewKeepAlive = (
     <MainViewKeepAlive
       activeId={activeKeepAliveId}
       mountedIds={mountedKeepAliveIds}
       projectKey={projectKey}
       mainContentProps={props}
+      mobileDrawer={mobileDrawerEnabled ? {
+        activeId: modalManager.detailTask ? null : taskView === "list" || taskView === "chat" ? taskView : null,
+        backgroundActive: !earlyHidden,
+        title: mobileDrawerTitle,
+        onClose: closeMobileDrawer,
+      } : undefined}
     />
   );
 
@@ -318,8 +643,10 @@ export function MainContent(props: MainContentProps) {
   FNXC:Settings 2026-06-22-00:00:
   Settings renders ahead of the overview branch so the header gear opens the embedded Settings view even when no project is selected (viewMode === "overview"), matching the prior modal which opened regardless of view mode.
 
-  FNXC:OpenTasksInRightSidebar 2026-06-28-00:00:
-  Embedded Settings closes must refresh App-scoped settings before returning to the board. The openTasksInRightSidebar routing hook reads project settings through useAppSettings, so saving the Appearance toggle needs the same refresh path as the modal settings close to make board-card routing change immediately without a reload.
+  FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+  FN-442: embedded Settings closes must refresh App-scoped settings before returning to the board. The task-detail
+  default-tab choice reaches every detail host through useAppSettings, so saving the Appearance selector needs the same
+  refresh path as the modal settings close to take effect without a reload.
   */
   if (taskView === "settings") {
     const closeSettingsView = () => {
@@ -337,6 +664,8 @@ export function MainContent(props: MainContentProps) {
             projectId={currentProject?.id}
             themeMode={themeMode}
             colorTheme={colorTheme}
+            uiStyle={uiStyle}
+            onUiStyleChange={setUiStyle}
             onThemeModeChange={setThemeMode}
             onColorThemeChange={setColorTheme}
             dashboardFontScalePct={dashboardFontScalePct}
@@ -344,25 +673,23 @@ export function MainContent(props: MainContentProps) {
             resolvedThemeMode={resolvedThemeMode}
             onDashboardFontScaleChange={setDashboardFontScalePct}
             onShadcnCustomColorsChange={setShadcnCustomColors}
-            onQuickChatButtonModeChange={setQuickChatButtonModeImmediate}
             chatMessageLayout={chatMessageLayout}
             onChatMessageLayoutChange={setChatMessageLayoutImmediate}
-            openTasksInRightSidebar={openTasksInRightSidebar}
-            onOpenTasksInRightSidebarChange={setOpenTasksInRightSidebarImmediate}
-            openMobileTasksInPopup={openMobileTasksInPopup}
-            onOpenMobileTasksInPopupChange={setOpenMobileTasksInPopupImmediate}
-            taskPopupsBoardListOnly={taskPopupsBoardListOnly}
-            onTaskPopupsBoardListOnlyChange={setTaskPopupsBoardListOnlyImmediate}
+            rightSidebarEnabled={rightSidebarEnabled}
+            onRightSidebarEnabledChange={setRightSidebarEnabledImmediate}
             showCostBadgeOnCards={showCostBadgeOnCards}
             onShowCostBadgeOnCardsChange={setShowCostBadgeOnCardsImmediate}
-            taskDetailChatFirst={taskDetailChatFirst}
-            onTaskDetailChatFirstChange={setTaskDetailChatFirstImmediate}
+            taskDetailDefaultTab={taskDetailDefaultTab}
+            onTaskDetailDefaultTabChange={setTaskDetailDefaultTabImmediate}
             onMobileNavPrimaryItemsChange={setMobileNavPrimaryItemsImmediate}
+            onMobileNavMenuSwipeGestureChange={setMobileNavMenuSwipeGestureImmediate}
             onReopenOnboarding={reopenOnboardingWithNav}
             onOpenApprovals={() => handleChangeTaskView("mailbox")}
+            /* FNXC:WorkflowEditorEmbedding 2026-09-15-05:29: FN-407 — the embedded Settings referral navigates to the Workflows view, exactly like the modal one. */
             onOpenWorkflowSettings={() => {
               closeSettingsView();
-              modalManager.openWorkflowEditor("settings");
+              modalManager.setWorkflowViewParams({ panel: "settings" });
+              handleChangeTaskView("workflows");
             }}
           />
         </Suspense>
@@ -394,12 +721,14 @@ export function MainContent(props: MainContentProps) {
   dashboard-views response may mount a plugin view, so a persisted legacy view cannot revive a
   disabled plugin and issue requests to an unavailable plugin API.
   */
-  const isEnabledPluginTaskView = resolvedPluginTaskView !== null && pluginDashboardViews.some(
-    (entry) => resolvedPluginTaskView === `plugin:${entry.pluginId}:${entry.view.viewId}`,
-  );
+  const enabledPluginView = resolvedPluginTaskView === null
+    ? undefined
+    : pluginDashboardViews.find(
+      (entry) => resolvedPluginTaskView === `plugin:${entry.pluginId}:${entry.view.viewId}`,
+    );
 
   // Project view
-  if (resolvedPluginTaskView && isEnabledPluginTaskView) {
+  if (resolvedPluginTaskView && enabledPluginView) {
     const pluginTasks = isRemote && remoteData.tasks.length > 0 ? remoteData.tasks : tasks;
     const isDependencyGraphView = resolvedPluginTaskView === "plugin:fusion-plugin-dependency-graph:graph";
     /*
@@ -425,13 +754,22 @@ export function MainContent(props: MainContentProps) {
         {isDependencyGraphView ? (
           <GraphWorkflowSwitcherSlot
             projectId={currentProject?.id}
-            onOpenWorkflowEditor={openWorkflowEditorWithNav}
-            onCreateWorkflow={openCreateWorkflowWithNav}
             onWorkflowSelectionChange={setGraphWorkflowSelection}
+            /* FNXC:WorkflowControls 2026-09-16-23:24: FN-483 — Graph garde son filtrage mais ne double pas le sélecteur du Board de fond. */
+            showWorkflowControls={!boardBackgroundOwnsHeaderSlot}
           />
         ) : null}
         <PluginDashboardViewHost
           taskView={resolvedPluginTaskView as `plugin:${string}:${string}`}
+          /*
+          FNXC:StandardizedPluginViews 2026-09-13-16:30:
+          Every enabled primary plugin destination is framed by the same host-owned ViewHeader and bounded ViewLayout. Resolution still comes exclusively from the existing project-scoped manifest list: this adds neither routes nor a registration for Reports.
+          */
+          layout={{
+            title: enabledPluginView.view.label,
+            icon: getPluginNavIcon(enabledPluginView.view.icon),
+            contentOwnsScroll: isDependencyGraphView,
+          }}
           context={{
             projectId: currentProject?.id,
             tasks: pluginContextTasks,
@@ -495,6 +833,25 @@ export function MainContent(props: MainContentProps) {
     );
   }
 
+  /*
+  FNXC:SnippetsDestination 2026-09-14-04:12:
+  Snippets is its own destination beside Skills, gated by the same feature flag: both are chat/skill authoring tools
+  and neither should appear when that capability is off.
+  */
+  if (taskView === "snippets") {
+    if (!settingsLoaded || !skillsEnabled) {
+      return null;
+    }
+    return (
+      <PageErrorBoundary>
+        <Suspense fallback={null}>
+          {/* FNXC:SnippetsDestination 2026-09-16-21:44: FN-476 — a destination is left by navigating, so the host supplies no close callback. */}
+          <SnippetsView />
+        </Suspense>
+      </PageErrorBoundary>
+    );
+  }
+
   if (taskView === "chat") {
     /*
     FNXC:MainViewKeepAlive 2026-08-30-19:05:
@@ -513,7 +870,7 @@ export function MainContent(props: MainContentProps) {
           /*
           FNXC:ArtifactRegistry 2026-07-12-00:00: Artifact-registration mail notifications open their producing task through the shared task-detail fetch path so the mailbox does not invent a separate deep-link scheme.
 
-          FNXC:ArtifactRegistry 2026-07-13-00:00: Mailbox artifact "View task" opens the producing task in the shared movable/resizable popped-out task-detail FloatingWindow (`popOutTaskDetail`), matching DocumentsView's artifact-task path instead of the docked `openDetailTask` modal, so the modal has full resize/move parity.
+          FNXC:ArtifactRegistry 2026-07-13-00:00: Mailbox artifact "View task" opens the producing task in the shared movable/resizable popped-out task-detail FloatingWindow (`popOutTaskDetail`) instead of the docked `openDetailTask` modal, so the modal has full resize/move parity.
           */
           onOpenTask={(taskId) => {
             void fetchTaskDetail(taskId, currentProject?.id)
@@ -552,8 +909,9 @@ export function MainContent(props: MainContentProps) {
         */}
         <HeaderWorkflowSwitcherSlot
           projectId={currentProject?.id}
-          onOpenWorkflowEditor={openWorkflowEditorWithNav}
           onWorkflowSelectionChange={(selection) => setMissionWorkflowId(selection && !selection.isAllWorkflowsSelected ? selection.selectedWorkflow.id : null)}
+          /* FNXC:WorkflowControls 2026-09-16-23:24: FN-483 — Missions conserve sa sélection de création sans rendre un second contrôle au-dessus du Board de fond. */
+          showWorkflowControls={!boardBackgroundOwnsHeaderSlot}
         />
         {/*
         FNXC:ProjectSwitchModalReset 2026-07-23-00:00:
@@ -612,23 +970,62 @@ export function MainContent(props: MainContentProps) {
     );
   }
 
-  if (taskView === "documents") {
+  if (taskView === "notes") {
     return (
       <PageErrorBoundary>
         <Suspense fallback={null}>
-          <DocumentsView
-            projectId={currentProject?.id}
-            columnFlagsByTaskId={columnFlagsByTaskId}
-            addToast={addToast}
-            onOpenDetail={openDetailTask}
-            onOpenArtifactTaskDetail={popOutTaskDetail}
-            onSendSelectionToTask={modalManager.openNewTaskWithDescription}
-          />
+          {/* FNXC:DesktopRightDock 2026-09-11-22:51: The standard Notes page must replace any retained compact-dock guard after a desktop-to-tablet transition. Its live dirty-state closure remains authoritative when the draft becomes dirty only after the transition. */}
+          <NotesView projectId={currentProject?.id} addToast={addToast} controller={notesController} registerGuard={registerNotesGuard} />
         </Suspense>
       </PageErrorBoundary>
     );
   }
 
+  if (taskView === "whiteboard") {
+    if (!settingsLoaded || !whiteboardEnabled) return null;
+    return (
+      <PageErrorBoundary>
+        <Suspense fallback={null}>
+          <WhiteboardView projectId={currentProject?.id} addToast={addToast} />
+        </Suspense>
+      </PageErrorBoundary>
+    );
+  }
+
+  /*
+  FNXC:ToolSurfaces 2026-09-15-16:04:
+  FN-426: Files and Git Manager are real destinations now, which is what makes the right dock optional. Both are
+  imported eagerly because their bodies (DockFilesView, GitManagerModal) were already in the main bundle through the
+  dock and AppModals, so promoting them to pages adds no new chunk.
+  */
+  if (taskView === "files") {
+    return (
+      <PageErrorBoundary>
+        <FilesView projectId={currentProject?.id} openFile={openFileInBrowser} />
+      </PageErrorBoundary>
+    );
+  }
+
+  if (taskView === "git-manager") {
+    return (
+      <PageErrorBoundary>
+        <GitManagerView
+          projectId={currentProject?.id}
+          tasks={tasks as Task[]}
+          addToast={addToast}
+          /* An old `pull-requests` request is routed here by App with this section preselected. */
+          initialSection={gitManagerInitialSection}
+          selectedPullRequestId={selectedPrId}
+        />
+      </PageErrorBoundary>
+    );
+  }
+
+  /*
+  FNXC:ToolSurfaces 2026-09-15-16:04:
+  FN-426 removed Pull Requests from every navigation surface in favour of the Git Manager section. This branch is kept
+  only as a defensive host for a request that somehow bypasses App's routing; it is not an offered destination.
+  */
   if (taskView === "pull-requests") {
     return (
       <PageErrorBoundary>
@@ -734,20 +1131,12 @@ export function MainContent(props: MainContentProps) {
     );
   }
 
-  if (taskView === "patchnode") {
-    return (
-      <PageErrorBoundary>
-        <Suspense fallback={null}>
-          <PatchnodeView
-            projectId={currentProject?.id}
-            onOpenTaskDetail={(taskId) => fetchTaskDetail(taskId, currentProject?.id)
-              .then((task) => openDetailTask(task as TaskDetail))
-              .catch(() => undefined)}
-          />
-        </Suspense>
-      </PageErrorBoundary>
-    );
-  }
+  /*
+  FNXC:HistoryModalSurface 2026-09-15-04:29:
+  FN-403: `patchnode` is no longer a main-content destination. History is a modal surface owned by
+  useModalManager and rendered exactly once by AppModals, so this switch deliberately has no History branch;
+  App coerces any residual `patchnode` view request into opening that modal.
+  */
 
   if (taskView === "goalsView") {
     if (!settingsLoaded || !goalsEnabled) {
@@ -768,6 +1157,8 @@ export function MainContent(props: MainContentProps) {
           <CommandCenter
             projectId={currentProject?.id}
             colorTheme={colorTheme}
+            uiStyle={uiStyle}
+            onUiStyleChange={setUiStyle}
             themeMode={themeMode}
             shadcnCustomColors={shadcnCustomColors}
             resolvedThemeMode={resolvedThemeMode}
@@ -805,22 +1196,21 @@ export function MainContent(props: MainContentProps) {
   }
 
   /*
-  FNXC:Navigation 2026-06-22-00:00:
-  Workflows, Import Tasks (GitHub import), and Automations are left-sidebar destinations that render embedded in the main content area instead of as modal overlays. Closing returns to the board. The same components still mount as modals in AppModals for the mobile overflow path.
+  FNXC:Navigation 2026-09-15-05:29:
+  Workflows, Import Tasks (GitHub import), and Automations are left-sidebar destinations that render embedded in the main content area instead of as modal overlays. Closing returns to the board.
+  FN-407: Workflows is now the ONLY presentation of the workflow editor — AppModals no longer mounts a modal copy — so every entry point converges here. Import Tasks and Automations still have a modal twin for the mobile overflow path.
   */
   if (taskView === "workflows") {
     return (
-      <PageErrorBoundary>
-        <Suspense fallback={null}>
-          <_WorkflowEditorView
-            isOpen={true}
-            onClose={() => handleChangeTaskView("board")}
-            addToast={addToast}
-            projectId={currentProject?.id}
-            presentation="embedded"
-          />
-        </Suspense>
-      </PageErrorBoundary>
+      <WorkflowsMainView
+        View={_WorkflowEditorView}
+        addToast={addToast}
+        projectId={currentProject?.id}
+        initialPanel={modalManager.workflowViewPanel}
+        initialWorkflowId={modalManager.workflowViewWorkflowId}
+        onClose={() => handleChangeTaskView("board")}
+        onClearParams={modalManager.clearWorkflowViewParams}
+      />
     );
   }
 
@@ -896,32 +1286,29 @@ export function MainContent(props: MainContentProps) {
     return (
       <PageErrorBoundary>
         {/*
-        FNXC:TaskDetailSwipeBack 2026-07-05-12:30:
-        FN-7587 — presentation-only predictive-back polish layered on top of the unchanged
-        FN-7583/FN-7586 dismissal routing (popstate / fusion:native-back / useNavigationHistory
-        stack). The `--mobile-transition` modifier only adds a CSS enter animation gated to the
-        existing `isMobile` prop; it never defers or reorders when onRequestClose/onBackToBoard
-        fire, and honors prefers-reduced-motion (see styles.css).
+        FNXC:MobileDrawerMotion 2026-09-12-20:37:
+        Standard mobile Task Detail owns its bottom-edge transition here. With the mobile shell, the shared
+        drawer shell is the sole animated surface, preventing nested content from moving twice;
+        dismissal and navigation callbacks remain synchronous and unchanged.
         */}
-        <div className={`task-detail-main-panel${isMobile ? " task-detail-main-panel--mobile-transition" : ""}`}>
-          <div className="task-detail-main-panel-body">
-            <TaskDetailContent
+        <MainPanelTaskDetailHost
               task={liveDetailTask}
               projectId={currentProject?.id}
               tasks={tasks}
               globalPaused={globalPaused}
-              embedded
               initialTab={mainPanelDetailInitialTab}
               /*
-              FNXC:TaskDetail 2026-06-22-18:40:
-              Board-card detail (full main panel) renders its "Back to board" affordance inside TaskDetailContent's gray header (far right, across from the task id) instead of a separate back-row above the content. The prop only renders the header back button when both embedded and onBackToBoard are present, so ListView split-pane and modal usages stay unaffected.
+              FNXC:TaskDetailHostOwnership 2026-09-13-16:30:
+              MainContent remains the navigation owner while canonical Task Detail chrome chooses ChevronLeft on phone and Close on desktop/tablet. The outer drawer contributes only its handle, never a second return control.
               */
-              onBackToBoard={closeTaskDetailMainPanel}
+              onNavigateToBoard={closeTaskDetailMainPanel}
+              presentation={mobileDrawerEnabled ? "drawer" : "panel"}
+              mobileTransition={isMobile && !mobileDrawerEnabled}
               /* FNXC:FloatingWindow 2026-06-22-21:10: Popping out from the board's full-panel detail also returns the main panel to the board, so the board (not the emptied detail) sits behind the floating window. */
               onPopOut={(task) => { popOutTaskDetail(task); closeTaskDetailMainPanel(); }}
               onOpenDetail={(value, initialTab) => openTaskDetailInMainPanel(value, initialTab ?? "chat")}
               onDeleteTask={deleteTask}
-              onReviseTask={(task) => modalManager.openNewTaskWithDescription(task.description)}
+              onRestoreRevertTask={restoreTaskRevert}
               onMergeTask={mergeTask}
               onRetryTask={retryTask}
               onOpenChatWithPrefill={onOpenChatWithPrefill}
@@ -929,11 +1316,7 @@ export function MainContent(props: MainContentProps) {
               onUnpauseTask={unpauseTask}
             onResetTask={resetTask}
               onDuplicateTask={duplicateTask}
-              /*
-              FNXC:Navigation 2026-06-22-09:00:
-              The full-panel task-detail must dismiss back to the board when a destructive/terminal action (delete/merge/archive/retry/reset/duplicate) fires, mirroring the modal path. Without onRequestClose the panel kept showing a ghost of the just-acted-on task.
-              */
-              onRequestClose={closeTaskDetailMainPanel}
+              /* FNXC:Navigation 2026-06-22-09:00: MainPanelTaskDetailHost routes destructive and explicit exits through the same Board navigation owner. */
               onRefinementCreated={(task) => ingestCreatedTasks([task])}
               onTaskUpdated={(updatedTask) => {
                 setMainPanelDetailTask((previous) => {
@@ -944,10 +1327,8 @@ export function MainContent(props: MainContentProps) {
               addToast={addToast}
               prAuthAvailable={prAuthAvailable}
               autoMergeEnabled={autoMerge}
-              taskDetailChatFirst={taskDetailChatFirst}
+              taskDetailDefaultTab={taskDetailDefaultTab}
             />
-          </div>
-        </div>
       </PageErrorBoundary>
     );
   }
@@ -970,55 +1351,30 @@ export function MainContent(props: MainContentProps) {
     */
     return null;
   }
-  return (
-    <PageErrorBoundary>
-      <ListView
-        tasks={isRemote && remoteData.tasks.length > 0 ? remoteData.tasks : tasks}
-        projectId={currentProject?.id}
-        onMoveTask={moveTask}
-        onRetryTask={retryTask}
-        onOpenChatWithPrefill={onOpenChatWithPrefill}
-        onDeleteTask={deleteTask}
-        onReviseTask={(task) => modalManager.openNewTaskWithDescription(task.description)}
-        onPauseTask={pauseTask}
-        onUnpauseTask={unpauseTask}
-        onArchiveTask={archiveTask}
-        onRevertTask={revertTask}
-        onMergeTask={mergeTask}
-            onResetTask={resetTask}
-        onDuplicateTask={duplicateTask}
-        onRefinementCreated={(task) => ingestCreatedTasks([task])}
-        onOpenDetail={(task, options) => openDetailTask(task, undefined, options)}
-        onPopOut={popOutTaskDetail}
-        addToast={addToast}
-        globalPaused={globalPaused}
-        onNewTask={openNewTaskWithNav}
-        onQuickCreate={handleBoardQuickCreate}
-        onPlanningMode={openPlanningWithInitialPlanWithNav}
-        availableModels={availableModels}
-        favoriteProviders={favoriteProviders}
-        favoriteModels={favoriteModels}
-        onToggleFavorite={handleToggleFavorite}
-        onToggleModelFavorite={handleToggleModelFavorite}
-        searchQuery={searchQuery}
-        lastFetchTimeMs={lastFetchTimeMs}
-        prAuthAvailable={prAuthAvailable}
-        autoMerge={autoMerge}
-        openMobileTasksInPopup={openMobileTasksInPopup}
-        taskDetailChatFirst={taskDetailChatFirst}
-        mergeStrategy={mergeStrategy}
-        onOpenWorkflowEditor={openWorkflowEditorWithNav}
-        onCreateWorkflow={openCreateWorkflowWithNav}
-        workflowControlsInHeader={sidebarActive || isMobile}
-      />
-    </PageErrorBoundary>
-  );
+  return <MainContentListView {...props} showWorkflowControls={!boardBackgroundOwnsHeaderSlot} />;
   };
+
+  const switchView = renderSwitchView();
+  const switchUsesMobileDrawer = mobileDrawerEnabled
+    && taskView !== "board"
+    && taskView !== "list"
+    && taskView !== "chat"
+    && taskView !== "planning"
+    && switchView !== null;
 
   return (
     <>
       {mainViewKeepAlive}
-      {renderSwitchView()}
+      {switchUsesMobileDrawer ? (
+        <MainContentDrawer
+          taskView={taskView}
+          open={!modalManager.detailTask}
+          title={mobileDrawerTitle}
+          onClose={closeMobileDrawer}
+        >
+          {switchView}
+        </MainContentDrawer>
+      ) : switchView}
     </>
   );
 }

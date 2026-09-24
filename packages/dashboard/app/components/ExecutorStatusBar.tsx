@@ -8,7 +8,7 @@ import {
   STALE_HIGH_FANOUT_BLOCKER_AGE_THRESHOLD_MS,
   type Task,
 } from "@fusion/core";
-import { AlertTriangle, Clock, Folder, MessageSquare, Pause, Play, Square, Zap } from "lucide-react";
+import { AlertTriangle, Clock, Folder, Pause, Play, Square, Zap } from "lucide-react";
 import { computeBlockerFanoutMap } from "../hooks/useBlockerFanout";
 import { useExecutorStats, type ExecutorColumnFlags } from "../hooks/useExecutorStats";
 import { isLikelyTabSuspensionError } from "../hooks/visibilitySuspension";
@@ -17,6 +17,8 @@ import type { ExecutorState } from "../api";
 import { EngineControlMenu, type EngineControlMenuHandle } from "./EngineControlMenu";
 import { TerminalLauncher } from "./TerminalLauncher";
 import { useViewportMode } from "../hooks/useViewportMode";
+import { useDashboardWindowLandmark } from "../context/DashboardWindowManagerContext";
+import { DashboardWindowVisibilityToggle } from "./DashboardWindowVisibilityToggle";
 
 /*
 FNXC:StuckTagRemoval 2026-08-17-22:30: Operator removed stuck-task tagging from the dashboard; engine recovery sweeps still consume taskStuckTimeoutMs server-side.
@@ -87,10 +89,6 @@ interface ExecutorStatusBarProps {
   onOpenScripts?: () => void;
   /** Runs a configured script in the terminal from the footer launcher dropdown. */
   onRunScript?: (name: string, command: string) => void;
-  /** Quick Chat launcher placement from Settings. */
-  quickChatButtonMode?: "floating" | "footer" | "off";
-  /** Opens the full Chat modal from the footer launcher. */
-  onOpenQuickChat?: () => void;
 }
 
 /**
@@ -145,9 +143,10 @@ function getStateDisplay(state: ExecutorState, t: TFunction<"app">): { label: st
  * - Executor state badge (idle/running/paused/stopped)
  * - Last activity timestamp
  */
-export function ExecutorStatusBar({ tasks, projectId, columnFlagsByTaskId: suppliedColumnFlagsByTaskId, staleHighFanoutBlockerAgeThresholdMs, currentProjectPath, onOpenProjectDirectory, keyboardOpen, hideWhenKeyboardOpen, onToggleTerminal, onOpenScripts, onRunScript, quickChatButtonMode = "off", onOpenQuickChat }: ExecutorStatusBarProps) {
+export function ExecutorStatusBar({ tasks, projectId, columnFlagsByTaskId: suppliedColumnFlagsByTaskId, staleHighFanoutBlockerAgeThresholdMs, currentProjectPath, onOpenProjectDirectory, keyboardOpen, hideWhenKeyboardOpen, onToggleTerminal, onOpenScripts, onRunScript }: ExecutorStatusBarProps) {
   const { t } = useTranslation("app");
   const viewportMode = useViewportMode();
+  const dashboardWindowFooterRef = useDashboardWindowLandmark("footer");
   const isMobile = viewportMode === "mobile";
   const showTerminalLauncher = !isMobile && Boolean(onToggleTerminal);
   const columnFlagsByTaskId = suppliedColumnFlagsByTaskId;
@@ -156,11 +155,6 @@ export function ExecutorStatusBar({ tasks, projectId, columnFlagsByTaskId: suppl
   FN-8453 receives a task-scoped board trait index from App before the shared
   live-agent predicate runs. Literal column ids are only a loading/legacy fallback.
   */
-  /*
-   * FNXC:ChatLauncher 2026-06-22-15:18:
-   * Settings can route Quick Chat to a footer launcher beside Terminal, keep the draggable floating FAB, or hide the launcher entirely. Footer launch stays desktop/tablet-only like Terminal while mobile opens from the floating path as a full-screen modal.
-   */
-  const showQuickChatFooterLauncher = !isMobile && quickChatButtonMode === "footer" && Boolean(onOpenQuickChat);
   const { stats, loading, error } = useExecutorStats(tasks, projectId, columnFlagsByTaskId);
   const [isProjectPathVisible, setIsProjectPathVisible] = useState(false);
   const [openStatTooltip, setOpenStatTooltip] = useState<OpenStatTooltip | null>(null);
@@ -263,21 +257,23 @@ export function ExecutorStatusBar({ tasks, projectId, columnFlagsByTaskId: suppl
   if (error) {
     if (isLikelyTabSuspensionError(error)) {
       return (
-        <div className={`${baseClassName} executor-status-bar--connecting`} role="status" aria-label={t("executor.status", "Executor status")}>
+        <div ref={dashboardWindowFooterRef} className={`${baseClassName} executor-status-bar--connecting`} role="status" aria-label={t("executor.status", "Executor status")}>
           <span className="executor-status-bar__connecting">
             <span className="executor-status-bar__indicator executor-status-bar__indicator--connecting executor-status-bar__indicator--active" aria-hidden="true" />
             {t("executor.connecting", "Connecting…")}
           </span>
+          <DashboardWindowVisibilityToggle />
         </div>
       );
     }
 
     return (
-      <div className={`${baseClassName} executor-status-bar--error`} role="status" aria-label={t("executor.status", "Executor status")}>
+      <div ref={dashboardWindowFooterRef} className={`${baseClassName} executor-status-bar--error`} role="status" aria-label={t("executor.status", "Executor status")}>
         <span className="executor-status-bar__error">
           <AlertTriangle size={14} />
           {error}
         </span>
+        <DashboardWindowVisibilityToggle />
       </div>
     );
   }
@@ -288,14 +284,16 @@ export function ExecutorStatusBar({ tasks, projectId, columnFlagsByTaskId: suppl
    */
   if (loading && stats.runningTaskCount === 0 && !hasRenderedPopulatedStatsRef.current) {
     return (
-      <div className={`${baseClassName} executor-status-bar--loading`} role="status" aria-label={t("executor.status", "Executor status")}>
+      <div ref={dashboardWindowFooterRef} className={`${baseClassName} executor-status-bar--loading`} role="status" aria-label={t("executor.status", "Executor status")}>
         <LoadingSpinner className="executor-status-bar__loading-text" label={t("executor.loading", "Loading...")} />
+        <DashboardWindowVisibilityToggle />
       </div>
     );
   }
 
   return (
     <div
+      ref={dashboardWindowFooterRef}
       className={`${baseClassName}${stats.executorState === "running" ? " executor-status-bar--running" : ""}`}
       role="status"
       aria-label={t("executor.status", "Executor status")}
@@ -434,24 +432,6 @@ export function ExecutorStatusBar({ tasks, projectId, columnFlagsByTaskId: suppl
       {/* Spacer */}
       <div className="executor-status-bar__spacer" />
 
-      {showQuickChatFooterLauncher && (
-        <>
-          <div className="executor-status-bar__segment executor-status-bar__segment--quick-chat-launcher" data-testid="executor-quick-chat-launcher-segment">
-            <button
-              type="button"
-              className="executor-status-bar__footer-launcher"
-              onClick={onOpenQuickChat}
-              aria-label={t("chat.openQuickChat", "Open Quick Chat")}
-              data-testid="executor-quick-chat-launcher"
-            >
-              <MessageSquare size={12} aria-hidden="true" />
-              <span>{t("chat.quickChat", "Quick Chat")}</span>
-            </button>
-          </div>
-          <span className="executor-status-bar__divider" aria-hidden="true" />
-        </>
-      )}
-
       {showTerminalLauncher && (
         <>
           <div className="executor-status-bar__segment executor-status-bar__segment--terminal-launcher" data-testid="executor-terminal-launcher-segment">
@@ -492,6 +472,7 @@ export function ExecutorStatusBar({ tasks, projectId, columnFlagsByTaskId: suppl
         </button>
         <EngineControlMenu ref={engineControlMenuRef} projectId={projectId} />
       </div>
+      <DashboardWindowVisibilityToggle />
     </div>
   );
 }

@@ -68,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           # Engine tests run real git operations (merge-base against main,
           # case-variant ref checks) that require full history. Shallow
@@ -104,6 +104,12 @@ jobs:
             plugins/fusion-plugin-hermes-runtime/dist
             plugins/fusion-plugin-openclaw-runtime/dist
             plugins/fusion-plugin-paperclip-runtime/dist
+            plugins/fusion-plugin-roadmap/dist
+            plugins/fusion-plugin-claude-runtime/dist
+            plugins/fusion-plugin-cursor-runtime/dist
+            plugins/fusion-plugin-droid-runtime/dist
+            plugins/fusion-plugin-grok-runtime/dist
+            plugins/fusion-plugin-omp-runtime/dist
           key: dist-${{ runner.os }}-${{ steps.dist-hash.outputs.hash }}
 
       # On a cache HIT, restored dist files carry their save-time mtimes while
@@ -126,7 +132,7 @@ jobs:
       # snapshot automatically — refresh is manual/scheduled only.
       - name: Upload per-shard test timings
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: test-timings-shard-${{ matrix.shard }}
           # Relative outputFile paths mean each package writes its own
@@ -159,7 +165,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js and pnpm
         uses: ./.github/actions/setup-node-pnpm
@@ -185,6 +191,12 @@ jobs:
             plugins/fusion-plugin-hermes-runtime/dist
             plugins/fusion-plugin-openclaw-runtime/dist
             plugins/fusion-plugin-paperclip-runtime/dist
+            plugins/fusion-plugin-roadmap/dist
+            plugins/fusion-plugin-claude-runtime/dist
+            plugins/fusion-plugin-cursor-runtime/dist
+            plugins/fusion-plugin-droid-runtime/dist
+            plugins/fusion-plugin-grok-runtime/dist
+            plugins/fusion-plugin-omp-runtime/dist
           key: dist-${{ runner.os }}-${{ steps.dist-hash.outputs.hash }}
 
       - name: Seed artifact hash-cache on cache hit
@@ -194,13 +206,30 @@ jobs:
       - name: Assert every dashboard test file is gated or skip-listed
         run: node scripts/check-test-inventory.mjs --dashboard-curated
 
+  # FNXC:LifecycleColumnCensus 2026-09-15-15:11:
+  # The ratchet previously ran only for pull requests, so a drift merged to main
+  # stayed invisible until an unrelated pull request inherited its failing lint job.
+  lifecycle-ratchet-drift:
+    name: Lifecycle-column ratchet drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup Node.js and pnpm
+        uses: ./.github/actions/setup-node-pnpm
+
+      - name: Run lifecycle-column ratchet
+        run: pnpm check:lifecycle-columns
+
   line-count-audit:
     name: Line-count audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js and pnpm
         uses: ./.github/actions/setup-node-pnpm
@@ -245,7 +274,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -282,7 +311,7 @@ jobs:
       PGPASSWORD: "postgres"
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -294,7 +323,7 @@ jobs:
 
       - name: Upload pipeline smoke report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: pipeline-smoke-report
           path: packages/engine/.pipeline-smoke-report.json
@@ -319,7 +348,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js and pnpm
         uses: ./.github/actions/setup-node-pnpm
@@ -342,6 +371,12 @@ jobs:
             plugins/fusion-plugin-hermes-runtime/dist
             plugins/fusion-plugin-openclaw-runtime/dist
             plugins/fusion-plugin-paperclip-runtime/dist
+            plugins/fusion-plugin-roadmap/dist
+            plugins/fusion-plugin-claude-runtime/dist
+            plugins/fusion-plugin-cursor-runtime/dist
+            plugins/fusion-plugin-droid-runtime/dist
+            plugins/fusion-plugin-grok-runtime/dist
+            plugins/fusion-plugin-omp-runtime/dist
             .fusion/cache/plugin-build-cache.json
           key: gate-dist-${{ runner.os }}-${{ steps.dist-hash.outputs.hash }}
           restore-keys: |

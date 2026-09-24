@@ -1,6 +1,6 @@
 {
   "name": "fusion-workspace",
-  "version": "0.77.0",
+  "version": "0.78.0-beta.4",
   "private": true,
   "license": "MIT",
   "homepage": "https://github.com/Runfusion/Fusion#readme",
@@ -27,6 +27,7 @@
     "check:inert-sync-lanes": "node scripts/check-inert-sync-lane-conversions.mjs",
     "check:fnxc-future-dates": "node scripts/check-fnxc-future-dates.mjs",
     "check:lane-wiring": "node scripts/check-lane-wiring.mjs",
+    "check:plugin-interop": "pnpm check:plugin-interop-drift",
     "check:plugin-interop-drift": "node scripts/check-plugin-interop-drift.mjs",
     "check:runtime-skill-loader-drift": "node scripts/check-runtime-skill-loader-drift.mjs",
     "census:lifecycle-columns": "node scripts/lifecycle-column-census.mjs",
@@ -119,7 +120,6 @@
       "@embedded-postgres/linux-ppc64",
       "@embedded-postgres/linux-x64",
       "@embedded-postgres/windows-x64",
-      "@homebridge/node-pty-prebuilt-multiarch",
       "electron",
       "esbuild",
       "koffi",

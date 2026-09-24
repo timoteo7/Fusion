@@ -72,6 +72,13 @@ export const defaultChatState: UseChatReturn = {
   sendMessage: vi.fn(),
   editMessageAndResend: vi.fn(),
   /*
+  FNXC:ChatMessageEdit 2026-09-16-05:58:
+  FN-459. A rejected edit rescues the typed correction through these two fields instead of losing it
+  when the reload remounts the target row. The shared default is "nothing to restore".
+  */
+  editDraftRestore: null,
+  clearEditDraftRestore: vi.fn(),
+  /*
   FNXC:ChatStreamCancel 2026-08-23-23:20:
   stopStreaming resolves a durable cancellation promise, and ChatView's `/new` and `/clear` handlers
   chain `.then(...)` on it. A bare vi.fn() returns undefined and throws inside the handler, so the
@@ -268,7 +275,7 @@ export function mockViewportMode(mode: "mobile" | "tablet" | "desktop") {
   return vi.spyOn(window, "matchMedia").mockImplementation((query: string = "") => ({
     matches:
       (mode === "mobile" && (query === "(max-width: 768px)" || query === "(max-width: 768px), (max-height: 480px)")) ||
-      (mode === "tablet" && query.includes("min-width: 769px") && query.includes("max-width: 1024px")),
+      (mode === "tablet" && query.includes("min-width: 769px") && query.includes("max-width: 1023.98px")),
     media: query,
     onchange: null,
     addListener: vi.fn(),
@@ -334,6 +341,36 @@ export function simulateKeyboardOpen({ vv, input, visualHeight }: { vv: VisualVi
   input.focus();
   input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
   setVisualViewportHeight(vv, visualHeight);
+}
+
+/*
+FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+FN-512 sizes a container from its OWN measured rectangle instead of applying a keyboard height
+blindly, which is the only reading that stays correct for a full-screen drawer, a small floating
+window, and an already-resized layout alike. jsdom performs no layout and returns an all-zero rect,
+so a test that wants to observe that decision must state the rectangle it is pretending to measure.
+
+Without this the adapter is correctly inert, and a test asserting "no bound published" would prove
+nothing about production.
+*/
+export function stubMeasuredRect(
+  element: HTMLElement,
+  { top, height, left = 0, width = 375 }: { top: number; height: number; left?: number; width?: number },
+) {
+  Object.defineProperty(element, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      top,
+      bottom: top + height,
+      height,
+      left,
+      right: left + width,
+      width,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    }),
+  });
 }
 
 /*

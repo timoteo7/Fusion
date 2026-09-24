@@ -622,10 +622,7 @@ exactly when the surrounding chrome is gone.
   border-bottom: 1px solid var(--border);
 }
 
-.devserver-preview-modal__titlebar h2 {
-  margin: 0;
-  font-size: 1rem;
-}
+/* FNXC:StandardizedViewLayout 2026-09-13-22:40: FN-379 lets the shared header own the preview title metrics. */
 
 .devserver-preview-modal__body {
   display: flex;
@@ -803,9 +800,10 @@ exactly when the surrounding chrome is gone.
     min-height: calc(var(--space-lg) + var(--space-lg) + var(--space-xs));
   }
 
+  /* FNXC:IconOnlyButtonCanon 2026-09-16-19:05: FN-471 — boîte d'icône canonique mobile au lieu d'un calcul bespoke. */
   .devserver-preview-actions .btn-icon {
-    min-width: calc(var(--space-lg) + var(--space-lg) + var(--space-xs));
-    min-height: calc(var(--space-lg) + var(--space-lg) + var(--space-xs));
+    min-width: var(--icon-button-size-mobile);
+    min-height: var(--icon-button-size-mobile);
   }
 
   .devserver-log-viewer__toolbar {

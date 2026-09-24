@@ -1,5 +1,9 @@
 /* ── Chat View ─────────────────────────────────────────────────────────────── */
 
+/*
+FNXC:ModalChrome 2026-09-14-11:35:
+Canonical and detached Chat surfaces use the History shell contract: one fixed shared header followed by a flex body painted with the content-background token. Internal list, thread, streaming, and composer semantics remain shared.
+*/
 .chat-view {
   container: chat-view / inline-size;
   display: flex;
@@ -18,6 +22,68 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.chat-view--floating .chat-view__body {
+  background: var(--bg-primary);
+}
+
+/*
+FNXC:NativeDensity 2026-09-11-00:30:
+All Chat hosts share one restrained density hierarchy: quiet list chrome, compact headers/actions, readable transcript measure, and a composer that stays visually primary. These rules preserve list/detail navigation, virtualization, streaming, dock/floating geometry, and the shared component tree.
+*/
+.chat-sidebar-search-container {
+  padding: var(--ui-density-sm);
+  gap: var(--ui-density-2xs);
+}
+
+.chat-session-list {
+  padding: var(--ui-density-2xs) var(--ui-density-sm);
+}
+
+.chat-session-item {
+  gap: var(--ui-density-2xs);
+  padding: var(--ui-density-sm) var(--ui-density-md);
+  border-radius: var(--radius-md);
+}
+
+.chat-thread-header {
+  gap: var(--ui-density-sm);
+  padding: var(--ui-density-sm) var(--ui-density-md);
+  background: var(--bg);
+}
+
+.chat-messages {
+  padding: var(--ui-density-lg);
+}
+
+.chat-transcript-row {
+  padding-block-end: var(--ui-density-md);
+}
+
+.chat-message {
+  padding: var(--ui-density-sm) var(--ui-density-md);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+:is(.view-header__actions, .chat-thread-header) .btn {
+  min-block-size: var(--ui-control-height);
+  padding-block: var(--ui-density-2xs);
+}
+
+@media (max-width: 768px) {
+  .chat-messages {
+    padding: var(--ui-density-sm);
+  }
+
+  .chat-thread-header {
+    padding-inline: var(--ui-density-sm);
+  }
+
+  :is(.view-header__actions, .chat-thread-header) .btn {
+    min-block-size: var(--ui-touch-height);
+  }
 }
 
 /* Conversation list */
@@ -165,11 +231,13 @@ html[data-viewport-mode="tablet"] .chat-view--docked-list .chat-sidebar--docked 
   background: var(--card-hover);
 }
 
-.chat-session-item--active {
+.chat-session-item--active,
+.chat-session-item--window-open {
   background: color-mix(in srgb, var(--todo) 12%, transparent);
 }
 
-.chat-session-item--active:hover {
+.chat-session-item--active:hover,
+.chat-session-item--window-open:hover {
   background: color-mix(in srgb, var(--todo) 16%, transparent);
 }
 
@@ -181,6 +249,19 @@ html[data-viewport-mode="tablet"] .chat-view--docked-list .chat-sidebar--docked 
   overflow: hidden;
   text-overflow: ellipsis;
   padding-right: calc((var(--space-md) * 2) + var(--space-sm));
+}
+
+/* FNXC:ChatWindows 2026-09-12-04:06: L’état textuel rend une fenêtre ouverte ou minimisée perceptible sans dépendre uniquement de la couleur de la ligne. */
+.chat-session-window-state {
+  display: inline-flex;
+  inline-size: max-content;
+  margin-block: var(--space-xs);
+  /* FNXC:DashboardStyling 2026-09-15-00:20: --space-2xs is not a defined rung; the tightest real rung is --space-3xs, so the padding actually applies instead of invalidating the declaration. */
+  padding: var(--space-3xs) var(--space-xs);
+  border: var(--btn-border-width) solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
 }
 
 .chat-session-preview {
@@ -281,6 +362,14 @@ FN-8191 gives the conversation action menu a token-composed border-box width. Ch
   z-index: 100;
 }
 
+/*
+FNXC:NativeUiCollections 2026-09-10-20:43:
+Conversation actions use one sectioned native collection for continuous arrow navigation. The tag-action rail follows as sibling chrome, with visible tag names aligned to its rename/delete buttons.
+*/
+.chat-session-context-menu-section {
+  display: contents;
+}
+
 .chat-session-context-menu button {
   display: flex;
   align-items: center;
@@ -315,29 +404,33 @@ This clamp is class-gated rather than width-gated: iPhone landscape, iPad, compa
 narrow floating Chat can all have a visible keyboard outside a phone-width media query. The
 measured thread top accounts for host chrome above Chat instead of assuming only the app header.
 */
+/*
+FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+FN-512: the bound is the thread's OWN measured usable height, published by
+`useKeyboardViewportSurface`. It is applied only when Chat is the owning container — inside an
+adapted drawer or floating window the class is never added, so the thread simply fills its bounded
+parent through the flex column and its own message scroller.
+
+The previous rule derived the height from `--vv-height` minus a measured thread top, which was one
+of several simultaneous adjustments to the same rectangle. No transform is declared here or applied
+in JS any more, so `.chat-thread` never establishes a containing block over the focused composer and
+WebKit has no reason to blur it and collapse the keyboard.
+*/
 .chat-thread--keyboard-active {
-  height: calc(var(--vv-height, calc(100dvh - var(--keyboard-overlap, 0px))) - var(--chat-thread-viewport-top, var(--header-height)));
-  max-height: calc(var(--vv-height, calc(100dvh - var(--keyboard-overlap, 0px))) - var(--chat-thread-viewport-top, var(--header-height)));
-  /* NOTE: the translateY drift compensation is applied imperatively in
-     JS (see ChatView's vv `apply()`), NOT here. Declaring
-     `transform`/`will-change: transform` in CSS keeps a non-`none`
-     transform on .chat-thread for the entire keyboard-active window —
-     and since .chat-thread is an ancestor of the focused composer
-     textarea, iOS Safari treats establishing that containing block as a
-     reason to blur the input and collapse the keyboard the instant it
-     opens. JS only sets a transform when there is real viewport drift
-     (offsetTop > 0); at the focus moment offsetTop is 0, so the
-     ancestor stays `transform: none` and the keyboard stays up. */
+  height: var(--chat-thread-visible-block-size, 100%);
+  max-height: var(--chat-thread-visible-block-size, 100%);
 }
 
 /*
-FNXC:ChatComposer 2026-09-01-05:36:
-When the keyboard covers the bottom gesture region, the composer must not reserve that
-safe-area inset again. Keep the accessory clearance because Safari does not subtract the
-input-assistant bar from visualViewport.height.
+FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+FN-512 removed `--chat-keyboard-accessory-clearance`. It added a fixed ~48px band under the composer
+whenever an iOS keyboard was believed to be up — a constant, not a measurement — and it is the direct
+cause of the "gros espace entre le clavier et l'input" half of the report. Nothing replaces it: no
+other magic number and no user-agent test. The composer keeps its ordinary `--space-md` padding, and
+the bottom safe-area reserve is still dropped while the keyboard genuinely covers that region.
 */
 .chat-thread--keyboard-active .chat-input-area {
-  padding-bottom: calc(var(--space-md) + var(--chat-keyboard-accessory-clearance, 0px));
+  padding-bottom: var(--space-md);
 }
 
 .chat-thread-header {
@@ -394,16 +487,9 @@ The Direct-chat context budget indicator is a secondary desktop/tablet header af
 }
 
 /*
-FNXC:ChatNavigation 2026-08-20-05:25:
-FN-068 puts the only Back action beside the selected conversation title. Do not override ViewHeader actions for detail mode: floating Open in Chat view and Close must retain ViewHeader's canonical right alignment.
-
-FNXC:ChatNavigation 2026-08-20-23:57:
-FN-096 keeps the shared-header New Chat action visible in selected detail as well as list mode. Its shrinkable token-based sizing preserves the floating Close and the thread-row Back action on narrow embedded, floating, and dock hosts.
+FNXC:StandardizedViewNavigation 2026-09-13-21:43:
+Chat's only return is the shared header chevron before the conversation identity; no separate Back row exists. The New Chat action stays visible in list and detail modes, and floating Open in Chat view plus Close retain ViewHeader's canonical right alignment.
 */
-.chat-thread-header-back {
-  flex: 0 0 auto;
-}
-
 .chat-view-header-new-chat {
   flex: 0 1 auto;
   min-width: fit-content;
@@ -432,10 +518,8 @@ FN-068 keeps the floating Chat ViewHeader as the only visible modal header and d
 }
 
 /*
-FNXC:QuickChat 2026-07-24-00:00:
-Tablet Quick Chat keeps its delegated ViewHeader drag handle but needs a modestly taller touch target
-than canonical desktop chrome. Scope the token-based height to the movable tablet band so phone sheets,
-desktop geometry, and every other ViewHeader consumer remain unchanged.
+FNXC:ChatWindows 2026-09-14-11:35:
+A detached tablet Chat keeps its delegated ViewHeader drag handle with a taller touch target. Scope the token height to the movable tablet band so phone sheets, desktop geometry, and other ViewHeader consumers remain unchanged.
 */
 @media (min-width: 769px) and (max-width: 1024px) and (min-height: 481px) {
   .chat-view--floating .view-header {
@@ -563,7 +647,7 @@ FN-110 keeps the conversation-local Find row compact across Chat hosts and disti
   padding: var(--space-lg);
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  gap: 0;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
   /* Stop iOS rubber-band scroll from propagating to the parent /
@@ -573,6 +657,25 @@ FN-110 keeps the conversation-local Find row compact across Chat hosts and disti
      transform momentarily exposes the body background as a gray
      box partially covering the messages. */
   overscroll-behavior: contain;
+  /* FNXC:StickyBottomScroll 2026-09-14-20:19:
+     FN-398: native scroll anchoring pulls against the manual bottom pin. When content grows above the
+     reader's cursor the browser silently shifts scrollTop to preserve its own anchor, which fights the
+     single sticky-bottom owner and reads to the user as "the scroll is being taken away from me". The
+     owner is the only authority on this viewport, so native anchoring is disabled here. */
+  overflow-anchor: none;
+}
+
+/*
+FNXC:ChatTranscriptVirtualization 2026-09-06-13:40:
+The transcript keeps every loaded message reachable while mounting only a viewport-bounded set of rich Markdown, thinking, tool-call, and attachment subtrees. Structural spacers remain inert and row spacing belongs inside measured rows so virtual offsets stay accurate on desktop, mobile, floating, and docked hosts.
+*/
+.chat-transcript-row {
+  padding-block-end: var(--space-md);
+}
+
+.chat-transcript-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
 }
 
 .chat-messages > .chat-empty-state {
@@ -601,8 +704,8 @@ FN-110 keeps the conversation-local Find row compact across Chat hosts and disti
 }
 
 /*
-FNXC:ChatMessageLayout 2026-08-24-03:34:
-Full-width conversation mode is scoped to the ChatView root so direct Chat, CLI transcripts, Quick Chat, and dock hosts share one override while the default bubble selectors remain unchanged. Stretch the message blocks, not their shared StandardChatSurface markup, so streaming, failures, tools, thinking, and attachments retain their existing semantics.
+FNXC:ChatMessageLayout 2026-09-14-11:35:
+Full-width mode is scoped to ChatView so canonical, detached, and CLI transcripts share one override. Stretch message blocks rather than StandardChatSurface markup so streams, failures, tools, thinking, and attachments retain semantics.
 */
 .chat-view--full-width .chat-message,
 .chat-view--full-width .chat-message--user,
@@ -627,8 +730,8 @@ Full-width conversation mode is scoped to the ChatView root so direct Chat, CLI 
 FNXC:ChatView 2026-07-22-00:00:
 The Latest button is centered with transform: translateX(-50%), so the global .btn:active { transform: scale(0.97) } rule must not replace that transform wholesale — doing so shifted the button half its width sideways on mousedown, out from under the cursor mid-click. Compose both transforms on :active instead (same fix as .devserver-log-viewer__new-logs-button).
 
-FNXC:ChatView 2026-07-23-18:15:
-Compose-on-:active was still fragile: same specificity as `.btn:active` can lose the cascade war (SelectionCommentPopover regressed the same way), and the shared `.btn { transition: transform }` made any transform churn feel like the chip jumps when the cursor moves near/over it in Quick Chat and full Chat. Center with left/right + margin-inline auto + width: fit-content so positioning no longer owns `transform`. Global `.btn:active` scale then applies in place around the geometric center without a sideways teleport. Covers session + room jump buttons (shared class), floating Quick Chat, main Chat view, and mobile.
+FNXC:ChatView 2026-09-14-11:35:
+Center the Latest chip with inline margins rather than a positioning transform so global active scaling cannot move it sideways under the cursor. The shared class covers session and room threads in canonical, detached, and mobile hosts.
 */
 .chat-jump-to-latest {
   position: absolute;
@@ -660,11 +763,8 @@ Compose-on-:active was still fragile: same specificity as `.btn:active` can lose
 }
 
 /*
-FNXC:ChatView 2026-06-23-11:40:
-Tablet Chat View has enough message-pane width for assistant prose, markdown, tool output, failure details, and attachments, so agent-side bubbles need a wider reading measure than the shared desktop/user cap. Use the ChatView container width instead of the viewport so floating Quick Chat and other narrow hosts keep their bounded bubble layout.
-
-FNXC:ChatView 2026-07-15-00:00:
-FN-8028 widens the tablet agent-side cap from 88% to 92% for a slightly wider reading measure while keeping it container-keyed, so Quick Chat and the right dock remain bounded by their narrow-host rule.
+FNXC:ChatView 2026-09-14-11:35:
+Tablet-width Chat can widen assistant prose and tool output while narrow detached hosts remain bounded. Key the reading measure to the ChatView container rather than the viewport.
 */
 @container chat-view (min-width: 48.0625rem) and (max-width: 64rem) {
   .chat-message--assistant,
@@ -675,8 +775,8 @@ FN-8028 widens the tablet agent-side cap from 88% to 92% for a slightly wider re
 }
 
 /*
-FNXC:ChatView 2026-06-28-14:47:
-Narrow chat hosts need full-width bubbles for prose, code, tool output, failures, streams, and attachments in already-constrained columns. Key this to the ChatView container width, not the viewport, so Quick Chat popups and the right dock on desktop viewports match phone-width Chat View behavior.
+FNXC:ChatView 2026-09-14-11:35:
+Narrow Chat hosts need full-width bubbles for prose, code, tools, failures, streams, and attachments. Key this to container width so detached windows and phone drawers share the constrained layout.
 */
 @container chat-view (max-width: 30rem) {
   .chat-message {
@@ -1431,9 +1531,14 @@ User messages in direct (model-loop) chat carry a compact edit affordance inline
   font-size: var(--font-size-sm);
 }
 
-/* Input area */
+/*
+FNXC:MobileDrawer 2026-09-10-22:24:
+Chat's transcript is the shrinking scroll owner inside the canonical drawer height. The composer remains a non-shrinking flex child so short landscape and keyboard-resized layouts cannot push the real input below the panel's internal system clearance.
+*/
 .chat-input-area {
   position: relative;
+  flex: 0 0 auto;
+  min-width: 0;
   padding: var(--space-md) var(--space-lg);
   border-top: 1px solid var(--border);
   display: flex;
@@ -1635,8 +1740,8 @@ thinking (reasoning-effort) level can be changed mid-conversation. The root wrap
 position: relative so the popover (mirroring .chat-skill-menu's positioning/z-index) anchors to
 the trigger instead of the whole .chat-input-row.
 
-FNXC:Chat-ModelSwitch 2026-07-12-00:00:
-FN-7908 keeps model/agent retargeting inside the same brain popup. The widened panel uses token-based widths and bounded scroll regions so the CustomModelDropdown trigger and agent list remain usable on desktop and mobile without adding a second composer affordance.
+FNXC:Chat-ModelSwitch 2026-09-06-21:48:
+Model/agent retargeting and favorite stars stay inside the same Brain popup. The fixed body portal uses the live shared floating-stack ceiling so it remains above floating chat and task-detail hosts, while the nested model portal occupies the next layer; both stay viewport-bounded and cannot enlarge the composer or footer on desktop or mobile.
 */
 .chat-thinking-level-root {
   position: relative;
@@ -1657,39 +1762,17 @@ FN-7908 keeps model/agent retargeting inside the same brain popup. The widened p
 }
 
 .chat-thinking-popover {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + var(--space-xs));
-  width: min(calc(var(--space-xl) * 15), calc(100vw - (var(--space-lg) * 2)));
+  position: fixed;
   max-width: calc(100vw - (var(--space-lg) * 2));
   max-inline-size: calc(100vw - (var(--space-lg) * 2));
-  max-height: min(calc(var(--space-xl) * 24), calc(100vh - (var(--space-xl) * 4)));
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  z-index: 50;
+  z-index: calc(var(--fusion-max-z) + 2);
 }
 
-/*
-FNXC:Chat-ModelSwitch 2026-07-13-00:00:
-FN-7934: The brain popup must fit the containing chat surface, not only the browser viewport. Key the inset layout on .chat-view--narrow because it reflects surface width for floating Chat windows and compact docks; otherwise a narrow floating Chat window on a wide viewport clips the Model / Agent picker on the right.
-*/
-.chat-view--narrow .chat-thinking-level-root {
-  position: static;
-}
-
-.chat-view--narrow .chat-thinking-popover {
-  left: var(--space-md);
-  right: var(--space-md);
-  width: auto;
-  max-width: none;
-  max-inline-size: none;
-  max-height: min(calc(var(--space-xl) * 20), calc(100vh - (var(--space-xl) * 5)));
-}
-
-.chat-view--narrow .chat-thinking-agent-list,
 .chat-view--narrow .chat-thinking-popover-list {
   max-height: calc(var(--space-xl) * 7);
 }
@@ -1716,94 +1799,14 @@ Thinking-section text uses the defined muted text token across all themes. The m
   text-transform: uppercase;
 }
 
-.chat-thinking-mode-toggle {
-  display: flex;
-  gap: var(--space-xs);
-  margin-bottom: var(--space-sm);
-  padding: var(--space-xs);
-  background: var(--surface-secondary);
-  border-radius: var(--radius-md);
-}
-
-.chat-thinking-mode-btn {
-  flex: 1;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 0.8125rem;
-  transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.chat-thinking-mode-btn--active,
-.chat-thinking-mode-btn:hover {
-  background: var(--surface);
-  color: var(--text-primary);
-}
-
-.chat-thinking-mode-btn:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring-strong);
-}
-
-.chat-thinking-model-picker .custom-model-dropdown {
+.chat-thinking-model-picker .model-combobox {
   width: 100%;
 }
 
-.chat-thinking-agent-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  max-height: calc(var(--space-xl) * 8);
-  overflow-y: auto;
-}
-
-.chat-thinking-agent-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  width: 100%;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  padding: var(--space-sm);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
-}
-
-.chat-thinking-agent-item:hover,
-.chat-thinking-agent-item--selected {
-  background: var(--card-hover);
-  border-color: var(--accent);
-}
-
-.chat-thinking-agent-item:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring-strong);
-}
-
-.chat-thinking-agent-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-thinking-agent-role,
 .chat-thinking-current-target,
 .chat-thinking-empty {
   color: var(--text-muted);
   font-size: 0.75rem;
-}
-
-.chat-thinking-agent-role {
-  flex: none;
-  text-transform: capitalize;
 }
 
 .chat-thinking-current-target,
@@ -2130,23 +2133,9 @@ Thinking-section text uses the defined muted text token across all themes. The m
   }
 
   /*
-  FNXC:Chat-ModelSwitch 2026-07-12-22:38:
-  FN-7916: mobile applies a global max-width clamp to every element, so a popover positioned from the small Brain-button wrapper collapsed into an unreadable strip. Let the chat input area own the mobile containing block and inset the panel with tokenized viewport gutters so the model picker, agent list, and thinking levels stay reachable.
+  FNXC:Chat-ModelSwitch 2026-09-06-21:10:
+  Mobile keeps only the inner model and thinking lists scrollable. The fixed body portal owns its viewport geometry, so no breakpoint may reintroduce a composer-relative containing block.
   */
-  .chat-thinking-level-root {
-    position: static;
-  }
-
-  .chat-thinking-popover {
-    left: var(--space-md);
-    right: var(--space-md);
-    width: auto;
-    max-width: none;
-    max-inline-size: none;
-    max-height: min(calc(var(--space-xl) * 20), calc(100vh - (var(--space-xl) * 5)));
-  }
-
-  .chat-thinking-agent-list,
   .chat-thinking-popover-list {
     max-height: calc(var(--space-xl) * 7);
   }
@@ -2243,22 +2232,22 @@ Shared ChatView hosts expose Direct-only tag filters and compact chips without i
 FNXC:ChatTags 2026-08-23-15:51:
 The tag filter select must use the sibling sidebar search input's comfortable token-based inner padding so "All tags" is not flush against its border across desktop, narrow, and mobile hosts.
 
-FNXC:ChatArchived 2026-08-23-16:27:
-The compact Archived toggle shares the narrowed tag-filter line, with tokenized row padding separating the search input and session list. Narrow and mobile sidebars may wrap the controls rather than clipping or horizontally overflowing them.
+FNXC:ChatArchived 2026-09-16-15:50:
+FN-465 : l'archivage n'est plus proposé dans le Chat, donc la ligne de filtres ne porte plus que le filtre par tag. Elle conserve son espacement tokenisé entre la recherche et la liste, et les sidebars étroites ou mobiles peuvent enrouler ses contrôles plutôt que les rogner ou déborder horizontalement.
 */
 .chat-sidebar-filter-row { display: flex; align-items: center; gap: var(--space-xs); padding: var(--space-xs) 0; min-width: 0; }
 .chat-tag-filter { display: flex; flex: 1 1 auto; align-items: center; gap: var(--space-xs); min-width: 0; overflow: hidden; color: var(--text-muted); }
 .chat-tag-filter > svg,
 .chat-tag-filter > .btn-icon { flex: 0 0 auto; }
 .chat-tag-filter select { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); color: var(--text); padding: var(--space-sm) var(--space-md); }
-.chat-archived-toggle { flex: 0 0 auto; padding-inline: var(--space-sm); white-space: nowrap; }
-.chat-archived-toggle--active { background: color-mix(in srgb, var(--accent) 16%, var(--surface-2)); color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .chat-session-tags { display: flex; flex-wrap: wrap; gap: var(--space-xs); overflow: hidden; }
 .chat-session-tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 var(--space-xs); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-muted); font-size: var(--font-size-xs); }
 /* FNXC:ChatTags 2026-08-05-12:15: direct-conversation tag controls keep assignment, rename, and deletion in the existing context menu so shared Chat hosts do not grow another sidebar action row. */
 .chat-session-tag-menu { display: flex; flex-direction: column; gap: var(--space-xs); padding: var(--space-xs); border-bottom: 1px solid var(--border); }
+.chat-tag-assignment-menu { min-width: 0; }
+.chat-tag-action-rail { display: flex; flex-direction: column; gap: var(--space-xs); }
 .chat-tag-menu-item { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
-.chat-session-context-menu .chat-tag-menu-item > [role="menuitemcheckbox"] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-tag-action-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--font-size-sm); }
 .chat-session-context-menu .chat-tag-menu-item > .btn-icon { flex: 0 0 auto; width: auto; padding: var(--space-xs); }
 .chat-tag-create-row { display: flex; gap: var(--space-xs); }
 .chat-tag-create-row .input { min-width: 0; }

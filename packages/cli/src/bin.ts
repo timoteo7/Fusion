@@ -122,7 +122,7 @@ async function loadCommandHandlers() {
   const { runServe } = await import("./commands/serve.js");
   const { runDaemon } = await import("./commands/daemon.js");
   const { runDesktop } = await import("./commands/desktop.js");
-  const { runTaskCreate, runTaskList, runTaskMove, runTaskMerge, runTaskUpdate, runTaskDeps, runTaskLog, runTaskLogs, runTaskShow, runTaskAttach, runTaskPause, runTaskUnpause, runTaskImportFromGitHub, runTaskImportFromGitLab, runTaskDuplicate, runTaskArchive, runTaskUnarchive, runTaskRefine, runTaskPlan, runTaskDelete, runTaskRetry, runTaskComment, runTaskComments, runTaskSteer, runTaskSetNode, runTaskClearNode } = await import("./commands/task.js");
+  const { runTaskCreate, runTaskList, runTaskMove, runTaskMerge, runTaskReconcile, runTaskUpdate, runTaskDeps, runTaskLog, runTaskLogs, runTaskShow, runTaskAttach, runTaskPause, runTaskUnpause, runTaskImportFromGitHub, runTaskImportFromGitLab, runTaskDuplicate, runTaskRefine, runTaskPlan, runTaskDelete, runTaskRetry, runTaskComment, runTaskComments, runTaskSteer, runTaskSetNode, runTaskClearNode } = await import("./commands/task.js");
   const { runPrCreate, runPrShow, runPrList, runPrRespond, runPrApprove, runPrRetry, runPrMerge, runPrClose, runPrAutomerge, runPrAutomergeCleanup } = await import("./commands/pr.js");
   const { runSettingsShow, runSettingsSet } = await import("./commands/settings.js");
   const { runSettingsExport } = await import("./commands/settings-export.js");
@@ -140,6 +140,13 @@ async function loadCommandHandlers() {
   const { runGoalsList, runGoalsCreate, runGoalsArchive, runGoalsCitations } = await import("./commands/goals.js");
   const { runProjectList, runProjectAdd, runProjectRemove, runProjectShow, runProjectInfo, runProjectSetDefault, runProjectDetect } = await import("./commands/project.js");
   const { runNodeList, runNodeConnect, runNodeDisconnect, runNodeShow, runNodeHealth, runMeshStatus } = await import("./commands/node.js");
+  const {
+    runCloudPairStart,
+    runCloudPairComplete,
+    runCloudHeartbeat,
+    runCloudStatus,
+    runCloudUnlink,
+  } = await import("./commands/cloud.js");
   const { runInit } = await import("./commands/init.js");
   const { runOnboard } = await import("./commands/onboard.js");
   const { runAgentStop, runAgentStart } = await import("./commands/agent.js");
@@ -168,6 +175,7 @@ async function loadCommandHandlers() {
     runTaskList,
     runTaskMove,
     runTaskMerge,
+    runTaskReconcile,
     runTaskUpdate,
     runTaskDeps,
     runTaskLog,
@@ -179,8 +187,6 @@ async function loadCommandHandlers() {
     runTaskImportFromGitHub,
     runTaskImportFromGitLab,
     runTaskDuplicate,
-    runTaskArchive,
-    runTaskUnarchive,
     runTaskRefine,
     runTaskPlan,
     runTaskDelete,
@@ -258,6 +264,11 @@ async function loadCommandHandlers() {
     runNodeShow,
     runNodeHealth,
     runMeshStatus,
+    runCloudPairStart,
+    runCloudPairComplete,
+    runCloudHeartbeat,
+    runCloudStatus,
+    runCloudUnlink,
     runInit,
     runOnboard,
     runAgentStop,
@@ -340,10 +351,9 @@ Usage:
   fn task deps <op> <id> ...        Add/remove/replace/set task dependencies
   fn task log <id> <message>          Add a log entry
   fn task merge <id>                  Merge an in-review task and close it
+  fn task reconcile <id>              Reconcile a proven already-landed review task
   fn task duplicate <id>              Duplicate a task (creates copy in triage)
   fn task refine <id> [opts]          Create a refinement task from done/in-review
-  fn task archive <id> [--force]      Archive a task; --force permits live-worktree removal
-  fn task unarchive <id>              Unarchive an archived task
   fn task delete <id> [--force] [--allow-resurrection]
                                       Delete a task (use --force to skip confirmation; --allow-resurrection permits intentional ID recreation)
   fn task attach <id> <file>          Attach a file to a task
@@ -413,6 +423,14 @@ PR:
   fn node show | info [name] [--json] Show node details
   fn node health <name>               Health check a node
   fn mesh status [--json]              Show full mesh state
+  fn cloud pair-start [--http <url>] [--name <name>]
+                                      Start cloud-link pairing (prints code)
+  fn cloud pair-complete [--http <url>] [--code <code>]
+                                      Finish pairing after console claim (pending file, or FUSION_CLOUD_PENDING_SECRET)
+  fn cloud heartbeat [--url <origin>] [--port <n>] [--no-tunnel]
+                                      One-shot publish. Without --url, start a Cloudflare tunnel until Ctrl+C. --no-tunnel publishes LAN only.
+  fn cloud status [--json]             Show local cloud-link state
+  fn cloud unlink                      Clear ~/.fusion/cloud-link.json
   fn settings                          Show current Fusion configuration
   fn settings set <key> <value>        Update a configuration setting
   fn settings set defaultNodeId <node-id>
@@ -529,7 +547,7 @@ Options:
   --help, -h                 Show this help
   --quiet, -q                Suppress informational stdout output
 
-Columns: triage, todo, in-progress, in-review, done, archived
+Columns: triage, todo, in-progress, in-review, done
 Supported file types: png, jpg, gif, webp, txt, log, json, yaml, yml, toml, csv, xml
 `.trim();
 
@@ -698,6 +716,7 @@ async function main() {
     runTaskList,
     runTaskMove,
     runTaskMerge,
+    runTaskReconcile,
     runTaskUpdate,
     runTaskDeps,
     runTaskLog,
@@ -709,8 +728,6 @@ async function main() {
     runTaskImportFromGitHub,
     runTaskImportFromGitLab,
     runTaskDuplicate,
-    runTaskArchive,
-    runTaskUnarchive,
     runTaskRefine,
     runTaskPlan,
     runTaskDelete,
@@ -788,6 +805,11 @@ async function main() {
     runNodeShow,
     runNodeHealth,
     runMeshStatus,
+    runCloudPairStart,
+    runCloudPairComplete,
+    runCloudHeartbeat,
+    runCloudStatus,
+    runCloudUnlink,
     runInit,
     runOnboard,
     runAgentStop,
@@ -1153,6 +1175,69 @@ async function main() {
         break;
       }
 
+      case "cloud": {
+        /*
+        FNXC:CloudLink 2026-08-24-02:17:
+        Thin client for cloud-link Mode A pairing and presence. pair-complete
+        takes the pending secret from the 0600 pending file or FUSION_CLOUD_PENDING_SECRET, never argv.
+        */
+        const subcommand = args[1];
+        switch (subcommand) {
+          case "pair-start": {
+            await runCloudPairStart({
+              http: getFlagValue(args, "--http"),
+              name: getFlagValue(args, "--name"),
+            });
+            break;
+          }
+          case "pair-complete": {
+            /*
+             * FNXC:CloudLink 2026-09-04-03:44:
+             * `--pending-secret` is a hard error in space and equals forms, so a copied
+             * command cannot leak the credential through process listings or shell history.
+             * getFlagValue is index-based and silently ignores --flag=value; without this
+             * token-form guard, an equals-form credential would leak while appearing to work.
+             */
+            if (args.some((arg) => arg === "--pending-secret" || arg.startsWith("--pending-secret="))) {
+              console.error(
+                "Do not pass --pending-secret (it appears in process listings). Run fn cloud pair-start first, or set FUSION_CLOUD_PENDING_SECRET.",
+              );
+              process.exit(1);
+            }
+            const pendingFromEnv = process.env.FUSION_CLOUD_PENDING_SECRET?.trim();
+            await runCloudPairComplete({
+              http: getFlagValue(args, "--http"),
+              code: getFlagValue(args, "--code"),
+              pendingSecret: pendingFromEnv || undefined,
+            });
+            break;
+          }
+          case "heartbeat": {
+            await runCloudHeartbeat({
+              url: getFlagValue(args, "--url"),
+              port: getFlagValueNumber(args, "--port"),
+              tunnel: !args.includes("--no-tunnel"),
+            });
+            break;
+          }
+          case "status": {
+            await runCloudStatus({ json: args.includes("--json") });
+            break;
+          }
+          case "unlink": {
+            await runCloudUnlink();
+            break;
+          }
+          default:
+            console.error(`Unknown subcommand: cloud ${subcommand || ""}`);
+            console.log(
+              "Try: fn cloud pair-start | pair-complete | heartbeat | status | unlink",
+            );
+            process.exit(1);
+        }
+        break;
+      }
+
       case "research": {
         const subcommand = args[1];
         switch (subcommand) {
@@ -1404,6 +1489,12 @@ async function main() {
             await runTaskMerge(id, projectName);
             break;
           }
+          case "reconcile": {
+            const id = args[2];
+            if (!id) { console.error("Usage: fn task reconcile <id>"); process.exit(1); }
+            await runTaskReconcile(id, projectName);
+            break;
+          }
           case "duplicate": {
             const id = args[2];
             if (!id) { console.error("Usage: fn task duplicate <id>"); process.exit(1); }
@@ -1419,18 +1510,6 @@ async function main() {
               ? args[feedbackIdx + 1]
               : undefined;
             await runTaskRefine(id, feedback, projectName);
-            break;
-          }
-          case "archive": {
-            const id = args[2];
-            if (!id) { console.error("Usage: fn task archive <id> [--force]"); process.exit(1); }
-            await runTaskArchive(id, projectName, {force: args.includes("--force")});
-            break;
-          }
-          case "unarchive": {
-            const id = args[2];
-            if (!id) { console.error("Usage: fn task unarchive <id>"); process.exit(1); }
-            await runTaskUnarchive(id, projectName);
             break;
           }
           case "delete": {

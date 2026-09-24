@@ -1,4 +1,6 @@
+import { ViewHeader } from "./ViewHeader";
 import "./DuplicateWarningModal.css";
+import { UiButton, UiDialog, UiSurface } from "./ui";
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import type { DuplicateMatch } from "../api";
@@ -26,28 +28,24 @@ export function DuplicateWarningModal({ matches, onOpen, onProceed, onCancel }: 
     cancelButtonRef.current?.focus();
   }, []);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCancel();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onCancel]);
-
+  /*
+  FNXC:DuplicateWarning 2026-09-11-16:53:
+  UiDialog is the sole Escape-dismissal owner, so one key press produces exactly one cancellation callback while this modal retains its initial Cancel-button focus.
+  */
   return (
-    <div className="modal-overlay open" role="presentation">
-      <div className="modal duplicate-warning-modal" role="dialog" aria-modal="true" aria-labelledby="duplicate-warning-modal-title">
-        <div className="modal-header">
-          <h3 id="duplicate-warning-modal-title">{t("duplicateWarning.title", "Possible duplicates")}</h3>
-        </div>
+    <UiDialog overlayClassName="modal-overlay open" className="modal duplicate-warning-modal" labelledBy="duplicate-warning-modal-title" onClose={onCancel}>
+        {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Shared chrome; the decision buttons remain the only exits from this confirmation. */}
+        <ViewHeader
+          className="modal-header"
+          headingLevel={3}
+          titleId="duplicate-warning-modal-title"
+          title={t("duplicateWarning.title", "Possible duplicates")}
+        />
         <div className="duplicate-warning-modal-body">
           <p className="duplicate-warning-modal-copy">{t("duplicateWarning.message", "We found similar active tasks. Open an existing task or create this one anyway.")}</p>
           <div className="duplicate-warning-modal-list">
             {matches.map((match) => (
-              <article className="card duplicate-warning-modal-item" key={match.id}>
+              <UiSurface className="card duplicate-warning-modal-item" key={match.id}>
                 <div className="duplicate-warning-modal-item-header">
                   <span className="card-id">{match.id}</span>
                   <span className={`card-status-badge ${toStatusClass(match.column)}`}>{match.column}</span>
@@ -55,21 +53,20 @@ export function DuplicateWarningModal({ matches, onOpen, onProceed, onCancel }: 
                 </div>
                 <div className="card-title duplicate-warning-modal-title">{getMatchDisplayText(match)}</div>
                 <div className="duplicate-warning-modal-actions">
-                  <button className="btn btn-sm" type="button" onClick={() => onOpen(match.id)}>{t("duplicateWarning.open", "Open")}</button>
+                  <UiButton className="btn btn-sm" type="button" onClick={() => onOpen(match.id)}>{t("duplicateWarning.open", "Open")}</UiButton>
                 </div>
-              </article>
+              </UiSurface>
             ))}
           </div>
         </div>
         <div className="modal-actions">
           <div className="modal-actions-left">
-            <button className="btn" type="button" ref={cancelButtonRef} onClick={onCancel}>{t("duplicateWarning.cancel", "Cancel")}</button>
+            <UiButton className="btn" type="button" ref={cancelButtonRef} onClick={onCancel}>{t("duplicateWarning.cancel", "Cancel")}</UiButton>
           </div>
           <div className="modal-actions-right">
-            <button className="btn btn-primary" type="button" onClick={onProceed}>{t("duplicateWarning.createAnyway", "Create anyway")}</button>
+            <UiButton className="btn btn-primary" type="button" onClick={onProceed}>{t("duplicateWarning.createAnyway", "Create anyway")}</UiButton>
           </div>
         </div>
-      </div>
-    </div>
+    </UiDialog>
   );
 }

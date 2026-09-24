@@ -11,17 +11,21 @@ export const DASHBOARD_VIEW_IDS = [
   "agents",
   "missions",
   "chat",
-  "documents",
+  "notes",
+  "whiteboard",
   "research",
   "evals",
   "ideation",
   "goalsView",
   "planning",
   "skills",
+  "snippets",
   "mailbox",
   "insights",
   "memory",
   "command-center",
+  "files",
+  "git-manager",
   "secrets",
   "dev-server",
   "pull-requests",
@@ -33,7 +37,7 @@ export const DASHBOARD_VIEW_IDS = [
 ] as const;
 
 export type CanonicalDashboardViewId = (typeof DASHBOARD_VIEW_IDS)[number];
-export type BuiltInTaskView = CanonicalDashboardViewId | "devserver";
+export type BuiltInTaskView = CanonicalDashboardViewId | "devserver" | "documents" | "recommendations";
 
 export interface DashboardViewMetadata {
   id: CanonicalDashboardViewId;
@@ -55,18 +59,23 @@ export const DASHBOARD_VIEWS: readonly DashboardViewMetadata[] = [
   { id: "board", label: "Board", labelKey: "nav.board" },
   { id: "list", label: "List", labelKey: "nav.list" },
   /*
-  FNXC:PatchnoteNaming 2026-08-30-01:40:
-  Operators call the delivery history Patchnote. Keep the stable `patchnode` identifier and translation key unchanged because routes, storage, and integrations depend on them.
+  FNXC:HistoryNaming 2026-09-04-09:35:
+  Operators call this destination History, and chat exposes it as `fn_history_read`. The `patchnode` view id, `nav.patchnode` key, `GET /api/patchnode` route, `project.patchnode_entries` table, and persisted mobile-navigation preferences intentionally remain unchanged.
 
-  FNXC:PatchnoteNaming 2026-08-30-06:36:
-  Operators now call the delivery history History. The stable `patchnode` identifier and translation key remain unchanged for routes, storage, persisted mobile-nav preferences, and integrations.
+  FNXC:HistoryModalSurface 2026-09-15-04:29:
+  FN-403: History is no longer a main-content destination. The id stays in this registry because persisted view
+  values, deep links, the API route, and the mobile navigation registry still address it, but a request for it now
+  opens the single History modal instead of replacing the current view.
   */
   { id: "patchnode", label: "History", labelKey: "nav.patchnode" },
   { id: "graph", label: "Graph" },
   { id: "agents", label: "Agents", labelKey: "nav.agents" },
   { id: "missions", label: "Missions", labelKey: "nav.missions" },
   { id: "chat", label: "Chat", labelKey: "nav.chat" },
-  { id: "documents", label: "Artifacts", labelKey: "nav.documents" },
+  /* FNXC:ProjectNotes 2026-09-09-17:08: Notes is one canonical project-scoped destination shared by metadata, deep links, desktop navigation, and mobile customization. */
+  { id: "notes", label: "Notes", labelKey: "nav.notes" },
+  /* FNXC:WhiteboardAlpha 2026-09-10-05:42: Whiteboard is one canonical default-off project destination shared by metadata, deep links, and every responsive navigation host. */
+  { id: "whiteboard", label: "Whiteboard", labelKey: "nav.whiteboard" },
   { id: "research", label: "Research", labelKey: "header.researchView" },
   { id: "evals", label: "Evals", labelKey: "header.evalsView" },
   /*
@@ -81,11 +90,34 @@ export const DASHBOARD_VIEWS: readonly DashboardViewMetadata[] = [
   FN-6886 promotes Planning Mode into a persisted top-level docked task view instead of treating it as a modal-only overlay.
   */
   { id: "planning", label: "Planning", labelKey: "nav.planning" },
+  /*
+  FNXC:SnippetsDestination 2026-09-14-04:12:
+  Skills and Snippets are two destinations, each with its own collection rail. The `skills` route keeps its stable id
+  and persistence identity; Snippets gets its own rather than remaining a tab inside it.
+  */
   { id: "skills", label: "Skills", labelKey: "header.skillsView" },
-  { id: "mailbox", label: "Mailbox", labelKey: "nav.mailbox" },
+  { id: "snippets", label: "Snippets", labelKey: "header.snippetsView" },
+  /*
+  FNXC:MailboxNavigation 2026-09-09-20:02:
+  Artifacts and recommendations are mailbox categories rather than standalone dashboard destinations. Legacy persisted and linked ids remain aliases so old navigation state resolves to Mailbox instead of an orphaned route.
+  */
+  { id: "mailbox", label: "Mailbox", labelKey: "nav.mailbox", aliases: ["documents", "recommendations"] },
   { id: "insights", label: "Insights", labelKey: "header.insightsView" },
   { id: "memory", label: "Memory", labelKey: "header.memoryView" },
   { id: "command-center", label: "Dashboard", labelKey: "nav.commandCenter" },
+  /*
+  FNXC:ToolSurfaces 2026-09-15-16:04:
+  FN-426 promotes Files and Git Manager from right-dock-only tools to first-class main-content destinations, which is
+  what lets the right dock become optional. Git Manager owns Pull Requests as one of its sections, so `pull-requests`
+  keeps its id below for persisted values and old links but is no longer offered as a standalone navigation entry.
+  */
+  { id: "files", label: "Files", labelKey: "nav.files" },
+  { id: "git-manager", label: "Git Manager", labelKey: "nav.gitManager" },
+  /*
+  FNXC:ToolSurfaces 2026-09-15-16:04:
+  FN-426 moves Secrets into Settings → project Secrets. The id stays registered so persisted view values, favorites,
+  and `?view=secrets` links resolve; App routes them to the Settings section instead of a standalone page.
+  */
   { id: "secrets", label: "Secrets", labelKey: "header.secretsView" },
   { id: "dev-server", label: "Dev Server", labelKey: "nav.devServer", aliases: ["devserver"] },
   { id: "pull-requests", label: "Pull Requests", labelKey: "pr.view.title" },

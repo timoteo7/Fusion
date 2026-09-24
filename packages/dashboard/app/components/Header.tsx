@@ -1,28 +1,30 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Settings, LayoutGrid, List, Search, X, Activity, MoreHorizontal, Clock, Folder, History, GitBranch, Monitor, Workflow, Bot, Target, Grid3X3, Mail, MessageSquare, Check, Zap, Sparkles, FileText, Brain, Lock, Gauge, Lightbulb, ChevronDown, ChevronRight, PanelRight, Plus, Star } from "lucide-react";
+import { Settings, LayoutGrid, List, Search, Activity, MoreHorizontal, Clock, Folder, History, GitBranch, Monitor, Workflow, Bot, Target, Grid3X3, Mail, MessageSquare, Check, Zap, Sparkles, Brain, Gauge, Lightbulb, PanelsTopLeft, ChevronDown, ChevronRight, PanelRight, Star, StickyNote } from "lucide-react";
 import "./Header.css";
 // ProjectSelector styles used by the imported standalone component.
 import "./ProjectSelector.css";
 import { ProjectSelector as StandaloneProjectSelector } from "./ProjectSelector";
 import { useProjectBookmarks } from "../hooks/useProjectBookmarks";
 import type { ProjectInfo } from "../api";
-import type { NodeConfig, ProjectStatus } from "@fusion/core";
+import type { NodeConfig, ProjectStatus, Task } from "@fusion/core";
 import { NodeStatusIndicator } from "./NodeStatusIndicator";
 import { NodeHealthDot } from "./NodeHealthDot";
 import { PluginSlot } from "./PluginSlot";
 import { useViewportMode, type ViewportMode } from "../hooks/useViewportMode";
+import { resolveHeaderNavigationOwnership } from "../utils/headerNavigationOwnership";
 import { getTrailingPath } from "../utils/pathDisplay";
 import type { TaskView } from "../hooks/useViewState";
 import type { PluginDashboardViewEntry } from "../api";
 import { buildPluginTaskViewId, isPluginViewId } from "../plugins/pluginViewRegistry";
 import { getPluginNavIcon } from "./pluginNavIcon";
+import { TaskSearchInput } from "./TaskSearchInput";
 import type { ShellHostContext } from "../shell-host";
+import { ViewActionButton } from "./ViewActionButton";
+import { useDashboardWindowLandmark } from "../context/DashboardWindowManagerContext";
 export { resolveReportContextRefs } from "../utils/reportContextRefs";
 
 export { useViewportMode };
-
-const NO_BRANCH_FILTER_VALUE = "__fusion:no-branch__";
 
 // Status icon config for project selector dropdown
 const PROJECT_STATUS_CONFIG: Record<ProjectStatus, { color: string }> = {
@@ -56,6 +58,21 @@ export interface HeaderProps {
   onOpenGitHubImport?: () => void;
   onOpenUsage?: (anchorRect?: DOMRect | null) => void;
   onOpenActivityLog?: () => void;
+  /*
+  FNXC:ToolSurfaces 2026-09-16-23:06:
+  FN-437 supersedes FN-426's "every breakpoint" rule for these two triggers: on PHONE the footer navigation menu is the
+  single owner of Activity (`mobile-more-item-activity`) and Notes (`mobile-more-item-notes`), so the Header renders
+  neither trigger there and the narrow header stops duplicating the footer. The FN-426 guarantee that neither tool
+  depends on the optional right dock is still upheld — by the Header on tablet/desktop and by the footer menu on
+  phone. The Header owns only the triggers and their anchor rect; App owns the single open panel, which is what keeps
+  Activity, Notes, and the footer Chat list mutually exclusive.
+  */
+  onOpenActivityPanel?: (anchorRect: DOMRect | null) => void;
+  activityPanelOpen?: boolean;
+  activityPanelId?: string;
+  onOpenNotesPanel?: (anchorRect: DOMRect | null) => void;
+  notesPanelOpen?: boolean;
+  notesPanelId?: string;
   /** Opens the mailbox view */
   onOpenMailbox?: () => void;
   /** Unread message count for badge display */
@@ -82,12 +99,24 @@ export interface HeaderProps {
   showAgentsTab?: boolean;
   searchQuery?: string;
   onSearchChange?: (query: string) => void;
-  branchFilter?: string;
-  baseBranchFilter?: string;
-  branchOptions?: string[];
-  baseBranchOptions?: string[];
-  onBranchFilterChange?: (value: string) => void;
-  onBaseBranchFilterChange?: (value: string) => void;
+  /*
+  FNXC:TaskSearch 2026-09-17-09:41:
+  FN-477 removed `taskSearchTasks`. The header no longer receives a catalogue to filter: the field
+  owns a paginated, project-scoped collection of its own, so a task whose board page has not loaded is
+  still findable. Availability of search must not depend on what the board happens to have loaded.
+  */
+  /** Desktop inline search navigates to Task Detail without changing board filters. */
+  onSelectSearchTask?: (task: Task) => void;
+  /** Toast sink handed to the result cards; they are read-only and never raise mutation toasts. */
+  addToast?: (message: string, type?: "success" | "error" | "info" | "warning") => void;
+  /*
+  FNXC:TaskSearch 2026-09-17-09:41:
+  The node the search must query. This is the SELECTED node id, not `currentNode?.id`: the selection
+  is authoritative from the moment the operator switches, while the resolved node object only appears
+  once the node list has loaded. Using the object would send the first search of a freshly selected
+  remote node to the LOCAL endpoint.
+  */
+  searchNodeId?: string;
   /** Multi-project props */
   projects?: ProjectInfo[];
   currentProject?: ProjectInfo | null;
@@ -97,6 +126,16 @@ export interface HeaderProps {
   shellHost?: ShellHostContext;
   /** When true, the mobile bottom nav bar handles primary navigation and header nav controls are hidden. */
   mobileNavEnabled?: boolean;
+  /*
+  FNXC:WorkflowControls 2026-09-16-23:24:
+  FN-483 : sur téléphone, le Board reste MONTÉ ET ACTIF derrière chaque drawer (`MainViewKeepAlive` garde
+  `backgroundActive`). Le Header doit donc distinguer la destination réellement ouverte (`view`, qui continue
+  d'alimenter la navigation) du CONTEXTE visuel de fond. Sans cette distinction, ouvrir Command Center retirait le
+  slot et le Board repliait son sélecteur en ligne SOUS le header — exactement le symptôme signalé. Cette prop ne
+  décide que de la visibilité du slot ; elle est fausse en vue globale et en page d'erreur backend, et n'a d'effet que
+  sur téléphone — les vraies pages tablette/ordinateur gardent la restriction Board/List de FN-439.
+  */
+  boardBackgroundActive?: boolean;
   /** When true on non-mobile screens, persistent left sidebar owns primary view navigation. */
   leftSidebarNavActive?: boolean;
   /*
@@ -113,12 +152,12 @@ export interface HeaderProps {
   availableNodes?: NodeConfig[];
   /** Currently selected node (null for local) */
   currentNode?: NodeConfig | null;
-  /** Callback when a node is selected */
-  onSelectNode?: (node: NodeConfig | null) => void;
+  /** Callback when a node is selected; false keeps the selector open when a project-scoped guard refuses the transition. */
+  onSelectNode?: (node: NodeConfig | null) => void | boolean | Promise<void | boolean>;
   /** Whether the current view is a remote node */
   isRemote?: boolean;
   /** Experimental feature flags controlling visibility of nav items. */
-  experimentalFeatures?: { insights?: boolean; memoryView?: boolean; devServer?: boolean; devServerView?: boolean; researchView?: boolean; evalsView?: boolean; ideationView?: boolean; goalsView?: boolean; leftSidebarNav?: boolean; rightDock?: boolean };
+  experimentalFeatures?: { insights?: boolean; memoryView?: boolean; devServer?: boolean; devServerView?: boolean; researchView?: boolean; evalsView?: boolean; ideationView?: boolean; whiteboardView?: boolean; goalsView?: boolean; leftSidebarNav?: boolean; rightDock?: boolean };
   pluginDashboardViews?: PluginDashboardViewEntry[];
   shellConnectionControl?: ReactNode;
 }
@@ -128,6 +167,12 @@ export function Header({
   onOpenGitHubImport,
   onOpenUsage,
   onOpenActivityLog,
+  onOpenActivityPanel,
+  activityPanelOpen = false,
+  activityPanelId,
+  onOpenNotesPanel,
+  notesPanelOpen = false,
+  notesPanelId,
   onOpenMailbox,
   mailboxUnreadCount = 0,
   mailboxPendingApprovalCount = 0,
@@ -144,12 +189,9 @@ export function Header({
   showAgentsTab,
   searchQuery = "",
   onSearchChange,
-  branchFilter = "",
-  baseBranchFilter = "",
-  branchOptions = [],
-  baseBranchOptions = [],
-  onBranchFilterChange,
-  onBaseBranchFilterChange,
+  onSelectSearchTask,
+  addToast,
+  searchNodeId,
   projects = [],
   currentProject,
   onSelectProject,
@@ -157,6 +199,7 @@ export function Header({
   projectId,
   shellHost = { kind: "browser" },
   mobileNavEnabled,
+  boardBackgroundActive = false,
   leftSidebarNavActive = false,
   rightDockAvailable = false,
   rightDockOpen = false,
@@ -174,7 +217,37 @@ export function Header({
   const isMobile = mode === "mobile";
   const isTablet = mode === "tablet";
   const isCompact = isMobile || isTablet;
-  const hideFullNav = isMobile && mobileNavEnabled;
+  /*
+  FNXC:Navigation 2026-09-16-19:44:
+  FN-468 : sous 1024 px — téléphone ET tablette — la pill flottante `MobileNavBar` est l'unique propriétaire de
+  la navigation primaire. Le Header doit donc retirer sa navigation de vues sur toute la bande compacte, pas
+  seulement sur téléphone : laisser les raccourcis de vues du Header pendant que la pill est montée recréerait
+  exactement les DEUX surfaces primaires simultanées que FN-419 a supprimées. `mobileNavEnabled` est alimenté par
+  le prédicat de shell partagé `isMobileShellMode`, et `hideHeaderViewNav` reste faux sur tablette (la colonne de
+  gauche n'y existe plus), si bien qu'un seul `#header-workflow-slot` est rendu.
+  */
+  const hideFullNav = isCompact && mobileNavEnabled;
+  /*
+  FNXC:HeaderNavigationOwnership 2026-09-17-02:14:
+  FN-481 : le Header dérive ses propres accès avec la MÊME table que celle transmise à la navigation basse par App,
+  de sorte qu'aucune surface ne puisse supposer un accès que l'autre ne rend pas. Il s'en sert pour ne pas se
+  dupliquer lui-même : le menu de débordement du Header historique n'offre plus Projets quand son sélecteur compact
+  porte déjà l'action de gestion. Le repli existe encore quand ce sélecteur n'est pas montable.
+  */
+  const headerOwnedNavigationItems = useMemo(
+    () => resolveHeaderNavigationOwnership({
+      mode,
+      mobileNavEnabled: Boolean(mobileNavEnabled),
+      hasOpenUsage: Boolean(onOpenUsage),
+      hasOpenNotesPanel: Boolean(onOpenNotesPanel),
+      hasOpenActivityPanel: Boolean(onOpenActivityPanel),
+      projectCount: projects.length,
+      hasSelectProject: Boolean(onSelectProject),
+      hasViewAllProjects: Boolean(onViewAllProjects),
+    }),
+    [mobileNavEnabled, mode, onOpenActivityPanel, onOpenNotesPanel, onOpenUsage, onSelectProject, onViewAllProjects, projects.length],
+  );
+  const headerOwnsProjects = headerOwnedNavigationItems.includes("projects");
   /*
   FNXC:Navigation 2026-06-19-00:00:
   When experimental left sidebar navigation is active on tablet/desktop, Header must suppress its view-toggle and More-views trigger so there is one canonical non-mobile navigation surface and no orphaned chevron remains.
@@ -184,13 +257,45 @@ export function Header({
 
   FNXC:WorkflowControls 2026-06-22-18:00:
   Mobile also renders the workflow portal in the top header next to the logo/project switch. The board/list workflow selector stays single-sourced through this slot, while CSS hides the "Workflow" label and compacts the trigger so it fits the mobile header.
+
+  FNXC:WorkflowControls 2026-09-15-23:32:
+  FN-439 makes Board and List the only pages that own a visible workflow selector: the portal node is produced only
+  for those two views, so Graph, Planning, and Missions no longer show a dropdown on a page that lists no tasks.
+  This does NOT break them — `GraphWorkflowSwitcherSlot`/`HeaderWorkflowSwitcherSlot` publish
+  `onWorkflowSelectionChange` from an effect that runs BEFORE their slot-absent early return, so graph filtering and
+  the Planning/Missions creation workflow keep using the persisted selection. FN-405's "one slot, one owner"
+  guarantee is preserved because the node stays single-sourced; the view condition only narrows where it exists.
   */
   const hideHeaderViewNav = leftSidebarNavActive && !isMobile;
+  /*
+  FN-439: single explicit derivation shared by both producers of `#header-workflow-slot`.
+
+  FNXC:WorkflowControls 2026-09-16-23:24:
+  FN-483 ajoute le contexte de Board de fond : quand un drawer téléphone est ouvert au-dessus d'un Board actif, le
+  slot survit à l'ouverture/fermeture et garde le MÊME nœud DOM. Les vraies pages tablette/ordinateur conservent la
+  restriction Board/List de FN-439.
+  */
+  const workflowSlotVisible = (boardBackgroundActive && isMobile) || view === "board" || view === "list";
+  /*
+  FNXC:WorkflowControls 2026-09-17-02:14:
+  FN-481 : la suppression de la navigation primaire (`hideFullNav`, vraie sur TOUTE la bande compacte tant que la pill
+  est montée) et le PLACEMENT du slot workflow sont deux décisions distinctes. La disposition compacte — slot dans
+  `header-left`, juste après le sélecteur compact de projet — appartient au seul mode téléphone. La tablette garde la
+  navigation basse mobile mais organise son Header comme l'ordinateur : le sélecteur de projet complet reste dans
+  `header-left` et le slot vit dans `header-actions`, donc l'ordre reste projet, puis workflow, puis recherche — dans
+  le DOM comme au clavier, sans `order` CSS. Les deux branches sont mutuellement exclusives (`isMobile` contre non‑
+  téléphone), si bien qu'un seul `#header-workflow-slot` est rendu.
+  */
+  const workflowSlotInHeaderLeft = isMobile && Boolean(hideFullNav);
+  const workflowSlotInHeaderActions = hideHeaderViewNav || (isTablet && Boolean(mobileNavEnabled));
   /*
   FNXC:Navigation 2026-06-21-23:40:
   The right dock is persistent and owns its own collapse control, so Header must not render a duplicate right-dock toggle or repurpose the More views overflow trigger on tablet/desktop.
   */
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
+  const [isInlineSearchOpen, setIsInlineSearchOpen] = useState(false);
+  const [inlineSearchQuery, setInlineSearchQuery] = useState("");
+  const inlineSearchTriggerRef = useRef<HTMLButtonElement>(null);
   const [isNonMobileSearchOpen, setIsNonMobileSearchOpen] = useState(false);
   // Track when user has explicitly closed the search (used for toggle visibility)
   const [isNonMobileSearchExplicitlyClosed, setIsNonMobileSearchExplicitlyClosed] = useState(false);
@@ -200,8 +305,6 @@ export function Header({
   const [isViewOverflowOpen, setIsViewOverflowOpen] = useState(false);
   const overflowButtonRef = useRef<HTMLButtonElement>(null);
   const overflowMenuRef = useRef<HTMLDivElement>(null);
-  const mobileSearchRef = useRef<HTMLDivElement>(null);
-  const mobileSearchInputRef = useRef<HTMLInputElement>(null);
   const nodeSelectorRef = useRef<HTMLDivElement>(null);
   const mobileProjectSwitchRef = useRef<HTMLDivElement>(null);
   const viewOverflowRef = useRef<HTMLDivElement>(null);
@@ -286,6 +389,7 @@ export function Header({
       onChangeView ||
       experimentalFeatures?.researchView ||
       experimentalFeatures?.ideationView ||
+      experimentalFeatures?.whiteboardView ||
       experimentalFeatures?.insights ||
 
       showSkillsTab ||
@@ -301,6 +405,28 @@ export function Header({
   const shouldShowMobileSearch = isMobileSearchOpen || searchQuery.length > 0;
 
   const canShowNonMobileSearch = (view === "board" || view === "list") && !isMobile && onSearchChange;
+  const showDesktopInlineSearch = Boolean(mode === "desktop" && canShowNonMobileSearch);
+  /*
+  FNXC:TaskSearch 2026-09-17-07:43:
+  FN-494 — `restoreFocus` est à `true` par défaut, donc la croix et Escape rendent le focus au
+  déclencheur recréé comme avant. La SELECTION d'un résultat passe `false` : la fiche de tâche vient
+  de s'ouvrir et le `setTimeout(... .focus(), 0)` lui volerait le focus une frame plus tard.
+  */
+  const closeInlineSearch = useCallback((options?: { restoreFocus?: boolean }) => {
+    setIsInlineSearchOpen(false);
+    setInlineSearchQuery("");
+    if (options?.restoreFocus === false) return;
+    window.setTimeout(() => inlineSearchTriggerRef.current?.focus(), 0);
+  }, []);
+
+  useEffect(() => {
+    if (!isInlineSearchOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeInlineSearch();
+    };
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => document.removeEventListener("keydown", closeOnEscape, true);
+  }, [closeInlineSearch, isInlineSearchOpen]);
   // Non-mobile search: toggled open OR has active query, but not if explicitly closed.
   const shouldShowNonMobileSearch = (isNonMobileSearchOpen || searchQuery.length > 0) && !isNonMobileSearchExplicitlyClosed;
   /*
@@ -308,7 +434,6 @@ export function Header({
   Closing board/list search must suppress the populated floating panel until App clears searchQuery, then immediately restore the Open search affordance. Keep the explicit-close state out of the empty-query toggle gate so an open-but-empty dismissal cannot strand the header without a search trigger.
   */
   const canShowNonMobileSearchToggle = Boolean(canShowNonMobileSearch && !shouldShowNonMobileSearch && searchQuery.length === 0);
-  const showBoardBranchFilters = view === "board";
 
   // Reset explicit close flag when query becomes empty (so active-query reopen behavior is ready for the next search).
   useEffect(() => {
@@ -435,9 +560,10 @@ export function Header({
   }, [onSearchChange]);
 
   const isDesktopShell = shellHost.kind === "desktop-shell";
+  const dashboardWindowHeaderRef = useDashboardWindowLandmark("header");
 
   return (
-    <div className="header-wrapper">
+    <div className="header-wrapper" ref={dashboardWindowHeaderRef}>
       <header className="header" data-shell-kind={shellHost.kind}>
         <div className="header-left">
           <div className="header-brand">
@@ -462,7 +588,7 @@ export function Header({
               fill="currentColor"
             />
           </svg>
-          <h1 className="logo">{t("appName", "Fusion")}</h1>
+          {!isMobile && <h1 className="logo">{t("appName", "Fusion")}</h1>}
         </div>
 
         {/* Mobile Project Switch - dropdown trigger next to logo when at least one project exists (mobile only) */}
@@ -528,7 +654,7 @@ export function Header({
           </div>
         )}
 
-        {hideFullNav && (
+        {workflowSlotInHeaderLeft && workflowSlotVisible && (
           <div
             id="header-workflow-slot"
             className="header-workflow-slot header-workflow-slot--mobile"
@@ -585,8 +711,9 @@ export function Header({
                     <button
                       className={`node-selector-option${!isRemote ? " node-selector-option--active" : ""}`}
                       onClick={() => {
-                        onSelectNode?.(null);
-                        setIsNodeSelectorOpen(false);
+                        void Promise.resolve(onSelectNode?.(null)).then((accepted) => {
+                          if (accepted !== false) setIsNodeSelectorOpen(false);
+                        });
                       }}
                       role="option"
                       aria-selected={!isRemote}
@@ -602,8 +729,9 @@ export function Header({
                         key={node.id}
                         className={`node-selector-option${currentNode?.id === node.id ? " node-selector-option--active" : ""}`}
                         onClick={() => {
-                          onSelectNode?.(node);
-                          setIsNodeSelectorOpen(false);
+                          void Promise.resolve(onSelectNode?.(node)).then((accepted) => {
+                            if (accepted !== false) setIsNodeSelectorOpen(false);
+                          });
                         }}
                         role="option"
                         aria-selected={currentNode?.id === node.id}
@@ -624,21 +752,6 @@ export function Header({
 
       <div className="header-actions">
         {shellConnectionControl}
-        {/*
-        FNXC:MobileTaskNavigation 2026-08-20-05:47:
-        Issue #2226 moves mobile Board/List navigation to the footer so Header can expose App's single full-task modal entry point from every active project view. The Planning column keeps its separate quick-entry composer.
-        */}
-        {isMobile && mobileNavEnabled && projectId && onNewTask && (
-          <button
-            className="btn-icon"
-            onClick={onNewTask}
-            title={t("newTaskModal.title", "New Task")}
-            aria-label={t("newTaskModal.title", "New Task")}
-            data-testid="mobile-header-new-task"
-          >
-            <Plus />
-          </button>
-        )}
 
         {/* Mobile Search Trigger - only on mobile, show trigger button in header */}
         {onSearchChange && isMobile && (hideFullNav || view === "board" || view === "list") && !shouldShowMobileSearch && (
@@ -654,19 +767,23 @@ export function Header({
           </button>
         )}
 
-        {/* Usage button on mobile when mobile bottom nav is active */}
+        {/*
+        FNXC:MobileUsage 2026-09-13-22:47:
+        The mobile project header keeps a one-tap Usage shortcut so AI quota status is reachable without opening the shared navigation menu. Show it only while mobile navigation owns the primary destinations; the legacy compact header retains its existing Usage entry in the overflow menu.
+        */}
         {isMobile && hideFullNav && onOpenUsage && (
           <button
             className="btn-icon"
             onClick={(event) => onOpenUsage(event.currentTarget.getBoundingClientRect())}
             title={t("header.viewUsage", "View usage")}
+            aria-label={t("header.viewUsage", "View usage")}
             data-testid="mobile-header-usage-btn"
           >
             <Activity size={16} />
           </button>
         )}
 
-        {hideHeaderViewNav && (
+        {workflowSlotInHeaderActions && workflowSlotVisible && (
           <div
             id="header-workflow-slot"
             className="header-workflow-slot"
@@ -677,8 +794,53 @@ export function Header({
         {/**
          * FNXC:Header 2026-06-21-00:00:
          * Desktop and tablet header search must render after the workflow portal slot so a populated WorkflowSwitcher appears left of the search icon while preserving the mobile search trigger's existing position and behavior.
+         *
+         * FNXC:HeaderTaskSearch 2026-09-12-21:52:
+         * On desktop Board and List, Search alternates in this exact action slot between the magnifier and the shared inline combobox. Its transient query and task-detail selection remain isolated from the Board/List filter; close, Escape, and selection clear the field without any modal or backdrop.
+         *
+         * FNXC:TaskSearch 2026-09-17-07:43:
+         * FN-494 nuance la restauration du focus : close et Escape le rendent toujours au déclencheur recréé, mais une SELECTION ne le fait plus — la fiche de tâche qui vient de s'ouvrir garde le focus.
          */}
-        {canShowNonMobileSearchToggle && (
+        {showDesktopInlineSearch && onSearchChange && (
+          isInlineSearchOpen ? (
+            <TaskSearchInput
+              query={inlineSearchQuery}
+              onSearchChange={setInlineSearchQuery}
+              /*
+              FNXC:TaskSearch 2026-09-17-09:41:
+              The result is handed straight to the host. It used to be re-looked-up in the board's
+              loaded collection first, which silently dropped exactly the results this feature
+              exists to surface: anything outside the loaded pages.
+              */
+              onSelectTask={(task) => {
+                onSelectSearchTask?.(task);
+                closeInlineSearch({ restoreFocus: false });
+              }}
+              onClose={() => closeInlineSearch()}
+              autoFocus
+              className="header-search--inline"
+              testId="desktop-header-search-input"
+              {...(projectId ? { projectId } : {})}
+              {...(searchNodeId ? { nodeId: searchNodeId } : {})}
+              {...(addToast ? { addToast } : {})}
+            />
+          ) : (
+            <button
+              ref={inlineSearchTriggerRef}
+              type="button"
+              className="btn-icon"
+              onClick={() => setIsInlineSearchOpen(true)}
+              title={t("header.openSearch", "Open search")}
+              aria-label={t("header.openSearch", "Open search")}
+              aria-expanded={false}
+              data-testid="desktop-inline-header-search-btn"
+            >
+              <Search size={16} />
+            </button>
+          )
+        )}
+
+        {canShowNonMobileSearchToggle && !showDesktopInlineSearch && (
           <button
             className="btn-icon"
             onClick={handleNonMobileSearchToggle}
@@ -702,15 +864,31 @@ export function Header({
             >
               <LayoutGrid size={16} />
             </button>
-            <button
+            {/*
+            FNXC:ToolSurfaces 2026-09-16-23:06:
+            FN-426 restored List beside Board in the legacy view-toggle group because FN-382 had made List a right-dock
+            tool, which was the last reason the dock was structurally required to browse tasks as a list. FN-437 keeps
+            that guarantee on tablet/desktop only: on phone the footer navigation pill owns List, so this producer —
+            and the standalone one in `header-actions` below — are both suppressed when `isMobile`, leaving exactly one
+            owner per host and no duplicate between header and footer.
+
+            FNXC:ToolSurfaces 2026-09-17-01:43:
+            FN-480 moves that phone ownership from the hard-coded `mobile-more-item-list` menu button — now deleted —
+            to the persisted quick-access slot `tasks`, which renders and routes List on mobile because Board is the
+            permanent background surface there. Depending on the operator's quick-access selection that single owner is
+            either the direct tab `mobile-nav-tab-tasks` or the menu entry `mobile-more-item-tasks`. The contract is
+            unchanged: exactly one List producer per host.
+            */}
+            {!isMobile && <button
               className={`view-toggle-btn${view === "list" ? " active" : ""}`}
-              onClick={() => onChangeView("list")}
+              onClick={() => onChangeView(view === "list" ? "board" : "list")}
               title={t("header.listView", "List view")}
               aria-label={t("header.listView", "List view")}
               aria-pressed={view === "list"}
+              data-testid="header-list-view-btn"
             >
               <List size={16} />
-            </button>
+            </button>}
             {showAgentsTab && (
               <button
                 className={`view-toggle-btn${view === "agents" ? " active" : ""}`}
@@ -759,21 +937,6 @@ export function Header({
                 <span className="status-dot status-dot--pending header-chat-unread-dot" aria-label={t("header.unreadChatResponse", "Unread chat response")} />
               )}
             </button>
-            {!isTablet && (
-              /*
-              FNXC:Navigation 2026-06-21-18:25:
-              The top-level documents destination now displays as Artifacts (FN-6890), but the documents route id remains stable for navigation and tests.
-              */
-              <button
-                className={`view-toggle-btn${view === "documents" ? " active" : ""}`}
-                onClick={() => onChangeView("documents")}
-                title={t("header.documentsView", "Artifacts view")}
-                aria-label={t("header.documentsView", "Artifacts view")}
-                aria-pressed={view === "documents"}
-              >
-                <FileText size={16} />
-              </button>
-            )}
             <button
               className={`view-toggle-btn${view === "mailbox" ? " active" : ""}`}
               onClick={() => (onOpenMailbox ? onOpenMailbox() : onChangeView("mailbox"))}
@@ -815,7 +978,7 @@ export function Header({
               <>
                 <button
                   ref={viewOverflowTriggerRef}
-                  className={`view-toggle-btn${(["research", "ideation", "skills", "insights", "memory", "secrets", "dev-server", "devserver", "graph"].includes(view) || (isTablet && view === "documents") || (experimentalFeatures?.evalsView && view === "evals") || (experimentalFeatures?.goalsView && view === "goalsView") || isPluginViewId(view)) ? " active" : ""}`}
+                  className={`view-toggle-btn${(["research", "ideation", "whiteboard", "skills", "insights", "memory", "secrets", "dev-server", "devserver", "graph"].includes(view) || (experimentalFeatures?.evalsView && view === "evals") || (experimentalFeatures?.goalsView && view === "goalsView") || isPluginViewId(view)) ? " active" : ""}`}
                   onClick={() => {
                     setIsViewOverflowOpen((prev) => !prev);
                   }}
@@ -890,6 +1053,13 @@ export function Header({
                         <span>{t("nav.ideation", "Ideation")}</span>
                       </button>
                     )}
+                    {experimentalFeatures?.whiteboardView && (
+                      <button className={`view-toggle-overflow-item${view === "whiteboard" ? " active" : ""}`} onClick={() => { onChangeView("whiteboard"); setIsViewOverflowOpen(false); }} role="menuitem" data-testid="view-overflow-whiteboard">
+                        <PanelsTopLeft size={14} />
+                        <span>{t("nav.whiteboard", "Whiteboard")}</span>
+                        <span className="btn-badge">{t("common.alpha", "Alpha")}</span>
+                      </button>
+                    )}
                     {experimentalFeatures?.insights && (
                       <button
                         className={`view-toggle-overflow-item${view === "insights" ? " active" : ""}`}
@@ -916,7 +1086,7 @@ export function Header({
                         data-testid="view-overflow-skills"
                       >
                         <Zap size={14} />
-                        <span>{t("header.skillsView", "Skills")}</span>
+                        <span>{t("header.skillsView", "Skills & Snippets")}</span>
                       </button>
                     )}
                     {experimentalFeatures?.memoryView && (
@@ -933,44 +1103,13 @@ export function Header({
                         <span>{t("header.memoryView", "Memory")}</span>
                       </button>
                     )}
-                    <button
-                      className={`view-toggle-overflow-item${view === "secrets" ? " active" : ""}`}
-                      onClick={() => {
-                        onChangeView("secrets");
-                        setIsViewOverflowOpen(false);
-                      }}
-                      role="menuitem"
-                      data-testid="view-overflow-secrets"
-                    >
-                      <Lock size={14} />
-                      <span>{t("header.secretsView", "Secrets")}</span>
-                    </button>
-                    {isTablet && (
-                      <button
-                        className={`view-toggle-overflow-item${view === "documents" ? " active" : ""}`}
-                        onClick={() => {
-                          onChangeView("documents");
-                          setIsViewOverflowOpen(false);
-                        }}
-                        role="menuitem"
-                        data-testid="view-overflow-documents"
-                      >
-                        <FileText size={14} />
-                        <span>{t("header.documentsView", "Artifacts view")}</span>
-                      </button>
-                    )}
-                    <button
-                      className={`view-toggle-overflow-item${view === "patchnode" ? " active" : ""}`}
-                      onClick={() => {
-                        onChangeView("patchnode");
-                        setIsViewOverflowOpen(false);
-                      }}
-                      role="menuitem"
-                      data-testid="view-overflow-patchnode"
-                    >
-                      <History size={14} />
-                      <span>{t("nav.patchnode", "History")}</span>
-                    </button>
+                    {/*
+                    FNXC:ToolSurfaces 2026-09-15-16:04:
+                    FN-426 removes the standalone Secrets entry: secrets live in Settings → project Secrets, beside the
+                    other project configuration they belong to. The `secrets` id remains RECOGNIZED — an old link or a
+                    persisted view still opens that Settings section — it is simply no longer OFFERED as a destination
+                    of its own here.
+                    */}
                     {experimentalFeatures?.devServerView && (
                       <button
                         className={`view-toggle-overflow-item${view === "dev-server" || view === "devserver" ? " active" : ""}`}
@@ -1062,6 +1201,57 @@ export function Header({
         <PluginSlot slotId="header-action" projectId={projectId} />
 
         {/*
+        FNXC:ToolSurfaces 2026-09-15-23:32:
+        FN-426 added a standalone Board/List toggle here because FN-382 had removed List from the wide navigation, so a
+        suppressed view-toggle group left the destination unreachable. FN-439 restores List to the wide navigation
+        itself — the footer **More** menu (`desktop-nav-list`) under the footer placement and `sidebar-nav-list` under
+        the sidebar placement — so this header producer is deleted rather than narrowed: keeping it would give
+        tablet/desktop two owners for the same destination. FN-437 had already removed the phone producer, where the
+        bottom-bar pill is the single owner. FN-480 (2026-09-17-01:43) relocated that phone owner from the deleted
+        hard-coded `mobile-more-item-list` button to the persisted quick-access slot `tasks`, which renders List on
+        mobile (direct tab `mobile-nav-tab-tasks`, or menu entry `mobile-more-item-tasks` when it is not selected).
+        Net contract: exactly one List producer per host, and no host relies on the optional right dock.
+        */}
+
+        {/*
+        FNXC:ToolSurfaces 2026-09-16-23:06:
+        FN-426 mounted Activity and Notes here on every breakpoint so neither had the optional right dock as its only
+        host. FN-437 narrows that to tablet/desktop: on phone the footer navigation menu already owns both destinations
+        (`mobile-more-item-activity` opens the full-screen activity log, `mobile-more-item-notes` opens the Notes view
+        in the main-content drawer), so a header trigger here was a second producer crowding a narrow header. The
+        dock-independence guarantee is unchanged — the footer menu takes over on phone. Usage stays an independent
+        surface with its own trigger below; App guarantees only one of these panels is open at a time.
+        */}
+        {!isMobile && onOpenActivityPanel && (
+          <button
+            className={`btn-icon${activityPanelOpen ? " btn-icon--active" : ""}`}
+            onClick={(event) => onOpenActivityPanel(event.currentTarget.getBoundingClientRect())}
+            title={t("nav.activityLog", "Activity Log")}
+            aria-label={t("nav.activityLog", "Activity Log")}
+            aria-haspopup="dialog"
+            aria-expanded={activityPanelOpen}
+            aria-controls={activityPanelOpen ? activityPanelId : undefined}
+            data-testid="header-activity-panel-btn"
+          >
+            <History size={16} />
+          </button>
+        )}
+        {!isMobile && onOpenNotesPanel && (
+          <button
+            className={`btn-icon${notesPanelOpen ? " btn-icon--active" : ""}`}
+            onClick={(event) => onOpenNotesPanel(event.currentTarget.getBoundingClientRect())}
+            title={t("nav.notes", "Notes")}
+            aria-label={t("nav.notes", "Notes")}
+            aria-haspopup="dialog"
+            aria-expanded={notesPanelOpen}
+            aria-controls={notesPanelOpen ? notesPanelId : undefined}
+            data-testid="header-notes-panel-btn"
+          >
+            <StickyNote size={16} />
+          </button>
+        )}
+
+        {/*
         FNXC:Navigation 2026-06-22-00:50:
         Usage (Activity) lives in the top header to the left of the right-sidebar toggle and opens the UsageIndicator as a header-anchored modal (not inline in the dock). Non-mobile only; mobile keeps its own usage button in the bottom-nav layout.
         */}
@@ -1095,6 +1285,7 @@ export function Header({
           </button>
         )}
 
+
         {/* Compact overflow menu trigger (mobile only — tablet uses the right-sidebar toggle above) */}
         {isMobile && !hideFullNav && (
           <button
@@ -1118,8 +1309,17 @@ export function Header({
             role="menu"
             aria-label={t("header.additionalHeaderActions", "Additional header actions")}
           >
-            {/* Projects - in overflow on mobile */}
-            {isMobile && projects.length >= 1 && onViewAllProjects && (
+            {/*
+            Projects — repli du menu de débordement.
+
+            FNXC:HeaderNavigationOwnership 2026-09-17-02:14:
+            FN-481 : quand le sélecteur compact `mobile-project-switch-trigger` est monté ET porte son action
+            `mobile-project-switch-view-all`, le Header possède déjà Projets et ne doit pas l'offrir une seconde fois
+            ici. Sans sélecteur montable (par exemple `onSelectProject` absent) mais avec l'action de gestion
+            disponible, cette entrée reste le seul chemin et est conservée : dédupliquer ne doit jamais rendre une
+            destination inatteignable.
+            */}
+            {isMobile && !headerOwnsProjects && projects.length >= 1 && onViewAllProjects && (
               <button
                 className="mobile-overflow-item"
                 onClick={() => handleOverflowAction(onViewAllProjects)}
@@ -1236,134 +1436,76 @@ export function Header({
             </button>
           </div>
         )}
+
+        {/*
+        FNXC:MobileTaskNavigation 2026-08-20-05:47:
+        Issue #2226 moves mobile Board/List navigation to the footer so Header can expose App's single full-task modal entry point from every active project view. The Planning column keeps its separate quick-entry composer.
+
+        FNXC:StandardizedViewActions 2026-09-16-23:06:
+        FN-437 reinstates the App-owned create-task control on DESKTOP, for every view including List: creating a task
+        previously depended on the current screen (Board, List, sidebar, keyboard shortcut), so there was no way to
+        create one from an arbitrary view. The Header is the one surface present on every screen, which makes it the
+        correct owner of that view-independent entry. It still adopts the shared `ViewActionButton` primitive so its
+        shape matches every other creation entry, and it keeps its established compact behavior below desktop, where
+        List is excluded because its own header preserves the selected-workflow argument. On desktop that List header
+        button is deliberately KEPT and coexists with this one: they live in two distinct bars (`header-actions` versus
+        the view's own header), and the workflow-aware argument is the reason the List one is not replaceable.
+        */}
+        {projectId && onNewTask && (mode === "desktop" || view !== "list") ? (
+          <ViewActionButton
+            kind="create"
+            onClick={onNewTask}
+            label={t("newTaskModal.title", "New Task")}
+            title={t("newTaskModal.title", "New Task")}
+            data-testid="mobile-header-new-task"
+          />
+        ) : null}
       </div>
     </header>
 
     {/* Desktop/Tablet Search - floating below header, in board or list view */}
-    {canShowNonMobileSearch && shouldShowNonMobileSearch && (
+    {canShowNonMobileSearch && shouldShowNonMobileSearch && !showDesktopInlineSearch && (
       <div className="header-floating-search">
-        <div className="header-search">
-          <Search size={14} className="header-search-icon" />
-          <input
-            autoFocus
-            type="text"
-            placeholder={t("header.searchTasks", "Search tasks...")}
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            className="header-search-input"
-          />
-          <button
-            className="header-search-clear"
-            onClick={handleNonMobileSearchClose}
-            aria-label={t("header.closeSearch", "Close search")}
-          >
-            <X size={14} />
-          </button>
-        </div>
-        {showBoardBranchFilters && (
-          <div className="header-branch-filters" data-testid="header-branch-filters-desktop">
-            <label className="header-branch-filter-label">
-              <span>{t("header.workingBranch", "Working branch")}</span>
-              <select
-                className="header-branch-filter-select"
-                value={branchFilter}
-                onChange={(event) => onBranchFilterChange?.(event.target.value)}
-                data-testid="working-branch-filter"
-              >
-                <option value="">{t("header.allWorkingBranches", "All working branches")}</option>
-                <option value={NO_BRANCH_FILTER_VALUE}>{t("header.noWorkingBranch", "No working branch")}</option>
-                {branchOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="header-branch-filter-label">
-              <span>{t("header.baseBranch", "Base branch")}</span>
-              <select
-                className="header-branch-filter-select"
-                value={baseBranchFilter}
-                onChange={(event) => onBaseBranchFilterChange?.(event.target.value)}
-                data-testid="target-branch-filter"
-              >
-                <option value="">{t("header.allBaseBranches", "All base branches")}</option>
-                <option value={NO_BRANCH_FILTER_VALUE}>{t("header.noBaseBranch", "No base branch")}</option>
-                {baseBranchOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        )}
+        <TaskSearchInput
+          query={searchQuery}
+          onSearchChange={onSearchChange}
+          /*
+          FNXC:TaskSearch 2026-09-17-07:43:
+          FN-494 — sans ce gestionnaire, ce champ tombait dans l'ancienne branche de repli qui écrivait
+          l'identifiant de la tâche dans le filtre Board/List et n'ouvrait jamais la fiche. La
+          sélection remonte désormais la tâche à l'hôte et referme la surface de recherche elle-même.
+          */
+          onSelectTask={(task) => {
+            onSelectSearchTask?.(task);
+            handleNonMobileSearchClose();
+          }}
+          onClose={handleNonMobileSearchClose}
+          autoFocus
+          {...(projectId ? { projectId } : {})}
+          {...(searchNodeId ? { nodeId: searchNodeId } : {})}
+          {...(addToast ? { addToast } : {})}
+        />
       </div>
     )}
 
     {/* Mobile Search Expanded - floating below header */}
     {onSearchChange && isMobile && shouldShowMobileSearch && (
       <div className="header-floating-search">
-        <div
-          ref={mobileSearchRef}
-          className="header-search mobile-search-expanded"
-        >
-          <Search size={14} className="header-search-icon" />
-          <input
-            ref={mobileSearchInputRef}
-            autoFocus
-            type="text"
-            placeholder={t("header.searchTasks", "Search tasks...")}
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            className="header-search-input"
-          />
-          <button
-            className="header-search-clear"
-            onClick={handleMobileSearchClose}
-            aria-label={t("header.closeSearch", "Close search")}
-          >
-            <X size={14} />
-          </button>
-        </div>
-        {showBoardBranchFilters && (
-          <div className="header-branch-filters" data-testid="header-branch-filters-mobile">
-            <label className="header-branch-filter-label">
-              <span>{t("header.workingBranch", "Working branch")}</span>
-              <select
-                className="header-branch-filter-select"
-                value={branchFilter}
-                onChange={(event) => onBranchFilterChange?.(event.target.value)}
-                data-testid="working-branch-filter-mobile"
-              >
-                <option value="">{t("header.allWorkingBranches", "All working branches")}</option>
-                <option value={NO_BRANCH_FILTER_VALUE}>{t("header.noWorkingBranch", "No working branch")}</option>
-                {branchOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="header-branch-filter-label">
-              <span>{t("header.baseBranch", "Base branch")}</span>
-              <select
-                className="header-branch-filter-select"
-                value={baseBranchFilter}
-                onChange={(event) => onBaseBranchFilterChange?.(event.target.value)}
-                data-testid="target-branch-filter-mobile"
-              >
-                <option value="">{t("header.allBaseBranches", "All base branches")}</option>
-                <option value={NO_BRANCH_FILTER_VALUE}>{t("header.noBaseBranch", "No base branch")}</option>
-                {baseBranchOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        )}
+        <TaskSearchInput
+          query={searchQuery}
+          onSearchChange={onSearchChange}
+          /* FNXC:TaskSearch 2026-09-17-07:43: FN-494 — même contrat sur téléphone : vider, fermer, ouvrir la fiche. */
+          onSelectTask={(task) => {
+            onSelectSearchTask?.(task);
+            handleMobileSearchClose();
+          }}
+          onClose={handleMobileSearchClose}
+          autoFocus
+          className="mobile-search-expanded"
+          {...(projectId ? { projectId } : {})}
+          {...(searchNodeId ? { nodeId: searchNodeId } : {})}
+          {...(addToast ? { addToast } : {})}
+        />
       </div>
     )}
   </div>

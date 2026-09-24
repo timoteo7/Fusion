@@ -1,11 +1,14 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { loadAllAppCss } from "../../test/cssFixture";
+import { __test_resetChatSnippetsCache } from "../../hooks/useChatSnippetsCache";
 
 // Mock API functions
 const mockFetchDiscoveredSkills = vi.fn().mockResolvedValue([]);
 const mockFetchSkillsCatalog = vi.fn().mockResolvedValue({ entries: [] });
 const mockToggleExecutionSkill = vi.fn().mockResolvedValue(undefined);
+const mockFetchGlobalSettings = vi.fn().mockResolvedValue({ chatSnippets: [] });
+const mockUpdateGlobalSettings = vi.fn().mockResolvedValue({ chatSnippets: [] });
 const mockFetchSkillContent = vi.fn().mockResolvedValue({
   name: "test-skill",
   skillMd: "",
@@ -20,17 +23,22 @@ vi.mock("../../api", () => ({
   // FNXC:Skills 2026-06-23-04:15: SkillsView now imports fetchSkillFileContent for the file viewer; stub it so the mock module is complete.
   fetchSkillFileContent: vi.fn().mockResolvedValue({ name: "", relativePath: "", content: "", isText: true }),
   installSkill: vi.fn().mockResolvedValue({ success: true }),
+  fetchGlobalSettings: (...args: unknown[]) => mockFetchGlobalSettings(...args),
+  updateGlobalSettings: (...args: unknown[]) => mockUpdateGlobalSettings(...args),
 }));
 
-function extractRuleBlock(css: string, selector: string): string {
+function extractRuleBlocks(css: string, selector: string): string[] {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const matches = [...css.matchAll(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, "g"))];
-  return matches.at(-1)?.[1] ?? "";
+  return [...css.matchAll(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, "g"))]
+    .map((match) => match[1]);
 }
 
-function extractMobileMediaBlocks(content: string): string {
+function extractRuleBlock(css: string, selector: string): string {
+  return extractRuleBlocks(css, selector).at(-1) ?? "";
+}
+
+function extractBalancedAtRuleBlocks(content: string, regex: RegExp): string {
   const blocks: string[] = [];
-  const regex = /@media[^{]*\(max-width: 768px\)[^{]*\{/g;
   let match;
 
   while ((match = regex.exec(content)) !== null) {
@@ -52,9 +60,18 @@ function extractMobileMediaBlocks(content: string): string {
   return blocks.join("\n");
 }
 
+function extractMobileMediaBlocks(content: string): string {
+  return extractBalancedAtRuleBlocks(content, /@media[^{]*\(max-width: 768px\)[^{]*\{/g);
+}
+
+function extractWideSnippetContainerBlocks(content: string): string {
+  return extractBalancedAtRuleBlocks(content, /@container\s+skills-view\s+\(min-width: 900px\)\s*\{/g);
+}
+
 describe("skills-view mobile css", () => {
   const cssContent = loadAllAppCss();
   const mobileMediaBlock = extractMobileMediaBlocks(cssContent);
+  const wideSnippetContainerBlock = extractWideSnippetContainerBlocks(cssContent);
 
   // FNXC:Skills 2026-06-22-09:30: SkillsView adopted the shared ViewHeader (.view-header /
   // .view-header__title) in the redesign, replacing the bespoke .skills-view-header /
@@ -67,6 +84,57 @@ describe("skills-view mobile css", () => {
 
   it("defines the shared .view-header__title", () => {
     expect(cssContent).toContain(".view-header__title {");
+  });
+
+  it("keeps the tab bar pinned and marks the active tab with the accent", () => {
+    const tabsBlocks = extractRuleBlocks(cssContent, ".skills-view-tabs");
+    const activeTabBlock = extractRuleBlock(cssContent, ".skills-view-tab--active");
+    expect(tabsBlocks.some((block) => block.includes("display: flex") && block.includes("flex-shrink: 0"))).toBe(true);
+    expect(activeTabBlock).toContain("border-bottom-color: var(--accent)");
+    expect(activeTabBlock).toContain("color: var(--text)");
+  });
+
+  it("explicitly hides each inactive tab panel", () => {
+    expect(extractRuleBlock(cssContent, ".skills-view-body[hidden]")).toContain("display: none");
+    expect(extractRuleBlock(cssContent, ".skills-view-snippets-panel[hidden]")).toContain("display: none");
+  });
+
+  it("makes the snippets panel its own bounded scroll owner", () => {
+    const panelBlocks = extractRuleBlocks(cssContent, ".skills-view-snippets-panel");
+    expect(panelBlocks.some((block) =>
+      block.includes("min-height: 0")
+      && block.includes("overflow-y: auto")
+      && block.includes("padding: var(--space-lg)"))).toBe(true);
+  });
+
+  it("uses a two-column snippets grid only in the wide skills container", () => {
+    const layoutBlock = extractRuleBlock(wideSnippetContainerBlock, ".skills-view-snippets__layout");
+    expect(layoutBlock).toContain("grid-template-columns: minmax(0, calc(var(--space-2xl) * 12)) minmax(0, 1fr)");
+    expect(layoutBlock).toContain("gap: var(--space-xl)");
+  });
+
+  it("retains narrow selected-skill hiding without capturing the snippets panel", () => {
+    expect(cssContent).toMatch(/\.skills-view\[data-selected="true"\] \.skills-view__list\s*\{[^}]*display:\s*none/s);
+  });
+
+  it("keeps tabs touchable and the snippets layout single-column on mobile", () => {
+    const tabsBlock = extractRuleBlock(mobileMediaBlock, ".skills-view-tabs");
+    const tabBlock = extractRuleBlock(mobileMediaBlock, ".skills-view-tab");
+    const panelBlock = extractRuleBlock(mobileMediaBlock, ".skills-view-snippets-panel");
+    const layoutBlock = extractRuleBlock(mobileMediaBlock, ".skills-view-snippets__layout");
+    expect(tabsBlock).toContain("padding-inline: var(--space-md)");
+    expect(tabsBlock).toContain("overflow-x: auto");
+    expect(tabBlock).toContain("min-height: calc(var(--space-lg) + var(--space-md) + var(--space-xs))");
+    expect(panelBlock).toContain("padding: var(--space-md)");
+    expect(layoutBlock).toContain("grid-template-columns: minmax(0, 1fr)");
+  });
+
+  it("stacks snippet rows and keeps their actions reachable on mobile", () => {
+    const itemBlock = extractRuleBlock(mobileMediaBlock, ".skills-view-snippets__item");
+    const actionsBlock = extractRuleBlock(mobileMediaBlock, ".skills-view-snippets__item-actions");
+    expect(itemBlock).toContain("flex-direction: column");
+    expect(actionsBlock).toContain("align-self: stretch");
+    expect(actionsBlock).toContain("justify-content: flex-end");
   });
 
   it("defines .skills-view-content with reduced padding on mobile", () => {
@@ -240,7 +308,10 @@ describe("skills-view mobile css", () => {
 
 describe("SkillsView component structure", () => {
   beforeEach(() => {
+    __test_resetChatSnippetsCache();
     vi.clearAllMocks();
+    mockFetchGlobalSettings.mockResolvedValue({ chatSnippets: [] });
+    mockUpdateGlobalSettings.mockResolvedValue({ chatSnippets: [] });
   });
 
   afterEach(() => {
@@ -270,6 +341,20 @@ describe("SkillsView component structure", () => {
     expect(screen.queryByRole("button", { name: "Install Mobile Installed" })).toBeNull();
   });
 
+  /* Snippets left this view for its own destination; its narrow-layout coverage lives in SnippetsView.test.tsx. */
+  it("keeps the execution-skill sections reachable in the narrow layout", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    window.dispatchEvent(new Event("resize"));
+    const { SkillsView } = await import("../SkillsView");
+
+    render(<SkillsView projectId="mobile-project" addToast={vi.fn()} onClose={vi.fn()} />);
+
+    expect(await screen.findByRole("heading", { name: "Discovered Skills" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Skills Catalog" })).toBeTruthy();
+    expect(screen.queryByTestId("skills-tab-snippets")).toBeNull();
+    expect(screen.queryByLabelText("Chat snippet editor")).toBeNull();
+  });
+
   it("renders .skills-view-content wrapper around sections", async () => {
     const { SkillsView } = await import("../SkillsView");
 
@@ -285,9 +370,11 @@ describe("SkillsView component structure", () => {
     const contentWrapper = screen.getByTestId("skills-view").querySelector(".skills-view-content");
     expect(contentWrapper).not.toBeNull();
 
-    // The two sections should be inside the wrapper
+    // Only the two execution-skill sections remain inside the wrapper, and no snippet chrome survives.
     const sections = contentWrapper!.querySelectorAll(".skills-view-section");
     expect(sections.length).toBe(2);
+    expect(contentWrapper!.querySelector(".skills-view-snippets")).toBeNull();
+    expect(screen.queryByTestId("skills-panel-snippets")).toBeNull();
 
     // Header (now the shared ViewHeader: .view-header) should be outside the content
     // wrapper, directly on skills-view.

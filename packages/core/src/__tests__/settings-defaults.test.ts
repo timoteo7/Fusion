@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CONSECUTIVE_TOOL_FAILURE_RETRY_THRESHOLD, DEFAULT_CONSECUTIVE_TOOL_FAILURE_RETRY_BACKOFF_MS, DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURE_RETRIES, DEFAULT_MAX_AUTO_MERGE_RETRIES, resolveConsecutiveToolFailureRetryBackoffMs, resolveConsecutiveToolFailureThreshold, resolveExecutorEscalationTarget, resolveMaxAutoMergeRetries, resolveMaxConsecutiveToolFailureRetries } from "../tasks/in-review-stall.js";
-import { CHAT_FOCUS_FLAG, isExperimentalFeatureEnabled } from "../config/experimental-features.js";
+import { CONSECUTIVE_TOOL_FAILURE_RETRY_THRESHOLD, DEFAULT_CONSECUTIVE_TOOL_FAILURE_RETRY_BACKOFF_MS, DEFAULT_IN_REVIEW_STALL_DEADLOCK_THRESHOLD, DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURE_RETRIES, DEFAULT_MAX_AUTO_MERGE_RETRIES, resolveConsecutiveToolFailureRetryBackoffMs, resolveInReviewStallDeadlockThreshold, resolveConsecutiveToolFailureThreshold, resolveExecutorEscalationTarget, resolveMaxAutoMergeRetries, resolveMaxConsecutiveToolFailureRetries } from "../tasks/in-review-stall.js";
+import { CHAT_FOCUS_FLAG, WHITEBOARD_VIEW_FLAG, isExperimentalFeatureEnabled } from "../config/experimental-features.js";
 import { DEFAULT_GLOBAL_SETTINGS, DEFAULT_PROJECT_SETTINGS, GLOBAL_SETTINGS_KEYS, PROJECT_SETTINGS_KEYS, isGlobalOnlySettingsKey, isGlobalSettingsKey, isProjectSettingsKey } from "../config/settings-schema.js";
 import {
   __resetLegacyCwdMainWarningForTests,
@@ -25,6 +25,15 @@ describe("settings defaults invariants", () => {
 
   it("keeps project worktreesDir unset by default", () => {
     expect(DEFAULT_PROJECT_SETTINGS.worktreesDir).toBeUndefined();
+  });
+
+  it("defaults unchanged in-review stall disposal to ten observations", () => {
+    expect(DEFAULT_IN_REVIEW_STALL_DEADLOCK_THRESHOLD).toBe(10);
+    expect(DEFAULT_PROJECT_SETTINGS.inReviewStallDeadlockThreshold).toBe(DEFAULT_IN_REVIEW_STALL_DEADLOCK_THRESHOLD);
+    expect(resolveInReviewStallDeadlockThreshold(undefined)).toBe(10);
+    expect(resolveInReviewStallDeadlockThreshold({ inReviewStallDeadlockThreshold: "unknown" })).toBe(10);
+    expect(resolveInReviewStallDeadlockThreshold({ inReviewStallDeadlockThreshold: 3 })).toBe(3);
+    expect(resolveInReviewStallDeadlockThreshold({ inReviewStallDeadlockThreshold: 0 })).toBe(0);
   });
 
   it("defaults local network discovery on and keeps its opt-out global-only", () => {
@@ -54,14 +63,22 @@ describe("settings defaults invariants", () => {
     expect(Object.hasOwn(DEFAULT_GLOBAL_SETTINGS, "autoReloadOnVersionChange")).toBe(false);
   });
 
+  it("keeps global chat snippets schema-present but unset to avoid a shared mutable array", () => {
+    expect(DEFAULT_GLOBAL_SETTINGS.chatSnippets).toBeUndefined();
+    expect(Object.hasOwn(DEFAULT_GLOBAL_SETTINGS, "chatSnippets")).toBe(true);
+    expect(GLOBAL_SETTINGS_KEYS).toContain("chatSnippets");
+    expect(PROJECT_SETTINGS_KEYS).not.toContain("chatSnippets");
+  });
+
   it("defaults dashboard keyboard shortcuts globally", () => {
     expect(DEFAULT_GLOBAL_SETTINGS.dashboardKeyboardShortcuts).toEqual({
-      quickChat: "Space",
+      toggleModalVisibility: "",
       terminal: "Ctrl+`",
       openFiles: "Ctrl+E",
       openSettings: "Ctrl+,",
       openCommandCenter: "Ctrl+K",
       newTask: "Ctrl+Shift+N",
+      openChatList: "Ctrl+Shift+L",
     });
     expect(GLOBAL_SETTINGS_KEYS).toContain("dashboardKeyboardShortcuts");
     expect(PROJECT_SETTINGS_KEYS).not.toContain("dashboardKeyboardShortcuts");
@@ -76,6 +93,13 @@ describe("settings defaults invariants", () => {
     expect(isExperimentalFeatureEnabled(undefined, "workflowGraphExecutor")).toBe(false);
     expect(isExperimentalFeatureEnabled(undefined, "workflowInterpreterDualObserve")).toBe(false);
     expect(isExperimentalFeatureEnabled({ experimentalFeatures: { workflowInterpreterDualObserve: true } }, "workflowInterpreterDualObserve")).toBe(false);
+  });
+
+  it("keeps Whiteboard Alpha experimental and default off", () => {
+    expect(isExperimentalFeatureEnabled(undefined, WHITEBOARD_VIEW_FLAG)).toBe(false);
+    expect(isExperimentalFeatureEnabled({ experimentalFeatures: {} }, WHITEBOARD_VIEW_FLAG)).toBe(false);
+    expect(isExperimentalFeatureEnabled({ experimentalFeatures: { whiteboardView: false } }, WHITEBOARD_VIEW_FLAG)).toBe(false);
+    expect(isExperimentalFeatureEnabled({ experimentalFeatures: { whiteboardView: true } }, WHITEBOARD_VIEW_FLAG)).toBe(true);
   });
 
   it("keeps chat focus experimental and default off", () => {
@@ -196,40 +220,30 @@ describe("settings defaults invariants", () => {
     });
   });
 
-  describe("openTasksInRightSidebar default", () => {
-    it("keeps openTasksInRightSidebar explicitly false in project defaults", () => {
-      expect(DEFAULT_PROJECT_SETTINGS.openTasksInRightSidebar).toBe(false);
-      expect("openTasksInRightSidebar" in DEFAULT_PROJECT_SETTINGS).toBe(true);
-      expect(PROJECT_SETTINGS_KEYS).toContain("openTasksInRightSidebar");
-    });
-
-    it("keeps openTasksInRightSidebar project-scoped only", () => {
-      expect("openTasksInRightSidebar" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
-      expect(GLOBAL_SETTINGS_KEYS).not.toContain("openTasksInRightSidebar");
-    });
+  /*
+  FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+  FN-442 deleted the `openTasksInRightSidebar` and `openMobileTasksInPopup` project settings: the floating task window
+  is now the unconditional route, so the opt-in booleans had no subject left. Their describe blocks are replaced by
+  the retirement case below rather than kept asserting a deliberately removed contract.
+  */
+  it("retires the board task-open routing settings", () => {
+    for (const key of ["openTasksInRightSidebar", "openMobileTasksInPopup", "taskDetailChatFirst"]) {
+      expect(Object.hasOwn(DEFAULT_PROJECT_SETTINGS, key)).toBe(false);
+      expect(PROJECT_SETTINGS_KEYS).not.toContain(key);
+      expect(Object.hasOwn(DEFAULT_GLOBAL_SETTINGS, key)).toBe(false);
+      expect(GLOBAL_SETTINGS_KEYS).not.toContain(key);
+    }
   });
 
-  describe("openMobileTasksInPopup default", () => {
-    it("keeps openMobileTasksInPopup explicitly false in project defaults", () => {
-      expect(DEFAULT_PROJECT_SETTINGS.openMobileTasksInPopup).toBe(false);
-      expect("openMobileTasksInPopup" in DEFAULT_PROJECT_SETTINGS).toBe(true);
-      expect(PROJECT_SETTINGS_KEYS).toContain("openMobileTasksInPopup");
-    });
-
-    it("keeps openMobileTasksInPopup project-scoped only", () => {
-      expect("openMobileTasksInPopup" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
-      expect(GLOBAL_SETTINGS_KEYS).not.toContain("openMobileTasksInPopup");
-    });
-  });
-
-  describe("taskPopupsBoardListOnly default", () => {
-    it("keeps taskPopupsBoardListOnly explicitly true in project defaults", () => {
-      expect(DEFAULT_PROJECT_SETTINGS.taskPopupsBoardListOnly).toBe(true);
-      expect("taskPopupsBoardListOnly" in DEFAULT_PROJECT_SETTINGS).toBe(true);
-      expect(PROJECT_SETTINGS_KEYS).toContain("taskPopupsBoardListOnly");
-    });
-
-    it("keeps taskPopupsBoardListOnly project-scoped only", () => {
+  /*
+  FNXC:TaskWindowIdentity 2026-09-14-17:46:
+  FN-392 removed the per-view task-popup setting. Its absence from the defaults is what makes a historical stored value
+  unknown to the save split, so it can never be re-applied or rewritten.
+  */
+  describe("removed taskPopupsBoardListOnly setting", () => {
+    it("declares the key in neither scope", () => {
+      expect("taskPopupsBoardListOnly" in DEFAULT_PROJECT_SETTINGS).toBe(false);
+      expect(PROJECT_SETTINGS_KEYS).not.toContain("taskPopupsBoardListOnly");
       expect("taskPopupsBoardListOnly" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
       expect(GLOBAL_SETTINGS_KEYS).not.toContain("taskPopupsBoardListOnly");
     });
@@ -260,30 +274,53 @@ describe("settings defaults invariants", () => {
     });
   });
 
-  describe("taskDetailChatFirst default", () => {
-    it("keeps taskDetailChatFirst explicitly false in project defaults", () => {
-      expect(DEFAULT_PROJECT_SETTINGS.taskDetailChatFirst).toBe(false);
-      expect("taskDetailChatFirst" in DEFAULT_PROJECT_SETTINGS).toBe(true);
-      expect(PROJECT_SETTINGS_KEYS).toContain("taskDetailChatFirst");
-    });
-
-    it("keeps taskDetailChatFirst project-scoped only", () => {
-      expect("taskDetailChatFirst" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
-      expect(GLOBAL_SETTINGS_KEYS).not.toContain("taskDetailChatFirst");
+  describe("navigationPlacement default", () => {
+    it("defaults to footer and keeps the setting project-scoped", () => {
+      expect(DEFAULT_PROJECT_SETTINGS.navigationPlacement).toBe("footer");
+      expect("navigationPlacement" in DEFAULT_PROJECT_SETTINGS).toBe(true);
+      expect(PROJECT_SETTINGS_KEYS).toContain("navigationPlacement");
+      expect(isProjectSettingsKey("navigationPlacement")).toBe(true);
+      expect("navigationPlacement" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
+      expect(GLOBAL_SETTINGS_KEYS).not.toContain("navigationPlacement");
+      expect(isGlobalOnlySettingsKey("navigationPlacement")).toBe(false);
     });
   });
 
-  describe("quickChatCloseOnOutsideClick default", () => {
-    it("keeps Quick Chat outside-click dismissal explicitly true in project defaults", () => {
-      expect(DEFAULT_PROJECT_SETTINGS.quickChatCloseOnOutsideClick).toBe(true);
-      expect("quickChatCloseOnOutsideClick" in DEFAULT_PROJECT_SETTINGS).toBe(true);
-      expect(PROJECT_SETTINGS_KEYS).toContain("quickChatCloseOnOutsideClick");
+  /*
+  FNXC:RightSidebarOptional 2026-09-15-16:04:
+  FN-426 makes the right tool dock an opt-in. The default must stay explicitly false (not merely absent) so an
+  upgraded project lands on the redistributed accesses instead of the historical always-on dock.
+  */
+  describe("rightSidebarEnabled default", () => {
+    it("defaults to false and keeps the setting project-scoped", () => {
+      expect(DEFAULT_PROJECT_SETTINGS.rightSidebarEnabled).toBe(false);
+      expect("rightSidebarEnabled" in DEFAULT_PROJECT_SETTINGS).toBe(true);
+      expect(PROJECT_SETTINGS_KEYS).toContain("rightSidebarEnabled");
+      expect(isProjectSettingsKey("rightSidebarEnabled")).toBe(true);
+      expect("rightSidebarEnabled" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
+      expect(GLOBAL_SETTINGS_KEYS).not.toContain("rightSidebarEnabled");
+      expect(isGlobalOnlySettingsKey("rightSidebarEnabled")).toBe(false);
+    });
+  });
+
+  describe("taskDetailDefaultTab default", () => {
+    it("keeps taskDetailDefaultTab seeded to the historical activity landing tab", () => {
+      expect(DEFAULT_PROJECT_SETTINGS.taskDetailDefaultTab).toBe("activity");
+      expect("taskDetailDefaultTab" in DEFAULT_PROJECT_SETTINGS).toBe(true);
+      expect(PROJECT_SETTINGS_KEYS).toContain("taskDetailDefaultTab");
     });
 
-    it("keeps quickChatCloseOnOutsideClick project-scoped only", () => {
-      expect("quickChatCloseOnOutsideClick" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
-      expect(GLOBAL_SETTINGS_KEYS).not.toContain("quickChatCloseOnOutsideClick");
+    it("keeps taskDetailDefaultTab project-scoped only", () => {
+      expect("taskDetailDefaultTab" in DEFAULT_GLOBAL_SETTINGS).toBe(false);
+      expect(GLOBAL_SETTINGS_KEYS).not.toContain("taskDetailDefaultTab");
     });
+  });
+
+  it("retires project-level Quick Chat preferences", () => {
+    for (const key of ["quickChatButtonMode", "quickChatCloseOnOutsideClick", "showQuickChatFAB"]) {
+      expect(Object.hasOwn(DEFAULT_PROJECT_SETTINGS, key)).toBe(false);
+      expect(PROJECT_SETTINGS_KEYS).not.toContain(key);
+    }
   });
 
   describe("dismissModalsOnOutsideClick default", () => {
@@ -312,6 +349,16 @@ describe("settings defaults invariants", () => {
       expect("quickAddSubmitOnEnter" in DEFAULT_PROJECT_SETTINGS).toBe(false);
       expect(PROJECT_SETTINGS_KEYS).not.toContain("quickAddSubmitOnEnter");
       expect(isGlobalOnlySettingsKey("quickAddSubmitOnEnter")).toBe(true);
+    });
+  });
+
+  describe("chatSubmitOnEnter default", () => {
+    it("defaults chat Enter submission to automatic and global-scoped only", () => {
+      expect(DEFAULT_GLOBAL_SETTINGS.chatSubmitOnEnter).toBe("auto");
+      expect(GLOBAL_SETTINGS_KEYS).toContain("chatSubmitOnEnter");
+      expect("chatSubmitOnEnter" in DEFAULT_PROJECT_SETTINGS).toBe(false);
+      expect(PROJECT_SETTINGS_KEYS).not.toContain("chatSubmitOnEnter");
+      expect(isGlobalOnlySettingsKey("chatSubmitOnEnter")).toBe(true);
     });
   });
 

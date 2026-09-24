@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MilestoneSliceInterviewModal } from "../MilestoneSliceInterviewModal";
+import { KeyboardViewportOwnerProvider } from "../../hooks/useKeyboardViewportSurface";
 
 const mockStartMilestoneInterview = vi.fn();
 const mockStartSliceInterview = vi.fn();
@@ -279,6 +280,38 @@ describe("MilestoneSliceInterviewModal", () => {
     expect(modal?.getAttribute("style")).toContain("--vv-height: 400px");
   });
 
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-15:32:
+  FN-512 single-owner rule: inside a drawer/window host that already adapted its bottom edge this
+  modal publishes nothing, so no second translate/shrink stacks on the host's adjustment.
+  */
+  it("publishes no keyboard variables when a host container already owns the adaptation", () => {
+    mockUseMobileKeyboard.mockReturnValue({
+      keyboardOpen: true,
+      keyboardOverlap: 250,
+      viewportHeight: 400,
+      viewportOffsetTop: 50,
+    });
+
+    render(
+      <KeyboardViewportOwnerProvider value={{ owned: true }}>
+        <MilestoneSliceInterviewModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onApplied={vi.fn()}
+          targetType="milestone"
+          targetId="milestone-1"
+          targetTitle="Milestone 1"
+        />
+      </KeyboardViewportOwnerProvider>,
+    );
+    const modal = document.querySelector(".planning-modal");
+
+    expect(modal?.getAttribute("style") ?? "").not.toContain("--keyboard-overlap");
+    expect(modal?.getAttribute("style") ?? "").not.toContain("--vv-height");
+    expect(modal?.getAttribute("style") ?? "").not.toContain("--vv-offset-top");
+  });
+
   it("shows loading state after clicking Start Interview", async () => {
       mockStartMilestoneInterview.mockResolvedValue({ sessionId: "session-123" });
       mockConnectMilestoneInterviewStream.mockReturnValue({
@@ -506,13 +539,12 @@ describe("MilestoneSliceInterviewModal", () => {
         }
       });
 
-      // Give React time to update
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 100));
+      // FNXC:MissionInterview 2026-09-11-00:04: poll for the summary render with
+      // waitFor instead of a fixed 100ms sleep so the assertion resolves as soon
+      // as React flushes the onSummary update (faster, and never masks slowness).
+      await waitFor(() => {
+        expect(screen.getByText("Refined Scope")).toBeDefined();
       });
-
-      // Summary should show Refined Scope header
-      expect(screen.getByText("Refined Scope")).toBeDefined();
     });
   });
 

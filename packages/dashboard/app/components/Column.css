@@ -1,0 +1,84 @@
+/*
+FNXC:DoneColumnGeometry 2026-09-09-00:33:
+The Done scroller owns one normal-flow virtual-content block. Spacer heights and row spacing are therefore physical scroll extent, never shrinkable flex children or unmeasured parent gaps.
+
+FNXC:DesktopNavigation 2026-09-11-19:35:
+The floating desktop action bar does not reduce Board height. Add clearance only to each column's scroll tail so its final controls can scroll above the bar without recreating a dead shell region.
+*/
+.column-body {
+  display: block;
+  gap: 0;
+}
+
+.column-body > * + * {
+  margin-block-start: var(--space-xs);
+}
+
+.column-virtual-content {
+  min-inline-size: 0;
+}
+
+.column-virtual-row {
+  box-sizing: border-box;
+  padding-block-end: var(--space-xs);
+}
+
+.column-virtual-spacer {
+  inline-size: 100%;
+  min-block-size: 0;
+  pointer-events: none;
+}
+
+.column-pagination-footer {
+  min-block-size: var(--space-lg);
+  padding-block: var(--space-xs);
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.column-pagination-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  color: var(--color-error);
+}
+
+/*
+FNXC:NativeDensity 2026-09-11-00:30:
+Columns use a compact header/body rhythm and one subtle elevation without changing virtual rows, pagination extent, or scroll ownership. Virtual rows, pagination extent and scroll ownership are unchanged.
+*/
+.column {
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.column-header {
+  gap: var(--ui-density-2xs);
+  padding: var(--ui-density-md) var(--ui-density-md) 0;
+}
+
+.column-desc {
+  padding: var(--ui-density-2xs) var(--ui-density-md) var(--ui-density-sm);
+}
+
+.column-body {
+  padding: var(--ui-density-2xs) var(--ui-density-sm) var(--ui-density-sm);
+}
+
+.column-pagination-footer {
+  padding-block: var(--ui-density-2xs);
+}
+
+@media (max-width: 768px) {
+  .column-header {
+    padding-inline: var(--ui-density-sm);
+  }
+}
+
+/* FNXC:NativeShell 2026-09-09-18:24: The complete-lane History action shares compact header controls and must shrink without colliding with count, sort, or menu actions. */
+.column-history-button {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+}

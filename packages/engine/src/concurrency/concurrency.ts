@@ -1,9 +1,10 @@
 import {
-  compareTaskIdNumeric,
+  compareTasksByQueueOrder,
   countRunningAgentTasks,
   enrichRunningAgentTaskShape,
   isRunningAgentTask,
-  resolveEffectiveConcurrency,
+  isWorktreeCapacityHolder,
+  resolveMaxConcurrentSetting,
   resolveWorkflowIrForTask,
   type Task,
   type WorkflowIrResolverStore,
@@ -20,55 +21,57 @@ export const PRIORITY_EXECUTE = 1;
 export const PRIORITY_SPECIFY = 0;
 
 /*
-FNXC:WorktreeCapacity 2026-08-01-04:38:
-Agent concurrency and worktree capacity count the same canonical live-task
-population. Collapse them to one project admission ceiling so planning, execute,
-and merge cannot each observe and claim the final worktree slot independently.
+FNXC:CapacityModel 2026-09-01-14:49:
+Agent admission reads only `maxConcurrent`: it bounds provider/LLM load across every AI-active task.
+Execution-worktree capacity is an independent optional gate owned by the admission coordinator.
 */
-export function resolveActiveTaskCapacityLimit(params: {
+export function resolveAgentCapacityLimit(params: {
   maxConcurrent?: unknown;
-  maxWorktrees?: unknown;
-  worktreeLimitEnabled?: unknown;
 }): number {
-  return resolveEffectiveConcurrency(params).effectiveLimit;
+  return resolveMaxConcurrentSetting(params);
 }
 
-/**
- * FNXC:WorktreeCapacity 2026-08-08-04:27:
- * Every production admission owner must persist the same operator-visible explanation when the
- * shared live-task ceiling is full. Retained directories are not holders: report only canonical
- * live task IDs, and name `maxWorktrees` only when it is the binding configured ceiling.
- */
+/** Every admission owner reports the exhausted gate from that gate's own snapshot. */
 export function formatAdmissionCapacityQueuedReason(params: {
-  maxConcurrent: number;
-  maxWorktrees: number;
-  worktreeLimitEnabled?: boolean;
+  gate: "maxConcurrent" | "maxWorktrees";
+  limit: number;
   claimed: number;
   holderTaskIds: Iterable<string>;
 }): string {
-  const concurrency = resolveEffectiveConcurrency(params);
-  const limit = concurrency.effectiveLimit;
-  const gate = concurrency.bindingKnob;
   const holders = [...new Set(params.holderTaskIds)].sort();
-  return `queued — ${gate} capacity exhausted: used=${params.claimed}/${limit}; effectiveLimit=${limit}; bindingKnob=${gate}; holders=${holders.join(",") || "none"}`;
+  return `queued — ${params.gate} capacity exhausted: used=${params.claimed}/${params.limit}; gate=${params.gate}; holders=${holders.join(",") || "none"}`;
 }
 
-/** Lifecycle lanes ordered by the project admission coordinator. */
+/*
+FNXC:TaskQueueOrder 2026-09-17-12:07:
+FN-509 DELETED `admissionLanePriority`. The lane is still recorded — capacity reporting and the
+per-lane reservation handoff both read it — but it no longer ORDERS anything: a review candidate no
+longer overtakes an execute or planning candidate that has been waiting longer. Ranking across
+lanes was a hidden priority: the operator asked for one chronological queue plus an explicit Boost,
+and a lane rank silently reintroduced "some cards jump the line" under a different name.
+*/
+/** Lifecycle lanes recorded by the project admission coordinator. */
 export type AdmissionLane = "review" | "execute" | "planning";
-
-const admissionLanePriority: Record<AdmissionLane, number> = {
-  review: 0,
-  execute: 1,
-  planning: 2,
-};
 
 /** A task waiting to enter one of the top-level agent lanes. */
 export interface AdmissionCandidate {
   taskId: string;
   projectId: string;
-  /** Explicit lifecycle ownership; priority never depends on provider or column names. */
+  /** Explicit lifecycle ownership. Reporting and reservation handoff only — never an order. */
   lane: AdmissionLane;
+  /** Starting this candidate will occupy a new execution-worktree slot. */
+  consumesWorktree: boolean;
   createdAt?: string;
+  /*
+  FNXC:TaskQueueOrder 2026-09-17-12:07:
+  The card's Boost scope, carried so the coordinator ranks candidates with exactly the comparator
+  the board displays. Omitting these three fields does not fail loudly — it silently makes a Boost
+  ineffective in admission while it still shows at the head of the column — so every provider must
+  pass them through.
+  */
+  column?: string;
+  columnMovedAt?: string;
+  queueBoost?: Task["queueBoost"];
   /** Records ownership of the host reservation before the lane starts. */
   reserve?: () => void;
   /**
@@ -86,28 +89,24 @@ export interface AdmissionProvider {
 }
 
 /*
-FNXC:ConcurrencyAdmission 2026-08-01-15:42:
-FN-8705 requires every newly available project slot to finish review/merge work
-before ready execution and planning. The lane is explicit on each candidate so
-custom workflow column names and provider IDs cannot change lifecycle priority;
-age and task ID only preserve fairness within the same lane.
+FNXC:ConcurrencyAdmission 2026-08-01-15:42 / FNXC:TaskQueueOrder 2026-09-17-12:07:
+FN-8705's lane rank ("review before execute before planning") is REPLACED by FN-509's single
+chronological order across every lane: an effective Boost first, then creation oldest-first, then
+the deterministic id tiebreak. Custom workflow column names and provider IDs still cannot influence
+it, which was the original point; the difference is that the lifecycle lane cannot either.
+
+This is the order candidates are TRIED in, not permission to start. A card whose capacity, overlap,
+dependency, approval or pause gate still refuses keeps its place while the coordinator moves on to
+the next admissible candidate.
 */
-/**
- * Deterministic lifecycle-lane ordering for project admission. Invalid/missing
- * timestamps sort after valid timestamps only within one lane; numeric task ids
- * then lexical ids make malformed data deterministic.
- */
-export function compareAdmissionCandidates(a: Pick<AdmissionCandidate, "taskId" | "createdAt" | "lane">, b: Pick<AdmissionCandidate, "taskId" | "createdAt" | "lane">): number {
-  const laneOrder = admissionLanePriority[a.lane] - admissionLanePriority[b.lane];
-  if (laneOrder !== 0) return laneOrder;
-  const aTime = a.createdAt ? Date.parse(a.createdAt) : Number.NaN;
-  const bTime = b.createdAt ? Date.parse(b.createdAt) : Number.NaN;
-  const aValid = Number.isFinite(aTime);
-  const bValid = Number.isFinite(bTime);
-  if (aValid !== bValid) return aValid ? -1 : 1;
-  if (aValid && aTime !== bTime) return aTime - bTime;
-  const numeric = compareTaskIdNumeric(a.taskId, b.taskId);
-  return numeric !== 0 ? numeric : a.taskId.localeCompare(b.taskId);
+export function compareAdmissionCandidates(
+  a: Pick<AdmissionCandidate, "taskId" | "createdAt" | "column" | "columnMovedAt" | "queueBoost">,
+  b: Pick<AdmissionCandidate, "taskId" | "createdAt" | "column" | "columnMovedAt" | "queueBoost">,
+): number {
+  return compareTasksByQueueOrder(
+    { id: a.taskId, createdAt: a.createdAt ?? "", ...(a.column !== undefined ? { column: a.column } : {}), ...(a.columnMovedAt !== undefined ? { columnMovedAt: a.columnMovedAt } : {}), ...(a.queueBoost ? { queueBoost: a.queueBoost } : {}) },
+    { id: b.taskId, createdAt: b.createdAt ?? "", ...(b.column !== undefined ? { column: b.column } : {}), ...(b.columnMovedAt !== undefined ? { columnMovedAt: b.columnMovedAt } : {}), ...(b.queueBoost ? { queueBoost: b.queueBoost } : {}) },
+  );
 }
 
 /*
@@ -125,11 +124,11 @@ export class ProjectAdmissionCoordinator {
    * are deliberately project-scoped, so a prompt handoff cannot let a second
    * same-project admission observe stale persisted rows and exceed maxConcurrent.
    */
-  private reservations = new Map<string, Set<string>>();
+  private reservations = new Map<string, Map<string, { consumesWorktree: boolean }>>();
 
-  private reserve(projectId: string, taskId: string): void {
-    const tasks = this.reservations.get(projectId) ?? new Set<string>();
-    tasks.add(taskId);
+  private reserve(projectId: string, taskId: string, consumesWorktree: boolean): void {
+    const tasks = this.reservations.get(projectId) ?? new Map<string, { consumesWorktree: boolean }>();
+    tasks.set(taskId, { consumesWorktree });
     this.reservations.set(projectId, tasks);
   }
 
@@ -156,24 +155,43 @@ export class ProjectAdmissionCoordinator {
 
   inspectProjectStateForTests(projectId: string): {
     reservedCount: number;
+    reservedWorktreeCount: number;
     draining: boolean;
     providerIds: string[];
   } {
     return {
       reservedCount: this.reservationCount(projectId),
+      reservedWorktreeCount: this.reservationCount(projectId, true),
       draining: this.draining.has(projectId),
       providerIds: [...(this.providers.get(projectId)?.keys() ?? [])].sort(),
     };
   }
 
-  private reservationCount(projectId: string): number {
-    return this.reservations.get(projectId)?.size ?? 0;
+  private reservationCount(projectId: string, worktreeOnly = false): number {
+    const reservations = this.reservations.get(projectId);
+    if (!reservations || !worktreeOnly) return reservations?.size ?? 0;
+    let count = 0;
+    for (const reservation of reservations.values()) {
+      if (reservation.consumesWorktree) count += 1;
+    }
+    return count;
+  }
+
+  private reservationTaskIds(projectId: string, worktreeOnly: boolean): string[] {
+    const reservations = this.reservations.get(projectId);
+    if (!reservations) return [];
+    const ids: string[] = [];
+    for (const [taskId, reservation] of reservations) {
+      if (!worktreeOnly || reservation.consumesWorktree) ids.push(taskId);
+    }
+    return ids;
   }
 
   private async occupiedCount(params: {
     projectId: string;
     claimed: () => Promise<number> | number;
     claimedTaskIds?: () => Promise<Iterable<string>> | Iterable<string>;
+    worktreeOnly?: boolean;
   }): Promise<number> {
     /*
     FNXC:ConcurrencyAdmission 2026-08-01-07:35:
@@ -183,12 +201,13 @@ export class ProjectAdmissionCoordinator {
     reservations observed on both sides of the read so that transfer window is conservatively
     counted once. The next admission gets a fresh durable snapshot and naturally sheds the old id.
     */
-    const reservations = new Set(this.reservations.get(params.projectId) ?? []);
+    const worktreeOnly = params.worktreeOnly === true;
+    const reservations = new Set(this.reservationTaskIds(params.projectId, worktreeOnly));
     const claimed = await params.claimed();
-    for (const taskId of this.reservations.get(params.projectId) ?? []) reservations.add(taskId);
+    for (const taskId of this.reservationTaskIds(params.projectId, worktreeOnly)) reservations.add(taskId);
     if (!params.claimedTaskIds) return claimed + reservations.size;
     const claimedIds = new Set(await params.claimedTaskIds());
-    for (const taskId of this.reservations.get(params.projectId) ?? []) reservations.add(taskId);
+    for (const taskId of this.reservationTaskIds(params.projectId, worktreeOnly)) reservations.add(taskId);
     let pendingReservations = 0;
     for (const taskId of reservations) {
       if (!claimedIds.has(taskId)) pendingReservations += 1;
@@ -204,6 +223,7 @@ export class ProjectAdmissionCoordinator {
   async reserveIfAvailable(params: {
     projectId: string;
     taskId: string;
+    consumesWorktree: boolean;
     maxConcurrent: number;
     claimed: () => Promise<number> | number;
     claimedTaskIds?: () => Promise<Iterable<string>> | Iterable<string>;
@@ -218,7 +238,7 @@ export class ProjectAdmissionCoordinator {
         return;
       }
       if (await this.occupiedCount(params) >= params.maxConcurrent) return;
-      this.reserve(params.projectId, params.taskId);
+      this.reserve(params.projectId, params.taskId, params.consumesWorktree);
       reserved = true;
     })();
     this.draining.set(params.projectId, drain);
@@ -248,6 +268,12 @@ export class ProjectAdmissionCoordinator {
     claimed: () => Promise<number> | number;
     /** Canonically live task ids, used to de-duplicate reservations after persistence catches up. */
     claimedTaskIds?: () => Promise<Iterable<string>> | Iterable<string>;
+    /** Optional execution-checkout dimension; omission means no worktree gate exists. */
+    worktreeGate?: {
+      limit: number;
+      claimed: () => Promise<number> | number;
+      claimedTaskIds?: () => Promise<Iterable<string>> | Iterable<string>;
+    };
     /** One-shot source for callers that do not hold a durable lane registration. */
     refresh?: () => Promise<AdmissionCandidate[]>;
     semaphore?: Pick<AgentSemaphore, "tryAcquire" | "release">;
@@ -289,6 +315,24 @@ export class ProjectAdmissionCoordinator {
       this function exists to prevent.
       */
       for (const winner of candidates) {
+        /*
+        FNXC:CapacityModel 2026-09-01-14:49:
+        A worktree-blocked execute candidate must not starve checkout-free planning candidates ordered
+        behind it. Continue through the same deterministic candidate list; returning here would couple
+        the two limits again even though the planning candidate consumes no execution-worktree slot.
+        */
+        if (
+          winner.consumesWorktree
+          && params.worktreeGate
+          && await this.occupiedCount({
+            projectId: params.projectId,
+            claimed: params.worktreeGate.claimed,
+            claimedTaskIds: params.worktreeGate.claimedTaskIds,
+            worktreeOnly: true,
+          }) >= params.worktreeGate.limit
+        ) {
+          continue;
+        }
         const acquiredHostSlot = hasReservableHostSlot
           ? params.semaphore!.tryAcquire()
           : true;
@@ -298,7 +342,7 @@ export class ProjectAdmissionCoordinator {
         // The project reservation is independent of the optional host semaphore.
         // It bridges every lane's dispatch-to-persist gap, including runtimes
         // where the cross-project semaphore is intentionally absent.
-        this.reserve(params.projectId, winner.taskId);
+        this.reserve(params.projectId, winner.taskId, winner.consumesWorktree);
         /*
         FNXC:ConcurrencyAdmission 2026-07-26-10:35:
         Unwind EXACTLY what this attempt took. Two ways a naive `semaphore.release()` corrupts
@@ -528,6 +572,16 @@ export async function persistedTopLevelAgentTaskIdsFromStore(store: WorkflowIrRe
   return ids;
 }
 
+/** Trait-aware execution-worktree holders, including WIP tasks in the acquire/persist window. */
+export async function persistedWorktreeHolderTaskIdsFromStore(store: WorkflowIrResolverStore, tasks: Task[]): Promise<string[]> {
+  const enriched = await enrichedTopLevelAgentTasksFromStore(store, tasks);
+  const ids: string[] = [];
+  for (const task of enriched) {
+    if (isWorktreeCapacityHolder(task)) ids.push(task.id);
+  }
+  return ids;
+}
+
 export async function persistedTopLevelAgentSlotsFromStore(store: WorkflowIrResolverStore, tasks: Task[]): Promise<number> {
   return countRunningAgentTasks(await enrichedTopLevelAgentTasksFromStore(store, tasks));
 }
@@ -556,7 +610,7 @@ export function computeTopLevelConcurrencyClaimed(params: {
  *
  * FNXC:ConcurrencyAdmission 2026-08-03-12:00:
  * FN-8453 forbids admission from raw task rows whenever workflow IR is available:
- * custom complete/archived columns can retain stale session metadata, so each row
+ * custom Complete columns can retain stale session metadata, so each live row
  * must be trait-enriched before it is allowed to occupy a top-level capacity slot.
  */
 export async function computeTopLevelConcurrencyClaimedFromStore(params: {

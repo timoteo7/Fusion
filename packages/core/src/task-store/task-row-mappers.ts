@@ -16,13 +16,12 @@ import {mkdir, writeFile, rename, unlink} from "node:fs/promises";
 import {join} from "node:path";
 import type {Task, RunAuditEvent, MergeQueueEntry, MergeRequestRecord, CompletionHandoffMarker, WorkflowWorkItem, PrEntity, PrConflictState, PrChecksRollup, PrReviewDecision} from "../types.js";
 import "../builtin-traits.js";
-import {normalizeTaskPriority} from "../tasks/task-priority.js";
+import { normalizeTaskQueueBoost } from "../tasks/task-queue-order.js";
 import {fromJson} from "../db/db.js";
 import {generateTaskLineageId} from "../tasks/task-lineage.js";
 import {type TaskRow, type TaskPersistSerializationContext, type TaskColumnDescriptor, TASK_COLUMN_DESCRIPTORS, TASK_COLUMN_DESCRIPTOR_BY_COLUMN} from "../task-store/persistence.js";
 import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
 import {readTaskRow as readTaskRowAsync} from "../task-store/async/async-persistence.js";
-import {findArchivedTaskEntry} from "../task-store/async/async-archive-lineage.js";
 import type {PrEntityRow, RunAuditEventRow, MergeQueueRow, MergeRequestRow, CompletionHandoffMarkerRow, WorkflowWorkItemRow} from "../task-store/row-types.js";
 
 export function getTaskSelectClauseImpl2(store: TaskStore, slim: boolean, tableAlias?: string): string {
@@ -32,7 +31,7 @@ export function getTaskSelectClauseImpl2(store: TaskStore, slim: boolean, tableA
 
     const prefix = tableAlias ? `${tableAlias}.` : "";
     return [
-      "id", "lineageId", "title", "description", "priority", "\"column\"", "status", "size", "reviewLevel", "currentStep",
+      "id", "lineageId", "title", "description", "queueBoost", "\"column\"", "status", "size", "reviewLevel", "currentStep",
       "worktree", "blockedBy", "overlapBlockedBy", "paused", "pausedReason", "wedgeNotification", "userPaused", "baseBranch", "branch", "autoMerge", "autoMergeProvenance", "executionStartBranch", "baseCommitSha",
       "modelPresetId", "modelProvider", "credentialInstanceId", "modelId",
       "validatorModelProvider", "validatorCredentialInstanceId", "validatorModelId",
@@ -40,9 +39,9 @@ export function getTaskSelectClauseImpl2(store: TaskStore, slim: boolean, tableA
       "mergeRetries", "aiMergeReviewReconciliation", "workflowStepRetries", "stuckKillCount", "resumeLimboCount", "executeRequeueLoopCount", "graphResumeRetryCount", "consecutiveToolFailureRetryCount", "executorEscalationAttempted", "toolFailureDetectorLogCursor", "toolFailureRetryExhaustedAuditEmitted", "resumeLimboTipSha", "resumeLimboStepSignature", "executeRequeueLoopSignature", "postReviewFixCount", "planReviewReplanCount", "recoveryRetryCount", "sessionContentionHoldCount", "sessionContentionWaitReason", "taskDoneRetryCount", "bulkCompletionRefusalAt", "worktreeSessionRetryCount", "completionHandoffLimboRecoveryCount", "verificationFailureCount", "mergeConflictBounceCount", "mergeAuditBounceCount", "mergeTransientRetryCount", "branchConflictRecoveryCount", "reviewerContextRetryCount", "reviewerFallbackRetryCount", "reviewConvergenceStage", "reviewConvergenceEscalationCount", "nextRecoveryAt",
       "error", "summary", "recommendations", "thinkingLevel", "validatorThinkingLevel", "planningThinkingLevel", "mergerThinkingLevel", "executionMode",
       "tokenUsageInputTokens", "tokenUsageOutputTokens", "tokenUsageCachedTokens", "tokenUsageCacheWriteTokens", "tokenUsageTotalTokens", "tokenUsageFirstUsedAt", "tokenUsageLastUsedAt", "tokenUsageModelProvider", "tokenUsageModelId", "tokenUsagePerModel", "tokenBudgetSoftAlertedAt", "tokenBudgetHardAlertedAt", "tokenBudgetOverride",
-      "createdAt", "updatedAt", "columnMovedAt", "firstExecutionAt", "cumulativeActiveMs", "cumulativePlanningMs", "planningStartedAt", "executionStartedAt", "executionCompletedAt",
+      "createdAt", "updatedAt", "columnMovedAt", "firstExecutionAt", "cumulativeActiveMs", "cumulativePlanningMs", "planningStartedAt", "cumulativePausedMs", "pausedStartedAt", "executionStartedAt", "executionCompletedAt",
       "dependencies", "steps", "stepReports", "customFields", "comments", "review", "reviewState", "workflowStepResults", "steeringComments",
-      "attachments", "prInfo", "prInfos", "issueInfo", "githubTracking", "sourceIssueProvider", "sourceIssueRepository", "sourceIssueExternalIssueId", "sourceIssueNumber", "sourceIssueUrl", "sourceIssueClosedAt", "mergeDetails", "workspaceWorktrees", "repositoryScope", "externalBlock",
+      "attachments", "prInfo", "prInfos", "issueInfo", "githubTracking", "sourceIssueProvider", "sourceIssueRepository", "sourceIssueExternalIssueId", "sourceIssueNumber", "sourceIssueUrl", "sourceIssueClosedAt", "mergeDetails", "workspaceWorktrees", "repositoryScope", "externalBlock", "planningFailure", "humanPlanApproval", "humanMergeApproval",
       "noCommitsExpected", "enabledWorkflowSteps", "modifiedFiles", "declaredSymbols",
       "missionId", "sliceId", "scopeOverride", "scopeOverrideReason", "scopeAutoWiden", "assignedAgentId", "pausedByAgentId", "assigneeUserId", "nodeId", "effectiveNodeId", "effectiveNodeSource",
       "sourceType", "sourceAgentId", "sourceRunId", "sourceSessionId", "sourceMessageId", "sourceParentTaskId", "sourceMetadata", "proposalClaimId",
@@ -90,7 +89,13 @@ export function normalizeTaskFromDiskImpl(store: TaskStore, task: Task): Task {
     if (!Array.isArray(task.log)) task.log = [];
     if (!Array.isArray(task.dependencies)) task.dependencies = [];
     if (!Array.isArray(task.steps)) task.steps = [];
-    task.priority = normalizeTaskPriority(task.priority);
+    /* FNXC:TaskQueueOrder 2026-09-17-12:07: a resumed task.json may carry a legacy `priority`
+       string or a malformed `queueBoost`. Reading stays tolerant — the legacy field is dropped
+       rather than re-emitted, and unusable rank data degrades to "no boost" instead of throwing. */
+    delete (task as { priority?: unknown }).priority;
+    const normalizedBoost = normalizeTaskQueueBoost(task.queueBoost);
+    if (normalizedBoost) task.queueBoost = normalizedBoost;
+    else delete (task as { queueBoost?: unknown }).queueBoost;
     return task;
   }
 
@@ -154,8 +159,10 @@ export async function readTaskForMoveImpl(store: TaskStore, id: string): Promise
     // Backend mode: read the task row directly via the async helper (without
     // acquiring the task lock). This method is called INSIDE withTaskLock from
     // moveTask/handoffToReview, so using getTask() (which also acquires the
-    // lock) would deadlock. We read the raw row and convert it. Fall back to
-    // archive lookup if the task is not in the live table.
+    // lock) would deadlock. We read the raw row and convert it.
+    // FNXC:TaskArchiveRemoval 2026-09-04-18:25:
+    // Move paths are live-only. A missing row must not fall back to a cold historical snapshot,
+    // because that would expose migration/forensic data to a lifecycle mutation.
         const layer = store.asyncLayer!;
     const pgRow = await readTaskRowAsync(layer, id, { includeDeleted: true });
     if (pgRow) {
@@ -164,11 +171,6 @@ export async function readTaskForMoveImpl(store: TaskStore, id: string): Promise
       }
       return store.rowToTask(store.pgRowToTaskRow(pgRow));
     }
-    // Fall back to archive lookup (soft-deleted/archived tasks).
-    const entry = await findArchivedTaskEntry(layer.db, id, layer.projectId);
-    if (entry) {
-      return store.archiveEntryToTask(entry, false);
-    }
     throw new Error(`Task ${id} not found`);
 }
 
@@ -176,7 +178,6 @@ export function rowToMergeQueueEntryImpl(store: TaskStore, row: MergeQueueRow): 
     return {
       taskId: row.taskId,
       enqueuedAt: row.enqueuedAt,
-      priority: normalizeTaskPriority(row.priority),
       leasedBy: row.leasedBy,
       leasedAt: row.leasedAt,
       leaseExpiresAt: row.leaseExpiresAt,

@@ -7,6 +7,14 @@ import {
   ensureDashboardClientBuild,
 } from "./build-output-setup";
 
+function listProductionFiles(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.name === "__tests__") return [];
+    const absolute = resolve(root, entry.name);
+    return entry.isDirectory() ? listProductionFiles(absolute) : [absolute];
+  });
+}
+
 describe("mobile build output chunking", () => {
   beforeAll(() => {
     // Clean worktrees and CI often start without dist/client; build explicitly so
@@ -43,6 +51,58 @@ describe("mobile build output chunking", () => {
     expect(() => readFileSync(bundledFontPath)).not.toThrow();
     expect(indexHtml).toContain('/fonts/SymbolsNerdFontMono-Regular.ttf');
     expect(indexHtml).toContain('rel="preload"');
+  });
+
+  test("compiles homemade Alpha without leaking its component selectors outside the Alpha scope", () => {
+    const css = readdirSync(dashboardClientAssetsDir)
+      .filter((file) => file.endsWith(".css"))
+      .map((file) => readFileSync(resolve(dashboardClientAssetsDir, file), "utf8"))
+      .join("\n");
+    const scopeStart = css.indexOf('@scope (:where(:root,[data-ui-portal="true"])){');
+    expect(scopeStart).toBeGreaterThanOrEqual(0);
+    expect(css).not.toContain("@apply");
+    expect(css).not.toContain("@import");
+
+    let depth = 0;
+    let scopeEnd = -1;
+    for (let index = css.indexOf("{", scopeStart); index < css.length; index += 1) {
+      if (css[index] === "{") depth += 1;
+      if (css[index] === "}") depth -= 1;
+      if (depth === 0) {
+        scopeEnd = index;
+        break;
+      }
+    }
+    expect(scopeEnd).toBeGreaterThan(scopeStart);
+    const alphaMarkerOffsets = [...css.matchAll(/\[data-ui\]/g)].map((match) => match.index);
+    expect(alphaMarkerOffsets.length).toBeGreaterThan(0);
+    expect(css).toContain("data-alpha-surface");
+    expect(css.toLowerCase()).not.toContain(["hero", "ui"].join(""));
+    expect(css.toLowerCase()).not.toContain("tailwind");
+    expect(css).not.toContain("@source");
+  });
+
+  test("refuses the retired component pipeline in source, config, manifest, and emitted assets", () => {
+    const retiredBrand = ["hero", "ui"].join("");
+    const productionFiles = [
+      ...listProductionFiles(resolve(import.meta.dirname, "..")),
+      resolve(import.meta.dirname, "../../package.json"),
+      resolve(import.meta.dirname, "../../vite.config.ts"),
+    ].filter((file) => /\.(?:css|tsx?|json)$/.test(file));
+    const productionSource = productionFiles.map((file) => readFileSync(file, "utf8")).join("\n").toLowerCase();
+    const emittedSource = readdirSync(dashboardClientAssetsDir)
+      .filter((file) => /\.(?:css|js)$/.test(file))
+      .map((file) => readFileSync(resolve(dashboardClientAssetsDir, file), "utf8"))
+      .join("\n")
+      .toLowerCase();
+
+    expect(productionSource).not.toContain(retiredBrand);
+    expect(productionSource).not.toContain("tailwindcss");
+    expect(productionSource).not.toContain("@apply");
+    expect(productionSource).not.toContain("@source");
+    expect(emittedSource).not.toContain(retiredBrand);
+    expect(emittedSource).not.toContain("@apply");
+    expect(emittedSource).not.toContain("@source");
   });
 
   test("keeps theme-data stylesheet link after all other stylesheet links in head", () => {

@@ -1,5 +1,7 @@
+import { ViewHeader } from "./ViewHeader";
+import { ViewLayoutContent } from "./ViewLayout";
 import "./ScriptsModal.css";
-import { useState, useEffect, useCallback, useRef, useMemo, type CSSProperties } from "react";
+import { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo, type CSSProperties } from "react";
 import { useTranslation, Trans } from "react-i18next";
 import type { Task } from "@fusion/core";
 import { getErrorMessage } from "@fusion/core";
@@ -7,9 +9,15 @@ import type { ToastType } from "../hooks/useToast";
 import { useConfirm } from "../hooks/useConfirm";
 import { getPathBasename } from "../utils/pathDisplay";
 import { FloatingWindow } from "./FloatingWindow";
+/* FNXC:ToolSurfaces 2026-09-15-16:04: FN-426 — the PR section reuses the existing view, lazily so Git's other sections do not pay for it. */
+const PullRequestView = lazy(() => import("./PullRequestView").then((m) => ({ default: m.PullRequestView })));
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
+import { useKeyboardViewportOwnedByAncestor } from "../hooks/useKeyboardViewportSurface";
+import { isKeyboardEditableElement } from "../utils/mobileKeyboardViewport";
 import { useMobileScrollLock } from "../hooks/useMobileScrollLock";
 import { useEmbeddedPresentation, type ModalPresentation } from "../hooks/useEmbeddedPresentation";
+import { useVirtualizedList } from "../hooks/useVirtualizedList";
+import { useAutoPaginationSentinel } from "../hooks/useAutoPaginationSentinel";
 import { useModalDismissPreference } from "../hooks/useOverlayDismiss";
 import { useViewportMode } from "../hooks/useViewportMode";
 import { copyTextToClipboard } from "../utils/copyToClipboard";
@@ -100,7 +108,13 @@ import {
 
 // ── Types & Constants ─────────────────────────────────────────────
 
-type SectionId = "status" | "changes" | "commits" | "branches" | "worktrees" | "stashes" | "recovery" | "remotes";
+/*
+FNXC:ToolSurfaces 2026-09-15-16:04:
+FN-426 folds Pull Requests into Git Manager as a section instead of leaving it a standalone destination. Git already
+owns branches, remotes, and worktrees, so a pull request belongs beside them; the PR view, its routes, and its actions
+are reused verbatim rather than reimplemented here.
+*/
+export type SectionId = "status" | "changes" | "commits" | "branches" | "worktrees" | "stashes" | "recovery" | "remotes" | "pull-requests";
 
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
@@ -116,6 +130,7 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ComponentType<{ size
   */
   { id: "recovery", label: "Recovery", icon: History },
   { id: "remotes", label: "Remotes", icon: GitMerge },
+  { id: "pull-requests", label: "Pull Requests", icon: GitPullRequest },
 ];
 
 // ── Helper Utilities ──────────────────────────────────────────────
@@ -219,11 +234,18 @@ interface GitManagerModalProps {
   Embedded mode must disable modal-only behaviors (scroll lock, resize persistence, Escape-to-close, overlay click dismiss) since they break the host page.
   */
   presentation?: ModalPresentation;
+  /*
+  FNXC:ToolSurfaces 2026-09-15-16:04:
+  FN-426: an old `pull-requests` link or a Pull Requests navigation click lands on Git Manager already showing that
+  section, optionally with the linked PR selected. Absent props keep the historical Status landing.
+  */
+  initialSection?: SectionId;
+  selectedPullRequestId?: string;
 }
 
 // ── Main Component ────────────────────────────────────────────────
 
-export function GitManagerModal({ isOpen, onClose, tasks: _tasks, addToast, projectId, presentation = "modal" }: GitManagerModalProps) {
+export function GitManagerModal({ isOpen, onClose, tasks: _tasks, addToast, projectId, presentation = "modal", initialSection, selectedPullRequestId }: GitManagerModalProps) {
   const { t } = useTranslation("app");
   const confirmContext = useConfirm();
   const viewportMode = useViewportMode();
@@ -233,13 +255,30 @@ export function GitManagerModal({ isOpen, onClose, tasks: _tasks, addToast, proj
   const { keyboardOverlap, viewportHeight, viewportOffsetTop, keyboardOpen } = useMobileKeyboard({
     enabled: viewportMode === "mobile",
   });
-  const keyboardStyle: CSSProperties = keyboardOpen
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-15:32:
+  FN-512 remediation: on a phone this modal is rendered INSIDE a container (mobile drawer, drawer-
+  presented FloatingWindow) that already pulled its own bottom edge to the visible bound. Publishing
+  `--keyboard-overlap`/`--vv-offset-top` there would translate and shrink the panel a second time,
+  which is exactly the competing-adjustment defect this task removes. One owner per container: when
+  an ancestor owns the adaptation, this surface emits nothing and keeps its resting geometry.
+  */
+  const keyboardOwnedByAncestor = useKeyboardViewportOwnedByAncestor();
+  const keyboardStyle: CSSProperties = keyboardOpen && !keyboardOwnedByAncestor
     ? ({
         "--keyboard-overlap": `${keyboardOverlap}px`,
         "--vv-offset-top": `${viewportOffsetTop}px`,
         ...(viewportHeight !== null ? { "--vv-height": `${viewportHeight}px` } : {}),
       } as CSSProperties)
     : {};
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+  FN-512: the deferred drift reset must not outlive this close. The frame was previously
+  unconditional, so if the operator closed Git and immediately focused a field in another surface,
+  the queued `scrollTo(0, 0)` landed during THAT keyboard raise — which on WebKit is itself a reason
+  to abort the raise. The deferred pass now runs only while nothing editable has taken focus in the
+  meantime, and the immediate reset (with the keyboard already dismissing) is unchanged.
+  */
   const handleClose = useCallback(() => {
     if (viewportMode === "mobile") {
       const activeElement = document.activeElement;
@@ -248,12 +287,24 @@ export function GitManagerModal({ isOpen, onClose, tasks: _tasks, addToast, proj
       }
       window.scrollTo(0, 0);
       requestAnimationFrame(() => {
+        if (isKeyboardEditableElement(document.activeElement)) return;
         window.scrollTo(0, 0);
       });
     }
     onClose();
   }, [onClose, viewportMode]);
-  const [activeSection, setActiveSection] = useState<SectionId>("status");
+  const [activeSection, setActiveSection] = useState<SectionId>(initialSection ?? "status");
+  /*
+  FNXC:ToolSurfaces 2026-09-15-16:04:
+  FN-426: a later request for a different section (a second Pull Requests link while Git is already open) must move
+  the panel, while an unchanged prop must never fight the operator's own tab clicks.
+  */
+  const lastRequestedSectionRef = useRef<SectionId | undefined>(initialSection);
+  useEffect(() => {
+    if (!initialSection || lastRequestedSectionRef.current === initialSection) return;
+    lastRequestedSectionRef.current = initialSection;
+    setActiveSection(initialSection);
+  }, [initialSection]);
   const [loading, setLoading] = useState(false);
   const [sectionError, setSectionError] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
@@ -1169,6 +1220,7 @@ export function GitManagerModal({ isOpen, onClose, tasks: _tasks, addToast, proj
                     stashes: t("git.sectionStashes", "Stashes"),
                     recovery: t("git.sectionRecovery", "Recovery"),
                     remotes: t("git.sectionRemotes", "Remotes"),
+                    "pull-requests": t("pr.view.title", "Pull Requests"),
                   }[section.id] ?? section.label;
                   return (
                     <button
@@ -1221,6 +1273,18 @@ export function GitManagerModal({ isOpen, onClose, tasks: _tasks, addToast, proj
                       {t("git.retry", "Retry")}
                     </button>
                   </div>
+                )}
+
+                {/*
+                FNXC:ToolSurfaces 2026-09-15-16:04:
+                FN-426: the PR section renders the SAME PullRequestView the standalone page used, with the same
+                project scope and the same linked-detail selection. It owns its own loading and error states, so it is
+                deliberately outside Git's section `loading` gate and fetches nothing through `fetchSectionData`.
+                */}
+                {activeSection === "pull-requests" && (
+                  <Suspense fallback={null}>
+                    <PullRequestView pullRequestId={selectedPullRequestId} projectId={projectId} />
+                  </Suspense>
                 )}
 
                 {/* ── Status Panel ── */}
@@ -1391,29 +1455,32 @@ export function GitManagerModal({ isOpen, onClose, tasks: _tasks, addToast, proj
       dragHandleSelector=".modal-header"
       className="floating-window--git-manager"
       defaultSize={{ width: Math.min(window.innerWidth * 0.95, 1400), height: window.innerHeight * 0.92 }}
+      /* FNXC:FloatingWindowGeometry 2026-09-16-05:45: FN-456 opens every window at the shared 1.43 ratio, but the operator excluded the integral views — "ça ne doit pas impacter les vues intégrales.. par exemple le gitmanager qui s'ouvre depuis le menu more du footer". Git Manager deliberately fills the work area, so its opening geometry stays exactly pre-FN-456. */
+      openingSizePolicy="full-view"
       minSize={{ width: 360, height: 280 }}
-      persistGeometryKey="floating-window:git-manager"
       suspendGeometryPersistenceOnMobile
       suspendGeometryPersistenceOnShortViewport
       /* FNXC:ModalTouchGeometry 2026-07-26-16:10: Git Manager keeps the global default-off backdrop preference; FloatingWindow's guarded pointer listener preserves drag-safe outside dismissal. */
       closeOnOutsidePointerDown={dismissOnOutsidePointerDown}
     >
       <div className="modal gm-modal" ref={modalRef} style={keyboardStyle}>
-        <div className="modal-header">
-          <h3>
-            <FolderGit2 size={18} style={{ marginRight: 8, verticalAlign: "middle" }} />
-            {t("git.modalTitle", "Git Manager")}
-          </h3>
-          <div className="gm-header-actions">
-            <button className="modal-close" onClick={handleClose} aria-label={t("git.close", "Close")}>
-              <X size={18} />
-            </button>
-          </div>
-        </div>
+        {/*
+        FNXC:StandardizedViewLayout 2026-09-13-22:40:
+        FN-379 classifies Git Manager as a shared-chrome destination. The canonical ViewHeader owns its title and
+        single exit while the section body stays in the bounded content zone, so the embedded dock presentation
+        above and this window presentation frame exactly one header.
+        */}
+        <ViewHeader
+          className="modal-header"
+          icon={FolderGit2}
+          title={t("git.modalTitle", "Git Manager")}
+          onClose={handleClose}
+          closeButtonProps={{ "aria-label": t("git.close", "Close") }}
+        />
 
-        <div className="gm-layout">
+        <ViewLayoutContent className="gm-layout">
         {gitBody}
-        </div>
+        </ViewLayoutContent>
       </div>
     </FloatingWindow>
   );
@@ -2148,6 +2215,11 @@ function CommitsPanel({
   copyToClipboard: (text: string, label?: string) => void;
 }) {
   const { t } = useTranslation("app");
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const virtualCommits = useVirtualizedList({ collectionKey: `${commitWorktreePath ?? "current"}:${commitSearch}`, keys: commits.map((commit) => commit.hash), scrollRef: listRef, estimateHeight: 76, maxRenderedRows: 60, initialAlign: "start" });
+  const visibleCommitHashes = new Set(virtualCommits.visibleKeys);
+  const renderedCommits = commits.filter((commit) => visibleCommitHashes.has(commit.hash));
+  const pagination = useAutoPaginationSentinel({ rootRef: listRef, hasMore: canLoadMore, loading: false, onLoadMore, direction: "end" });
   const commitTargetWorktrees = useMemo(() => {
     const seen = new Set<string>();
     return worktrees.filter((worktree) => {
@@ -2200,13 +2272,15 @@ function CommitsPanel({
           </div>
         </div>
       </div>
-      <div className="gm-commits-list">
+      <div className="gm-commits-list" ref={listRef} onScroll={virtualCommits.onScroll}>
         {commits.length === 0 ? (
           <div className="gm-empty">
             {commitSearch ? t("git.noMatchingCommits", "No matching commits") : t("git.noCommitsFound", "No commits found")}
           </div>
         ) : (
-          commits.map((commit, idx) => (
+          <>
+          {virtualCommits.topSpacerHeight > 0 ? <div aria-hidden="true" style={{ height: virtualCommits.topSpacerHeight }} /> : null}
+          {renderedCommits.map((commit, idx) => (
             <div key={commit.hash} className="gm-commit-item">
               {/* Simple commit graph line */}
               <div className="gm-commit-graph">
@@ -2262,14 +2336,12 @@ function CommitsPanel({
                 )}
               </div>
             </div>
-          ))
+          ))}
+          {virtualCommits.bottomSpacerHeight > 0 ? <div aria-hidden="true" style={{ height: virtualCommits.bottomSpacerHeight }} /> : null}
+          {canLoadMore ? <div ref={pagination.sentinelRef} className="gm-load-more" role="status" aria-live="polite" data-testid="git-commits-auto-pagination-sentinel" /> : null}
+          </>
         )}
       </div>
-      {canLoadMore && (
-        <button className="gm-load-more" onClick={onLoadMore}>
-          {t("git.loadMoreCommits", "Load more commits")}
-        </button>
-      )}
     </div>
   );
 }

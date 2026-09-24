@@ -7,9 +7,9 @@ Planning keeps this compatibility wrapper while the neutral HeaderWorkflowSwitch
 
 interface PlanningWorkflowSwitcherSlotProps {
   projectId?: string;
-  onOpenWorkflowEditor?: (workflowId?: string) => void;
-  onCreateWorkflow?: () => void;
   onWorkflowSelectionChange?: (selection: HeaderWorkflowSelection | null) => void;
+  /* FNXC:WorkflowControls 2026-09-16-23:24: FN-483 — relais de la permission de rendu vers le slot partagé. */
+  showWorkflowControls?: boolean;
 }
 
 export function PlanningWorkflowSwitcherSlot(props: PlanningWorkflowSwitcherSlotProps) {

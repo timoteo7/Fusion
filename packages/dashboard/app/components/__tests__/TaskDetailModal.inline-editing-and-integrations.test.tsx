@@ -4,7 +4,7 @@ FN-7306 labels the stable internal `chat` tab as Activity and keeps it as the de
 */
 import { describe, it, expect, vi } from "vitest";
 import { useState, type Dispatch, type SetStateAction } from "react";
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Task, TaskDetail } from "@fusion/core";
 import {
@@ -26,6 +26,34 @@ import { loadAllAppCss } from "../../test/cssFixture";
 import { TaskDetailModal, TaskDetailContent } from "../TaskDetailModal";
 
 setupTaskDetailModalHooks();
+
+function openTaskDetailActionsMenu() {
+  const trigger = screen.getByRole("button", { name: "Actions" });
+  if (trigger.getAttribute("aria-expanded") !== "true") fireEvent.click(trigger);
+  return screen.getByRole("menu");
+}
+
+/*
+FNXC:TaskDetailHeaderActions 2026-09-16-18:07 (FN-470):
+Edit task is no longer a direct header button: it is the penultimate entry of the single overflow menu.
+These two helpers are the suite's only edit entry points, so the relocation is expressed once instead of at
+each call site.
+*/
+function queryTaskDetailEditAction(): HTMLElement | null {
+  const trigger = screen.queryByRole("button", { name: "Actions" });
+  if (!trigger) return null;
+  const wasOpen = trigger.getAttribute("aria-expanded") === "true";
+  const menu = openTaskDetailActionsMenu();
+  const action = within(menu).queryByTestId("task-detail-header-action-edit");
+  if (!wasOpen) fireEvent.click(trigger);
+  return action;
+}
+
+function enterTaskDetailEditMode(): void {
+  const trigger = screen.getByRole("button", { name: "Actions" });
+  if (trigger.getAttribute("aria-expanded") !== "true") fireEvent.click(trigger);
+  fireEvent.click(within(screen.getByRole("menu")).getByTestId("task-detail-header-action-edit"));
+}
 
 function getMediaBlocks(css: string, mediaQuery: string): string[] {
   const blocks: string[] = [];
@@ -224,7 +252,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
 
       await waitFor(() => {
@@ -257,7 +285,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
 
       await waitFor(() => {
@@ -299,7 +327,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
       fireEvent.change(screen.getByTestId("task-source-provider-input"), { target: { value: "gitlab" } });
       fireEvent.change(screen.getByTestId("task-source-repository-input"), { target: { value: "runfusion/dashboard" } });
@@ -348,7 +376,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
       fireEvent.change(screen.getByTestId("task-source-provider-input"), { target: { value: "" } });
       fireEvent.change(screen.getByTestId("task-source-repository-input"), { target: { value: "" } });
@@ -389,7 +417,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
       fireEvent.change(screen.getByTestId("task-source-provider-input"), { target: { value: "gitlab" } });
       fireEvent.click(screen.getByText("Save"));
@@ -397,7 +425,7 @@ describe("TaskDetailModal", () => {
       await waitFor(() => {
         expect(addToast).toHaveBeenCalledWith("Failed to update FN-001: source patch failed", "error");
       });
-      expect(document.querySelector("#task-form-title")).toBeTruthy();
+      expect(document.querySelector("#task-form-description")).toBeTruthy();
     });
   });
 
@@ -518,7 +546,7 @@ describe("TaskDetailModal", () => {
 
   describe("inline editing", () => {
     const chooseInlinePriority = (priority: TaskPriority) => {
-      fireEvent.click(screen.getByTestId("detail-priority-trigger"));
+      openTaskDetailActionsMenu();
       fireEvent.click(screen.getByTestId(`detail-priority-option-${priority}`));
     };
     beforeEach(() => {
@@ -529,7 +557,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test task" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test task" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -538,7 +566,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const editButton = document.querySelector(".modal-edit-btn");
+      const editButton = queryTaskDetailEditAction();
       expect(editButton).toBeTruthy();
     });
 
@@ -555,7 +583,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const editButton = document.querySelector(".modal-edit-btn");
+      const editButton = queryTaskDetailEditAction();
       expect(editButton).toBeTruthy();
     });
 
@@ -572,7 +600,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const editButton = document.querySelector(".modal-edit-btn");
+      const editButton = queryTaskDetailEditAction();
       expect(editButton).toBeNull();
     });
 
@@ -580,7 +608,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test task" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test task" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -589,22 +617,21 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      // Enter edit mode
-      const editButton = document.querySelector(".modal-edit-btn");
-      expect(editButton).toBeTruthy();
-      fireEvent.click(editButton!);
+      // Enter edit mode through the overflow menu
+      expect(queryTaskDetailEditAction()).toBeTruthy();
+      enterTaskDetailEditMode();
 
-      // Edit button should be hidden now
-      expect(document.querySelector(".modal-edit-btn")).toBeNull();
-      // But TaskForm title input should be visible
-      expect(document.querySelector("#task-form-title")).toBeTruthy();
+      // The edit entry is gone with the whole Actions overflow
+      expect(queryTaskDetailEditAction()).toBeNull();
+      // But the TaskForm description field should be visible
+      expect(document.querySelector("#task-form-description")).toBeTruthy();
     });
 
-    it("entering edit mode shows title input and description textarea", () => {
-      const { container } = render(
+    it("keeps the title out of the header and exposes no title field in edit mode", () => {
+      render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test task", description: "Test description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test task", description: "Test description" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -613,24 +640,25 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      // Initially shows title as h2
-      expect(document.querySelector("h2.detail-title")).toBeTruthy();
-      expect(document.querySelector("#task-form-title")).toBeNull();
+      const header = document.querySelector(".task-detail-content > .modal-header");
+      expect(header).not.toHaveTextContent("Test task");
+      expect(header?.querySelector("h1, h2, h3, h4, h5, h6")).toBeNull();
+      expect(screen.getByTestId("task-detail-definition-description")).toHaveTextContent("Test description");
+      expect(document.querySelector("#task-form-description")).toBeNull();
 
-      // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
-      // Now shows edit form with TaskForm fields
+      expect(header).not.toHaveTextContent("Test task");
       expect(document.querySelector("h2.detail-title")).toBeNull();
-      expect(document.querySelector("#task-form-title")).toBeTruthy();
-      expect(document.querySelector("#task-form-description")).toBeTruthy();
+      expect(document.querySelector("#task-form-title")).toBeNull();
+      expect(document.querySelector("#task-form-description")).toHaveValue("Test description");
     });
 
     it("clicking Cancel exits edit mode without saving", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Original title", description: "Original description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Original title", description: "Original description" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -640,18 +668,19 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       // Change values
-      const titleInput = document.querySelector("#task-form-title") as HTMLInputElement;
-      fireEvent.change(titleInput, { target: { value: "Modified title" } });
+      const modifiedDescription = document.querySelector("#task-form-description") as HTMLTextAreaElement;
+      fireEvent.change(modifiedDescription, { target: { value: "Modified description" } });
 
       // Click Cancel
       fireEvent.click(screen.getByText("Cancel"));
 
-      // Should exit edit mode without saving
-      expect(document.querySelector("#task-form-title")).toBeNull();
-      expect(document.querySelector("h2.detail-title")?.textContent).toBe("Original title");
+      // The editable value is restored without recreating a visible header title.
+      expect(document.querySelector("#task-form-description")).toBeNull();
+      expect(document.querySelector(".modal-header")).not.toHaveTextContent("Original title");
+      expect(screen.getByTestId("task-detail-definition-description")).toHaveTextContent("Original description");
     });
 
     it("clicking Save calls updateTask with correct parameters", async () => {
@@ -662,7 +691,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Original title", description: "Original description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Original title", description: "Original description" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -672,12 +701,10 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       // Change values
-      const titleInput = document.querySelector("#task-form-title") as HTMLInputElement;
       const descTextarea = document.querySelector("#task-form-description") as HTMLTextAreaElement;
-      fireEvent.change(titleInput, { target: { value: "New title" } });
       fireEvent.change(descTextarea, { target: { value: "New description" } });
 
       // Click Save
@@ -685,7 +712,6 @@ describe("TaskDetailModal", () => {
 
       await waitFor(() => {
         expect(mockUpdate).toHaveBeenCalledWith("FN-001", expect.objectContaining({
-          title: "New title",
           description: "New description",
         }), undefined);
       });
@@ -700,7 +726,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Original title", description: "Original description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Original title", description: "Original description" })}
           onClose={noop}
           onDeleteTask={onDeleteTask}
           onMergeTask={noopMerge}
@@ -709,7 +735,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(document.querySelector("#task-form-description")!, { target: { value: "   \n\t" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -729,7 +755,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", description: "Original description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", description: "Original description" })}
           onClose={noop}
           onDeleteTask={onDeleteTask}
           onMergeTask={noopMerge}
@@ -738,7 +764,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(document.querySelector("#task-form-description")!, { target: { value: "" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -759,7 +785,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", description: "Original description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", description: "Original description" })}
           onClose={noop}
           onDeleteTask={onDeleteTask}
           onMergeTask={noopMerge}
@@ -768,7 +794,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       const description = document.querySelector("#task-form-description")!;
       fireEvent.change(description, { target: { value: "" } });
       fireEvent.click(screen.getByText("Save"));
@@ -791,7 +817,7 @@ describe("TaskDetailModal", () => {
           <TaskDetailContent
             initialTab="definition"
             embedded
-            task={makeTask({ id: "FN-001", column: "triage", description: "Original description" })}
+            task={makeTask({ id: "FN-001", column: "ideas", description: "Original description" })}
             onOpenDetail={noopOpenDetail}
             onDeleteTask={onDeleteTask}
             onMergeTask={noopMerge}
@@ -800,7 +826,7 @@ describe("TaskDetailModal", () => {
           />,
         );
 
-        fireEvent.click(document.querySelector(".modal-edit-btn")!);
+        enterTaskDetailEditMode();
         fireEvent.change(document.querySelector("#task-form-description")!, { target: { value: "" } });
         fireEvent.click(screen.getByText("Save"));
         await act(async () => vi.advanceTimersByTimeAsync(1_500));
@@ -816,7 +842,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test title", description: "Test description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test title", description: "Test description" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -826,7 +852,7 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       const saveButton = screen.getByText("Save");
       expect(saveButton.hasAttribute("disabled")).toBe(false);
@@ -841,7 +867,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Original" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Original" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -851,10 +877,10 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
-      const titleInput = document.querySelector("#task-form-title") as HTMLInputElement;
-      fireEvent.change(titleInput, { target: { value: "Changed title" } });
+      const changedDescription = document.querySelector("#task-form-description") as HTMLTextAreaElement;
+      fireEvent.change(changedDescription, { target: { value: "Changed description" } });
 
       // Click Save
       fireEvent.click(screen.getByText("Save"));
@@ -873,7 +899,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Original" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Original" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -883,10 +909,10 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
-      const titleInput = document.querySelector("#task-form-title") as HTMLInputElement;
-      fireEvent.change(titleInput, { target: { value: "Changed title" } });
+      const changedDescription = document.querySelector("#task-form-description") as HTMLTextAreaElement;
+      fireEvent.change(changedDescription, { target: { value: "Changed description" } });
 
       // Click Save
       fireEvent.click(screen.getByText("Save"));
@@ -896,7 +922,7 @@ describe("TaskDetailModal", () => {
       });
 
       // Should exit edit mode
-      expect(document.querySelector("#task-form-title")).toBeNull();
+      expect(document.querySelector("#task-form-description")).toBeNull();
     });
 
     it("failed save shows toast with error and stays in edit mode", async () => {
@@ -909,7 +935,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Original" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Original" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -919,10 +945,10 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
-      const titleInput = document.querySelector("#task-form-title") as HTMLInputElement;
-      fireEvent.change(titleInput, { target: { value: "Changed title" } });
+      const changedDescription = document.querySelector("#task-form-description") as HTMLTextAreaElement;
+      fireEvent.change(changedDescription, { target: { value: "Changed description" } });
 
       // Click Save
       fireEvent.click(screen.getByText("Save"));
@@ -932,14 +958,14 @@ describe("TaskDetailModal", () => {
       });
 
       // Should stay in edit mode
-      expect(document.querySelector("#task-form-title")).toBeTruthy();
+      expect(document.querySelector("#task-form-description")).toBeTruthy();
     });
 
     it("Escape key exits edit mode", async () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test title" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test title" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -949,8 +975,8 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
-      expect(document.querySelector("#task-form-title")).toBeTruthy();
+      enterTaskDetailEditMode();
+      expect(document.querySelector("#task-form-description")).toBeTruthy();
 
       // Press Escape (handled via document-level keydown listener)
       await act(async () => {
@@ -959,14 +985,14 @@ describe("TaskDetailModal", () => {
       });
 
       // Should exit edit mode
-      expect(document.querySelector("#task-form-title")).toBeNull();
+      expect(document.querySelector("#task-form-description")).toBeNull();
     });
 
-    it("edit mode shows both title and description fields", () => {
+    it("edit mode shows the description field and no title field", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test title", description: "Test description" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test title", description: "Test description" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -976,10 +1002,10 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
-      // Both title and description should be present in TaskForm
-      expect(document.querySelector("#task-form-title")).toBeTruthy();
+      // FNXC:TaskDescriptionEditing 2026-09-14-19:15: FN-391 removed the title field; only the description remains.
+      expect(document.querySelector("#task-form-description")).toBeTruthy();
       expect(document.querySelector("#task-form-description")).toBeTruthy();
     });
 
@@ -987,7 +1013,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test task" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test task" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -997,7 +1023,7 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       // Model configuration is present via TaskForm in edit mode.
       // U6/R3: the per-step "Workflow Steps" section was removed from TaskForm;
@@ -1014,7 +1040,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test", description: "Desc", dependencies: ["FN-002"] })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test", description: "Desc", dependencies: ["FN-002"] })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1024,7 +1050,7 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       const descTextarea = document.querySelector("#task-form-description") as HTMLTextAreaElement;
       fireEvent.change(descTextarea, { target: { value: "Updated desc" } });
@@ -1047,7 +1073,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test", description: "Desc", priority: "normal" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test", description: "Desc", priority: "normal" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1056,7 +1082,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       fireEvent.click(screen.getByText("Save"));
 
@@ -1064,7 +1090,7 @@ describe("TaskDetailModal", () => {
         expect(mockUpdate).not.toHaveBeenCalled();
       });
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
       fireEvent.change(document.querySelector("#task-priority") as HTMLSelectElement, { target: { value: "urgent" } });
       fireEvent.click(screen.getByText("Save"));
@@ -1088,7 +1114,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test", description: "Desc" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test", description: "Desc" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1098,14 +1124,14 @@ describe("TaskDetailModal", () => {
       );
 
       // No change → no updateTask call.
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByText("Save"));
       await waitFor(() => {
         expect(mockUpdate).not.toHaveBeenCalled();
       });
 
       // Selecting a level sends that value.
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
       const select = await screen.findByTestId("planner-oversight-level-select");
       fireEvent.change(select, { target: { value: "observe" } });
@@ -1128,7 +1154,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test", description: "Desc", plannerOversightLevel: "observe" as Task["plannerOversightLevel"] })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test", description: "Desc", plannerOversightLevel: "observe" as Task["plannerOversightLevel"] })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1137,7 +1163,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByTestId("task-form-more-options-toggle"));
       const select = await screen.findByTestId("planner-oversight-level-select");
       expect(select).toHaveValue("observe");
@@ -1156,7 +1182,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test", description: "Desc", executionMode: "standard" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test", description: "Desc", executionMode: "standard" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1165,7 +1191,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(screen.getByTestId("task-form-execution-mode-select"), { target: { value: "fast" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -1182,7 +1208,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test", description: "Desc", executionMode: "fast" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test", description: "Desc", executionMode: "fast" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1191,7 +1217,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(screen.getByTestId("task-form-execution-mode-select"), { target: { value: "standard" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -1210,7 +1236,7 @@ describe("TaskDetailModal", () => {
           initialTab="definition"
           task={makeTask({
             id: "FN-001",
-            column: "triage",
+            column: "ideas",
             title: "Test",
             description: "Desc",
             executionMode: "fast",
@@ -1224,7 +1250,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(screen.getByTestId("task-form-execution-mode-select"), { target: { value: "standard" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -1253,7 +1279,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(screen.getByTestId("task-form-execution-mode-select"), { target: { value: "fast" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -1267,7 +1293,7 @@ describe("TaskDetailModal", () => {
       const mockUpdate = vi.mocked(updateTask);
       const mockRebuild = vi.mocked(rebuildTaskSpec);
       mockUpdate.mockResolvedValueOnce(makeTask({ id: "FN-001", column: "todo", title: "Test", description: "Desc", executionMode: null }) as Task);
-      mockRebuild.mockResolvedValueOnce(makeTask({ id: "FN-001", column: "triage", status: "needs-replan", executionMode: null }) as Task);
+      mockRebuild.mockResolvedValueOnce(makeTask({ id: "FN-001", column: "ideas", status: "needs-replan", executionMode: null }) as Task);
 
       const { container } = render(
         <TaskDetailModal
@@ -1281,7 +1307,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(screen.getByTestId("task-form-execution-mode-select"), { target: { value: "standard" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -1303,7 +1329,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test", description: "Desc", executionMode: "fast" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test", description: "Desc", executionMode: "fast" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1312,7 +1338,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.click(screen.getByText("Save"));
 
       await waitFor(() => {
@@ -1324,7 +1350,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", description: "Priority metadata", priority: undefined })}
+          task={makeTask({ id: "FN-001", column: "ideas", description: "Priority metadata", priority: undefined })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1333,21 +1359,21 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const priorityTrigger = screen.getByTestId("detail-priority-trigger");
-      expect(priorityTrigger).toHaveAccessibleName("Priority: Normal");
+      openTaskDetailActionsMenu();
+      expect(screen.getByTestId("detail-priority-option-normal")).toHaveAttribute("aria-pressed", "true");
     });
 
     it("renders priority select and execution mode toggle together and keeps both interactive", async () => {
       const { updateTask } = await import("../../api");
       const mockUpdate = vi.mocked(updateTask);
       mockUpdate
-        .mockResolvedValueOnce(makeTask({ id: "FN-001", column: "triage", priority: "urgent", executionMode: "standard" }) as Task)
-        .mockResolvedValueOnce(makeTask({ id: "FN-001", column: "triage", priority: "urgent", executionMode: "fast" }) as Task);
+        .mockResolvedValueOnce(makeTask({ id: "FN-001", column: "ideas", priority: "urgent", executionMode: "standard" }) as Task)
+        .mockResolvedValueOnce(makeTask({ id: "FN-001", column: "ideas", priority: "urgent", executionMode: "fast" }) as Task);
 
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", priority: "high", executionMode: "standard" })}
+          task={makeTask({ id: "FN-001", column: "ideas", priority: "high", executionMode: "standard" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1356,23 +1382,16 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const controls = screen.getByTestId("detail-meta-inline-controls");
-      const priorityTrigger = screen.getByTestId("detail-priority-trigger");
-      const executionModeToggle = screen.getByRole("button", { name: "Execution mode: standard" });
-
-      /*
-      FNXC:QuickAddActionRow 2026-07-16-16:00:
-      FN-8194: attach, GitHub, and Oversight precede the Quick Add-matched
-      Priority/Fast controls; both controls remain direct interactive children.
-      */
-      expect(controls).toContainElement(priorityTrigger.parentElement);
-      expect(executionModeToggle.parentElement).toBe(controls);
+      const menu = openTaskDetailActionsMenu();
+      expect(menu).toContainElement(screen.getByTestId("detail-priority-option-high"));
+      expect(menu).toContainElement(screen.getByTestId("detail-execution-mode-toggle"));
 
       chooseInlinePriority("urgent");
-      fireEvent.click(executionModeToggle);
+      await waitFor(() => expect(mockUpdate).toHaveBeenNthCalledWith(1, "FN-001", { priority: "urgent" }, undefined));
+      openTaskDetailActionsMenu();
+      fireEvent.click(screen.getByTestId("detail-execution-mode-toggle"));
 
       await waitFor(() => {
-        expect(mockUpdate).toHaveBeenNthCalledWith(1, "FN-001", { priority: "urgent" }, undefined);
         expect(mockUpdate).toHaveBeenNthCalledWith(2, "FN-001", { executionMode: "fast" }, undefined);
       });
     });
@@ -1384,7 +1403,7 @@ describe("TaskDetailModal", () => {
       const addToast = vi.fn();
       const updatedTask = makeTask({
         id: "FN-001",
-        column: "triage",
+        column: "ideas",
         status: "awaiting-approval",
         priority: "urgent",
       });
@@ -1395,7 +1414,7 @@ describe("TaskDetailModal", () => {
           initialTab="definition"
           task={makeTask({
             id: "FN-001",
-            column: "triage",
+            column: "ideas",
             status: "awaiting-approval",
             description: "Priority metadata",
             priority: "normal",
@@ -1416,7 +1435,7 @@ describe("TaskDetailModal", () => {
       });
       expect(onTaskUpdated).toHaveBeenCalledWith(expect.objectContaining({
         id: "FN-001",
-        column: "triage",
+        column: "ideas",
         status: "awaiting-approval",
         priority: "urgent",
       }));
@@ -1430,7 +1449,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", description: "Priority metadata", priority: "high" })}
+          task={makeTask({ id: "FN-001", column: "ideas", description: "Priority metadata", priority: "high" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1455,7 +1474,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", description: "Priority metadata", priority: "low" })}
+          task={makeTask({ id: "FN-001", column: "ideas", description: "Priority metadata", priority: "low" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1469,10 +1488,9 @@ describe("TaskDetailModal", () => {
       await waitFor(() => {
         expect(mockUpdate).toHaveBeenCalledWith("FN-001", { priority: "urgent" }, undefined);
       });
-      await waitFor(() => {
-        expect(screen.getByTestId("detail-priority-trigger")).toHaveAccessibleName("Priority: Low");
-      });
-      expect(addToast).toHaveBeenCalledWith("Failed to update FN-001: Request failed", "error");
+      await waitFor(() => expect(addToast).toHaveBeenCalledWith("Failed to update FN-001: Request failed", "error"));
+      openTaskDetailActionsMenu();
+      expect(screen.getByTestId("detail-priority-option-low")).toHaveAttribute("aria-pressed", "true");
     });
 
     it.each([
@@ -1501,7 +1519,8 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Execution mode: standard" }));
+      openTaskDetailActionsMenu();
+      fireEvent.click(screen.getByTestId("detail-execution-mode-toggle"));
 
       await waitFor(() => {
         expect(mockUpdate).toHaveBeenCalledWith("FN-001", { executionMode: "fast" }, undefined);
@@ -1530,14 +1549,16 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Execution mode: fast" }));
+      openTaskDetailActionsMenu();
+      fireEvent.click(screen.getByTestId("detail-execution-mode-toggle"));
 
       await waitFor(() => {
         expect(mockConfirm).toHaveBeenCalled();
       });
       expect(mockUpdate).not.toHaveBeenCalled();
       expect(mockRebuild).not.toHaveBeenCalled();
-      expect(screen.getByRole("button", { name: "Execution mode: fast" })).toHaveAttribute("aria-pressed", "true");
+      openTaskDetailActionsMenu();
+      expect(screen.getByTestId("detail-execution-mode-toggle")).toHaveAttribute("aria-pressed", "true");
     });
 
     it.each([
@@ -1548,7 +1569,7 @@ describe("TaskDetailModal", () => {
       const mockUpdate = vi.mocked(updateTask);
       const mockRebuild = vi.mocked(rebuildTaskSpec);
       mockUpdate.mockResolvedValueOnce(makeTask({ id: "FN-001", column: "todo", executionMode: null }) as Task);
-      mockRebuild.mockResolvedValueOnce(makeTask({ id: "FN-001", column: "triage", status: "needs-replan", executionMode: null }) as Task);
+      mockRebuild.mockResolvedValueOnce(makeTask({ id: "FN-001", column: "ideas", status: "needs-replan", executionMode: null }) as Task);
 
       render(
         <TaskDetailModal
@@ -1563,7 +1584,8 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Execution mode: fast" }));
+      openTaskDetailActionsMenu();
+      fireEvent.click(screen.getByTestId("detail-execution-mode-toggle"));
 
       await waitFor(() => {
         expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
@@ -1593,7 +1615,8 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Execution mode: standard" }));
+      openTaskDetailActionsMenu();
+      fireEvent.click(screen.getByTestId("detail-execution-mode-toggle"));
 
       await waitFor(() => {
         expect(mockUpdate).toHaveBeenCalledWith("FN-001", { executionMode: "fast" }, undefined);
@@ -1608,13 +1631,13 @@ describe("TaskDetailModal", () => {
       const mockRebuild = vi.mocked(rebuildTaskSpec);
       const addToast = vi.fn();
       const onTaskUpdated = vi.fn();
-      const updatedTask = makeTask({ id: "FN-001", column: "triage", executionMode: "fast" });
+      const updatedTask = makeTask({ id: "FN-001", column: "ideas", executionMode: "fast" });
       mockUpdate.mockResolvedValueOnce(updatedTask as Task);
 
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", executionMode: "standard" })}
+          task={makeTask({ id: "FN-001", column: "ideas", executionMode: "standard" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1624,7 +1647,8 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Execution mode: standard" }));
+      openTaskDetailActionsMenu();
+      fireEvent.click(screen.getByTestId("detail-execution-mode-toggle"));
 
       await waitFor(() => {
         expect(mockUpdate).toHaveBeenCalledWith("FN-001", { executionMode: "fast" }, undefined);
@@ -1633,9 +1657,8 @@ describe("TaskDetailModal", () => {
       expect(mockRebuild).not.toHaveBeenCalled();
       expect(onTaskUpdated).toHaveBeenCalledWith(updatedTask);
       expect(addToast).toHaveBeenCalledWith("Execution mode updated to fast", "success");
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Execution mode: fast" })).toHaveAttribute("aria-pressed", "true");
-      });
+      openTaskDetailActionsMenu();
+      expect(screen.getByTestId("detail-execution-mode-toggle")).toHaveAttribute("aria-pressed", "true");
     });
 
     it("reverts to fast when the retained fast-to-standard replan fails after update", async () => {
@@ -1658,16 +1681,16 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Execution mode: fast" }));
+      openTaskDetailActionsMenu();
+      fireEvent.click(screen.getByTestId("detail-execution-mode-toggle"));
 
       await waitFor(() => {
         expect(mockUpdate).toHaveBeenCalledWith("FN-001", { executionMode: null }, undefined);
         expect(mockRebuild).toHaveBeenCalledWith("FN-001", undefined);
       });
-      await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Execution mode: fast" })).toHaveAttribute("aria-pressed", "true");
-      });
-      expect(addToast).toHaveBeenCalledWith("Failed to update FN-001: Replan failed", "error");
+      await waitFor(() => expect(addToast).toHaveBeenCalledWith("Failed to update FN-001: Replan failed", "error"));
+      openTaskDetailActionsMenu();
+      expect(screen.getByTestId("detail-execution-mode-toggle")).toHaveAttribute("aria-pressed", "true");
     });
 
     it("disables inline execution mode toggle while save is in-flight", async () => {
@@ -1680,7 +1703,7 @@ describe("TaskDetailModal", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", executionMode: "standard" })}
+          task={makeTask({ id: "FN-001", column: "ideas", executionMode: "standard" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1689,9 +1712,12 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const toggle = screen.getByRole("button", { name: "Execution mode: standard" });
+      openTaskDetailActionsMenu();
+      const toggle = screen.getByTestId("detail-execution-mode-toggle");
       fireEvent.click(toggle);
-      expect(toggle).toBeDisabled();
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+      openTaskDetailActionsMenu();
+      expect(screen.getByTestId("detail-execution-mode-toggle")).toBeDisabled();
 
       await waitFor(() => {
         expect(mockUpdate).toHaveBeenCalledWith("FN-001", { executionMode: "fast" }, undefined);
@@ -1761,12 +1787,11 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
-      const titleInput = document.querySelector("#task-form-title") as HTMLInputElement;
       const descTextarea = document.querySelector("#task-form-description") as HTMLTextAreaElement;
-      expect(titleInput.value).toBe("My Task");
       expect(descTextarea.value).toBe("My Description");
+      expect(document.querySelector("#task-form-title")).toBeNull();
     });
 
     it("pre-populates working/base branch inputs and saves changed branch only", async () => {
@@ -1786,7 +1811,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       const workingBranchInput = document.querySelector("#task-working-branch") as HTMLInputElement;
       const baseBranchInput = document.querySelector("#task-base-branch") as HTMLInputElement;
@@ -1818,7 +1843,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(document.querySelector("#task-base-branch") as HTMLInputElement, { target: { value: "release/2026-05" } });
       fireEvent.click(screen.getByText("Save"));
 
@@ -1844,7 +1869,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
       fireEvent.change(document.querySelector("#task-working-branch") as HTMLInputElement, { target: { value: "" } });
       fireEvent.change(document.querySelector("#task-base-branch") as HTMLInputElement, { target: { value: "" } });
       fireEvent.click(screen.getByText("Save"));
@@ -1865,7 +1890,7 @@ describe("TaskDetailModal", () => {
 
       const initialTask = makeTask({
         id: "FN-001",
-        column: "todo",
+        column: "ideas",
         title: "My Task",
         description: "Old Description",
       });
@@ -1889,7 +1914,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       const descTextarea = document.querySelector("#task-form-description") as HTMLTextAreaElement;
       fireEvent.change(descTextarea, { target: { value: "New Description" } });
@@ -1919,7 +1944,7 @@ describe("TaskDetailModal", () => {
         },
       });
 
-      const initialTask = makeTask({ id: "FN-001", column: "triage", title: "Model sync test" });
+      const initialTask = makeTask({ id: "FN-001", column: "ideas", title: "Model sync test" });
       const updatedAfterExecutor: Task = {
         ...initialTask,
         modelProvider: "anthropic",
@@ -1975,7 +2000,7 @@ describe("TaskDetailModal", () => {
       });
 
       await user.click(screen.getByLabelText("Executor Model"));
-      await user.click(screen.getByText("Claude Sonnet 4.5"));
+      await user.click(screen.getByRole("option", { name: /Claude Sonnet 4\.5/ }));
 
       await waitFor(() => {
         expect(mockUpdateTask).toHaveBeenNthCalledWith(
@@ -2013,7 +2038,7 @@ describe("TaskDetailModal", () => {
 
       await user.keyboard("{Escape}");
       await user.click(screen.getByLabelText("Reviewer Model"));
-      await user.click(screen.getByText("GPT-4o"));
+      await user.click(screen.getByRole("option", { name: /GPT-4o/ }));
 
       await waitFor(() => {
         expect(mockUpdateTask).toHaveBeenNthCalledWith(
@@ -2034,7 +2059,7 @@ describe("TaskDetailModal", () => {
         expect(addToast).not.toHaveBeenCalledWith(expect.any(String), "error");
       });
 
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       await waitFor(() => {
         expect(screen.getByLabelText("Executor Model")).toHaveTextContent("Claude Sonnet 4.5");
@@ -2067,7 +2092,7 @@ describe("TaskDetailModal", () => {
           initialTab="model"
           task={makeTask({
             id: "FN-001",
-            column: "triage",
+            column: "ideas",
             title: "Scoped reviewer failure",
             validatorModelProvider: "anthropic",
             validatorModelId: "claude-haiku-5",
@@ -2085,7 +2110,7 @@ describe("TaskDetailModal", () => {
 
       await waitFor(() => expect(screen.getByLabelText("Reviewer Model")).toBeInTheDocument());
       await user.click(screen.getByLabelText("Reviewer Model"));
-      await user.click(await screen.findByText("GPT-4o"));
+      await user.click(await screen.findByRole("option", { name: /GPT-4o/ }));
 
       await waitFor(() => {
         expect(mockUpdateTask).toHaveBeenCalledWith("FN-001", {
@@ -2106,7 +2131,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test task" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test task" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -2116,7 +2141,7 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       // The edit form body should NOT contain the Save or Cancel action buttons
       const editForm = document.querySelector(".modal-edit-form");
@@ -2140,7 +2165,7 @@ describe("TaskDetailModal", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ id: "FN-001", column: "triage", title: "Test task" })}
+          task={makeTask({ id: "FN-001", column: "ideas", title: "Test task" })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -2150,7 +2175,7 @@ describe("TaskDetailModal", () => {
       );
 
       // Enter edit mode
-      fireEvent.click(document.querySelector(".modal-edit-btn")!);
+      enterTaskDetailEditMode();
 
       // The hint should be in the modal-actions footer, not inside the edit form body
       const editForm = document.querySelector(".modal-edit-form");
@@ -2173,16 +2198,11 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      // Should NOT be in edit mode — no edit hint, no Save/Cancel in footer
-      const modalActions = document.querySelector(".modal-actions");
-      expect(modalActions!.querySelector(".modal-edit-hint")).toBeNull();
-
-      const footerButtons = modalActions!.querySelectorAll("button");
-      const buttonTexts = Array.from(footerButtons).map((b) => b.textContent);
-      expect(buttonTexts).not.toContain("Save");
-      expect(buttonTexts).not.toContain("Cancel");
-      // The retained footer exposes Actions without a destination-column control.
-      expect(buttonTexts).toContain("Actions");
+      // A standard task has no empty footer; lifecycle controls live in the canonical header.
+      expect(document.querySelector(".modal-actions")).toBeNull();
+      expect(screen.getByRole("button", { name: "Actions" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
       expect(container.querySelector(".detail-move-dropdown, .detail-move-btn, .detail-move-menu")).toBeNull();
     });
   });
@@ -2547,9 +2567,10 @@ describe("TaskDetailModal", () => {
         />,
       );
 
+      fireEvent.click(screen.getByRole("button", { name: "Read plan" }));
       expect(screen.getByText("Loading specification…")).toBeDefined();
-      // Token stats now live in their own Stats tab — switch to it before
-      // asserting on token-loading text.
+      // Return from the Plan document before switching to Stats.
+      fireEvent.click(screen.getByRole("button", { name: "Back to definition" }));
       fireEvent.click(screen.getByRole("button", { name: "Stats" }));
       expect(screen.getByText("Execution Timing")).toBeInTheDocument();
       expect(screen.getByText("Execution Details")).toBeInTheDocument();
@@ -2621,19 +2642,19 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      // Initially shows loading
+      // The complete specification is loaded in the Plan document sub-view.
+      fireEvent.click(screen.getByRole("button", { name: "Read plan" }));
       expect(screen.getByText("Loading specification…")).toBeDefined();
 
-      // After fetch resolves, spec content appears
+      // After fetch resolves, spec content appears in the Plan document rather than the Description markdown.
       await waitFor(() => {
-        const markdownBody = document.querySelector(".markdown-body");
-        expect(markdownBody).toBeTruthy();
+        expect(screen.getByTestId("task-detail-plan-full")).toHaveTextContent("This is the loaded spec content.");
       }, { timeout: 3000 });
 
-      // Loading indicator should be gone
+      // Loading indicator should be gone.
       expect(screen.queryByText("Loading specification…")).toBeNull();
 
-      // Token stats live behind the Stats tab now.
+      fireEvent.click(screen.getByRole("button", { name: "Back to definition" }));
       fireEvent.click(screen.getByRole("button", { name: "Stats" }));
       expect(screen.queryByText("Loading token statistics…")).toBeNull();
       expect(screen.getByText("Execution Timing")).toBeInTheDocument();
@@ -2644,10 +2665,10 @@ describe("TaskDetailModal", () => {
       expect(screen.getByText("Runtime status")).toBeInTheDocument();
       expect(screen.getAllByText("Fast").length).toBeGreaterThan(0);
       expectSingleStatsRuntimeStatus("executing");
-      expect(screen.getByText((1200).toLocaleString())).toBeInTheDocument();
-      expect(screen.getByText((450).toLocaleString())).toBeInTheDocument();
-      expect(screen.getByText((210).toLocaleString())).toBeInTheDocument();
-      expect(screen.getByText((1860).toLocaleString())).toBeInTheDocument();
+      expect(screen.getAllByText((1200).toLocaleString()).length).toBeGreaterThan(0);
+      expect(screen.getAllByText((450).toLocaleString()).length).toBeGreaterThan(0);
+      expect(screen.getAllByText((210).toLocaleString()).length).toBeGreaterThan(0);
+      expect(screen.getAllByText((1860).toLocaleString()).length).toBeGreaterThan(0);
       const firstUsed = document.querySelector('time[datetime="2026-04-24T09:00:00.000Z"]');
       const lastUsed = document.querySelector('time[datetime="2026-04-24T10:15:00.000Z"]');
       expect(firstUsed).toBeTruthy();
@@ -2674,7 +2695,7 @@ describe("TaskDetailModal", () => {
         updatedAt: "2026-01-01T00:00:00Z",
       };
 
-      mockFetch.mockResolvedValueOnce({
+      mockFetch.mockResolvedValue({
         ...strippedTask,
         prompt: "# Spec",
         log: [
@@ -3489,7 +3510,7 @@ describe("TaskDetailModal", () => {
   });
 });
 
-describe("TaskDetailModal inline action row parity (FN-8194)", () => {
+describe("TaskDetailModal footer quick-action parity (FN-8194)", () => {
   const renderDetail = (task: Task) => render(
     <TaskDetailModal
       initialTab="details"
@@ -3505,16 +3526,19 @@ describe("TaskDetailModal inline action row parity (FN-8194)", () => {
   it("uses the existing file input and preserves Quick Add action order", async () => {
     renderDetail(makeTask({ id: "FN-8194", column: "todo", plannerOversightLevel: "observe" }));
 
-    const controls = screen.getByTestId("detail-meta-inline-controls");
+    const menu = openTaskDetailActionsMenu();
     const attach = screen.getByTestId("detail-inline-attach");
     const github = screen.getByTestId("detail-inline-github-toggle");
-    const oversight = await screen.findByTestId("detail-oversight-menu-trigger");
-    const priority = screen.getByTestId("detail-priority-trigger").parentElement!;
-    const fast = screen.getByRole("button", { name: "Execution mode: standard" });
+    const oversight = await screen.findByTestId("detail-actions-oversight-heading");
+    const priority = screen.getByTestId("detail-actions-priority-heading");
+    const fast = screen.getByTestId("detail-execution-mode-toggle");
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
     const fileInputClick = vi.spyOn(fileInput, "click");
 
-    expect([...controls.children]).toEqual([attach, github, oversight.parentElement, priority, fast]);
+    for (const [before, after] of [[attach, github], [github, oversight], [oversight, priority], [priority, fast]]) {
+      expect(before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    expect(menu).toContainElement(attach);
     fireEvent.click(attach);
     expect(fileInputClick).toHaveBeenCalledOnce();
   });
@@ -3536,6 +3560,7 @@ describe("TaskDetailModal inline action row parity (FN-8194)", () => {
     expect(fileInputs).toHaveLength(1);
     const fileInputClick = vi.spyOn(fileInputs[0], "click");
 
+    openTaskDetailActionsMenu();
     fireEvent.click(screen.getByTestId("detail-inline-attach"));
 
     expect(fileInputClick).toHaveBeenCalledOnce();
@@ -3548,16 +3573,16 @@ describe("TaskDetailModal inline action row parity (FN-8194)", () => {
 
     renderDetail(makeTask({ id: "FN-8194", column: "todo", githubTracking: { enabled: false } }));
 
+    openTaskDetailActionsMenu();
     const toggle = screen.getByTestId("detail-inline-github-toggle");
     expect(toggle).toHaveAttribute("aria-pressed", "false");
-    expect(toggle).not.toHaveClass("btn-primary");
     fireEvent.click(toggle);
 
     await waitFor(() => {
       expect(mockUpdate).toHaveBeenCalledWith("FN-8194", { githubTracking: { enabled: true } }, undefined);
     });
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
-    expect(toggle).toHaveClass("btn-primary");
+    openTaskDetailActionsMenu();
+    await waitFor(() => expect(screen.getByTestId("detail-inline-github-toggle")).toHaveAttribute("aria-pressed", "true"));
   });
 
   it("enables GitHub tracking for Ideas intake tasks after workflow metadata fails", async () => {
@@ -3568,6 +3593,7 @@ describe("TaskDetailModal inline action row parity (FN-8194)", () => {
 
     renderDetail(makeTask({ id: "FN-ideas", column: "ideas", githubTracking: { enabled: false } }));
 
+    openTaskDetailActionsMenu();
     const toggle = screen.getByTestId("detail-inline-github-toggle");
     expect(toggle).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(toggle);
@@ -3575,7 +3601,8 @@ describe("TaskDetailModal inline action row parity (FN-8194)", () => {
     await waitFor(() => {
       expect(mockUpdate).toHaveBeenCalledWith("FN-ideas", { githubTracking: { enabled: true } }, undefined);
     });
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    openTaskDetailActionsMenu();
+    await waitFor(() => expect(screen.getByTestId("detail-inline-github-toggle")).toHaveAttribute("aria-pressed", "true"));
   });
 
   it("shows the GitHub toggle after Coding (Ideas) workflow metadata resolves", async () => {
@@ -3592,12 +3619,14 @@ describe("TaskDetailModal inline action row parity (FN-8194)", () => {
 
     renderDetail(makeTask({ id: "FN-ideas-workflow", column: "done", githubTracking: { enabled: false } }));
 
+    openTaskDetailActionsMenu();
     expect(screen.queryByTestId("detail-inline-github-toggle")).not.toBeInTheDocument();
     expect(await screen.findByTestId("detail-inline-github-toggle")).toHaveAttribute("aria-pressed", "false");
   });
 
   it("hides the GitHub toggle for unrelated and GitLab-tracked tasks", () => {
     const { unmount } = renderDetail(makeTask({ id: "FN-8194", column: "done", githubTracking: { enabled: true } }));
+    openTaskDetailActionsMenu();
     expect(screen.queryByTestId("detail-inline-github-toggle")).not.toBeInTheDocument();
     unmount();
 
@@ -3615,6 +3644,7 @@ describe("TaskDetailModal inline action row parity (FN-8194)", () => {
         },
       },
     }) as Task);
+    openTaskDetailActionsMenu();
     expect(screen.queryByTestId("detail-inline-github-toggle")).not.toBeInTheDocument();
   });
 });

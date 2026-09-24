@@ -18,9 +18,20 @@ vi.mock("../../hooks/useMobileKeyboard", () => ({ useMobileKeyboard: vi.fn(() =>
 vi.mock("../../sse-bus", () => ({ subscribeSse: vi.fn(() => () => {}) }));
 vi.mock("../Header", () => ({ useViewportMode: vi.fn(() => "desktop") }));
 vi.mock("../ComposeChatPanel", () => ({ ComposeChatPanel: () => null }));
-vi.mock("lucide-react", () => ({ Mail: () => null, Send: () => null, Inbox: () => null, Bot: () => null, Trash2: () => null, Archive: () => null, CheckCheck: () => null, Loader2: () => null, RefreshCw: () => null, MessageSquare: () => null, User: () => null, X: () => null, Check: () => null, ChevronRight: () => null, ChevronDown: () => null, AlertCircle: () => null, Map: () => null, Flag: () => null, Lightbulb: () => null, BarChart3: () => null, Target: () => null, CircleAlert: () => null }));
+vi.mock("lucide-react", () => ({ Mail: () => null, Send: () => null, Inbox: () => null, Bot: () => null, Trash2: () => null, Archive: () => null, CheckCheck: () => null, Loader2: () => null, RefreshCw: () => null, Filter: () => null, MessageSquare: () => null, User: () => null, X: () => null, Check: () => null, ChevronRight: () => null, ChevronDown: () => null, AlertCircle: () => null, Map: () => null, Flag: () => null, Lightbulb: () => null, BarChart3: () => null, Target: () => null, CircleAlert: () => null, ChevronLeft: () => null }));
 
 import * as api from "../../api";
+
+/*
+FNXC:MailboxTwoTabs 2026-09-16-16:53:
+Archived, Completions and Agents are inbox SCOPES now, chosen from the single header filter button
+instead of their own tabs. Every former tab gesture in this suite goes through this one helper.
+*/
+async function selectInboxScope(scope: string, user: { click: (element: Element) => Promise<void> }) {
+  await user.click(await screen.findByTestId("mailbox-inbox-filter"));
+  await user.click(await screen.findByTestId(`mailbox-inbox-filter-option-${scope}`));
+}
+
 
 const agents = [{ id: "agent-1", name: "Agent", role: "executor", state: "idle", createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-15T00:00:00.000Z", metadata: {} }];
 const recommendationNotice = (id: string): Message => ({ id, fromId: "agent-1", fromType: "agent", toId: "dashboard", toType: "user", type: "agent-to-user", read: true, content: "Recommendations", createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-15T00:00:00.000Z", metadata: { kind: "task-recommendation-notice", taskId: "FN-9100", recommendationIds: ["rec-1"] } });
@@ -28,15 +39,19 @@ const ordinary = (id: string): Message => ({ ...recommendationNotice(id), metada
 
 /**
  * FNXC:TaskRecommendations 2026-08-15-22:39:
- * The create control is mounted separately in each selected and conversation body. Exercise real
- * mailbox hosts at both breakpoints so a future one-site wiring regression cannot leave a hidden surface prose-only.
+ * The create control is mounted separately in each selected and conversation body. Recommendation
+ * notices have moved out of the active Inbox, so archived history is the retained mailbox route that
+ * must keep every detail action working across real hosts and breakpoints.
  */
 describe("mailbox task recommendation production surfaces", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
-    const messages = [recommendationNotice("notice"), ordinary("ordinary")];
-    vi.mocked(api.fetchInbox).mockResolvedValue({ messages, total: messages.length, unreadCount: 0 });
+    const archivedMessages = [recommendationNotice("notice")];
+    const inboxMessages = [ordinary("ordinary")];
+    vi.mocked(api.fetchInbox).mockImplementation(async (filter) => filter?.archived
+      ? { messages: archivedMessages, total: archivedMessages.length, unreadCount: 0 }
+      : { messages: inboxMessages, total: inboxMessages.length, unreadCount: 0 });
     vi.mocked(api.fetchOutbox).mockResolvedValue({ messages: [], total: 0 });
     vi.mocked(api.fetchUnreadCount).mockResolvedValue({ unreadCount: 0 });
     vi.mocked(api.fetchAgents).mockResolvedValue(agents as never);
@@ -60,6 +75,7 @@ describe("mailbox task recommendation production surfaces", () => {
     vi.mocked(api.fetchConversation).mockResolvedValue(pane === "conversation" ? messages as never : []);
     const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
     render(<Host addToast={vi.fn()} onOpenNativeStructure={vi.fn()} nativeStructureCandidates={[]} />);
+    await selectInboxScope("archived", user);
     await user.click(await screen.findByTestId("mailbox-item-notice"));
     if (pane === "conversation") await waitFor(() => expect(screen.getByTestId("mailbox-conversation")).toBeInTheDocument());
     expect(await screen.findByRole("button", { name: "Create task" })).toBeInTheDocument();

@@ -26,8 +26,6 @@ fn task move FN-001 todo                  # Move task to column
 fn task merge FN-001                      # Merge in-review task to main
 fn task duplicate FN-001                  # Copy task to triage
 fn task refine FN-001 --feedback "..."    # Create follow-up task
-fn task archive FN-001                    # Move done → archived
-fn task unarchive FN-001                  # Move archived → done
 fn task delete FN-001 [--force]           # Soft delete (recoverable via DB)
 fn task retry FN-001                      # Retry failed task → todo
 fn task comment FN-001 "text"             # Add general comment
@@ -101,11 +99,23 @@ fn settings set prCompletionMode pr-first  # Use PR workflow
 ## Backups
 
 ```bash
-fn backup --create                         # Create backup now
-fn backup --list                           # List backups with sizes
-fn backup --restore <file>                 # Restore from backup
-fn backup --cleanup                        # Remove old backups
+fn backup --create                                      # Create project/archive + central .dump pair
+fn backup --list                                        # List complete pairs and orphans with sizes
+fn backup --restore fusion-pg-<timestamp>.dump           # Restore the required same-stem pair
+fn backup --restore fusion-central-pg-<timestamp>.dump   # Restore central only
+fn backup --cleanup                                     # Remove old pairs and abandoned crash artifacts
 ```
+
+Before native backup operations, quiesce Fusion writers and competing
+create/list/cleanup/restore processes; the command has no cross-process lock.
+A restore validates every required archive and retains a current-state
+`fusion-pre-restore-pg-*` + `fusion-central-pre-restore-pg-*` +
+`fusion-migrations-pre-restore-pg-*` stem first. Project/archive restores
+before central and captured migration bookkeeping. If a later group fails,
+Fusion rolls every committed group back from the retained stem. Legacy
+two-member stems remain restorable; Fusion then rewinds
+`public.fusion_schema_migrations` from the earliest missing CREATE-TABLE
+sentinel and replays pending migrations.
 
 ## Multi-Project
 

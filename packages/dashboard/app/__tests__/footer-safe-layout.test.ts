@@ -1,7 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadAllAppCss, loadAllAppCssBaseOnly } from "../test/cssFixture";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { loadAllAppCss, loadAllAppCssBaseOnly, readAppFile } from "../test/cssFixture";
 
 /**
  * Stylesheet regression tests for the footer-safe project workspace layout.
@@ -99,13 +97,38 @@ describe("footer-safe project workspace layout", () => {
 
   // ── Child views use height: 100% ───────────────────────────────────
 
+  describe("Board boundary and scroll ownership", () => {
+    /*
+    FNXC:DashboardFooterLayout 2026-09-15-09:52:
+    REMOVED: "keeps both Alpha boundary states layout-transparent". FN-399 replaced the Alpha
+    boundary with the themeable Interface style axis, deleting the `[data-alpha-surface]` marker and
+    renaming `ui.css` to `native-ui.css`; the stale `ui.css` read made this whole file crash at import
+    time, so the dead assertion only became visible once the path was repaired. The absence of the
+    marker is now owned by NativeUiPrimitives.test.tsx and App.test.tsx.
+    */
+
+    it("keeps horizontal overflow on Board and vertical overflow in column bodies", () => {
+      const boardBlock = css.match(/\.board\s*\{[^}]*\}/)?.[0] ?? "";
+      const bodyBlock = css.match(/\.column-body\s*\{[^}]*\}/)?.[0] ?? "";
+      expect(boardBlock).toContain("overflow-x: auto");
+      expect(boardBlock).toContain("overflow-y: hidden");
+      expect(bodyBlock).toContain("overflow-y: auto");
+      expect(bodyBlock).toContain("overflow-x: hidden");
+    });
+  });
+
   describe("child views use height: 100% (not viewport calc)", () => {
-    it(".board uses height: 100%", () => {
-      const boardBlock = css.match(/\.board\s*\{[^}]*\}/)?.[0];
-      expect(boardBlock).toBeTruthy();
+    it(".board and every workflow state fill the parent-defined safe height", () => {
+      const boardBlock = css.match(/\.board\s*\{[^}]*\}/)?.[0] ?? "";
+      const workflowViewBlock = css.match(/\.board-workflow-view\s*\{[^}]*\}/)?.[0] ?? "";
+      const skeletonBlock = css.match(/\.board\.board-workflows-skeleton\s*\{[^}]*\}/)?.[0] ?? "";
       expect(boardBlock).toContain("height: 100%");
-      // Should NOT have viewport-based calc
-      expect(boardBlock).not.toContain("100vh");
+      expect(boardBlock).toContain("min-height: 0");
+      expect(workflowViewBlock).toContain("height: 100%");
+      expect(workflowViewBlock).toContain("min-height: 0");
+      expect(skeletonBlock).toContain("height: 100%");
+      expect(skeletonBlock).toContain("min-height: 0");
+      expect(`${boardBlock}${workflowViewBlock}${skeletonBlock}`).not.toMatch(/100d?vh/);
     });
 
     it(".list-view uses height: 100%", () => {
@@ -122,6 +145,63 @@ describe("footer-safe project workspace layout", () => {
 
       expect(agentsContentBlock).toContain("padding: var(--space-md) var(--space-md) calc(var(--space-md) + env(safe-area-inset-bottom, 0px) + var(--standalone-bottom-gap));");
       expect(agentsContentBlock).not.toContain("var(--mobile-nav-height)");
+    });
+  });
+
+  // ── Footer-height token consumers outside the declaring scope ──────
+
+  /*
+  FNXC:DashboardFooterLayout 2026-09-11-23:41:
+  `:root` floors --executor-footer-height at 0px (styles.css) and only
+  .dashboard-project-shell / .project-content--with-footer raise it to 36px.
+  A bottom-edge surface rendered OUTSIDE those scopes therefore inherits 0px.
+  That silently collapsed the Alpha desktop navigation footer to zero height:
+  mounted and focusable, but invisible, after it had already replaced the left
+  sidebar. Assert the general invariant rather than that one bar — any rule that
+  sizes its own box from the token must declare the token in the same block.
+  */
+  describe("--executor-footer-height consumers that size themselves", () => {
+    // Comments carry braces and at-rule prose, so strip them before parsing rules.
+    const baseCss = loadAllAppCssBaseOnly().replace(/\/\*[\s\S]*?\*\//g, "");
+    /*
+    FNXC:DashboardFooterLayout 2026-09-15-09:52:
+    The rule scanner must NOT anchor on the previous rule's closing brace: consuming that brace makes
+    matchAll skip every other rule, so whether a given selector is seen depends on how many rules
+    precede it in the concatenated stylesheet. Removing unrelated rules (FN-409 deleted the docked
+    terminal styles) flipped that parity and hid `.desktop-action-bar`. Selectors cannot contain
+    braces, so scanning `selector { body }` directly is both simpler and parity-free.
+    */
+    const ruleBlocks = [...baseCss.matchAll(/([^{}@]+?)\s*\{([^{}]*)\}/g)].map((match) => ({
+      selector: match[1].trim(),
+      body: match[2],
+    }));
+
+    it("floors the token at 0px on :root, which is what makes redeclaration mandatory", () => {
+      expect(baseCss).toMatch(/:root\s*\{[^}]*--executor-footer-height:\s*0px/);
+    });
+
+    it("every rule sizing its own box from the token also declares the token", () => {
+      const selfSizing = ruleBlocks.filter((rule) =>
+        /(?:^|;|\s)(?:block-size|height):\s*var\(--executor-footer-height\b/.test(rule.body),
+      );
+      expect(selfSizing.length).toBeGreaterThan(0);
+      const collapsingToZero = selfSizing
+        .filter((rule) => !/--executor-footer-height:\s*(?!0px)[^;]+;/.test(rule.body))
+        .map((rule) => rule.selector);
+      expect(collapsingToZero).toEqual([]);
+    });
+
+    it("gives the Alpha desktop navigation footer a non-zero height outside the shell scope", () => {
+      const bar = ruleBlocks.find((rule) => rule.selector === ".desktop-action-bar");
+      expect(bar).toBeTruthy();
+      expect(bar!.body).toContain("--executor-footer-height: 36px");
+      expect(bar!.body).toContain("block-size: var(--executor-footer-height)");
+    });
+
+    it("keeps the sibling pinned-terminal host redeclaring the token for the same reason", () => {
+      const terminalCss = readAppFile("components/TerminalModal.css").replace(/\/\*[\s\S]*?\*\//g, "");
+      const host = terminalCss.match(/\.terminal-below-host--with-footer\s*\{([^{}]*)\}/)?.[1] ?? "";
+      expect(host).toContain("--executor-footer-height: 36px");
     });
   });
 

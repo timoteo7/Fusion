@@ -1,14 +1,15 @@
 import "./QuickEntryBox.css";
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { UiButton, UiInput, UiListBox, UiListBoxItem, UiMenu, UiMenuItem, UiPopoverSurface, UiTextArea } from "./ui";
+import { useState, useCallback, useRef, useEffect, useMemo, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import type { ToastType } from "../hooks/useToast";
-import { DEFAULT_TASK_PRIORITY, TASK_PRIORITIES, getErrorMessage } from "@fusion/core";
-import type { Task, Settings, TaskPriority, ResolvedWorkflowOptionalStep, ThinkingLevel, ColumnId } from "@fusion/core";
+import { getErrorMessage } from "@fusion/core";
+import type { Task, Settings, ResolvedWorkflowOptionalStep, ThinkingLevel, ColumnId } from "@fusion/core";
 import type { ModelInfo, Agent, CreateTaskInput, DuplicateMatch, BoardWorkflowDefinition, NodeInfo } from "../api";
 import { checkDuplicateTasks, fetchModels, fetchSettings, updateGlobalSettings, fetchAgents, uploadAttachment, fetchWorkflowOptionalSteps } from "../api";
 import { DuplicateWarningModal } from "./DuplicateWarningModal";
-import { Link, Paperclip, Brain, Lightbulb, Sparkles, Save, ChevronDown, ChevronUp, ChevronRight, Bot, Server, Zap, Eye, EyeOff, Play } from "lucide-react";
+import { Link, Paperclip, Brain, Lightbulb, Sparkles, Save, ChevronDown, ChevronUp, ChevronRight, Bot, Server, Zap, UserCheck, Lock, Eye, EyeOff } from "lucide-react";
 import { CustomModelDropdown } from "./CustomModelDropdown";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { getScopedItem, MAX_PERSISTED_DRAFT_BYTES, removeScopedItem, setScopedItem } from "../utils/projectStorage";
@@ -20,7 +21,7 @@ import { ProviderIcon } from "./ProviderIcon";
 import { WorkflowOptionalStepsDropdown } from "./WorkflowOptionalStepsDropdown";
 import { WorkflowIcon } from "./WorkflowIcon";
 import { PendingAttachmentPreviews } from "./PendingAttachmentPreviews";
-import { getPriorityColorVar, getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
+import { getTaskTitleDisplayText } from "../utils/taskTitleDisplay";
 import { validateQuickAddStartWorkflow, workflowSupportsQuickAddStart, resolveQuickAddStartInitialColumn, resolveQuickAddStartWorkflowTarget, resolveQuickAddStartTargetColumn, type ValidatedQuickAddWorkflow } from "../utils/quickAddStart";
 import { computeFixedMenuPosition, getLayoutViewportSize } from "../utils/fixedMenuPosition";
 import { isInsidePortaledModelMenu } from "../utils/portalSurfaces";
@@ -28,6 +29,27 @@ import { restoreOptionalStepsOnFastExit } from "../utils/fastModeOptionalSteps";
 import { useQuickAddSubmitOnEnter } from "../hooks/useQuickAddSubmitOnEnter";
 
 const STORAGE_KEY = "kb-quick-entry-text";
+/*
+FNXC:NativeQuickEntry 2026-09-17-09:02:
+FN-498 raises the hold-to-Start threshold by 20% (500ms -> 600ms) because the old threshold was short enough to
+start tasks the operator only meant to save. The ENGAGE delay is deliberately UNCHANGED: the subject is how long
+the button must be held to START, not how soon the ring appears, so "brief click = ordinary Save" keeps exactly
+its previous boundary. These three values are exported so tests reference the product constants instead of
+copying literals, which is how the previous retune left stale assertions behind.
+*/
+export const QUICK_ADD_START_HOLD_DURATION_MS = 600;
+/*
+FNXC:NativeQuickEntry 2026-09-16-02:15:
+FN-453 separates a brief click from an ENGAGED hold. A press shorter than this engagement delay is an ordinary
+Save (no visual fill ever appears); once the fill starts, the press is an engaged hold whose release before the
+hold threshold CANCELS the gesture instead of saving — releasing early now behaves as if the button was never
+clicked. The mask therefore animates over the remaining `QUICK_ADD_START_HOLD_FILL_MS` rather than the full hold.
+*/
+export const QUICK_ADD_START_HOLD_ENGAGE_MS = 150;
+export const QUICK_ADD_START_HOLD_FILL_MS = QUICK_ADD_START_HOLD_DURATION_MS - QUICK_ADD_START_HOLD_ENGAGE_MS;
+type QuickAddSaveGesture = { kind: "pointer"; pointerId: number } | { kind: "keyboard"; key: " " | "Enter" };
+/** One physical press. `id` scopes its synthetic-click barrier so no gesture can silence a later, independent one. */
+type QuickAddSaveGestureState = { id: number; input: QuickAddSaveGesture; engaged: boolean };
 const ALLOWED_TASK_ATTACHMENT_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -83,10 +105,12 @@ interface QuickEntryBoxProps {
   */
   defaultExpanded?: boolean;
   /*
-  FNXC:QuickEntry 2026-06-22-19:25:
-  List view renders quick-add as a COMPACT single-line input so the box isn't tall. When true, the textarea stays one line: isExpanded initializes false, focus does NOT auto-expand it, and auto-resize-to-scrollHeight is short-circuited (capped to the one-line min-height). Board/columns omit singleLine, preserving the tall 80px + auto-grow behavior. singleLine governs only textarea height, not the disclosure/controls panel (which List already collapses via defaultExpanded={false}).
+  FNXC:QuickEntry 2026-09-14-03:31:
+  The `singleLine` compact variant is REMOVED. It existed only for List, and made the same composer look and behave
+  differently depending on where it was mounted: one-line textarea, no auto-grow, no expand on focus, no expand on
+  Shift+Enter. List and Board now instantiate this component with the same contract, so there is one Quick Entry
+  presentation everywhere.
   */
-  singleLine?: boolean;
   /** Explicit override of the global Enter-submit preference. */
   submitOnEnter?: boolean;
   /**
@@ -158,7 +182,7 @@ function hasMeaningfulNodeChoice(nodes: NodeInfo[]): boolean {
   return nodes.length > 1 || nodes.some((node) => node.type !== "local");
 }
 
-export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], availableModels, workflowId, workflowOptions, defaultWorkflowId, projectId, autoExpand = true, defaultExpanded = true, singleLine = false, submitOnEnter, favoriteProviders: parentFavoriteProviders, favoriteModels: parentFavoriteModels, onToggleFavorite: parentToggleFavorite, onToggleModelFavorite: parentToggleModelFavorite, onOpenTask }: QuickEntryBoxProps) {
+export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], availableModels, workflowId, workflowOptions, defaultWorkflowId, projectId, autoExpand = true, defaultExpanded = true, submitOnEnter, favoriteProviders: parentFavoriteProviders, favoriteModels: parentFavoriteModels, onToggleFavorite: parentToggleFavorite, onToggleModelFavorite: parentToggleModelFavorite, onOpenTask }: QuickEntryBoxProps) {
   const { t } = useTranslation("app");
   const contextSubmitOnEnter = useQuickAddSubmitOnEnter();
   const enterSubmits = submitOnEnter ?? contextSubmitOnEnter;
@@ -170,16 +194,33 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   // isExpanded controls textarea height styling (auto-resize)
-  // FNXC:QuickEntry 2026-06-22-19:25: singleLine (List view) starts collapsed so the textarea is one line, not the tall 80px variant.
-  const [isExpanded, setIsExpanded] = useState(!singleLine);
-  // isDisclosureExpanded controls visibility of the controls panel (Deps, Models, etc.)
-  // Starts expanded by default — controls visible immediately
+  const [isExpanded, setIsExpanded] = useState(true);
+  // isDisclosureExpanded controls visibility of advanced options (Deps, Models, etc.).
+  /*
+  FNXC:NativeQuickEntry 2026-09-15-00:20:
+  Quick Entry starts with only its compact immediate-action row visible and progressively discloses
+  advanced routing options. That compact presentation was already the one Column — the sole production
+  mount — renders, and Column now asks for it explicitly with `defaultExpanded={false}` instead of relying
+  on a perimeter flag, so production geometry is unchanged. State and callbacks stay in this single
+  composer instance so disclosure never discards the draft.
+  */
   const [isDisclosureExpanded, setIsDisclosureExpanded] = useState(defaultExpanded);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dictation = useComposerDictation({ textareaRef, value: description, onChange: setDescription, projectId });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const touchButtonRef = useRef<HTMLButtonElement | null>(null);
   const startIntentRef = useRef<ValidatedQuickAddWorkflow | null>(null);
+  const quickAddSaveButtonRef = useRef<HTMLButtonElement | null>(null);
+  const quickAddSaveGestureRef = useRef<QuickAddSaveGestureState | null>(null);
+  const quickAddSaveGestureIdRef = useRef(0);
+  const quickAddSaveEngageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const quickAddSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Id of the gesture whose trailing synthetic click must be absorbed, or null when no click is owed. */
+  const quickAddSaveSuppressClickRef = useRef<number | null>(null);
+  const quickAddSaveBarrierReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const quickAddStartWorkflowRef = useRef<ValidatedQuickAddWorkflow | null>(null);
+  const quickAddStartIdentityRef = useRef<string | null>(null);
+  const [quickAddSaveState, setQuickAddSaveState] = useState<"idle" | "holding">("idle");
   const justResetRef = useRef(false);
   const draftPersistenceWarningShownRef = useRef(false);
   const previousProjectIdRef = useRef(projectId);
@@ -197,7 +238,13 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   const [agentsProjectId, setAgentsProjectId] = useState<string | undefined>(undefined);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
   const [showNodePicker, setShowNodePicker] = useState(false);
-  const [showPriorityPicker, setShowPriorityPicker] = useState(false);
+  /*
+  FNXC:TaskQueueOrder 2026-09-17-12:07:
+  FN-509 removed the task priority field and Quick Add's priority picker with it — the trigger, its
+  portal, its position state, and its outside-click/scroll/resize listeners. No empty button shell,
+  wrapper, or aria-label is left in the action cluster. Tasks run in arrival order; an operator
+  raises one explicitly with Boost on its card.
+  */
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [activeModelSubmenu, setActiveModelSubmenu] = useState<"plan" | "executor" | "validator" | "merger" | null>(null);
@@ -227,8 +274,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   const agentPickerOpenTokenRef = useRef(0);
   const nodePickerRef = useRef<HTMLDivElement>(null);
   const nodePickerPortalRef = useRef<HTMLDivElement>(null);
-  const priorityPickerRef = useRef<HTMLDivElement>(null);
-  const priorityPickerPortalRef = useRef<HTMLDivElement>(null);
   /*
   FNXC:QuickAddMenuAnchor 2026-08-01-07:11:
   Preserve both shared-helper vertical anchors in Quick Add state. Portal styles must use `bottom`
@@ -237,7 +282,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   */
   const [agentPickerPosition, setAgentPickerPosition] = useState<{ top: number | null; bottom: number | null; left: number; width: number; maxHeight?: number } | null>(null);
   const [nodePickerPosition, setNodePickerPosition] = useState<{ top: number | null; bottom: number | null; left: number; width: number; maxHeight?: number } | null>(null);
-  const [priorityPickerPosition, setPriorityPickerPosition] = useState<{ top: number | null; bottom: number | null; left: number; width: number; maxHeight?: number } | null>(null);
   const [modelMenuPosition, setModelMenuPosition] = useState<{ top: number | null; bottom: number | null; left: number; width: number; maxHeight?: number } | null>(null);
   // Dependency dropdown portal refs and state
   const depTriggerRef = useRef<HTMLButtonElement>(null);
@@ -270,6 +314,16 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   const [optionalSteps, setOptionalSteps] = useState<ResolvedWorkflowOptionalStep[]>([]);
   const [enabledOptionalStepIds, setEnabledOptionalStepIds] = useState<string[]>([]);
   const [isFastMode, setIsFastMode] = useState(false);
+  /*
+  FNXC:HumanPlanApproval 2026-09-15-06:24:
+  FN-408 — per-card human plan validation. Its own state, but MUTUALLY EXCLUSIVE with Fast
+  (2026-09-15-07:30): Fast is planless, so an armed Fast card could never reach a plan, a Plan
+  Review or a decidable episode. Arming this clears Fast and vice versa; arming it never clears the
+  optional-step selection.
+  */
+  const [requiresHumanPlanApproval, setRequiresHumanPlanApproval] = useState(false);
+  /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514 per-card delivery lock, armed at creation with a boolean only. */
+  const [requiresHumanMergeApproval, setRequiresHumanMergeApproval] = useState(false);
   const isFastModeRef = useRef(isFastMode);
   const preFastOptionalStepIdsRef = useRef<string[] | null>(null);
   const defaultOnOptionalStepIds = useMemo(
@@ -282,7 +336,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   const [githubTrackingOverride, setGithubTrackingOverride] = useState<boolean | null>(null);
   // FNXC:PlannerOversight 2026-07-14-18:11: null = follow project sessionAdvisorEnabledByDefault.
   const [sessionAdvisorOverride, setSessionAdvisorOverride] = useState<boolean | null>(null);
-  const [priority, setPriority] = useState<TaskPriority>(DEFAULT_TASK_PRIORITY);
   const [nodeId, setNodeId] = useState<string | undefined>(undefined);
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[] | null>(null);
   const submitInFlightRef = useRef(false);
@@ -306,6 +359,28 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
 
   // If onCreate is not provided, the component is disabled
   const isDisabled = !onCreate;
+
+  /*
+  FNXC:NativeQuickEntry 2026-09-15-00:20:
+  Collapsing advanced controls must close every parent-owned portal state before the triggers disappear.
+  The options subtree is also unmounted below so child-owned workflow-step portals cannot remain visible
+  without an anchor.
+  */
+  useEffect(() => {
+    if (isDisclosureExpanded) return;
+    agentPickerOpenTokenRef.current += 1;
+    setShowDeps(false);
+    setDepDropdownPosition(null);
+    setShowAgentPicker(false);
+    setAgentPickerPosition(null);
+    setShowNodePicker(false);
+    setNodePickerPosition(null);
+    setShowWorkflowPicker(false);
+    setWorkflowPickerPosition(null);
+    setIsModelMenuOpen(false);
+    setModelMenuPosition(null);
+    setActiveModelSubmenu(null);
+  }, [isDisclosureExpanded]);
 
   // Fetch models if not provided by parent
   useEffect(() => {
@@ -392,16 +467,40 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   const startInitialColumn = validatedStartWorkflow ? resolveQuickAddStartInitialColumn(validatedStartWorkflow) : null;
   const startWorkflowTarget = validatedStartWorkflow ? resolveQuickAddStartWorkflowTarget(validatedStartWorkflow) : null;
   /*
-  FNXC:QuickAddStart 2026-07-31-23:51:
-  Start is a VISIBLE button in the quick-add action row for eligible workflows only, replacing the hidden
-  long-press/right-click Save menu that operators could not discover. Eligibility is `workflowSupportsQuickAddStart`:
-  Coding (Ideas), or any workflow whose first visible lane is a server-derived manual-intake/"waiting" column.
-  A provable target is still required (`startInitialColumn` for the create-time column override, or `onMoveTask`
-  for the follow-up move). Workflows without a waiting lane render no Start button at all — Save stays the single
-  create affordance there.
+  FNXC:QuickAddStart 2026-09-13-17:28:
+  Quick Add exposes two outcomes through its single icon-only Save action: a brief click or tap saves the task, while a
+  continuous `QUICK_ADD_START_HOLD_DURATION_MS` hold starts it. Legacy surfaces retain the explicit Start chip. Eligibility remains
+  `workflowSupportsQuickAddStart`: Coding (Ideas), or a workflow whose first visible lane is a server-derived
+  manual-intake/"waiting" column. A provable target is still required (`startInitialColumn` for the create-time
+  column override, or `onMoveTask` for the follow-up move), so malformed or ineligible workflows never turn Save
+  into an inferred transition.
   */
   const canQuickAddStart = Boolean(validatedStartWorkflow && workflowSupportsQuickAddStart(validatedStartWorkflow) && startWorkflowTarget && (startInitialColumn || onMoveTask));
   const canQuickAddStartNow = canQuickAddStart && Boolean(description.trim()) && !isSubmitting;
+  /*
+  FNXC:QuickAddStart 2026-09-16-02:15:
+  FN-453 root cause: an in-flight hold used to be invalidated by OBJECT IDENTITY, so any refresh that re-instantiated
+  logically identical workflow metadata silently cancelled the hold and the button "did nothing". The hold is now
+  fenced by a VALUE snapshot of everything Start actually depends on — workflow id, the create-time column override,
+  the resolved Start destination, and the ordered visible-column routing facts. A re-instantiated equivalent workflow
+  keeps the gesture alive; a real change of identity, eligibility, or destination still cancels it without creating.
+  */
+  const quickAddStartIdentity = useMemo(() => {
+    if (!validatedStartWorkflow) return null;
+    return JSON.stringify({
+      id: validatedStartWorkflow.id,
+      initialColumn: startInitialColumn,
+      target: startWorkflowTarget,
+      columns: validatedStartWorkflow.columns.map((column) => [
+        column.id,
+        column.flags.intake === true,
+        column.flags.hold === true,
+        column.flags.manualIntake === true,
+        column.flags.complete === true,
+        column.flags.hiddenFromBoard === true,
+      ]),
+    });
+  }, [startInitialColumn, startWorkflowTarget, validatedStartWorkflow]);
 
   useEffect(() => {
     const parentChanged = previousWorkflowDefaultRef.current.workflowId !== workflowId
@@ -476,11 +575,19 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   FN-260 makes Fast reversible: leaving it restores the pre-Fast selection plus any steps explicitly enabled while Fast was active. Invalidate that baseline whenever non-user metadata seeding or reset replaces the enabled set, so stale workflow selections fall back to the current defaultOn seed.
   */
 
-  const toggleFastMode = useCallback(() => {
-    const next = !isFastMode;
+  /*
+  FNXC:HumanPlanApproval 2026-09-15-07:30:
+  FN-408 remediation — Fast and the per-card human plan approval are mutually exclusive in the UI
+  because they are mutually exclusive on the server: an armed card is always planned, so the create
+  payload can never carry both. Turning one on visibly turns the other off instead of silently
+  dropping the operator's Fast choice at creation.
+  */
+  const setFastMode = useCallback((next: boolean) => {
+    if (next === isFastModeRef.current) return;
     if (next) {
       preFastOptionalStepIdsRef.current = enabledOptionalStepIds;
       setEnabledOptionalStepIds([]);
+      setRequiresHumanPlanApproval(false);
     } else {
       setEnabledOptionalStepIds(
         restoreOptionalStepsOnFastExit(
@@ -491,8 +598,28 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
       );
       preFastOptionalStepIdsRef.current = null;
     }
+    isFastModeRef.current = next;
     setIsFastMode(next);
-  }, [defaultOnOptionalStepIds, enabledOptionalStepIds, isFastMode]);
+  }, [defaultOnOptionalStepIds, enabledOptionalStepIds]);
+
+  const toggleFastMode = useCallback(() => {
+    setFastMode(!isFastMode);
+  }, [isFastMode, setFastMode]);
+
+  const toggleHumanPlanApproval = useCallback(() => {
+    const next = !requiresHumanPlanApproval;
+    if (next) setFastMode(false);
+    setRequiresHumanPlanApproval(next);
+  }, [requiresHumanPlanApproval, setFastMode]);
+
+  /*
+  FNXC:HumanMergeApproval 2026-09-17-18:09:
+  FN-514 — the DELIVERY lock is independent of Fast and of the plan validation: it stops only the
+  final delivery, so a Fast card can legitimately carry it and neither toggle clears the other.
+  */
+  const toggleHumanMergeApproval = useCallback(() => {
+    setRequiresHumanMergeApproval((current) => !current);
+  }, []);
 
   const executorSelectionValue = getModelSelectionValue(executorProvider, executorModelId);
   const validatorSelectionValue = getModelSelectionValue(validatorProvider, validatorModelId);
@@ -599,12 +726,11 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   }, []);
 
   // Resize when description changes (not in fullscreen mode since CSS handles it)
-  // FNXC:QuickEntry 2026-06-22-19:25: singleLine (List view) must stay one line — skip auto-resize-to-scrollHeight so the textarea never grows tall with content; CSS clamps it to the one-line height.
   useEffect(() => {
-    if (isExpanded && !singleLine) {
+    if (isExpanded) {
       autoResize();
     }
-  }, [description, isExpanded, autoResize, singleLine]);
+  }, [description, isExpanded, autoResize]);
 
   /*
   FNXC:QuickEntryFocus 2026-06-25-00:00:
@@ -677,21 +803,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   }, [showAgentPicker]);
 
   useEffect(() => {
-    if (!showPriorityPicker) return;
-
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (priorityPickerRef.current?.contains(target)) return;
-      if (priorityPickerPortalRef.current?.contains(target)) return;
-      setShowPriorityPicker(false);
-      setPriorityPickerPosition(null);
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showPriorityPicker]);
-
-  useEffect(() => {
     if (!showWorkflowPicker) return;
 
     const handleClickOutside = (e: MouseEvent) => {
@@ -722,8 +833,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
     setAgentPickerPosition(null);
     setShowNodePicker(false);
     setNodePickerPosition(null);
-    setShowPriorityPicker(false);
-    setPriorityPickerPosition(null);
     setExecutorProvider(undefined);
     setExecutorModelId(undefined);
     setCredentialInstanceId(undefined);
@@ -739,14 +848,17 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
     setThinkingLevel("");
     setValidatorThinkingLevel("");
     setPlanningThinkingLevel("");
+    /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514 — a successful create resets the lock choice so it is never implicitly inherited by the next card. */
+    setRequiresHumanMergeApproval(false);
     setMergerThinkingLevel("");
     setSelectedPresetId(undefined);
     setEnabledOptionalStepIds(defaultOnOptionalStepIds);
     preFastOptionalStepIdsRef.current = null;
     setIsFastMode(false);
+    /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 resets with the other creation choices after a successful create. */
+    setRequiresHumanPlanApproval(false);
     setGithubTrackingOverride(null);
     setSessionAdvisorOverride(null);
-    setPriority(DEFAULT_TASK_PRIORITY);
     setNodeId(undefined);
     setShowDeps(false);
     setIsModelMenuOpen(false);
@@ -887,10 +999,13 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
         */
         enabledWorkflowSteps: isFastMode || optionalSteps.length > 0 ? enabledOptionalStepIds : undefined,
         ...(isFastMode ? { executionMode: "fast" } : {}),
+        /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 sends only the arming flag; the server owns Plan Review enforcement and every decision. */
+        ...(requiresHumanPlanApproval ? { humanPlanApproval: true } : {}),
+        /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514 sends only the arming flag; the server owns every delivery decision. */
+        ...(requiresHumanMergeApproval ? { humanMergeApproval: true } : {}),
         githubTracking: githubTrackingOverride !== null ? { enabled: githubTrackingOverride } : undefined,
         // FNXC:PlannerOversight 2026-07-14-18:11: only send when user toggled away from project default.
         sessionAdvisorEnabled: sessionAdvisorOverride !== null ? sessionAdvisorOverride : undefined,
-        priority,
         nodeId: effectiveNodeId,
         acknowledgedDuplicates: overrides?.acknowledgedDuplicates,
       });
@@ -964,14 +1079,34 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
     planningProvider,
     planningModelId,
     planningCredentialInstanceId,
+    hasMergerOverride,
+    mergerProvider,
+    mergerModelId,
     mergerCredentialInstanceId,
     thinkingLevel,
+    validatorThinkingLevel,
+    planningThinkingLevel,
+    mergerThinkingLevel,
     enabledOptionalStepIds,
+    optionalSteps,
     isFastMode,
+    /*
+    FNXC:HumanPlanApproval 2026-09-15-23:08:
+    FN-443 — the human plan approval arming flag is part of the create intent this callback reads, so
+    it MUST be declared here. Omitting it froze the payload on the value captured at the last
+    unrelated dependency change: an operator who typed the request first and armed the toggle second
+    created a card WITHOUT the requirement, silently, because only a further keystroke (`description`)
+    rebuilt the callback. The same stale-capture defect applied to the merger override, its model id,
+    and the three per-lane thinking levels, which are declared alongside it for the same reason.
+    Read the value from state — never mirror it into a ref, which would reintroduce a second
+    authority for an operator choice that must stay exactly what the toolbar shows.
+    */
+    requiresHumanPlanApproval,
+    /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514's arming flag is part of the same create intent and must be declared here for the same stale-capture reason. */
+    requiresHumanMergeApproval,
     settings,
     githubTrackingOverride,
     sessionAdvisorOverride,
-    priority,
     effectiveNodeId,
     pendingAttachments,
     projectId,
@@ -1044,9 +1179,10 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
 
   const handleDuplicateCancel = useCallback(() => {
     /*
-    FNXC:QuickAddStart 2026-07-22-16:10:
-    Cancelling duplicate confirmation discards the saved Start intent. A later ordinary Save
-    must remain create-only rather than reusing a promotion snapshot from the cancelled action.
+    FNXC:QuickAddStart 2026-09-12-21:38:
+    Cancelling duplicate confirmation discards the saved Start intent but retains the completed hold's click barrier.
+    The gesture's trailing pointer/key release and synthetic click must be consumed before a later independent Save,
+    even when the dialog closes while the original physical gesture is still held.
     */
     startIntentRef.current = null;
     setDuplicateMatches(null);
@@ -1054,16 +1190,29 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
     setIsSubmitting(false);
   }, []);
 
+  /*
+  FNXC:QuickAddStart 2026-07-24-11:20:
+  Start stashes the workflow snapshot validated at click time in `startIntentRef` and then runs the SAME submit
+  path as Save. The snapshot (not live state) is what `submitCreateTask` reads, so a workflow list refreshed
+  mid-duplicate-confirmation cannot retarget an in-flight Start.
+
+  FNXC:QuickAddStart 2026-09-15-09:12:
+  Declared above `handleKeyDown` because the Cmd/Ctrl+Enter accelerator routes through this exact function
+  rather than duplicating the eligibility/snapshot rules.
+  */
+  const handleStartClick = useCallback((workflowSnapshot: ValidatedQuickAddWorkflow | null = validatedStartWorkflow) => {
+    if (!canQuickAddStartNow || !workflowSnapshot) return;
+    startIntentRef.current = workflowSnapshot;
+    void handleSubmit();
+  }, [canQuickAddStartNow, handleSubmit, validatedStartWorkflow]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter") {
         if (e.shiftKey) {
           // Allow Shift+Enter to insert a newline in any quick-entry state
           // Don't prevent default - let the newline be inserted
-          // FNXC:QuickEntry 2026-06-22-19:25: singleLine (List view) stays one line even on Shift+Enter — do not expand the textarea.
-          if (!singleLine) {
-            setIsExpanded(true);
-          }
+          setIsExpanded(true);
           return;
         }
         if (duplicateMatches || submitInFlightRef.current) {
@@ -1073,10 +1222,23 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
         /*
         FNXC:QuickEntry 2026-08-16-03:15:
         The global Quick Add option defaults on to preserve historical Enter submission. When disabled, plain Enter remains a browser newline while Cmd/Ctrl+Enter stays the explicit save accelerator.
+
+        FNXC:QuickEntry 2026-09-15-09:12:
+        FN-411 promotes Cmd/Ctrl+Enter to the "create AND start" accelerator: when the selected workflow is
+        Start-eligible (`canQuickAddStartNow`, i.e. a validated workflow with a provable destination and a
+        non-empty description), the shortcut runs `handleStartClick` — the SAME path as the Save hold gesture
+        and the legacy Start chip — so the frozen `startIntentRef` snapshot, duplicate preflight and
+        `submitInFlightRef` lock all still apply. It falls back to create-only `handleSubmit()` whenever Start
+        is not provable, so the shortcut never fails silently. Plain Enter is unchanged and stays governed by
+        `quickAddSubmitOnEnter`; Shift+Enter (even with Cmd/Ctrl) stays a newline.
         */
         if (e.metaKey || e.ctrlKey) {
           e.preventDefault();
-          handleSubmit();
+          if (canQuickAddStartNow) {
+            handleStartClick();
+          } else {
+            handleSubmit();
+          }
           return;
         }
         if (!enterSubmits) {
@@ -1104,11 +1266,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
         if (showNodePicker) {
           setShowNodePicker(false);
           setNodePickerPosition(null);
-          return;
-        }
-        if (showPriorityPicker) {
-          setShowPriorityPicker(false);
-          setPriorityPickerPosition(null);
           return;
         }
         if (showWorkflowPicker) {
@@ -1148,13 +1305,13 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
       showNodePicker,
       isModelMenuOpen,
       activeModelSubmenu,
-      showPriorityPicker,
       showWorkflowPicker,
       projectId,
       setIsDisclosureExpanded,
       duplicateMatches,
       enterSubmits,
-      singleLine,
+      canQuickAddStartNow,
+      handleStartClick,
     ],
   );
 
@@ -1168,11 +1325,10 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
 
   const handleFocus = useCallback(() => {
     // Auto-expand on focus when autoExpand prop is true (default)
-    // FNXC:QuickEntry 2026-06-22-19:25: never auto-expand the textarea on focus when singleLine (List view) — it must stay one line.
-    if (autoExpand && !singleLine) {
+    if (autoExpand) {
       setIsExpanded(true);
     }
-  }, [autoExpand, singleLine]);
+  }, [autoExpand]);
 
   const toggleDep = useCallback((id: string) => {
     setDependencies((prev) =>
@@ -1182,7 +1338,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
 
   /*
   FNXC:QuickAddDepsMenu 2026-07-25-12:00:
-  All Quick Add portaled menus (Deps, Models, workflow, agent, node, priority) share anchor-first
+  All Quick Add portaled menus (Deps, Models, workflow, agent, node) share anchor-first
   layout-viewport positioning. Mixing visualViewport offsets with getBoundingClientRect, or deriving
   upward `top` from a height cap, made short menus float too high; upward portals consume `bottom`
   and `top: auto` so their rendered bottom remains attached regardless of content height.
@@ -1358,29 +1514,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
     });
   }, []);
 
-  const updatePriorityPickerPosition = useCallback(() => {
-    const trigger = priorityPickerRef.current?.querySelector("button") as HTMLButtonElement | null;
-    if (!trigger) return;
-
-    const rect = trigger.getBoundingClientRect();
-    const { width: viewportWidth, height: viewportHeight } = getLayoutViewportSize();
-    const position = computeFixedMenuPosition({
-      triggerRect: rect,
-      viewportWidth,
-      viewportHeight,
-      preferredWidth: Math.max(rect.width, 200),
-      preferredHeight: 220,
-      minWidth: 200,
-    });
-    setPriorityPickerPosition({
-      top: position.top,
-      bottom: position.bottom,
-      left: position.left,
-      width: position.width,
-      maxHeight: position.maxHeight,
-    });
-  }, []);
-
   // Keep model menu portal anchored during scroll/resize
   useEffect(() => {
     if (!isModelMenuOpen) return;
@@ -1506,31 +1639,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
     };
   }, [showNodePicker, updateNodePickerPosition]);
 
-  // Keep priority picker portal anchored during scroll/resize
-  useEffect(() => {
-    if (!showPriorityPicker) return;
-
-    const handleReposition = () => updatePriorityPickerPosition();
-
-    window.addEventListener("resize", handleReposition);
-    window.addEventListener("scroll", handleReposition, true);
-
-    const vv = window.visualViewport;
-    if (vv) {
-      vv.addEventListener("resize", handleReposition);
-      vv.addEventListener("scroll", handleReposition);
-    }
-
-    return () => {
-      window.removeEventListener("resize", handleReposition);
-      window.removeEventListener("scroll", handleReposition, true);
-      if (vv) {
-        vv.removeEventListener("resize", handleReposition);
-        vv.removeEventListener("scroll", handleReposition);
-      }
-    };
-  }, [showPriorityPicker, updatePriorityPickerPosition]);
-
   const handlePlanningModelChange = useCallback((value: string) => {
     const next = parseModelSelection(value);
     setPlanningCredentialInstanceId(undefined);
@@ -1610,17 +1718,127 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   FNXC:QuickEntry 2026-06-30-00:00:
   Quick-add intentionally exposes no Plan button, disabled Plan state, tooltip, test id, or click target. Keep non-quick-add planning entry points such as the New Task dialog and model-menu planning lane intact.
   */
+  /**
+   * Ends the active gesture (if any) and returns it. `suppressClick` arms the barrier for THAT gesture only,
+   * so the synthetic click a release produces is absorbed exactly once and never leaks into a later press.
+   */
+  const endQuickAddSaveGesture = useCallback((suppressClick: boolean) => {
+    const active = quickAddSaveGestureRef.current;
+    if (quickAddSaveEngageTimerRef.current) clearTimeout(quickAddSaveEngageTimerRef.current);
+    if (quickAddSaveTimerRef.current) clearTimeout(quickAddSaveTimerRef.current);
+    quickAddSaveEngageTimerRef.current = null;
+    quickAddSaveTimerRef.current = null;
+    quickAddSaveGestureRef.current = null;
+    quickAddStartWorkflowRef.current = null;
+    quickAddStartIdentityRef.current = null;
+    if (active && suppressClick) quickAddSaveSuppressClickRef.current = active.id;
+    setQuickAddSaveState("idle");
+    return active;
+  }, []);
+
+  const cancelQuickAddSaveGesture = useCallback(() => {
+    endQuickAddSaveGesture(true);
+  }, [endQuickAddSaveGesture]);
+
+  /**
+   * FNXC:NativeQuickEntry 2026-09-16-02:15:
+   * Second bound on the barrier, for the release events that DO produce a click: the browser dispatches that click in
+   * the same turn as pointerup/keyup, so a zero-delay fence drops a barrier whose click never arrived (the usual cause
+   * being a momentarily disabled Save swallowing it) without ever releasing it early. Cancellation routes deliberately
+   * do not schedule it; their barrier is dropped by the next press instead.
+   */
+  const releaseQuickAddSaveClickBarrierAfterTerminalEvent = useCallback(() => {
+    const armedGestureId = quickAddSaveSuppressClickRef.current;
+    if (armedGestureId === null || quickAddSaveBarrierReleaseTimerRef.current) return;
+    quickAddSaveBarrierReleaseTimerRef.current = setTimeout(() => {
+      quickAddSaveBarrierReleaseTimerRef.current = null;
+      if (quickAddSaveSuppressClickRef.current === armedGestureId) quickAddSaveSuppressClickRef.current = null;
+    }, 0);
+  }, []);
+
+  const beginQuickAddSaveGesture = useCallback((input: QuickAddSaveGesture) => {
+    /*
+    FNXC:NativeQuickEntry 2026-09-16-02:15:
+    FN-453 root cause: the click barrier used to be a component-wide boolean that a cancellation could leave armed
+    with nothing left to consume it, after which EVERY later hold was refused and Save looked dead. A new physical
+    press always owns the barrier: whatever the previous gesture left behind is dropped here, which bounds the
+    barrier's lifetime to a single gesture without needing a timer race.
+    */
+    quickAddSaveSuppressClickRef.current = null;
+    if (quickAddSaveBarrierReleaseTimerRef.current) clearTimeout(quickAddSaveBarrierReleaseTimerRef.current);
+    quickAddSaveBarrierReleaseTimerRef.current = null;
+    if (!canQuickAddStartNow || !validatedStartWorkflow || quickAddSaveGestureRef.current) return false;
+    const id = quickAddSaveGestureIdRef.current + 1;
+    quickAddSaveGestureIdRef.current = id;
+    quickAddSaveGestureRef.current = { id, input, engaged: false };
+    quickAddStartWorkflowRef.current = validatedStartWorkflow;
+    quickAddStartIdentityRef.current = quickAddStartIdentity;
+    quickAddSaveEngageTimerRef.current = setTimeout(() => {
+      quickAddSaveEngageTimerRef.current = null;
+      const active = quickAddSaveGestureRef.current;
+      if (!active || active.id !== id) return;
+      active.engaged = true;
+      setQuickAddSaveState("holding");
+    }, QUICK_ADD_START_HOLD_ENGAGE_MS);
+    quickAddSaveTimerRef.current = setTimeout(() => {
+      quickAddSaveTimerRef.current = null;
+      const workflowSnapshot = quickAddStartWorkflowRef.current;
+      endQuickAddSaveGesture(true);
+      handleStartClick(workflowSnapshot);
+    }, QUICK_ADD_START_HOLD_DURATION_MS);
+    return true;
+  }, [canQuickAddStartNow, endQuickAddSaveGesture, handleStartClick, quickAddStartIdentity, validatedStartWorkflow]);
+
+  const completeQuickAddSaveGesture = useCallback((gesture: QuickAddSaveGesture) => {
+    const active = quickAddSaveGestureRef.current;
+    const matches = active?.input.kind === gesture.kind && (active.input.kind === "pointer"
+      ? active.input.pointerId === (gesture as Extract<QuickAddSaveGesture, { kind: "pointer" }>).pointerId
+      : active.input.key === (gesture as Extract<QuickAddSaveGesture, { kind: "keyboard" }>).key);
+    if (!active || !matches) return;
+    const wasEngaged = active.engaged;
+    endQuickAddSaveGesture(true);
+    /*
+    FNXC:NativeQuickEntry 2026-09-16-02:15:
+    FN-453 operator contract: releasing an ENGAGED hold before the `QUICK_ADD_START_HOLD_DURATION_MS` threshold must behave as if the button was
+    never pressed — no create, no move, no duplicate lookup, draft preserved. Only a press released before the fill
+    engages is an ordinary Save, and that save is issued here (rather than through the native click) because Enter
+    fires its click on keydown; the gesture's own click is absorbed by the barrier so exactly one task is created.
+    */
+    if (wasEngaged) return;
+    void handleSubmit();
+  }, [endQuickAddSaveGesture, handleSubmit]);
+
   /*
-  FNXC:QuickAddStart 2026-07-24-11:20:
-  Start stashes the workflow snapshot validated at click time in `startIntentRef` and then runs the SAME submit
-  path as Save. The snapshot (not live state) is what `submitCreateTask` reads, so a workflow list refreshed
-  mid-duplicate-confirmation cannot retarget an in-flight Start.
+  FNXC:NativeQuickEntry 2026-09-13-17:28:
+  Pointer and keyboard holds share one hold timer and one captured workflow snapshot. Only a primary pointer using
+  its primary button may begin a hold. Reaching the threshold consumes Start exactly once, arms suppression for late
+  release/click events, and resets the visual state to Save immediately rather than tying protection to rendered
+  confirmation state. Workflow changes, submission, disablement, blur, Escape, capture loss, and unmount invalidate a
+  pending gesture.
+
+  FNXC:NativeQuickEntry 2026-09-12-21:38:
+  A completed Start hold owns its synthetic-click barrier until the trailing click is consumed, independently of
+  submission success, failure, or duplicate-dialog cancellation. Success can reset and re-enable the form before the
+  pointer is released, while cancellation preserves the draft; neither outcome may let that same physical gesture
+  save a new or retained draft.
+
+  FNXC:NativeQuickEntry 2026-09-16-02:15:
+  FN-453 replaces the component-wide boolean barrier and its zero-delay release timer with a per-gesture id that the
+  NEXT press always clears. That is the fix for "holding Save sometimes does nothing": a cancellation whose click
+  never arrived (pointercancel, blur, capture loss, a disabled button swallowing the click) used to leave the barrier
+  armed forever, and `beginQuickAddSaveGesture` then refused every subsequent hold. Cancellation still absorbs its
+  OWN trailing click, and a completed Start still owns its barrier until that click is consumed.
   */
-  const handleStartClick = useCallback(() => {
-    if (!canQuickAddStartNow || !validatedStartWorkflow) return;
-    startIntentRef.current = validatedStartWorkflow;
-    handleSubmit();
-  }, [canQuickAddStartNow, handleSubmit, validatedStartWorkflow]);
+  useEffect(() => () => {
+    endQuickAddSaveGesture(false);
+    if (quickAddSaveBarrierReleaseTimerRef.current) clearTimeout(quickAddSaveBarrierReleaseTimerRef.current);
+    quickAddSaveBarrierReleaseTimerRef.current = null;
+  }, [endQuickAddSaveGesture]);
+  useEffect(() => {
+    if (quickAddSaveGestureRef.current && (isSubmitting || isDisabled || !canQuickAddStartNow || quickAddStartIdentityRef.current !== quickAddStartIdentity)) {
+      cancelQuickAddSaveGesture();
+    }
+  }, [canQuickAddStartNow, cancelQuickAddSaveGesture, isDisabled, isSubmitting, quickAddStartIdentity]);
 
   const truncate = (s: string, len: number) =>
     s.length > len ? s.slice(0, len) + "…" : s;
@@ -1706,13 +1924,24 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   const sessionAdvisorToggleLabel = effectiveSessionAdvisor
     ? t("tasks.sessionAdvisorOn", "Session advisor ON for next task (project default: {{default}})", { default: projectSessionAdvisorDefault ? t("tasks.sessionAdvisorDefaultOn", "on") : t("tasks.sessionAdvisorDefaultOff", "off") })
     : t("tasks.sessionAdvisorOff", "Session advisor OFF for next task (project default: {{default}})", { default: projectSessionAdvisorDefault ? t("tasks.sessionAdvisorDefaultOn", "on") : t("tasks.sessionAdvisorDefaultOff", "off") });
-  const PriorityIcon = getPriorityIcon(priority);
-  const priorityLabel = getPriorityLabel(priority);
-  const priorityButtonLabel = t("tasks.quickEntryPriorityLabel", "Priority: {{priority}}", { priority: priorityLabel });
   const fastToggleLabel = t("tasks.toggleFastMode", "Toggle fast execution mode");
+  /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 toggle label; the tooltip states the actual consequence, not just the mode name. */
+  /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514 toggle label states the consequence, like the plan toggle beside it. */
+  const humanMergeApprovalToggleLabel = t(
+    "tasks.humanMergeApproval.toggle",
+    "Require my approval before this task is delivered",
+  );
+  const humanPlanApprovalToggleLabel = t(
+    "tasks.humanPlanApproval.toggle",
+    "Require my approval of the plan before execution",
+  );
+  const disclosureLabel = isDisclosureExpanded
+    ? t("tasks.hideAdvancedOptions", "Hide advanced options")
+    : t("tasks.showAdvancedOptions", "Show advanced options");
 
-  // Show expanded controls based on disclosure state (user preference), not textarea focus
+  // Quick Add keeps immediate actions available while disclosure controls advanced routing options only.
   const showExpandedControls = isDisclosureExpanded;
+  const showActionRow = true;
 
   const toggleExpanded = useCallback(() => {
     setIsDisclosureExpanded((prev) => {
@@ -1725,7 +1954,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
   return (
     <>
       <div
-        className={`quick-entry-box ${isDisclosureExpanded ? "quick-entry-box--expanded" : "quick-entry-box--collapsed"}${singleLine ? " quick-entry--single-line" : ""}${isFileDragOver ? " quick-entry-box--drag-over" : ""}`}
+        className={`quick-entry-box ${isDisclosureExpanded ? "quick-entry-box--expanded" : "quick-entry-box--collapsed"}${isFileDragOver ? " quick-entry-box--drag-over" : ""}`}
         data-testid="quick-entry-box"
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -1742,9 +1971,9 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
       <div className="description-with-refine">
         <div className="quick-entry-main-row">
           <div className="quick-entry-textarea-wrap">
-            <textarea
+            <UiTextArea
               ref={textareaRef}
-              className={`quick-entry-input ${isExpanded && !singleLine ? "quick-entry-input--expanded" : ""}`}
+              className={`quick-entry-input ${isExpanded ? "quick-entry-input--expanded" : ""}`}
               placeholder={isSubmitting ? t("tasks.creating", "Creating...") : t("tasks.addTaskPlaceholder", "Add a task...")}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -1754,33 +1983,34 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
               onBlur={handleBlur}
               disabled={isSubmitting || isDisabled}
               data-testid="quick-entry-input"
-              rows={singleLine ? 1 : 2}
+              rows={2}
               aria-controls="quick-entry-controls"
               aria-expanded={isDisclosureExpanded}
             />
           </div>
           <MicButton {...dictation.micProps} disabled={isSubmitting || isDisabled} />
-          <button
+          <UiButton
             type="button"
             className="btn btn-sm quick-entry-toggle"
             onClick={toggleExpanded}
             aria-expanded={isDisclosureExpanded}
             aria-controls="quick-entry-controls"
             data-testid="quick-entry-toggle"
-            title={isDisclosureExpanded ? t("tasks.collapse", "Collapse") : t("tasks.expand", "Expand")}
+            title={disclosureLabel}
+            aria-label={disclosureLabel}
           >
             {isDisclosureExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          </button>
+          </UiButton>
         </div>
       </div>
       <div
         id="quick-entry-controls"
         className="quick-entry-controls"
-        hidden={!showExpandedControls}
-        aria-hidden={!showExpandedControls}
+        hidden={!showActionRow}
+        aria-hidden={!showActionRow}
       >
-        {/* All quick-create actions behind single disclosure toggle */}
-        {showExpandedControls && !isSubmitting && (
+        {/* Quick Add keeps immediate actions visible and progressively discloses advanced options. */}
+        {showActionRow && !isSubmitting && (
           <div
             className="quick-entry-actions"
             data-testid="quick-entry-actions"
@@ -1807,18 +2037,22 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
             First-run review flagged the quick-add composer as disorganized: chips wrapped into four
             arbitrary-looking rows with Save buried mid-row. Reorganize into two logical clusters inside
             the single wrapping action row: an options group (workflow, optional steps, deps,
-            models, node, agent) and a right-aligned primary group (attach, GitHub tracking, Priority,
+            models, node, agent) and a right-aligned primary group (attach, GitHub tracking,
             Fast, Save) so status controls sit beside attach and Save still reads last/right.
 
             FNXC:QuickAddActionRow 2026-07-10-21:45:
-            Priority and Fast are icon-only in the bottom primary group: priority uses the shared
+            Fast is icon-only in the bottom primary group: it uses the shared
             up/high, down/low, flag/normal, alert/urgent glyph helper, and Fast uses Zap while retaining
             title/aria-label/test-id semantics.
             */}
-            <div className="quick-entry-options-group" data-testid="quick-entry-options-group">
+            {showExpandedControls && (
+            <div
+              className="quick-entry-options-group"
+              data-testid="quick-entry-options-group"
+            >
             {showWorkflowSelector && (
               <div className="quick-entry-workflow-wrap" ref={workflowPickerRef}>
-                <button
+                <UiButton
                   ref={workflowTriggerRef}
                   type="button"
                   className="btn btn-sm dep-trigger quick-entry-workflow-trigger"
@@ -1832,8 +2066,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                     setAgentPickerPosition(null);
                     setShowNodePicker(false);
                     setNodePickerPosition(null);
-                    setShowPriorityPicker(false);
-                    setPriorityPickerPosition(null);
                     setIsModelMenuOpen(false);
                     setModelMenuPosition(null);
                     setActiveModelSubmenu(null);
@@ -1864,12 +2096,13 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                   />
                   <span className="quick-entry-workflow-label">{quickEntryWorkflowLabel}</span>
                   <ChevronDown size={12} aria-hidden="true" />
-                </button>
+                </UiButton>
                 {showWorkflowPicker && portalRoot && workflowPickerPosition && createPortal(
-                  <div
+                  <UiPopoverSurface
                     ref={workflowPickerPortalRef}
+                    triggerRef={workflowPickerRef}
+                    onClose={() => setShowWorkflowPicker(false)}
                     className="dep-dropdown quick-entry-workflow-menu"
-                    role="listbox"
                     data-testid="quick-entry-workflow-menu"
                     style={{
                       position: "fixed",
@@ -1882,16 +2115,18 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                     }}
                   >
                     <div className="dep-dropdown-search-header">{t("tasks.quickEntryWorkflowHeader", "Create in workflow")}</div>
+                    <UiListBox aria-label={t("tasks.quickEntryWorkflowHeader", "Create in workflow")}>
                     {realWorkflowOptions.map((option) => {
                       const duplicateName = (quickEntryWorkflowNameCounts.get(option.name) ?? 0) > 1;
                       const optionLabel = duplicateName
                         ? t("tasks.quickEntryWorkflowDuplicateLabel", "{{name}} ({{id}})", { name: option.name, id: option.id })
                         : option.name;
                       return (
-                        <button
+                        <UiListBoxItem
                           key={option.id}
-                          type="button"
-                          role="option"
+                          id={option.id}
+                          textValue={optionLabel}
+                          legacyAs="button"
                           aria-selected={quickEntryWorkflowId === option.id}
                           aria-label={optionLabel}
                           className={`dep-dropdown-item quick-entry-workflow-option${quickEntryWorkflowId === option.id ? " selected" : ""}`}
@@ -1908,10 +2143,11 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                             <span className="dep-dropdown-title quick-entry-workflow-option-name">{option.name}</span>
                             {duplicateName ? <span className="dep-dropdown-subtitle quick-entry-workflow-option-id">{option.id}</span> : null}
                           </span>
-                        </button>
+                        </UiListBoxItem>
                       );
                     })}
-                  </div>,
+                    </UiListBox>
+                  </UiPopoverSurface>,
                   portalRoot,
                 )}
               </div>
@@ -1930,7 +2166,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
               Quick Add intentionally omits AI Refine so the compact create row has no refine button, menu, loading state, or /ai/refine-text path. New Task and TaskForm keep their dedicated refine affordance for richer task drafting.
             */}
             <div className="dep-trigger-wrap">
-              <button
+              <UiButton
                 ref={depTriggerRef}
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
@@ -1947,8 +2183,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                       setAgentPickerPosition(null);
                       setShowNodePicker(false);
                       setNodePickerPosition(null);
-                      setShowPriorityPicker(false);
-                      setPriorityPickerPosition(null);
                       // Position the dropdown before rendering
                       updateDepDropdownPosition();
                     } else {
@@ -1960,7 +2194,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
               >
                 <Link size={12} style={{ verticalAlign: "middle" }} />
                 {dependencies.length > 0 ? t("tasks.depsCount", "{{count}} deps", { count: dependencies.length }) : t("tasks.deps", "Deps")}
-              </button>
+              </UiButton>
             </div>
             {/* Dependency dropdown rendered via portal for proper viewport positioning */}
             {showDeps && portalRoot && depDropdownPosition && (() => {
@@ -1994,7 +2228,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                     overflowY: depDropdownPosition.maxHeight ? "auto" : undefined,
                   }}
                 >
-                  <input
+                  <UiInput
                     className="dep-dropdown-search"
                     placeholder={t("tasks.searchTasksPlaceholder", "Search tasks…")}
                     autoFocus={typeof document === "undefined" || document.activeElement !== textareaRef.current}
@@ -2013,7 +2247,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                         onClick={() => toggleDep(t.id)}
                       >
                         <span className="dep-dropdown-id">{t.id}</span>
-                        <span className="dep-dropdown-title">{truncate(t.title || t.description || t.id, 60)}</span>
+                        <span className="dep-dropdown-title">{truncate(getTaskTitleDisplayText(t), 60)}</span>
                       </div>
                     ))
                   )}
@@ -2022,7 +2256,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
               );
             })()}
 
-            <button
+            <UiButton
               ref={modelTriggerRef}
               type="button"
               onMouseDown={(e) => e.preventDefault()}
@@ -2034,8 +2268,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                 setAgentPickerPosition(null);
                 setShowNodePicker(false);
                 setNodePickerPosition(null);
-                setShowPriorityPicker(false);
-                setPriorityPickerPosition(null);
                 setActiveModelSubmenu(null);
                 setIsModelMenuOpen(true);
                 updateModelMenuPosition();
@@ -2043,11 +2275,11 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
             >
               <Brain size={12} style={{ verticalAlign: "middle" }} />
               {modelMenuLabel}
-            </button>
+            </UiButton>
 
             {shouldShowNodePicker && (
               <div className="node-trigger-wrap" ref={nodePickerRef}>
-                <button
+                <UiButton
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
                   className="btn btn-sm dep-trigger"
@@ -2059,8 +2291,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                     setIsModelMenuOpen(false);
                     setModelMenuPosition(null);
                     setActiveModelSubmenu(null);
-                    setShowPriorityPicker(false);
-                    setPriorityPickerPosition(null);
                     setShowNodePicker((prev) => {
                       const next = !prev;
                       if (next) {
@@ -2079,7 +2309,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                       <NodeHealthDot status={selectedNode.status} showLabel />
                     </span>
                   )}
-                </button>
+                </UiButton>
               </div>
             )}
 
@@ -2138,7 +2368,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
             )}
 
             <div className="agent-trigger-wrap" ref={agentPickerRef}>
-              <button
+              <UiButton
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 className="btn btn-sm dep-trigger"
@@ -2149,8 +2379,6 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                   } else {
                     setShowNodePicker(false);
                     setNodePickerPosition(null);
-                    setShowPriorityPicker(false);
-                    setPriorityPickerPosition(null);
                     void loadAgents();
                   }
                 }}
@@ -2158,7 +2386,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
               >
                 <Bot size={12} style={{ verticalAlign: "middle" }} />
                 {selectedAgentLabel ? ` ${selectedAgentLabel}` : ` ${t("tasks.agent", "Agent")}`}
-              </button>
+              </UiButton>
             </div>
             {showAgentPicker && portalRoot && agentPickerPosition && createPortal(
               <div
@@ -2215,32 +2443,19 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
 
             {/*
             FNXC:QuickAddStart 2026-07-31-23:51:
-            Start renders as the last chip in the options group so it wraps onto the same line as Models/Agent and
-            reads as an alternate create action beside Save (which stays right-aligned in the primary group). It is
-            present ONLY for manual-intake/"waiting"-first workflows — `hold` alone is not eligibility because the
-            merged auto-triaging Planning lane also holds cards. With an empty description it stays visible but
-            DISABLED (matching Save) so the affordance does not appear and vanish as the operator types; the whole
-            action row still unmounts while a create is in flight.
+            FNXC:NativeQuickEntry 2026-09-15-00:20:
+            REMOVED: the separate visible Start chip. It only ever rendered in the variant Column — the sole
+            production mount — never used, because inside the former boundary Start has always been a hold on the
+            single icon-only Save action. Its eligibility rule (manual-intake/"waiting"-first workflows only,
+            `hold` alone is not eligibility) and its create/move behaviour are unchanged and now live entirely on
+            that gesture, so no affordance and no empty shell is left behind.
             */}
-            {canQuickAddStart && (
-              <button
-                type="button"
-                className="btn btn-sm quick-entry-start-button"
-                onClick={handleStartClick}
-                onMouseDown={(e) => e.preventDefault()}
-                disabled={!canQuickAddStartNow}
-                data-testid="quick-entry-save-start"
-                title={t("tasks.startTaskTitle", "Create and start the task")}
-              >
-                <Play size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
-                {t("tasks.start", "Start")}
-              </button>
-            )}
             </div>
+            )}
 
             {/*
             FNXC:BoardComposer 2026-07-10-12:00:
-            Primary action cluster: attach + GitHub tracking + Priority + Fast sit directly beside Save,
+            Primary action cluster: attach + GitHub tracking + Fast sit directly beside Save,
             and Save is the LAST control in DOM order so it is right-aligned (margin-left auto on the
             cluster) and reads as the composer's primary action. Save keeps its distinct `btn-task-create`
             styling.
@@ -2249,12 +2464,12 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
             file input trigger, and pending-count badge.
 
             FNXC:QuickAddActionRow 2026-07-15-00:00:
-            Attach, GitHub, session advisor, Priority, and Fast are one icon-only cluster. Every control
+            Attach, GitHub, session advisor, and Fast are one icon-only cluster. Every control
             uses `btn-icon` so its SVG resolves to the shared `--icon-size-sm` token; do not fork
             ProviderIcon's shared size map to size this one GitHub use case.
             */}
             <div className="quick-entry-primary-group" data-testid="quick-entry-primary-group">
-              <button
+              <UiButton
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 className="btn btn-icon btn-sm quick-entry-attach-button"
@@ -2267,9 +2482,9 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                 {pendingAttachments.length > 0 && (
                   <span className="quick-entry-attach-count" aria-hidden="true">{pendingAttachments.length}</span>
                 )}
-              </button>
+              </UiButton>
 
-              <button
+              <UiButton
                 type="button"
                 className={`btn btn-icon btn-sm ${effectiveGithubTracking ? "btn-primary" : ""}`}
                 onClick={() => {
@@ -2282,7 +2497,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                 aria-label={githubToggleLabel}
               >
                 <ProviderIcon provider="github" size="sm" />
-              </button>
+              </UiButton>
 
               {/*
               FNXC:PlannerOversight 2026-07-14-18:11:
@@ -2294,7 +2509,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
               clear override to null (inherit) — same as TaskDetailModal — instead of
               permanently hardcoding true/false after a double-click.
               */}
-              <button
+              <UiButton
                 type="button"
                 className={`btn btn-icon btn-sm ${effectiveSessionAdvisor ? "btn-primary" : ""}`}
                 onClick={() => {
@@ -2311,82 +2526,9 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                 aria-label={sessionAdvisorToggleLabel}
               >
                 {effectiveSessionAdvisor ? <Eye size={14} aria-hidden="true" /> : <EyeOff size={14} aria-hidden="true" />}
-              </button>
+              </UiButton>
 
-              <div className="priority-trigger-wrap" ref={priorityPickerRef}>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  className="btn btn-icon btn-sm dep-trigger"
-                  data-testid="quick-entry-priority-button"
-                  title={priorityButtonLabel}
-                  aria-label={priorityButtonLabel}
-                  onClick={() => {
-                    setShowDeps(false);
-                    setShowAgentPicker(false);
-                    setAgentPickerPosition(null);
-                    setShowNodePicker(false);
-                    setNodePickerPosition(null);
-                    setIsModelMenuOpen(false);
-                    setModelMenuPosition(null);
-                    setActiveModelSubmenu(null);
-                    setShowPriorityPicker((prev) => {
-                      const next = !prev;
-                      if (next) {
-                        updatePriorityPickerPosition();
-                      } else {
-                        setPriorityPickerPosition(null);
-                      }
-                      return next;
-                    });
-                  }}
-                >
-                  {/* FNXC:PriorityColorCoding 2026-07-11-00:00: The quick-add icon-only priority trigger must preview urgency color from priorityIndicator without changing its label, test id, or picker behavior. */}
-                  <PriorityIcon size={14} aria-hidden="true" style={{ color: getPriorityColorVar(priority) }} />
-                </button>
-              </div>
-
-              {showPriorityPicker && portalRoot && priorityPickerPosition && createPortal(
-                <div
-                  ref={priorityPickerPortalRef}
-                  className="dep-dropdown priority-picker-dropdown priority-picker-dropdown--portal"
-                  onMouseDown={(e) => e.preventDefault()}
-                  style={{
-                    position: "fixed",
-                    top: priorityPickerPosition.bottom === null ? `${priorityPickerPosition.top}px` : "auto",
-                    bottom: priorityPickerPosition.bottom === null ? undefined : `${priorityPickerPosition.bottom}px`,
-                    left: `${priorityPickerPosition.left}px`,
-                    width: `${priorityPickerPosition.width}px`,
-                    maxHeight: priorityPickerPosition.maxHeight ? `${priorityPickerPosition.maxHeight}px` : undefined,
-                    overflowY: priorityPickerPosition.maxHeight ? "auto" : undefined,
-                  }}
-                >
-                  <div className="dep-dropdown-search-header">{t("tasks.selectPriority", "Select priority")}</div>
-                  {TASK_PRIORITIES.map((taskPriority) => {
-                    const label = getPriorityLabel(taskPriority);
-                    const OptionPriorityIcon = getPriorityIcon(taskPriority);
-                    return (
-                      <div
-                        key={taskPriority}
-                        className={`dep-dropdown-item${priority === taskPriority ? " selected" : ""}`}
-                        data-testid={`quick-entry-priority-option-${taskPriority}`}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          setPriority(taskPriority);
-                          setShowPriorityPicker(false);
-                          setPriorityPickerPosition(null);
-                        }}
-                      >
-                        <OptionPriorityIcon size={12} aria-hidden="true" style={{ color: getPriorityColorVar(taskPriority) }} />
-                        <span className="dep-dropdown-title">{label}</span>
-                      </div>
-                    );
-                  })}
-                </div>,
-                portalRoot,
-              )}
-
-              <button
+              <UiButton
                 type="button"
                 className={`btn btn-icon btn-sm ${isFastMode ? "btn-primary" : ""}`}
                 onClick={toggleFastMode}
@@ -2397,20 +2539,127 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                 aria-label={fastToggleLabel}
               >
                 <Zap size={14} aria-hidden="true" />
-              </button>
+              </UiButton>
 
-              <button
+              {/* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 — sits immediately beside Fast, same icon-button primitive and size, toggled independently. */}
+              <UiButton
                 type="button"
-                className="btn btn-task-create btn-sm"
-                onClick={handleSubmit}
+                className={`btn btn-icon btn-sm ${requiresHumanPlanApproval ? "btn-primary" : ""}`}
+                onClick={toggleHumanPlanApproval}
                 onMouseDown={(e) => e.preventDefault()}
-                disabled={!description.trim() || isSubmitting}
-                data-testid="quick-entry-save"
-                title={t("tasks.createTaskTitle", "Create task")}
+                aria-pressed={requiresHumanPlanApproval}
+                data-testid="quick-entry-human-plan-approval-toggle"
+                title={humanPlanApprovalToggleLabel}
+                aria-label={humanPlanApprovalToggleLabel}
               >
-                <Save size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
-                {t("tasks.save", "Save")}
-              </button>
+                <UserCheck size={14} aria-hidden="true" />
+              </UiButton>
+
+              {/* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514 — the delivery lock, same icon-button primitive and size, toggled independently of Fast and of plan validation. */}
+              <UiButton
+                type="button"
+                className={`btn btn-icon btn-sm ${requiresHumanMergeApproval ? "btn-primary" : ""}`}
+                onClick={toggleHumanMergeApproval}
+                onMouseDown={(e) => e.preventDefault()}
+                aria-pressed={requiresHumanMergeApproval}
+                data-testid="quick-entry-human-merge-approval-toggle"
+                title={humanMergeApprovalToggleLabel}
+                aria-label={humanMergeApprovalToggleLabel}
+              >
+                <Lock size={14} aria-hidden="true" />
+              </UiButton>
+
+              <UiButton
+                ref={quickAddSaveButtonRef}
+                type="button"
+                className="btn btn-task-create btn-sm btn-icon quick-entry-save"
+                onClick={() => {
+                  if (quickAddSaveSuppressClickRef.current !== null) {
+                    quickAddSaveSuppressClickRef.current = null;
+                    if (quickAddSaveBarrierReleaseTimerRef.current) clearTimeout(quickAddSaveBarrierReleaseTimerRef.current);
+                    quickAddSaveBarrierReleaseTimerRef.current = null;
+                    return;
+                  }
+                  if (!quickAddSaveGestureRef.current) void handleSubmit();
+                }}
+                onMouseDown={(e) => e.preventDefault()}
+                onPointerDown={(event) => {
+                  if (event.button !== 0 || event.isPrimary === false) return;
+                  if (!beginQuickAddSaveGesture({ kind: "pointer", pointerId: event.pointerId })) return;
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                }}
+                onPointerUp={(event) => {
+                  completeQuickAddSaveGesture({ kind: "pointer", pointerId: event.pointerId });
+                  releaseQuickAddSaveClickBarrierAfterTerminalEvent();
+                  if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                }}
+                onPointerCancel={() => cancelQuickAddSaveGesture()}
+                onPointerLeave={() => cancelQuickAddSaveGesture()}
+                onLostPointerCapture={() => cancelQuickAddSaveGesture()}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    cancelQuickAddSaveGesture();
+                    return;
+                  }
+                  if ((event.key === " " || event.key === "Enter") && !event.repeat) {
+                    event.preventDefault();
+                    beginQuickAddSaveGesture({ kind: "keyboard", key: event.key });
+                  }
+                }}
+                onKeyUp={(event) => {
+                  if (event.key === " " || event.key === "Enter") {
+                    event.preventDefault();
+                    completeQuickAddSaveGesture({ kind: "keyboard", key: event.key });
+                    releaseQuickAddSaveClickBarrierAfterTerminalEvent();
+                  }
+                }}
+                onBlur={() => cancelQuickAddSaveGesture()}
+                disabled={!description.trim() || isSubmitting}
+                style={{ "--quick-entry-hold-duration": `${QUICK_ADD_START_HOLD_FILL_MS}ms` } as CSSProperties}
+                data-testid="quick-entry-save"
+                data-hold-state={quickAddSaveState}
+                /* FNXC:NativeQuickEntry 2026-09-16-02:15: an engaged hold no longer offers "release to save", because FN-453 makes an early release a cancellation. */
+                aria-label={quickAddSaveState === "holding"
+                  ? t("tasks.holdToStartReleaseCancels", "Keep holding to start; release to cancel")
+                  : t("tasks.saveHoldToStart", "Save task; hold to start")}
+                title={t("tasks.saveHoldToStart", "Save task; hold to start")}
+              >
+                {/*
+                FNXC:NativeQuickEntry 2026-09-16-23:28:
+                FN-478 replaces the vertical fill mask + Play icon with a circular progress ring: the floppy Save icon fades out
+                while `.quick-entry-save-ring` fades in and its arc fills 0% -> 100% over the remaining hold time. Both layers are
+                always rendered and decorative (`aria-hidden`); only `data-hold-state` drives which one is visible, so an early
+                release simply restores the floppy without touching the gesture state machine or task creation.
+                */}
+                {(
+                  <span className="quick-entry-save-icons">
+                    <span className="quick-entry-save-icon quick-entry-save-icon--save" aria-hidden="true">
+                      <Save size={12} />
+                    </span>
+                    <span className="quick-entry-save-ring" aria-hidden="true">
+                      <svg viewBox="0 0 36 36" role="presentation" focusable="false">
+                        <circle className="quick-entry-save-ring__track" cx="18" cy="18" r="15" fill="none" />
+                        <circle
+                          className="quick-entry-save-ring__indicator"
+                          cx="18"
+                          cy="18"
+                          r="15"
+                          fill="none"
+                          pathLength={100}
+                          strokeDasharray="100"
+                          strokeDashoffset={100}
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </span>
+                  </span>
+                )}
+              </UiButton>
+              {(
+                <span className="visually-hidden" role="status" aria-live="polite">
+                  {quickAddSaveState === "holding" ? t("tasks.holdToStartProgress", "Keep holding to start") : ""}
+                </span>
+              )}
             </div>
           </div>
         )}
@@ -2422,9 +2671,10 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
           removeLabel={t("tasks.removeAttachment", "Remove image")}
           testIdPrefix="quick-entry-preview"
         />
-        {isModelMenuOpen && portalRoot && modelMenuPosition && createPortal(
-            <div
+        {showExpandedControls && isModelMenuOpen && portalRoot && modelMenuPosition && createPortal(
+            <UiPopoverSurface
               ref={modelMenuPortalRef}
+              onClose={() => setIsModelMenuOpen(false)}
               className="model-nested-menu model-nested-menu--portal"
               onMouseDown={(e) => {
                 /*
@@ -2456,8 +2706,9 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                  * Top-level model rows use bare role names and matching icon alignment because
                  * .model-menu-item-label has no gap. Submenu headers retain the "<Role> Model" form.
                  */
-                <div className="model-menu-items">
-                  <button
+                <UiMenu className="model-menu-items" aria-label={t("tasks.modelOverrides", "Model overrides")}>
+                  <UiMenuItem
+                    id="plan"
                     type="button"
                     className={`model-menu-item ${hasPlanningOverride ? "model-menu-item--active" : ""}`}
                     onClick={() => setActiveModelSubmenu("plan")}
@@ -2473,8 +2724,9 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                         : t("tasks.usingDefault", "Using default")}
                     </span>
                     <ChevronRight size={12} style={{ marginLeft: "auto", color: "var(--text-dim)" }} />
-                  </button>
-                  <button
+                  </UiMenuItem>
+                  <UiMenuItem
+                    id="executor"
                     type="button"
                     className={`model-menu-item ${hasExecutorOverride ? "model-menu-item--active" : ""}`}
                     onClick={() => setActiveModelSubmenu("executor")}
@@ -2490,8 +2742,9 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                         : t("tasks.usingDefault", "Using default")}
                     </span>
                     <ChevronRight size={12} style={{ marginLeft: "auto", color: "var(--text-dim)" }} />
-                  </button>
-                  <button
+                  </UiMenuItem>
+                  <UiMenuItem
+                    id="validator"
                     type="button"
                     className={`model-menu-item ${hasValidatorOverride ? "model-menu-item--active" : ""}`}
                     onClick={() => setActiveModelSubmenu("validator")}
@@ -2507,8 +2760,9 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                         : t("tasks.usingDefault", "Using default")}
                     </span>
                     <ChevronRight size={12} style={{ marginLeft: "auto", color: "var(--text-dim)" }} />
-                  </button>
-                  <button
+                  </UiMenuItem>
+                  <UiMenuItem
+                    id="merger"
                     type="button"
                     className={`model-menu-item ${hasMergerOverride ? "model-menu-item--active" : ""}`}
                     onClick={() => setActiveModelSubmenu("merger")}
@@ -2524,12 +2778,12 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                         : t("tasks.usingDefault", "Using default")}
                     </span>
                     <ChevronRight size={12} style={{ marginLeft: "auto", color: "var(--text-dim)" }} />
-                  </button>
-                </div>
+                  </UiMenuItem>
+                </UiMenu>
               ) : (
                 // Submenu with CustomModelDropdown for the selected target
                 <div className="model-submenu">
-                  <button
+                  <UiButton
                     type="button"
                     className="model-submenu-back"
                     onClick={() => setActiveModelSubmenu(null)}
@@ -2537,7 +2791,7 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                   >
                     <ChevronDown size={12} style={{ transform: "rotate(90deg)", marginRight: 4 }} />
                     {t("common.back", "Back")}
-                  </button>
+                  </UiButton>
                   <div className="model-submenu-header">
                     {activeModelSubmenu === "plan" && t("tasks.planModel", "Plan Model")}
                     {activeModelSubmenu === "executor" && t("tasks.executorModel", "Executor Model")}
@@ -2583,18 +2837,18 @@ export function QuickEntryBox({ onCreate, onMoveTask, addToast, tasks = [], avai
                   {modelsError && (
                     <div className="model-submenu-error">
                       <span>{modelsError}</span>
-                      <button type="button" className="btn btn-sm" onClick={loadModels}>
+                      <UiButton type="button" className="btn btn-sm" onClick={loadModels}>
                         {t("common.retry", "Retry")}
-                      </button>
+                      </UiButton>
                     </div>
                   )}
                 </div>
               )}
-            </div>,
+            </UiPopoverSurface>,
             portalRoot,
           )}
         </div>
-        <input
+        <UiInput
           ref={fileInputRef}
           type="file"
           accept={TASK_ATTACHMENT_ACCEPT}

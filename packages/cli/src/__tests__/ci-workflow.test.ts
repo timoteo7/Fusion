@@ -471,6 +471,19 @@ describe("Full suite workflow (.github/workflows/full-suite.yml)", () => {
     expect(workflow.on?.pull_request).toBeUndefined();
   });
 
+  it("checks lifecycle-column drift after main receives a merge", () => {
+    const job = workflow.jobs?.["lifecycle-ratchet-drift"];
+    const steps = job?.steps ?? [];
+
+    expect(job).toBeDefined();
+    expect(steps.some((step: any) => step.uses === "./.github/actions/setup-node-pnpm")).toBe(true);
+    const ratchet = steps.find(
+      (step: any) => typeof step.run === "string" && step.run.includes("pnpm check:lifecycle-columns"),
+    );
+    expect(ratchet).toBeDefined();
+    expect(ratchet?.["continue-on-error"]).not.toBe(true);
+  });
+
   it("carries the demoted tier: 4-way shards, engine slow, inventory guard", () => {
     expect(workflow.jobs?.["test-shards"]?.strategy?.matrix?.shard).toEqual([1, 2, 3, 4]);
     expect(content).toContain("pnpm test:ci:shard --shard ${{ matrix.shard }} --total 4");
@@ -870,6 +883,13 @@ describe("Cross-platform agent-browser install workflow", () => {
     // FNXC:CI 2026-07-26-23:05: pack fixture must keep skip-install so the composite
     // takes the no-store-cache setup-node path (see setup-node-pnpm action).
     expect(findCompositeSetupStep(packFixture?.steps ?? [])?.with?.["skip-install"]).toBe("true");
+    /*
+    FNXC:AgentBrowserPackaging 2026-09-04-04:42:
+    prepack asserts dist/plugin-sdk/index.d.ts, so pack-fixture must install workspace
+    deps and build @runfusion/fusion before `pnpm pack`. Do not skip that assertion.
+    */
+    expect(content).toContain("pnpm install --frozen-lockfile");
+    expect(content).toContain("pnpm --filter @runfusion/fusion build");
     expect(installSmoke?.needs).toBe("pack-fixture");
     expect(installSmoke?.["runs-on"]).toBe("${{ matrix.os }}");
     expect(installSmoke?.strategy?.matrix?.os).toEqual(["ubuntu-latest", "macos-latest", "windows-latest"]);

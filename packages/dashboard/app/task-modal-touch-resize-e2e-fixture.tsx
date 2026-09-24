@@ -6,9 +6,12 @@ import { I18nextProvider, initReactI18next, useTranslation } from "react-i18next
 import "./styles.css";
 import "./components/TaskDetailModal.css";
 import "./components/FloatingWindow.css";
+import "./native-ui.css";
+import "./ui-style-tokens.css";
 import { FloatingWindow } from "./components/FloatingWindow";
 import { App } from "./App";
-import { TaskDetailContent } from "./components/TaskDetailModal";
+import { TaskDetailContent, TaskDetailModal } from "./components/TaskDetailModal";
+import { AppTaskPopoutWindow } from "./components/TaskDetailHostBoundaries";
 import { AppModals } from "./components/AppModals";
 import { MainContent } from "./components/dashboard/MainContent";
 import { ListView } from "./components/ListView";
@@ -17,12 +20,72 @@ import { NavigationHistoryProvider } from "./hooks/useNavigationHistory";
 import { NewTaskModal } from "./components/NewTaskModal";
 import { AgentListModal } from "./components/AgentListModal";
 import { SetupWizardModal } from "./components/SetupWizardModal";
+import { SettingsModal } from "./components/SettingsModal";
 import { ConfirmDialogProvider } from "./hooks/useConfirm";
 
 const params = new URLSearchParams(window.location.search);
 const surface = params.get("surface") ?? "new-task";
 const titleMode = params.get("titleMode") ?? "overflow";
 const boardCardClickSurface = surface === "board-card-click-app";
+const preserveDesktopHostDuringViewportProbe = params.get("preserveDesktopHost") === "true";
+if (preserveDesktopHostDuringViewportProbe) {
+  /*
+  FNXC:TaskDetailTitleRemoval 2026-09-13-11:59:
+  List split, right dock, and pop-out are desktop-only navigation owners, but their mounted shared header still needs real narrow-viewport CSS coverage. Freeze only JavaScript host admission after desktop mount so CDP can resize the actual viewport without routing away; CSS media and container queries continue to use the resized viewport.
+  */
+  Object.defineProperty(window, "innerWidth", { configurable: true, get: () => 1200 });
+  const nativeMatchMedia = window.matchMedia.bind(window);
+  const stableMediaMatches = new Map<string, boolean>();
+  window.matchMedia = (query: string): MediaQueryList => {
+    if (!stableMediaMatches.has(query)) stableMediaMatches.set(query, nativeMatchMedia(query).matches);
+    const initial = nativeMatchMedia(query);
+    return {
+      matches: stableMediaMatches.get(query) ?? false,
+      media: initial.media,
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => true,
+    };
+  };
+  /*
+  FNXC:TaskDetailChatGeometry 2026-09-13-13:09:
+  Desktop-only production hosts also observe their containers before routing responsively. Freeze fixture observer admission after its first real delivery so narrow CSS can be measured on the mounted List split/right-dock/pop-out owner; this observer is host scaffolding and is independent of the removed title clamp.
+  */
+  const NativeResizeObserver = window.ResizeObserver;
+  window.ResizeObserver = class StableHostResizeObserver implements ResizeObserver {
+    private readonly observer: ResizeObserver;
+    constructor(callback: ResizeObserverCallback) {
+      let delivered = false;
+      this.observer = new NativeResizeObserver((entries, observer) => {
+        if (delivered) return;
+        delivered = true;
+        callback(entries, observer);
+      });
+    }
+    observe(target: Element, options?: ResizeObserverOptions) { this.observer.observe(target, options); }
+    unobserve(target: Element) { this.observer.unobserve(target); }
+    disconnect() { this.observer.disconnect(); }
+  };
+}
+/*
+FNXC:TaskDetailChatGeometry 2026-09-11-18:16:
+The browser fixture drives the real Task Detail hosts through both chat surfaces and deterministic empty, loading, populated, and streaming-shaped responses. This lets Chromium prove that the transcript owns overflow while the in-flow composer remains at the usable body edge with or without a contextual footer.
+*/
+const chatKind = params.get("chatKind") === "planner" ? "planner" : "activity";
+const chatState = params.get("chatState") ?? "empty";
+const showContextualFooter = params.get("footer") === "true";
+const structuredTaskDetail = params.get("structured") === "true";
+/*
+FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+FN-442 replaced the boolean Chat-first opt-in with a three-value project choice, and made the floating task window the
+unconditional board/list route. The fixture states its intent directly: drive the planner Chat surface by selecting the
+`chat` landing tab, and the Activity surface with the historical `activity` default.
+*/
+const taskDetailDefaultTab = chatKind === "planner" ? ("chat" as const) : ("activity" as const);
+const taskDetailInitialTab = chatKind === "planner" ? ("planner-chat" as const) : ("chat" as const);
 if (params.has("reset")) localStorage.clear();
 
 /*
@@ -56,7 +119,47 @@ geometry before each committed screenshot is captured.
 window.fetch = async (input) => {
   const url = input instanceof Request ? input.url : String(input);
   const pathname = new URL(url, window.location.href).pathname;
-  const payload = url.includes("/projects/across-nodes")
+  if (chatState === "loading" && (pathname.endsWith(`/tasks/${fixtureTask.id}/logs`) || (pathname === "/api/chat/sessions" && url.includes("lookup=resume")))) {
+    return await new Promise<Response>(() => undefined);
+  }
+  const activityEntries = chatState === "empty" || chatKind !== "activity" ? [] : Array.from({ length: chatState === "populated" ? 120 : 8 }, (_, index) => ({
+    type: "text",
+    text: `${chatState === "streaming" ? "Streaming output" : "Recorded output"} ${index + 1} ${"fills the production transcript. ".repeat(6)}`,
+    timestamp: new Date(Date.UTC(2026, 8, 11, 12, index)).toISOString(),
+    role: "executor",
+  }));
+  const plannerSession = {
+    id: "chat-fn-349",
+    agentId: `task-planner:${fixtureTask.id}`,
+    title: "Task Detail geometry",
+    status: "active",
+    projectId: "fixture",
+    modelProvider: "mock",
+    modelId: "scripted",
+    createdAt: "2026-09-11T12:00:00.000Z",
+    updatedAt: "2026-09-11T12:01:00.000Z",
+    cliSessionFile: null,
+    cliExecutorAdapterId: null,
+    inFlightGeneration: null,
+  };
+  const plannerMessages = chatState === "empty" || chatKind !== "planner" ? [] : Array.from({ length: chatState === "populated" ? 120 : 4 }, (_, index) => ({
+    id: chatState === "streaming" && index === 3 ? "streaming-assistant" : `planner-message-${index}`,
+    sessionId: plannerSession.id,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `${chatState === "streaming" ? "Streaming plan" : "Persisted plan"} ${index + 1} ${"fills the production transcript. ".repeat(6)}`,
+    thinkingOutput: null,
+    metadata: null,
+    createdAt: new Date(Date.UTC(2026, 8, 11, 13, index)).toISOString(),
+  }));
+  const payload = pathname.endsWith(`/tasks/${fixtureTask.id}/logs`)
+    ? activityEntries
+    : pathname === "/api/chat/sessions" && url.includes("lookup=resume")
+      ? { sessions: chatState === "empty" ? [] : [plannerSession] }
+      : pathname === `/api/chat/sessions/${plannerSession.id}/messages`
+        ? { messages: plannerMessages }
+        : pathname === `/api/chat/sessions/${plannerSession.id}`
+          ? { session: plannerSession }
+        : url.includes("/projects/across-nodes")
     ? [{ id: "fixture", name: "Fixture", path: "/fixture", status: "active" }]
     : url.includes("/tasks/board-workflows")
       ? { flagEnabled: true, defaultWorkflowId: "fixture-workflow", taskWorkflowIds: { [fixtureTask.id]: "fixture-workflow" }, workflows: [{ id: "fixture-workflow", name: "Fixture", columns: boardCardClickSurface ? [
@@ -65,14 +168,18 @@ window.fetch = async (input) => {
         FN-115's production-App Chromium fixture needs measured horizontal overflow at desktop and
         tablet widths, so it supplies enough canonical workflow columns to exercise Board panning.
         */
-        { id: "todo", name: "Todo", flags: {} },
+        { id: "todo", name: "Todo", flags: { hold: true } },
         { id: "in-progress", name: "In progress", flags: {} },
         { id: "in-review", name: "In review", flags: {} },
         { id: "verify", name: "Verify", flags: {} },
         { id: "done", name: "Done", flags: {} },
-      ] : [{ id: "todo", name: "Todo", flags: {} }, { id: "in-progress", name: "In progress", flags: {} }, { id: "in-review", name: "In review", flags: {} }] }] }
+      ] : [{ id: "todo", name: "Todo", flags: { hold: true } }, { id: "in-progress", name: "In progress", flags: {} }, { id: "in-review", name: "In review", flags: {} }] }] }
+      : pathname === "/api/tasks/page"
+        ? { tasks: [fixtureTask], total: 1, hasMore: false, nextCursor: null }
+        : pathname === "/api/tasks/done"
+          ? { tasks: [], total: 0, hasMore: false, nextCursor: null }
       : url.includes(`/tasks/${fixtureTask.id}/prompt`)
-        ? { id: fixtureTask.id, prompt: "" }
+        ? { id: fixtureTask.id, prompt: fixtureTask.prompt }
         : pathname === `/api/tasks/${fixtureTask.id}`
           ? fixtureTask
           : pathname === "/api/tasks"
@@ -93,7 +200,9 @@ window.fetch = async (input) => {
                   ? { goals: [] }
         : url.includes("/models")
           ? { models: [], favoriteProviders: [], favoriteModels: [] }
-          : url.includes("/settings") ? { taskPopupsBoardListOnly: false, openMobileTasksInPopup: params.get("openMobileTasksInPopup") === "true" }
+          : pathname === "/api/settings/scopes" ? { global: { experimentalFeatures: {} }, project: {} }
+          : pathname === "/api/settings/global" ? { experimentalFeatures: {} }
+          : url.includes("/settings") ? { taskDetailDefaultTab, experimentalFeatures: {} }
             : url.includes("/agents") || url.includes("/nodes") ? []
               : [];
   return new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
@@ -101,18 +210,38 @@ window.fetch = async (input) => {
 
 const fixtureTitle = titleMode === "fit"
   ? "Fitting browser title"
-  : titleMode === "threshold"
-    ? "A threshold title whose real host width crosses the two line clamp"
-    : titleMode === "description" ? undefined : titleMode === "id" ? "" : "A browser measured task title that crosses the two line clamp threshold without changing the operator selected expanded state ".repeat(3);
-const fixtureDescription = titleMode === "description" ? "A browser measured description fallback that crosses the two line clamp threshold without changing the operator selected expanded state ".repeat(3) : titleMode === "id" ? "" : "Fixture description";
+  : titleMode === "description" ? undefined : titleMode === "id" ? "" : "A long editable browser task title that must remain absent from shared header chrome ".repeat(3);
+const fixtureDescription = titleMode === "description" ? "A browser description without a title remains primary Definition content. ".repeat(3) : titleMode === "id" ? "" : "Fixture description";
+/*
+FNXC:TaskDetailStructure 2026-09-12-23:26:
+La fixture Chromium des vrais hôtes contient une description, un PROMPT.md, des étapes de statuts variés et un Feed avec résultat et agent réel afin que les captures Définition, plan et Activity prouvent la hiérarchie livrée plutôt qu’une coquille vide.
+*/
+/*
+FNXC:TaskDetailDefinition 2026-09-14-20:45:
+FN-391: the `fit` matrix row is the one that produces the operator-facing screenshots, so it must
+carry REAL Definition content — steps for the collapsed progress disclosure and a plan containing
+`What This Delivers` for the product-outcome section. Capturing an empty shell would prove the
+section order and nothing about what those sections actually render.
+*/
+const hasDefinitionContent = structuredTaskDetail || titleMode === "fit";
+const fixturePlan = "# Task: FN-TITLE-FLICKER - Delivery plan\n\n## What This Delivers\n\n- Operators see progress, description, and the expected outcome in one glance.\n- The complete plan stays one click away behind Read plan.\n\n## Mission\n\nKeep the task detail structure readable in every host.\n\n## Verification\n\n- Inspect Definition\n- Open the full plan\n- Review Activity\n";
 const fixtureTask = {
   id: titleMode === "id" ? "FN-8806" : "FN-TITLE-FLICKER",
   title: fixtureTitle,
   description: fixtureDescription,
-  column: "todo",
+  column: showContextualFooter ? "in-review" : "todo",
   status: "pending",
-  prompt: "",
-  steps: [],
+  prompt: hasDefinitionContent ? fixturePlan : "",
+  steps: hasDefinitionContent ? [
+    { id: 1, name: "Inspect every task detail host", status: "done" },
+    { id: 2, name: "Open the full planning document", status: "in-progress" },
+    { id: 3, name: "Verify responsive activity logs", status: "pending" },
+  ] : [],
+  log: structuredTaskDetail ? [
+    { timestamp: "2026-09-12T22:30:00.000Z", action: "Started visual verification", outcome: "Desktop definition rendered", runContext: { agentId: "agent-executor" } },
+    { timestamp: "2026-09-12T22:35:00.000Z", action: "Opened the complete plan" },
+    { timestamp: "2026-09-12T22:40:00.000Z", action: "Checked Activity hierarchy", outcome: "Feed remains readable on mobile" },
+  ] : [],
   attachments: [],
   dependencies: [],
   createdAt: "2026-08-05T00:00:00.000Z",
@@ -121,10 +250,8 @@ const fixtureTask = {
 const fixtureColumnFlagsByTaskId = new Map([[fixtureTask.id, { hold: true }]]);
 
 /*
-FNXC:TaskDetailTitle 2026-08-05-18:48:
-The App pop-out browser route hydrates the same project and task caches used after a discarded
-session, so its board card exists on App's first render. This removes timing retries from the
-fixture while App still revalidates the stable mocked API data through its production hooks.
+FNXC:TaskDetailTitleRemoval 2026-09-13-11:59:
+The App pop-out browser route hydrates the same project and task caches used after a discarded session, so its board card exists on first render and the matrix can open the real title-free pop-out path without timing retries.
 */
 if (surface === "task-detail-title-app-floating" || surface === "board-card-click-app") {
   const savedAt = Date.now();
@@ -133,9 +260,15 @@ if (surface === "task-detail-title-app-floating" || surface === "board-card-clic
   localStorage.setItem("kb-dashboard-tasks-cache:fixture", JSON.stringify({ savedAt, data: [fixtureTask] }));
 }
 
+/*
+FNXC:TaskDetailChatGeometry 2026-09-17-00:48:
+The real-host browser matrix supplies its selected chat kind through the fixture query. Pass that
+landing-tab contract to every TaskDetailModal owner so Chromium measures Activity and Planner
+content rather than silently retaining the Definition default after the Task Detail rebuild.
+*/
 const detailProps = {
   task: fixtureTask,
-  initialTab: "definition" as const,
+  initialTab: taskDetailInitialTab,
   onDeleteTask: async () => fixtureTask,
   onMergeTask: async () => ({ success: true } as never),
   onOpenDetail: () => undefined,
@@ -143,21 +276,16 @@ const detailProps = {
 };
 
 /*
-FNXC:TaskDetailTitle 2026-08-05-17:54:
-The Chromium fixture renders the production TaskDetailModal and embedded TaskDetailContent paths,
-not a title lookalike, so browser geometry can expose control-driven clamp feedback that jsdom does
-not calculate. The adapters keep API data inert while preserving the real heading, observer, and
-accessible control contract.
+FNXC:TaskDetailTitleRemoval 2026-09-13-11:59:
+The Chromium fixture renders production TaskDetailModal and embedded TaskDetailContent paths, not lookalikes, so browser checks can reject any surviving title heading or click target while preserving real Definition and edit behavior.
 */
 const noop = () => undefined;
 const asyncTask = async () => fixtureTask;
 const asyncMerge = async () => ({ success: true } as never);
 
 /*
-FNXC:TaskDetailTitle 2026-08-05-19:01:
-The browser regression must enter each production owner rather than wrapping TaskDetailContent in
-fixture-only geometry. These minimal adapters provide inert dependencies but retain AppModals,
-MainContent, ListView, the right-dock controller, and the task FloatingWindow render paths.
+FNXC:TaskDetailTitleRemoval 2026-09-13-11:59:
+The browser regression enters each production owner rather than wrapping TaskDetailContent in fixture-only geometry. These minimal adapters retain AppModals, MainContent, ListView, the right-dock controller, the mobile drawer, and task FloatingWindow paths.
 */
 function TaskDetailTitleModalHarness() {
   const modalManager = {
@@ -166,30 +294,47 @@ function TaskDetailTitleModalHarness() {
     closeDetailTask: noop,
     updateDetailTask: noop,
     openNewTaskWithDescription: noop,
-    openWorkflowEditor: noop,
+    setWorkflowViewParams: noop,
+    clearWorkflowViewParams: noop,
   };
-  return <div data-testid="title-host-modal"><NavigationHistoryProvider value={{ pushNav: noop, replaceCurrent: noop, removeNav: noop }}><AppModals projectId="fixture" tasks={[fixtureTask]} projects={[]} currentProject={null} addToast={noop} toasts={[]} removeToast={noop} modalManager={modalManager as never} projectActions={{} as never} taskHandlers={{} as never} taskOperations={{ moveTask: asyncTask, deleteTask: asyncTask, mergeTask: asyncMerge, archiveTask: asyncTask, retryTask: asyncTask, pauseTask: asyncTask, unpauseTask: asyncTask, resetTask: asyncTask, duplicateTask: asyncTask }} deepLink={{ handleDetailClose: noop }} settings={{ prAuthAvailable: false, autoMerge: true, openTasksInRightSidebar: false, openMobileTasksInPopup: false, taskPopupsBoardListOnly: true, showCostBadgeOnCards: false, taskDetailChatFirst: false, chatMessageLayout: "bubbles", themeMode: "system", colorTheme: "default", dashboardFontScalePct: 100, shadcnCustomColors: {}, resolvedThemeMode: "light", setThemeMode: noop, setColorTheme: noop, setDashboardFontScalePct: noop, setShadcnCustomColors: noop, setQuickChatButtonModeImmediate: noop, setChatMessageLayoutImmediate: noop, setOpenTasksInRightSidebarImmediate: noop, setOpenMobileTasksInPopupImmediate: noop, setTaskPopupsBoardListOnlyImmediate: noop, setShowCostBadgeOnCardsImmediate: noop, setTaskDetailChatFirstImmediate: noop, setMobileNavPrimaryItemsImmediate: noop }} /></NavigationHistoryProvider></div>;
+  return <div data-testid="title-host-modal"><NavigationHistoryProvider value={{ pushNav: noop, replaceCurrent: noop, removeNav: noop, promoteNav: noop }}><AppModals projectId="fixture" tasks={[fixtureTask]} projects={[]} currentProject={null} addToast={noop} toasts={[]} removeToast={noop} modalManager={modalManager as never} projectActions={{} as never} taskHandlers={{} as never} taskOperations={{ moveTask: asyncTask, deleteTask: asyncTask, mergeTask: asyncMerge, retryTask: asyncTask, pauseTask: asyncTask, unpauseTask: asyncTask, resetTask: asyncTask, duplicateTask: asyncTask }} deepLink={{ handleDetailClose: noop }} settings={{ prAuthAvailable: false, autoMerge: true, showCostBadgeOnCards: false, taskDetailDefaultTab, chatMessageLayout: "bubbles", navigationPlacement: "footer" as const, rightSidebarEnabled: false, themeMode: "system", colorTheme: "default", dashboardFontScalePct: 100, shadcnCustomColors: {}, resolvedThemeMode: "light", setThemeMode: noop, setColorTheme: noop, uiStyle: "classic" as const, setUiStyle: noop, setDashboardFontScalePct: noop, setShadcnCustomColors: noop, setChatMessageLayoutImmediate: noop, setNavigationPlacementImmediate: noop, setRightSidebarEnabledImmediate: noop, setShowCostBadgeOnCardsImmediate: noop, setTaskDetailDefaultTabImmediate: noop, setMobileNavPrimaryItemsImmediate: noop, setMobileNavMenuSwipeGestureImmediate: noop }} /></NavigationHistoryProvider></div>;
 }
 
 function TaskDetailTitleMainPanelHarness() {
-  return <div data-testid="title-host-main-panel" className="fn-8806-constrained-title-host"><MainContent {...{ taskView: "task-detail", mainPanelDetailTask: fixtureTask, tasks: [fixtureTask], currentProject: null, addToast: noop, moveTask: asyncTask, deleteTask: asyncTask, mergeTask: asyncMerge, retryTask: asyncTask, pauseTask: asyncTask, unpauseTask: asyncTask, resetTask: asyncTask, duplicateTask: asyncTask, closeTaskDetailMainPanel: noop, setMainPanelDetailTask: noop, openTaskDetailInMainPanel: noop, popOutTaskDetail: noop, modalManager: { openNewTaskWithDescription: noop }, globalPaused: false, prAuthAvailable: false, autoMerge: true, taskDetailChatFirst: false } as unknown as React.ComponentProps<typeof MainContent>} /></div>;
+  return <div data-testid="title-host-main-panel" className="fn-8806-constrained-title-host" style={{ height: "100vh", minHeight: 0, overflow: "hidden" }}><MainContent {...{ taskView: "task-detail", mainPanelDetailTask: fixtureTask, tasks: [fixtureTask], currentProject: null, addToast: noop, moveTask: asyncTask, deleteTask: asyncTask, mergeTask: asyncMerge, retryTask: asyncTask, pauseTask: asyncTask, unpauseTask: asyncTask, resetTask: asyncTask, duplicateTask: asyncTask, closeTaskDetailMainPanel: noop, setMainPanelDetailTask: noop, openTaskDetailInMainPanel: noop, popOutTaskDetail: noop, modalManager: { openNewTaskWithDescription: noop }, globalPaused: false, prAuthAvailable: false, autoMerge: true, taskDetailDefaultTab } as unknown as React.ComponentProps<typeof MainContent>} /></div>;
 }
 
+/*
+FNXC:TaskDetailHeaderActions 2026-09-17-01:27:
+The browser fixture must follow the embedded main-panel action through App's canonical pop-out window boundary. Keeping the source Task Detail host and resulting FloatingWindow together catches a missing or misrouted overflow entry without recreating either surface as a lookalike.
+*/
+function TaskDetailPopOutOverflowHarness() {
+  const [mainPanelTask, setMainPanelTask] = useState<Task | null>(fixtureTask);
+  const [poppedOutTask, setPoppedOutTask] = useState<Task | null>(null);
+  return <div data-testid="title-host-pop-out-overflow" className="fn-8806-constrained-title-host" style={{ height: "100vh", minHeight: 0, overflow: "hidden" }}>
+    <MainContent {...{ taskView: "task-detail", mainPanelDetailTask: mainPanelTask, tasks: [fixtureTask], currentProject: null, addToast: noop, moveTask: asyncTask, deleteTask: asyncTask, mergeTask: asyncMerge, retryTask: asyncTask, pauseTask: asyncTask, unpauseTask: asyncTask, resetTask: asyncTask, duplicateTask: asyncTask, closeTaskDetailMainPanel: () => setMainPanelTask(null), setMainPanelDetailTask: setMainPanelTask, openTaskDetailInMainPanel: noop, popOutTaskDetail: setPoppedOutTask, modalManager: { openNewTaskWithDescription: noop }, globalPaused: false, prAuthAvailable: false, autoMerge: true, taskDetailDefaultTab } as unknown as React.ComponentProps<typeof MainContent>} />
+    {poppedOutTask && <AppTaskPopoutWindow {...detailProps} task={poppedOutTask} onRemoveWindow={() => setPoppedOutTask(null)} />}
+  </div>;
+}
+
+/*
+FNXC:TaskDetailPresentation 2026-09-17-00:21:
+FN-442 routes List selection through its real pop-out callback. The fixture retains that production path and renders the resulting TaskDetailModal instead of preserving the retired embedded detail pane.
+*/
 function TaskDetailTitleListHarness() {
-  localStorage.setItem("kb:fixture:kb-dashboard-list-selected-task", fixtureTask.id);
-  return <div data-testid="title-host-list"><ListView {...{ tasks: [fixtureTask], projectId: "fixture", onMoveTask: asyncTask, onDeleteTask: asyncTask, onMergeTask: asyncMerge, addToast: noop, onOpenDetail: noop, onNewTask: noop, onQuickCreate: noop, availableModels: [], autoMerge: true, columnFlagsByTaskId: fixtureColumnFlagsByTaskId } as unknown as React.ComponentProps<typeof ListView>} /></div>;
+  const [poppedOutTask, setPoppedOutTask] = useState<Task | null>(null);
+  return <div data-testid="title-host-list" style={{ height: "100vh", minHeight: 0, overflow: "hidden" }}>
+    <ListView {...{ tasks: [fixtureTask], projectId: "fixture", onMoveTask: asyncTask, onDeleteTask: asyncTask, onMergeTask: asyncMerge, addToast: noop, onOpenDetail: noop, onPopOut: setPoppedOutTask, onNewTask: noop, onQuickCreate: noop, availableModels: [], autoMerge: true, taskDetailDefaultTab, columnFlagsByTaskId: fixtureColumnFlagsByTaskId } as unknown as React.ComponentProps<typeof ListView>} />
+    {poppedOutTask && <TaskDetailModal {...detailProps} task={poppedOutTask} onClose={() => setPoppedOutTask(null)} />}
+  </div>;
 }
 
 function TaskDetailTitleDockHarness() {
   localStorage.setItem("fusion:right-dock-open", "true");
   localStorage.setItem("fusion:right-dock-view", "tasks");
-  const dock = useRightDockController({ active: true, projectId: "fixture", tasks: [fixtureTask], addToast: noop, settingsLoaded: true, researchReadinessVersion: 0, workflowSteps: [], subscribePluginEvents: () => noop, openDetailTask: noop, openTaskPopup: noop, openMobileTasksInPopup: false, openFileInBrowser: noop, onDeleteTask: asyncTask, onMergeTask: asyncMerge, openSettings: noop, onSendSelectionToTask: noop, onCreateTaskFromInsight: noop, onNavigateToMission: noop, onTaskCreated: noop, prAuthAvailable: false, autoMerge: true, taskDetailChatFirst: false, visibilityOptions: {}, footerVisible: false, columnFlagsByTaskId: fixtureColumnFlagsByTaskId });
+  const dock = useRightDockController({ active: true, projectId: "fixture", tasks: [fixtureTask], addToast: noop, settingsLoaded: true, researchReadinessVersion: 0, workflowSteps: [], subscribePluginEvents: () => noop, openDetailTask: noop, openFileInBrowser: noop, onDeleteTask: asyncTask, onMergeTask: asyncMerge, openSettings: noop, onSendSelectionToTask: noop, onCreateTaskFromInsight: noop, onNavigateToMission: noop, onTaskCreated: noop, prAuthAvailable: false, autoMerge: true, taskDetailDefaultTab, visibilityOptions: {}, footerVisible: false, columnFlagsByTaskId: fixtureColumnFlagsByTaskId });
   React.useEffect(() => { dock.openTaskInDock(fixtureTask); }, []);
-  return <div data-testid="title-host-dock" className="fn-8806-constrained-title-host">{dock.dock}</div>;
-}
-
-function TaskDetailTitleFloatingHarness() {
-  return <div data-testid="title-host-floating"><FloatingWindow windowKey="fn-8806-task-floating" title={fixtureTask.id} onClose={noop} hideHeader dragHandleSelector=".task-detail-content--embedded > .modal-header" className="floating-window--task-detail" defaultSize={{ width: 560, height: 480 }} minSize={{ width: 320, height: 240 }} layer="task-detail"><TaskDetailContent {...detailProps} embedded onRequestClose={noop} /></FloatingWindow></div>;
+  return <div data-testid="title-host-dock" className="fn-8806-constrained-title-host" style={{ height: "100vh", minHeight: 0, overflow: "hidden" }}>{dock.dock}</div>;
 }
 
 /*
@@ -206,6 +351,14 @@ function TaskDetailTitleEmbeddedHarness() {
   return <div data-testid="title-host-embedded" className="fn-8806-constrained-title-host" style={{ width: "24rem", height: "36rem" }}><TaskDetailContent {...detailProps} embedded /></div>;
 }
 
+/*
+FNXC:TaskDetailTitleRemoval 2026-09-15-00:20:
+The browser matrix mounts Task Detail's real mobile-drawer branch directly so its title-free shared header and stable dialog name are measured alongside the five desktop-owned production hosts.
+*/
+function TaskDetailTitleMobileDrawerHarness() {
+  return <TaskDetailModal {...detailProps} mobileDrawer onClose={noop} />;
+}
+
 function TaskDetailResizeHarness() {
   const { t } = useTranslation("app");
   return <FloatingWindow
@@ -217,7 +370,6 @@ function TaskDetailResizeHarness() {
     className="floating-window--task-detail"
     defaultSize={{ width: 560, height: 480 }}
     minSize={{ width: 320, height: 240 }}
-    persistGeometryKey="floating-window:task-detail"
     suspendGeometryPersistenceOnMobile
     layer="task-detail"
     testId="task-detail-modal-overlay"
@@ -239,7 +391,6 @@ function FloatingWindowHarness() {
     defaultSize={{ width: 560, height: 480 }}
     defaultPosition={{ x: 80, y: 80 }}
     minSize={{ width: 320, height: 240 }}
-    persistGeometryKey="fusion:fn-8605-floating"
     suspendGeometryPersistenceOnMobile
   >
     <div>{t("fixture.floatingTaskDetailBody", "Floating task detail body")}</div>
@@ -259,7 +410,6 @@ function HeaderlessFloatingWindowHarness() {
     defaultSize={{ width: 560, height: 480 }}
     defaultPosition={{ x: 80, y: 80 }}
     minSize={{ width: 320, height: 240 }}
-    persistGeometryKey="fusion:fn-8605-headerless-floating"
     suspendGeometryPersistenceOnMobile
   >
     <div className="fn-8605-delegated-drag-handle">{t("fixture.headerlessTaskDetail", "Headerless task detail")}
@@ -287,7 +437,6 @@ function GenericFloatingWindowHarness() {
     defaultSize={{ width: 560, height: 480 }}
     defaultPosition={{ x: 80, y: 80 }}
     minSize={{ width: 320, height: 240 }}
-    persistGeometryKey="fusion:fn-8612-generic-floating"
     suspendGeometryPersistenceOnMobile
   >
     <div className="fn-8612-generic-drag-handle">{t("fixture.genericWindowHeader", "Generic window header")}</div>
@@ -296,16 +445,21 @@ function GenericFloatingWindowHarness() {
 }
 
 function Fixture() {
+  const appOwnsShell = surface === "task-detail-title-app-floating" || surface === "board-card-click-app";
+  const content = appOwnsShell ? <TaskDetailTitleAppFloatingHarness /> : surface === "task-detail-pop-out-overflow" ? <TaskDetailPopOutOverflowHarness /> : surface === "settings-official" ? <SettingsModal onClose={() => undefined} addToast={() => undefined} initialSection="experimental" /> : surface === "agent-list-modal" ? <AgentListModal isOpen onClose={() => undefined} addToast={() => undefined} /> : surface === "setup-wizard-modal" ? <SetupWizardModal onProjectRegistered={() => undefined} onClose={() => undefined} /> : surface === "floating-window" ? <FloatingWindowHarness /> : surface === "floating-window-headerless" ? <HeaderlessFloatingWindowHarness /> : surface === "floating-window-generic" ? <GenericFloatingWindowHarness /> : surface === "task-detail-title-modal" ? <TaskDetailTitleModalHarness /> : surface === "task-detail-title-main-panel" ? <TaskDetailTitleMainPanelHarness /> : surface === "task-detail-title-list" ? <TaskDetailTitleListHarness /> : surface === "task-detail-title-dock" ? <TaskDetailTitleDockHarness /> : surface === "task-detail-title-native-drawer" ? <TaskDetailTitleMobileDrawerHarness /> : surface === "task-detail-title-embedded" ? <TaskDetailTitleEmbeddedHarness /> : surface === "task-detail" ? <TaskDetailResizeHarness /> : <NewTaskModal
+    isOpen
+    tasks={[]}
+    onClose={() => undefined}
+    onCreateTask={async () => ({ id: "FN-E2E" }) as never}
+    addToast={() => undefined}
+  />;
+  /*
+  FNXC:NativeUiPresentation 2026-09-15-00:20:
+  There is no presentation perimeter to enable any more, so every surface mounts through the same
+  provider stack. The former `?alpha=true` fixture parameter is gone with the provider it toggled.
+  */
   return <I18nextProvider i18n={i18n}>
-    <ConfirmDialogProvider skipConfirmations>
-      {surface === "task-detail-title-app-floating" || surface === "board-card-click-app" ? <TaskDetailTitleAppFloatingHarness /> : surface === "agent-list-modal" ? <AgentListModal isOpen onClose={() => undefined} addToast={() => undefined} /> : surface === "setup-wizard-modal" ? <SetupWizardModal onProjectRegistered={() => undefined} onClose={() => undefined} /> : surface === "floating-window" ? <FloatingWindowHarness /> : surface === "floating-window-headerless" ? <HeaderlessFloatingWindowHarness /> : surface === "floating-window-generic" ? <GenericFloatingWindowHarness /> : surface === "task-detail-title-modal" ? <TaskDetailTitleModalHarness /> : surface === "task-detail-title-main-panel" ? <TaskDetailTitleMainPanelHarness /> : surface === "task-detail-title-list" ? <TaskDetailTitleListHarness /> : surface === "task-detail-title-dock" ? <TaskDetailTitleDockHarness /> : surface === "task-detail-title-floating" ? <TaskDetailTitleFloatingHarness /> : surface === "task-detail-title-embedded" ? <TaskDetailTitleEmbeddedHarness /> : surface === "task-detail" ? <TaskDetailResizeHarness /> : <NewTaskModal
-        isOpen
-        tasks={[]}
-        onClose={() => undefined}
-        onCreateTask={async () => ({ id: "FN-E2E" }) as never}
-        addToast={() => undefined}
-      />}
-    </ConfirmDialogProvider>
+    <ConfirmDialogProvider skipConfirmations>{content}</ConfirmDialogProvider>
   </I18nextProvider>;
 }
 

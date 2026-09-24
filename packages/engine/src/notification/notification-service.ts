@@ -9,9 +9,10 @@ import type {
   NotificationProvider,
   Settings,
   Task,
+  Artifact,
 } from "@fusion/core";
 import type { LifecycleColumns, TaskMoveLanes, WorkflowIrResolverStore } from "@fusion/core";
-import { DASHBOARD_USER_ID, isTaskNotFoundError, MAX_TERMINAL_FAILURE_AUTO_RETRIES, NotificationDispatcher, resolveProjectColumnsForRoles, resolveReviewColumns, resolveTaskLifecycleColumns, resolveWorkflowIrForTask, WEDGE_RENOTIFY_COOLDOWN_MS } from "@fusion/core";
+import { columnsWithFlag, DASHBOARD_USER_ID, isTaskNotFoundError, MAX_TERMINAL_FAILURE_AUTO_RETRIES, NotificationDispatcher, resolveProjectColumnsForRoles, resolveReviewColumns, resolveTaskLifecycleColumns, resolveWorkflowIrForTask, WEDGE_RENOTIFY_COOLDOWN_MS } from "@fusion/core";
 import { DEFAULT_NTFY_EVENTS, buildNtfyClickUrl, formatTaskIdentifier } from "../util/notifier.js";
 import { schedulerLog } from "../logger.js";
 import { NtfyNotificationProvider } from "./ntfy-provider.js";
@@ -40,7 +41,7 @@ export interface NotificationServiceOptions {
 
 interface NotificationServiceStoreEvents {
   "task:created": [task: Task];
-  "task:moved": [data: { task: Task; from: Column; to: Column }];
+  "task:moved": [data: { task: Task; from: Column; to: Column; lanes?: TaskMoveLanes }];
   "task:updated": [task: Task, meta?: { lanes?: TaskMoveLanes }];
   "task:merged": [result: MergeResult];
   "settings:updated": [payload: { settings: Settings; previous: Settings }];
@@ -49,6 +50,8 @@ interface NotificationServiceStoreEvents {
 interface NotificationServiceStore {
   getSettings(): Promise<Settings> | Settings;
   getTask?(id: string): Promise<Task | undefined> | Task | undefined;
+  /** Project-scoped active artifacts produced by the task. */
+  getArtifacts?(taskId: string): Promise<Artifact[]>;
   /** Durable compare-and-set for restart-safe wedge delivery episodes. */
   claimTaskWedgeNotificationEpisode?(taskId: string, reasonKey: string | null): Promise<{ episodeId?: string; claimed: boolean }>;
   markTaskWedgeNotificationPending?(taskId: string, descriptor: { reasonKey: string; source: "auto" | "supplied"; reason: string; action: string; gate?: string }, options?: { staleAfterMs?: number }): Promise<{ since: string; armed: boolean; restamped: boolean }>;
@@ -362,11 +365,66 @@ export class NotificationService {
     }
   }
 
-  private handleTaskMoved = (data: { task: Task; from: Column; to: Column }): void => {
+  private handleTaskMoved = (data: { task: Task; from: Column; to: Column; lanes?: TaskMoveLanes }): void => {
     void this.handleTaskMovedAsync(data);
   };
 
-  private async handleTaskMovedAsync(data: { task: Task; from: Column; to: Column }): Promise<void> {
+  private async resolveTerminalColumnsForMove(data: { task: Task; lanes?: TaskMoveLanes }): Promise<Set<string>> {
+    if (data.lanes?.terminal?.length) return new Set(data.lanes.terminal);
+    try {
+      const ir = await resolveWorkflowIrForTask(this.store as WorkflowIrResolverStore, data.task.id);
+      const terminal = columnsWithFlag(ir, "complete");
+      return terminal.length > 0 ? new Set(terminal) : new Set(["done"]);
+    } catch {
+      return new Set(["done"]);
+    }
+  }
+
+  /**
+   * FNXC:MailboxTaskCompletion 2026-09-13-03:42:
+   * A completion mail belongs to the post-commit move snapshot, not to fn_task_done or task:merged.
+   * It is the sole future message for the episode and carries the summary plus durable recommendation
+   * identifiers; optional artifact lookup failure must not suppress that useful recap. Membership uses
+   * every complete-trait column, while taskId/destination/columnMovedAt identifies one durable episode.
+   */
+  private async writeTaskCompletionMailboxMessage(data: { task: Task; from: Column; to: Column; lanes?: TaskMoveLanes }): Promise<void> {
+    try {
+      const terminalColumns = await this.resolveTerminalColumnsForMove(data);
+      if (!terminalColumns.has(data.to) || terminalColumns.has(data.from) || data.from === data.to) return;
+      const sendMessageOnce = this.options.messageStore?.sendMessageOnce;
+      if (!sendMessageOnce) return;
+
+      let artifacts: Artifact[] = [];
+      try {
+        artifacts = await this.store.getArtifacts?.(data.task.id) ?? [];
+      } catch (error) {
+        schedulerLog.debug(`[notify] ${data.task.id} completion artifact lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const imageIds = [...new Set(artifacts.filter((artifact) => artifact.type === "image").map((artifact) => artifact.id))];
+      const recommendationIds = [...new Set((data.task.recommendations ?? []).map((recommendation) => recommendation.id).filter((id) => id.trim().length > 0))];
+      const summary = data.task.summary?.trim() || "Task completed without a summary.";
+      await sendMessageOnce.call(this.options.messageStore, {
+        fromId: "system",
+        fromType: "system",
+        toId: DASHBOARD_USER_ID,
+        toType: "user",
+        type: "system",
+        content: `## Task completed: ${formatTaskIdentifier(data.task)}\n\n${summary}`,
+        metadata: {
+          kind: "task-completion-notice",
+          taskId: data.task.id,
+          imageArtifactIds: imageIds,
+          recommendationIds,
+        },
+      }, `task-completion-notice:${data.task.id}:${data.to}:${data.task.columnMovedAt ?? "unknown"}`);
+    } catch (error) {
+      schedulerLog.debug(`[notify] ${data.task.id} completion mailbox message failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async handleTaskMovedAsync(data: { task: Task; from: Column; to: Column; lanes?: TaskMoveLanes }): Promise<void> {
+    // Mailbox delivery is deliberately detached so a slow/failed message store never delays move handling.
+    void this.writeTaskCompletionMailboxMessage(data);
     await this.maybeSuppressTransientFailedNotification(data.task, `moved to ${data.to}`);
 
     /*
@@ -375,7 +433,7 @@ export class NotificationService {
     durable hold must be cleared when its subject visibly progresses, including workflow-renamed
     hold/WIP/terminal lanes, so its timer or restart sweep cannot alert after that recovery.
     */
-    const movedProgressedLanes = await resolveProjectColumnsForRoles(this.store, ["hold", "countsTowardWip", "complete", "archived"]);
+    const movedProgressedLanes = new Set(await resolveProjectColumnsForRoles(this.store, ["hold", "countsTowardWip", "complete"]));
     if (
       movedProgressedLanes.has(data.to)
       || (typeof data.task.status === "string" && data.task.status !== "failed")
@@ -644,7 +702,7 @@ export class NotificationService {
     self-healing descriptor's live pause and auto-merge hold too; only role
     membership is stable when workflows rename lifecycle columns.
     */
-    const terminalLanes = await resolveProjectColumnsForRoles(this.store, ["complete", "archived"]);
+    const terminalLanes = new Set(await resolveProjectColumnsForRoles(this.store, ["complete"]));
     const liveRowCannotBeWedge = liveTask.deletedAt != null || terminalLanes.has(liveTask.column);
     const suppliedDescriptorIsHeldOrProgressing = suppliedDescriptor != null
       && (liveTask.paused === true || liveTask.userPaused === true || liveTask.autoMerge === false || isTaskProgressing(liveTask));
@@ -691,7 +749,7 @@ export class NotificationService {
       than one lane per role on a renamed board, and a first-match answer would silently ignore the
       others. Legacy-seeded, so an unconverted board resolves exactly the four ids it used to compare.
       */
-      const progressedLanes = await resolveProjectColumnsForRoles(this.store, ["hold", "countsTowardWip", "complete", "archived"]);
+      const progressedLanes = new Set(await resolveProjectColumnsForRoles(this.store, ["hold", "countsTowardWip", "complete"]));
       const hasProgressed = progressedLanes.has(task.column)
         || (!isActiveSelfHealingNoAction && typeof task.status === "string" && task.status !== "failed")
         || (isActiveSelfHealingNoAction && ["queued", "planning", "in-progress", "merging", "merging-pr", "merged", "done"].includes(task.status ?? ""));
@@ -900,8 +958,8 @@ export class NotificationService {
         ? { reasonKey: durablePending.reasonKey, reason: durablePending.reason, action: durablePending.action, ...(durablePending.gate ? { gate: durablePending.gate } : {}) }
         : cached!.descriptor;
 
-      const terminalLanes = await resolveProjectColumnsForRoles(this.store, ["complete", "archived"]);
-      const progressedLanes = await resolveProjectColumnsForRoles(this.store, ["hold", "countsTowardWip", "complete", "archived"]);
+      const terminalLanes = new Set(await resolveProjectColumnsForRoles(this.store, ["complete"]));
+      const progressedLanes = new Set(await resolveProjectColumnsForRoles(this.store, ["hold", "countsTowardWip", "complete"]));
       const activeSelfHealing = task.wedgeNotification?.status === "active" && task.wedgeNotification.reasonKey.startsWith("self-healing-no-action:");
       const hasProgressed = progressedLanes.has(task.column)
         || (!activeSelfHealing && typeof task.status === "string" && task.status !== "failed")

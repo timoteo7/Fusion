@@ -1,0 +1,105 @@
+import { forwardRef, type ButtonHTMLAttributes, type ComponentType, type ReactNode } from "react";
+import { ChevronLeft, Plus, type LucideProps } from "lucide-react";
+import { UiButton } from "./ui";
+import "./ViewActionButton.css";
+
+export type ViewActionButtonKind = "action" | "create";
+
+export interface ViewActionButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
+  label: ReactNode;
+  /** Required when label is not a string. */
+  accessibleLabel?: string;
+  icon?: ComponentType<LucideProps>;
+  iconClassName?: string;
+  kind?: ViewActionButtonKind;
+  iconOnlyOnMobile?: boolean;
+  /*
+  FNXC:IconOnlyButtonCanon 2026-09-17-09:26:
+  FN-502: a badge is NOT a redundant label. The phone presentation hides the label because the pictogram already
+  says what the action does; a count says something the pictogram cannot, and the operator must see it without
+  opening any menu. It is therefore rendered as a SIBLING of the visually hidden label and survives the collapse.
+  */
+  badge?: ReactNode;
+}
+
+/*
+FNXC:StandardizedViewActions 2026-09-13-16:12:
+Primary resource creation has one shared Plus button across dashboard headers. Its visible label remains on desktop/tablet and becomes visually hidden only on phone chrome, while the same localized string remains the accessible name.
+
+FNXC:IconOnlyButtonCanon 2026-09-16-19:05:
+FN-471: the create button no longer carries `btn-primary`. A CTA-filled square is not one of the two canonical
+icon-only variants, and `btn-primary` paints at 0,1,0 from `styles.css` — loaded last — so the phone blocks
+could not neutralize it without escalating specificity. The emphasis now lives on `view-action-button--create`
+in this component's stylesheet, which the phone icon-only rules override to the plain bordered variant.
+*/
+export const ViewActionButton = forwardRef<HTMLButtonElement, ViewActionButtonProps>(function ViewActionButton(
+  {
+    label,
+    accessibleLabel,
+    icon,
+    iconClassName,
+    kind = "action",
+    iconOnlyOnMobile = true,
+    badge,
+    className,
+    type = "button",
+    ...props
+  },
+  ref,
+) {
+  const Icon = icon ?? (kind === "create" ? Plus : undefined);
+  const ariaLabel = accessibleLabel ?? (typeof label === "string" ? label : undefined);
+  /*
+  FNXC:StandardizedViewActions 2026-09-13-20:32:
+  Collapsing to icon-only is only legal when there IS an icon: hiding the label of an icon-less action would leave a
+  visually empty touch target. An action without a pictogram therefore keeps its readable label on every viewport.
+  */
+  const collapsesOnMobile = iconOnlyOnMobile && Boolean(Icon);
+  const classes = [
+    "btn",
+    "btn-sm",
+    kind === "create" ? "view-action-button--create" : "view-action-button--action",
+    "view-action-button",
+    collapsesOnMobile ? "view-action-button--mobile-icon-only" : "",
+    className,
+  ].filter(Boolean).join(" ");
+
+  return (
+    <UiButton {...props} ref={ref} type={type} className={classes} aria-label={props["aria-label"] ?? ariaLabel}>
+      {Icon ? <Icon aria-hidden="true" className={iconClassName} /> : null}
+      <span className="view-action-button__label">{label}</span>
+      {badge != null ? <span className="view-action-button__badge">{badge}</span> : null}
+    </UiButton>
+  );
+});
+
+export interface ViewBackButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children" | "aria-label"> {
+  label: string;
+  "data-testid"?: string;
+}
+
+/*
+FNXC:StandardizedViewNavigation 2026-09-13-16:12:
+Every list-to-detail return is a real, single ChevronLeft button before the owning title. The full box is interactive; no parent wrapper or separate textual Back row competes for the same transition.
+
+FNXC:IconOnlyButtonCanon 2026-09-16-19:05:
+FN-471: the chevron is icon-only, so it uses the canonical bordered variant (`btn` + `btn-icon`) and the shared
+28/36px geometry instead of the bespoke 44px square that made it the loudest control on a phone header.
+*/
+export const ViewBackButton = forwardRef<HTMLButtonElement, ViewBackButtonProps>(function ViewBackButton(
+  { label, className, type = "button", ...props },
+  ref,
+) {
+  return (
+    <UiButton
+      {...props}
+      ref={ref}
+      type={type}
+      className={["btn", "btn-icon", "view-back-button", className].filter(Boolean).join(" ")}
+      aria-label={label}
+      title={props.title ?? label}
+    >
+      <ChevronLeft aria-hidden="true" />
+    </UiButton>
+  );
+});

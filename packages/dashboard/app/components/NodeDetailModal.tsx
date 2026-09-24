@@ -1,3 +1,4 @@
+import { ViewHeader } from "./ViewHeader";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -439,14 +440,18 @@ export function NodeDetailModal({
 
   return (
     /* FNXC:ModalTouchGeometry 2026-07-26-13:15: Shared FloatingWindow owns this modal's touch drag, resize, clamping, and persistence while phone and short viewports retain their sheet behavior. */
-    <FloatingWindow windowKey="node-detail" title={t("nodes.modalTitle", "Node Details")} ariaLabel={t("nodes.modalAriaLabel", "Node details for {{name}}", { name: node.name })} onClose={onClose} hideHeader dragHandleSelector=".modal-header" className="floating-window--node-detail" defaultSize={{ width: 720, height: 560 }} minSize={{ width: 360, height: 280 }} persistGeometryKey="floating-window:node-detail" suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport closeOnOutsidePointerDown>
+    <FloatingWindow windowKey="node-detail" title={t("nodes.modalTitle", "Node Details")} ariaLabel={t("nodes.modalAriaLabel", "Node details for {{name}}", { name: node.name })} onClose={onClose} hideHeader dragHandleSelector=".modal-header" className="floating-window--node-detail" defaultSize={{ width: 720, height: 560 }} minSize={{ width: 360, height: 280 }} suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport closeOnOutsidePointerDown>
       <div
         className="modal modal-lg node-detail-modal"
       >
-        <div className="modal-header">
-          <h3>{t("nodes.modalTitle", "Node Details")}</h3>
-          <button className="modal-close" onClick={onClose} aria-label={t("nodes.closeModalAriaLabel", "Close node detail modal")}>&times;</button>
-        </div>
+        {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Shared dialog chrome; `.modal-header` stays for the drag handle selector. */}
+        <ViewHeader
+          className="modal-header"
+          headingLevel={3}
+          title={t("nodes.modalTitle", "Node Details")}
+          onClose={onClose}
+          closeButtonProps={{ "aria-label": t("nodes.closeModalAriaLabel", "Close node detail modal") }}
+        />
 
         <div className="modal-body node-detail-modal__body">
           <section className="node-detail-modal__section">

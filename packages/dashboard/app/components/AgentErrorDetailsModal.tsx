@@ -1,9 +1,11 @@
+import { ViewHeader } from "./ViewHeader";
 import "./AgentErrorDetailsModal.css";
 import { useMemo, useState } from "react";
 import { AlertCircle, Check, Copy, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useOverlayDismiss } from "../hooks/useOverlayDismiss";
 import { copyTextToClipboard } from "../utils/copyToClipboard";
+import { FloatingWindow } from "./FloatingWindow";
 
 const DEFAULT_ISSUE_URL = "https://github.com/Runfusion/Fusion/issues/new";
 
@@ -62,15 +64,32 @@ export function AgentErrorDetailsModal({ open, onClose, errorText, issueContext 
   }
 
   return (
-    <div className="modal-overlay open" {...overlayDismissProps} role="dialog" aria-modal="true" aria-label={t("agentError.dialogLabel", "Agent error details")}>
+    /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: FN-394 hosts every dashboard dialog in the shared window, so this one also opens standard-sized and centred, snaps to a half or to the work area, and restores its previous floating rectangle. */
+    <FloatingWindow
+      windowKey="agent-error-details"
+      modal
+      hideHeader
+      surfaceGroup="dialog"
+      title={t("agentError.title", "Agent Error Details")}
+      ariaLabel={t("agentError.dialogLabel", "Agent error details")}
+      onClose={onClose}
+      dragHandleSelector=".agent-error-modal .modal-header"
+      className="floating-window--dialog floating-window--agent-error-details"
+      defaultSize={{ width: 640, height: 480 }}
+      minSize={{ width: 320, height: 240 }}
+      suspendGeometryPersistenceOnMobile
+      suspendGeometryPersistenceOnShortViewport
+      backdropMouseHandlers={overlayDismissProps}
+    >
       <div className="modal agent-error-modal">
-        <div className="modal-header">
-          <h2 className="modal-title">
-            <AlertCircle size={16} />
-            {t("agentError.title", "Agent Error Details")}
-          </h2>
-          <button className="modal-close" onClick={onClose} aria-label={t("common.close", "Close")}>&times;</button>
-        </div>
+        {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Shared dialog chrome; the alert icon stays with the shared title. */}
+        <ViewHeader
+          className="modal-header"
+          icon={AlertCircle}
+          title={t("agentError.title", "Agent Error Details")}
+          onClose={onClose}
+          closeButtonProps={{ "aria-label": t("common.close", "Close") }}
+        />
         <div className="agent-error-modal__content">
           <pre className="agent-error-modal__error">{errorText}</pre>
         </div>
@@ -106,7 +125,7 @@ export function AgentErrorDetailsModal({ open, onClose, errorText, issueContext 
           </a>
         </div>
       </div>
-    </div>
+    </FloatingWindow>
   );
 }
 

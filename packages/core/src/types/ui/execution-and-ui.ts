@@ -71,6 +71,26 @@ export type AnthropicAuthPreference = (typeof ANTHROPIC_AUTH_PREFERENCES)[number
 export const THEME_MODES = ["dark", "light", "system"] as const;
 export type ThemeMode = (typeof THEME_MODES)[number];
 
+/*
+FNXC:UiStyleAxis 2026-09-15-00:20:
+FN-399 splits dashboard appearance into two independent axes. `colorTheme` keeps owning colour only;
+`uiStyle` owns non-chromatic shape (density, radii, borders, typography scale, control/touch heights,
+icon sizes, hover intensity, motion, shadow geometry). "classic" is the default and the fallback for
+any missing/invalid/unknown persisted value, so upgrading changes no shape. "clean" is the sparser
+grammar piloted by Task Detail. Selecting a style never mutates themeMode, colorTheme,
+shadcnCustomColors or dashboardFontScalePct, and selecting a colour never mutates uiStyle.
+*/
+export const UI_STYLES = ["classic", "clean"] as const;
+export type UiStyle = (typeof UI_STYLES)[number];
+
+/** Default interface style: the historical ("Actuel") grammar. */
+export const DEFAULT_UI_STYLE: UiStyle = "classic";
+
+/** Narrow an unknown persisted/cached value to a declared interface style. */
+export function isUiStyle(value: unknown): value is UiStyle {
+  return typeof value === "string" && (UI_STYLES as readonly string[]).includes(value);
+}
+
 /** Color theme options for the dashboard */
 export const COLOR_THEMES = [
   "default",
@@ -118,6 +138,11 @@ export const COLOR_THEMES = [
   "glass",
   // FNXC:DashboardTheming 2026-07-01-00:00: Glass Silver is the silver/gray frosted sibling of Glass; keep this id in lockstep with dashboard/desktop validators and selector metadata so persisted explicit choices survive startup.
   "glass-silver",
+  /*
+  FNXC:LiquidGlassTheme 2026-09-09-15:50:
+  Liquid Glass is a separate persisted preset rather than a remap of either historical Glass theme. Keep this ID synchronized with selector metadata and both first-paint validators so an explicit choice survives web and Electron startup.
+  */
+  "liquid-glass",
   "horizon",
   "vitesse",
   "outrun",

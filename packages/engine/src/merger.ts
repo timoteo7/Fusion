@@ -130,7 +130,8 @@ import {
   resolveTaskLifecycleColumns,
   isFusionDeletableBranch,
   classifyTaskBranchOrigin,
-  type WorkflowIr
+  type WorkflowIr,
+  type OverlapWaitLandedPath
 } from "@fusion/core";
 import { evaluateAutoMergeFactProviders } from "./merge/auto-merge-fact-providers.js";
 import { resolveMergePolicy } from "./merge/merge-trait.js";
@@ -1993,21 +1994,19 @@ async function sweepAutostashOrphans(
       }
       /*
       FNXC:WorkflowLifecycleColumns 2026-08-02-10:50 (fleet: merger.ts terminal guards):
-      "IS THE SOURCE TASK FINISHED?" from its own workflow, unioned with the legacy pair — a row can outlive
+      "Is the source task finished?" from its own workflow, unioned with the legacy Done fallback — a row can outlive
       the column it is stored in, and this guard decides whether an orphaned stash is still LIVE. Being too
       strict here keeps a stash alive forever (harmless clutter); being too loose discards a stash whose task
       is still running (lost work), so over-inclusion of terminal ids is the safe direction, exactly as in
       `resolveTerminalColumnsFor`.
 
-      With the literal pair, a renamed board answered "not finished" for every completed task, so every
+      With the literal Done check, a renamed board answered "not finished" for every completed task, so every
       orphaned stash stayed classified as live and was never cleaned up.
       */
       const sourceLifecycle = await resolveTaskLifecycleColumns(store, sourceTaskId);
       const sourceTerminal = new Set([
         sourceLifecycle?.complete ?? "done",
-        sourceLifecycle?.archived ?? "archived",
         "done",
-        "archived",
       ]);
       if (!sourceTask || !sourceTerminal.has(sourceTask.column)) {
         live.push(orphan);
@@ -5123,6 +5122,34 @@ export interface MergerOptions {
 }
 
 
+export async function captureSingleCommitLandedPaths(
+  rootDir: string,
+  sha: string,
+  repository = ".",
+): Promise<OverlapWaitLandedPath[]> {
+  const { stdout } = await execAsync(`git show --format= --name-status -z ${quoteArg(sha)}`, {
+    cwd: rootDir,
+    encoding: "utf-8",
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  const fields = stdout.split("\0").filter(Boolean);
+  const paths: OverlapWaitLandedPath[] = [];
+  for (let index = 0; index < fields.length;) {
+    const statusToken = fields[index++]!;
+    const code = statusToken[0];
+    if (code === "R" || code === "C") {
+      const previousPath = fields[index++];
+      const path = fields[index++];
+      if (previousPath && path) paths.push({ repository, previousPath, path, status: "renamed" });
+      continue;
+    }
+    const path = fields[index++];
+    if (!path) continue;
+    paths.push({ repository, path, status: code === "A" ? "added" : code === "D" ? "deleted" : "modified" });
+  }
+  return paths;
+}
+
 export async function captureSingleCommitLandedMetadata(
   rootDir: string,
   sha: string,
@@ -6795,9 +6822,7 @@ export async function aiMergeTask(
   const finalizedLifecycle = await resolveTaskLifecycleColumns(store, taskId);
   const finalizedColumns = new Set([
     finalizedLifecycle?.complete ?? "done",
-    finalizedLifecycle?.archived ?? "archived",
     "done",
-    "archived",
   ]);
   if (finalizedColumns.has(task.column)) {
     const message = `merger: skipping squash for ${taskId} — task already finalized (column=${task.column})`;
@@ -7453,7 +7478,7 @@ export async function aiMergeTask(
   if (integrationRoot.mode === "reuse-task-worktree") {
     // FN-5353: ensure the target task is in mergeQueue before attempting strict
     // targetTaskId lease acquisition for reuse handoff.
-    await store.enqueueMergeQueue(task.id, { priority: task.priority });
+    await store.enqueueMergeQueue(task.id);
     try {
       reuseHandoff = await acquireReuseHandoff({
         task,
@@ -9586,6 +9611,21 @@ export async function aiMergeTask(
       mergeDetails,
       modifiedFiles: noOpVerifiedShortCircuit ? undefined : landedFiles && landedFiles.length > 0 ? landedFiles : undefined,
     });
+    if (typeof (store as Partial<TaskStore>).publishTaskOverlapDeliveries === "function") {
+      const currentTask = await store.getTask(taskId);
+      const paths = recordedSha ? await captureSingleCommitLandedPaths(rootDir, recordedSha) : [];
+      await store.publishTaskOverlapDeliveries(taskId, [{
+        blockerTaskId: taskId,
+        blockerLineageId: currentTask?.lineageId,
+        repository: ".",
+        target: mergeTarget.branch,
+        landedSha: recordedSha,
+        paths,
+        noOp: noOpVerifiedShortCircuit === true || mergeWasEmpty,
+        evidence: landedFilesCaptureFallback === "attribution-failed" ? "unavailable" : "merge-details",
+        summary: currentTask?.summary,
+      }]);
+    }
     if (recordedSha) {
       const currentTask = await store.getTask(taskId);
       if (currentTask?.lineageId) {

@@ -229,7 +229,6 @@ function PlanningStatusConvergenceHarness({ detailTask, modalManager, settings }
         projectId="project-a"
         onMoveTask={integrationAsyncNoop}
         onDeleteTask={integrationAsyncNoop}
-        onArchiveTask={integrationAsyncNoop}
         onMergeTask={integrationAsyncNoop}
         onOpenDetail={integrationNoop}
         addToast={integrationNoop}
@@ -337,6 +336,7 @@ describe("AppModals", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sseSubscriptions.length = 0;
+    vi.spyOn(taskApi, "fetchCompletedTasks").mockResolvedValue({ tasks: [], total: 0, hasMore: false });
     clearCache(`${SWR_CACHE_KEYS.TASKS_PREFIX}project-a`);
     mockTaskDetailModalProps.mockClear();
     mockScheduledTasksModalProps.mockClear();
@@ -612,7 +612,7 @@ describe("AppModals", () => {
   });
 
   it("drives SSE planner activity and its authoritative status update through board, the desktop list row, and the real detail host", async () => {
-    vi.spyOn(taskApi, "fetchTasks").mockReset();
+    vi.spyOn(taskApi, "fetchTaskPage").mockReset();
     vi.spyOn(taskApi, "fetchBoardWorkflows").mockReset();
     window.localStorage.setItem("kb:project-a:kb-dashboard-list-columns", JSON.stringify(["title", "status"]));
     const parkedTask = {
@@ -631,7 +631,7 @@ describe("AppModals", () => {
       columnMovedAt: "2026-08-05T10:00:00.000Z",
     };
     const manager = { ...mockModalManager, detailTask: parkedTask };
-    vi.spyOn(taskApi, "fetchTasks").mockResolvedValueOnce([parkedTask] as any);
+    vi.spyOn(taskApi, "fetchTaskPage").mockResolvedValueOnce({ tasks: [parkedTask], total: 1, hasMore: false } as any);
     vi.spyOn(taskApi, "fetchBoardWorkflows").mockResolvedValue({
       flagEnabled: true,
       defaultWorkflowId: "builtin:coding",
@@ -688,13 +688,13 @@ describe("AppModals", () => {
       expect(screen.getByTestId("task-detail-status-badge")).toHaveTextContent("Planning");
     });
 
-    vi.mocked(taskApi.fetchTasks).mockResolvedValueOnce([{
+    vi.mocked(taskApi.fetchTaskPage).mockResolvedValueOnce({ tasks: [{
       ...inProgressTask,
       status: null,
-    }] as any);
+    }], total: 1, hasMore: false } as any);
     act(() => window.dispatchEvent(new Event("focus")));
 
-    await waitFor(() => expect(taskApi.fetchTasks).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(taskApi.fetchTaskPage).toHaveBeenCalledTimes(2));
     /*
     FNXC:TaskStatusBadge 2026-08-09-08:24:
     FN-8826's empty-status WIP lifecycle fallback and FN-8764/FN-8798's stale-planning
@@ -712,7 +712,10 @@ describe("AppModals", () => {
       expect(cardBadge?.className).not.toMatch(/queued-to-plan|planning/i);
       expect(desktopListBadge).toHaveTextContent(/in progress/i);
       expect(desktopListBadge).not.toHaveTextContent(/planning/i);
-      expect(document.querySelector("#task-detail-modal-title")).toHaveTextContent("FN-8798");
+      const detailHeader = document.querySelector(".task-detail-content > .modal-header");
+      expect(detailHeader).toHaveTextContent("FN-8798");
+      expect(detailHeader).not.toHaveTextContent("Revision task");
+      expect(detailHeader?.querySelector("h1, h2, h3, h4, h5, h6")).toBeNull();
       expect(screen.queryByTestId("task-detail-status-badge")).not.toBeInTheDocument();
     });
   });
@@ -724,7 +727,7 @@ describe("AppModals", () => {
   so this cross-surface guard explicitly mounts and proves the mobile renderer.
   */
   it("drives SSE planner activity and its authoritative status update through board, the mobile list card, and the real detail host", async () => {
-    vi.spyOn(taskApi, "fetchTasks").mockReset();
+    vi.spyOn(taskApi, "fetchTaskPage").mockReset();
     vi.spyOn(taskApi, "fetchBoardWorkflows").mockReset();
     const viewportSpy = mockMobileViewport();
     try {
@@ -745,7 +748,7 @@ describe("AppModals", () => {
         columnMovedAt: "2026-08-05T10:00:00.000Z",
       };
       const manager = { ...mockModalManager, detailTask: parkedTask };
-      vi.spyOn(taskApi, "fetchTasks").mockResolvedValueOnce([parkedTask] as any);
+      vi.spyOn(taskApi, "fetchTaskPage").mockResolvedValueOnce({ tasks: [parkedTask], total: 1, hasMore: false } as any);
       vi.spyOn(taskApi, "fetchBoardWorkflows").mockResolvedValue({
         flagEnabled: true,
         defaultWorkflowId: "builtin:coding",
@@ -778,9 +781,9 @@ describe("AppModals", () => {
         expect(screen.getByTestId("task-detail-status-badge")).toHaveTextContent("Planning");
       });
 
-      vi.mocked(taskApi.fetchTasks).mockResolvedValueOnce([{ ...inProgressTask, status: null }] as any);
+      vi.mocked(taskApi.fetchTaskPage).mockResolvedValueOnce({ tasks: [{ ...inProgressTask, status: null }], total: 1, hasMore: false } as any);
       act(() => window.dispatchEvent(new Event("focus")));
-      await waitFor(() => expect(taskApi.fetchTasks).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(taskApi.fetchTaskPage).toHaveBeenCalledTimes(2));
       await waitFor(() => {
         const card = document.querySelector('.card[data-id="FN-8798"]');
         const cardBadge = card?.querySelector(".card-status-badge");
@@ -791,7 +794,10 @@ describe("AppModals", () => {
         expect(cardBadge?.className).not.toMatch(/queued-to-plan|planning/i);
         expect(mobileListBadge).toHaveTextContent(/in progress/i);
         expect(mobileListBadge).not.toHaveTextContent(/planning/i);
-        expect(document.querySelector("#task-detail-modal-title")).toHaveTextContent("FN-8798");
+        const detailHeader = document.querySelector(".task-detail-content > .modal-header");
+        expect(detailHeader).toHaveTextContent("FN-8798");
+        expect(detailHeader).not.toHaveTextContent("Revision task");
+        expect(detailHeader?.querySelector("h1, h2, h3, h4, h5, h6")).toBeNull();
         expect(screen.queryByTestId("task-detail-status-badge")).not.toBeInTheDocument();
       });
     } finally {

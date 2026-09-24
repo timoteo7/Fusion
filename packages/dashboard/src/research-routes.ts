@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { archivedColumnsForTask } from "./task-lifecycle-lanes.js";
 import type { NextFunction, Request, Response } from "express";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { TaskStore, ResearchRun, TaskCreateInput } from "@fusion/core";
@@ -321,16 +320,16 @@ export function createResearchRouter(store: TaskStore, options?: ServerOptions):
       const description = typeof req.body?.description === "string" && req.body.description.trim()
         ? req.body.description.trim()
         : buildFindingTaskSummary(run, found.finding);
-      const priority = req.body?.priority;
-      if (priority !== undefined && !["low", "normal", "high", "urgent"].includes(priority)) {
-        throw badRequest("priority must be one of: low, normal, high, urgent");
+      /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 — promoting a research finding creates an
+         ordinary arrival-ordered task. An explicit level is refused, not silently dropped. */
+      if (req.body?.priority !== undefined) {
+        throw badRequest("priority is no longer supported: tasks run in arrival order and are raised with Boost");
       }
       const attachExport = validateAttachExport(req.body?.attachExport);
 
       const taskInput: TaskCreateInput = {
         title,
         description,
-        priority,
         source: {
           sourceType: "research",
           sourceRunId: run.id,
@@ -431,13 +430,6 @@ export function createResearchRouter(store: TaskStore, options?: ServerOptions):
 
       const task = await scopedStore.getTask(req.params.taskId);
       if (!task) throw notFound(`Task not found: ${req.params.taskId}`);
-      /*
-      FNXC:WorkflowResolvedColumns 2026-07-30-06:50 (batch-core):
-      Archived tasks are read-only for research enrichment. Keyed on the literal, a renamed board let
-      an ARCHIVED card be enriched — writes landing on a row the archive treats as immutable.
-      */
-      if ((await archivedColumnsForTask(scopedStore, task.id)).has(task.column)) throw new ApiError(409, "Cannot enrich archived task");
-
       let documentKey: string;
       try {
         documentKey = buildResearchDocumentKey(req.params.runId);

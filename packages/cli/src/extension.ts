@@ -21,7 +21,6 @@ import {
   type Task,
   type ColumnId,
   type InsightCategory,
-  type TaskPriority,
   type InsightStatus,
   type InsightRunStatus,
   type InsightRunTrigger,
@@ -30,7 +29,6 @@ import {
   type AgentUpdateInput,
   getTaskDuplicateLineage,
   resolveAgentProvisioningPolicy,
-  TASK_PRIORITIES,
   MAX_TASK_LIST_TEXT_CHARS,
   MAX_TASK_MESSAGE_LENGTH,
   resolveSecretAccessPolicy,
@@ -47,7 +45,6 @@ import {
   type ApprovalRequestActorSnapshot,
   type SecretScope,
   declaresAnyLifecycleTrait,
-  resolveTaskLifecycleColumns,
   resolveNodeOverrideLanes,
   resolveLifecycleColumns,
   resolveWorkflowIrForTaskWithProvenance,
@@ -72,7 +69,6 @@ import {
   type FinalizePlanOverride,
   fetchWebContent,
   assertNoSecretPlaintext,
-  installBaselineArchiveWorktreeDisposer,
   emitGoalRetrievalAudit,
   createWorkflowAuthoringTools,
   workflowListParams,
@@ -576,7 +572,6 @@ async function getStore(
           return raced.store;
         }
         /* FNXC:TaskLifecycleTools 2026-08-15-06:35: Agent tools intentionally install the protective baseline with no force path; only a human CLI invocation can override live removal. */
-        installBaselineArchiveWorktreeDisposer(boot.taskStore, {rootDir: projectRoot, getSettings: () => boot.taskStore.getSettings()});
         storeCache.set(projectRoot, { store: boot.taskStore, shutdown: boot.shutdown });
         return boot.taskStore;
       } catch (error) {
@@ -625,8 +620,7 @@ async function getStore(
  */
 export function setHostTaskStore(projectRoot: string, store: TaskStore): void {
   knownProjectRoots.add(resolve(projectRoot));
-  // FNXC:WorkflowLifecycle 2026-07-16-10:00: Install before caching an injected host store because getStore returns cached stores without a construction pass; this preserves executor-less archive cleanup during host startup.
-  installBaselineArchiveWorktreeDisposer(store, {rootDir: projectRoot, getSettings: () => store.getSettings()});
+  // FNXC:TaskArchiveRemoval 2026-09-04-18:25: Host-injected stores are canonicalized before caching so every tool shares the already-initialized store and its one-time historical reintegration pass.
   const canonical = resolveProjectRoot(projectRoot);
   storeCache.set(canonical, { store, external: true });
   storeBootInflight.delete(canonical);
@@ -1416,23 +1410,9 @@ function getTaskSourceLabel(task: Pick<Task, "sourceType" | "sourceMetadata" | "
   }
 }
 
-async function formatDuplicateLineageLine(task: Task, store: TaskStore): Promise<string | null> {
+function formatDuplicateLineageLine(task: Task): string | null {
   const lineage = getTaskDuplicateLineage(task);
-  if (lineage.length === 0) return null;
-
-  const labels = await Promise.all(lineage.map(async (id) => {
-    try {
-      const linked = await store.getTask(id);
-      /* FNXC:WorkflowLifecycleColumns 2026-08-02-12:45 (fleet): the board's archived column — the same marker
-         as the CLI command's copy of this helper, converted there in this PR. */
-      const linkedLifecycle = await resolveTaskLifecycleColumns(store, id);
-      return linked.column === (linkedLifecycle?.archived ?? "archived") ? `${id} (archived)` : id;
-    } catch {
-      return id;
-    }
-  }));
-
-  return `Duplicate of: ${labels.join(", ")}`;
+  return lineage.length > 0 ? `Duplicate of: ${lineage.join(", ")}` : null;
 }
 
 export function formatTaskLine(t: Task): string {
@@ -1441,11 +1421,10 @@ export function formatTaskLine(t: Task): string {
   const source = getTaskSourceLabel(t);
   const sourceSuffix = source ? ` [via: ${source}]` : "";
   const deps = t.dependencies.length ? ` [deps: ${t.dependencies.join(", ")}]` : "";
-  /* DELIBERATE-LITERAL: `formatTaskLine` is a SYNCHRONOUS formatter taking only a Task — no store, no IR, and
-     it is called from list rendering where a per-row async resolution would be a read per line. The literal
-     only decides whether to print "(paused)", so a renamed board's mislabel is cosmetic. Converting it means
-     threading resolved flags in from every caller, which belongs with the board-render conversion that owns
-     the same problem (see the glyph note in commands/task.ts). */
+  /* Degraded synchronous formatter: live task listings exclude deleted/historical rows, and `done`/`archived`
+     are the built-in terminal fallbacks when no workflow metadata is available. FN-9295: both suppress the
+     paused marker, matching the lifecycle census. DELIBERATE-LITERAL: the `archived` literal is intentional
+     here as the degraded fallback for the historical sentinel column. */
   const isTerminalColumn = t.column === "done" || t.column === "archived";
   const paused = t.paused && !isTerminalColumn ? " (paused)" : "";
   return `${t.id}  ${label}${sourceSuffix}${deps}${paused}`;
@@ -1739,9 +1718,8 @@ export default function kbExtension(pi: ExtensionAPI) {
           description: "Agent ID to assign this task to (e.g. 'agent-abc123')",
         }),
       ),
-      priority: Type.Optional(
-        StringEnum([...TASK_PRIORITIES], { description: "Task priority (low, normal, high, urgent)" }) as unknown as TSchema,
-      ),
+      /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 removed the `priority` parameter. Tasks run in
+         arrival order; an operator raises one explicitly with Boost on the card. */
       workflow_id: Type.Optional(
         Type.String({
           description:
@@ -1810,7 +1788,7 @@ export default function kbExtension(pi: ExtensionAPI) {
             ? new fusionCore.MessageStore(null, { asyncLayer: layer })
             : new fusionCore.MessageStore(store.getDatabase());
           const title = params.description.split(/\r?\n/, 1)[0]?.trim().slice(0, 80) || "Follow-up task";
-          await messageStore.sendMessage({ fromId: fnCtx.agentId ?? "ephemeral-worker", fromType: "agent", toId: fusionCore.DASHBOARD_USER_ID, toType: "user", type: "agent-to-user", content: `Task proposal awaiting validation: ${title}`, metadata: { kind: "task-proposal", proposalStatus: "pending", proposalIdempotencyKey: randomUUID(), proposedTask: { title, description: params.description, priority: params.priority as TaskPriority | undefined, workflowId: params.workflow_id, dependencies: params.depends } } });
+          await messageStore.sendMessage({ fromId: fnCtx.agentId ?? "ephemeral-worker", fromType: "agent", toId: fusionCore.DASHBOARD_USER_ID, toType: "user", type: "agent-to-user", content: `Task proposal awaiting validation: ${title}`, metadata: { kind: "task-proposal", proposalStatus: "pending", proposalIdempotencyKey: randomUUID(), proposedTask: { title, description: params.description, workflowId: params.workflow_id, dependencies: params.depends } } });
           return { content: [{ type: "text", text: "Task proposal submitted to the operator for validation; no task was created." }], details: { proposed: true } };
         }
       }
@@ -1875,7 +1853,6 @@ export default function kbExtension(pi: ExtensionAPI) {
           description: params.description.trim(),
           dependencies: params.depends,
           assignedAgentId: normalizedAgentId === null ? undefined : normalizedAgentId,
-          priority: params.priority as TaskPriority | undefined,
           ...(workflowId ? { workflowId } : {}),
           source: { sourceType: "api", sourceAgentId: fnCtx.agentId, sourceParentTaskId: fnCtx.taskId },
           githubTracking: resolvedTracking.enabled
@@ -1916,7 +1893,6 @@ export default function kbExtension(pi: ExtensionAPI) {
                 (task.assignedAgentId
                   ? `Assigned to: ${task.assignedAgentId}\n`
                   : "") +
-                `Priority: ${task.priority}\n` +
                 `Path: .fusion/tasks/${task.id}/`,
             },
           ],
@@ -1926,7 +1902,6 @@ export default function kbExtension(pi: ExtensionAPI) {
             column: task.column,
             dependencies: task.dependencies,
             assignedAgentId: task.assignedAgentId,
-            priority: task.priority,
           },
         };
       } catch (error) {
@@ -1949,11 +1924,11 @@ export default function kbExtension(pi: ExtensionAPI) {
     label: "fn: Update Task",
     description:
       "Update fields on an existing task. Supports modifying the title, " +
-      "description, dependencies, assigned agent, priority, and workflow_id after task creation. " +
+      "description, dependencies, assigned agent, and workflow_id after task creation. " +
       "Set workflow_id to a workflow ID to select it, or null to clear the workflow selection.",
     promptSnippet: "Update fields on an existing Fusion task",
     promptGuidelines: [
-      "Use fn_task_update to modify task title, description, dependencies, assigned agent, priority, or workflow_id after creation.",
+      "Use fn_task_update to modify task title, description, dependencies, assigned agent, or workflow_id after creation.",
       "Set workflow_id to null to clear a task's workflow selection and enabled workflow steps.",
       "At least one field must be provided to update.",
     ],
@@ -1979,9 +1954,8 @@ export default function kbExtension(pi: ExtensionAPI) {
           description: "Node ID override for this task, or null to clear",
         }),
       ),
-      priority: Type.Optional(
-        StringEnum([...TASK_PRIORITIES], { description: "Task priority (low, normal, high, urgent)" }) as unknown as TSchema,
-      ),
+      /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 removed the `priority` parameter. Tasks run in
+         arrival order; an operator raises one explicitly with Boost on the card. */
       workflow_id: Type.Optional(
         Type.Union([Type.String(), Type.Null()], {
           description:
@@ -2109,10 +2083,7 @@ export default function kbExtension(pi: ExtensionAPI) {
         updates.nodeId = normalizedNodeId;
         updatedFields.push("nodeId");
       }
-      if (params.priority !== undefined) {
-        updates.priority = params.priority;
-        updatedFields.push("priority");
-      }
+      /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 removed the `priority` parameter here too. */
       if (params.workflow_id !== undefined) {
         if (params.workflow_id === null) {
           await store.clearTaskWorkflowSelection(task.id);
@@ -2161,7 +2132,7 @@ export default function kbExtension(pi: ExtensionAPI) {
 
       if (updatedFields.length === 0) {
         return {
-          content: [{ type: "text", text: "No fields to update. Provide at least one of: title, description, depends, agentId, nodeId, priority, workflow_id." }],
+          content: [{ type: "text", text: "No fields to update. Provide at least one of: title, description, depends, agentId, nodeId, workflow_id." }],
           isError: true,
           details: { error: "No fields provided" },
         };
@@ -2297,7 +2268,7 @@ export default function kbExtension(pi: ExtensionAPI) {
       if (sourceLabel) {
         lines.push(`Created via: ${sourceLabel}`);
       }
-      const duplicateLineage = await formatDuplicateLineageLine(task, store);
+      const duplicateLineage = formatDuplicateLineageLine(task);
       if (duplicateLineage) {
         lines.push(duplicateLineage);
       }
@@ -2918,86 +2889,6 @@ export default function kbExtension(pi: ExtensionAPI) {
     },
   });
 
-  // ── fn_task_archive ───────────────────────────────────────────────
-
-  pi.registerTool({
-    name: "fn_task_archive",
-    label: "fn: Archive Task",
-    description:
-      "Archive a task from any live column (move to archived). " +
-      "Archived tasks are preserved for historical reference but moved out of the main board view. " +
-      "If the task is still referenced as a lineage parent by another task, archiving is rejected unless removeLineageReferences:true is passed.",
-    promptSnippet: "Archive a Fusion task from any live column (moves to archived column)",
-    promptGuidelines: [
-      "Use to clean up tasks from any live board column when you want them hidden from active views",
-      "Already archived tasks cannot be archived again",
-      "Archived tasks can be unarchived later if needed",
-      "If archiving fails because the task is still referenced as a lineage parent by another task, retry with removeLineageReferences:true to clear that reference and unblock the archive",
-    ],
-    /*
-    FNXC:TaskLifecycleTools 2026-07-07-00:00:
-    fn_task_archive and fn_task_delete both gate on store.TaskHasLineageChildrenError, whose message tells the
-    caller to pass { removeLineageReferences: true } — but neither tool schema exposed that parameter, leaving
-    lineage-parent tasks permanently stuck (FN-7661). Expose it on both tools' Type.Object schema and forward it
-    to the store call so the recovery path the error message advertises is actually reachable by agents. Keep
-    this in sync with store.archiveTask / store.deleteTask option shapes if they change.
-    */
-    parameters: Type.Object({
-      id: Type.String({ description: "Task ID to archive from any live column (e.g. FN-001)." }),
-      removeLineageReferences: Type.Optional(Type.Boolean({ description: "When true, clear incoming lineage-parent references (child sourceParentTaskId) before archiving, so a task still referenced as a lineage parent can be archived." })),
-    }),
-
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      // FNXC:ToolPermissionGates 2026-07-26-13:55: policy-gated for agent principals; operators unaffected.
-      const gated = await applyAgentPolicyGateForExtensionTool("fn_task_archive", params as Record<string, unknown>, ctx as ExtensionCallerContext);
-      if (gated) return gated;
-      const store = await getStore(ctx.cwd);
-      try {
-        const task = await store.archiveTask(params.id, {
-          removeLineageReferences: params.removeLineageReferences === true,
-          liveExecutionGuard: "refuse",
-        });
-        return {
-          content: [{ type: "text", text: `Archived ${task.id} → ${columnLabel(task.column)}` }],
-          details: { taskId: task.id, column: task.column },
-        };
-      } catch (error) {
-        if (error instanceof fusionCore.TaskIsLiveError) {
-          const task = await store.getTask(params.id);
-          return {isError: true, content: [{type: "text", text: fusionCore.describeArchiveLiveness(params.id, {live: true, reasons: error.reasons}, {workspaceWorktreeCount: Object.keys(task?.workspaceWorktrees ?? {}).length})}], details: {taskId: params.id}};
-        }
-        throw error;
-      }
-    },
-  });
-
-  // ── fn_task_unarchive ─────────────────────────────────────────────
-
-  pi.registerTool({
-    name: "fn_task_unarchive",
-    label: "fn: Unarchive Task",
-    description:
-      "Unarchive an archived task (move from archived → its restore column). " +
-      "Restores to the pre-archive column when available, with active execution columns downgraded to todo.",
-    promptSnippet: "Unarchive a Fusion task (restores to its pre-archive column)",
-    promptGuidelines: [
-      "Use to restore an archived task back to its pre-archive column when available",
-      "Only tasks in the 'archived' column can be unarchived",
-    ],
-    parameters: Type.Object({
-      id: Type.String({ description: "Task ID to unarchive (e.g. FN-001). Must be in 'archived' column." }),
-    }),
-
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const store = await getStore(ctx.cwd);
-      const task = await store.unarchiveTask(params.id);
-
-      return {
-        content: [{ type: "text", text: `Unarchived ${task.id} → ${columnLabel(task.column)}` }],
-        details: { taskId: task.id, column: task.column },
-      };
-    },
-  });
 
   // ── fn_task_delete ─────────────────────────────────────────────────
 
@@ -3013,15 +2904,13 @@ export default function kbExtension(pi: ExtensionAPI) {
       "Use for cleaning up test tasks or tasks created in error when you want the task hidden from active board views",
       "This tool performs a soft delete: task data is preserved and the ID stays reserved",
       "Use allowResurrection:true when operators want the deleted task ID to be intentionally reusable on future createTask calls",
-      "Use fn_task_archive for completed work you want to keep referenceable in the board",
-      "True hard removal is handled by archive cleanup paths (archiveTaskAndCleanup / cleanupArchivedTasks), not fn_task_delete",
       "If deletion fails because the task is still referenced as a lineage parent by another task, retry with removeLineageReferences:true to clear that reference and unblock the delete",
       "If deletion fails because live tasks depend on it, first review the conflict, then deliberately retry with removeDependencyReferences:true to atomically remove only those incoming dependency edges and replan affected tasks",
     ],
     /*
     FNXC:TaskLifecycleTools 2026-07-07-00:00:
-    See matching comment on fn_task_archive above (FN-7661): the store's TaskHasLineageChildrenError message
-    advertises { removeLineageReferences: true } as the recovery path, so this tool must expose and forward it too.
+    The store's TaskHasLineageChildrenError advertises { removeLineageReferences: true }, so this
+    deletion tool must expose and forward the same recovery path.
 
     FNXC:DependencyIntegrity 2026-08-20-19:00:
     FN-075 exposes the store's explicit dependent-conflict recovery at the CLI bridge. The bridge
@@ -5242,7 +5131,7 @@ export default function kbExtension(pi: ExtensionAPI) {
     description:
       "Link a feature to a fn task for implementation. " +
       "Updates the feature status to 'triaged' and associates it with the task. " +
-      "If the target task is not on the active board (for example archived, deleted, or never created), " +
+      "If the target task is not on the active board (for example deleted, historical, or never created), " +
       "the tool returns a clear validation error indicating that only active tasks can be linked.",
     promptSnippet: "Link a feature to a task",
     promptGuidelines: [

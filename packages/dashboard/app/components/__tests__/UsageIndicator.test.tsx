@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, fireEvent, createEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { UsageIndicator } from "../UsageIndicator";
 import "../UsageIndicator.css";
 import * as useUsageDataModule from "../../hooks/useUsageData";
 import type { ProviderUsage } from "../../api";
 import { scopedKey } from "../../utils/projectStorage";
+import { readAppFile, loadAllAppCssBaseOnly } from "../../test/cssFixture";
 
 // Mock the useUsageData hook
 vi.mock("../../hooks/useUsageData", () => ({
@@ -587,13 +589,15 @@ describe("UsageIndicator", () => {
 
     render(<UsageIndicator isOpen={true} onClose={mockOnClose} projectId={TEST_PROJECT_ID} anchorRect={null} />);
 
+    // FN-394: the non-anchored presentation is hosted by the shared window, which keeps the usage identity class on its backdrop.
     const overlay = screen.getByTestId("usage-modal-overlay");
     const modal = screen.getByTestId("usage-modal") as HTMLElement;
-    expect(overlay).toHaveClass("modal-overlay", "open", "usage-modal-overlay");
+    expect(overlay).toHaveClass("floating-window-overlay", "floating-window-overlay--modal", "usage-modal-overlay");
+    expect(screen.getByTestId("floating-window-usage")).toBeInTheDocument();
     expect(modal).toHaveClass("modal");
     expect(modal).not.toHaveClass("usage-modal--popover");
     expect(modal.style.top).toBe("");
-    expect(modal.parentElement).toBe(overlay);
+    expect(overlay).toContainElement(modal);
   });
 
   it("uses the top-aligned mobile sheet surface instead of the desktop popover", () => {
@@ -669,7 +673,12 @@ describe("UsageIndicator", () => {
     expect(mockOnClose).toHaveBeenCalledTimes(1);
   });
 
-  it("calls onClose when desktop popover backdrop is clicked", () => {
+  /*
+   * FN-491: the anchored popover used to mount a full-screen transparent backdrop purely to catch the outside click.
+   * It froze the board behind it, so a click on a card only closed the popover and never reached the card. Dismissal
+   * now comes from the shared `useOutsidePointerDismiss` hook and no layer is mounted at all.
+   */
+  it("la popover ancrée ne monte aucun calque plein écran", () => {
     mockUseUsageData.mockReturnValue(createUsageDataState({
       providers: mockProviders,
       loading: false,
@@ -679,16 +688,85 @@ describe("UsageIndicator", () => {
     }));
 
     render(
-      <UsageIndicator
-        isOpen={true}
-        onClose={mockOnClose}
-        projectId={TEST_PROJECT_ID}
-        anchorRect={createAnchorRect()}
-      />
+      <UsageIndicator isOpen={true} onClose={mockOnClose} projectId={TEST_PROJECT_ID} anchorRect={createAnchorRect()} />
     );
 
-    fireEvent.click(screen.getByTestId("usage-modal-overlay"));
+    expect(screen.getByTestId("usage-modal")).toHaveClass("usage-modal--popover");
+    expect(document.querySelectorAll(".usage-popover-backdrop")).toHaveLength(0);
+    expect(screen.queryByTestId("usage-modal-overlay")).not.toBeInTheDocument();
+  });
+
+  it("le board reste cliquable derrière la popover Usage", async () => {
+    const user = userEvent.setup();
+    mockUseUsageData.mockReturnValue(createUsageDataState({
+      providers: mockProviders,
+      loading: false,
+      error: null,
+      lastUpdated: new Date(),
+      refresh: mockRefresh,
+    }));
+    const boardClicked = vi.fn();
+
+    render(
+      <>
+        <button type="button" data-testid="board-card" onClick={boardClicked}>Card</button>
+        <UsageIndicator isOpen={true} onClose={mockOnClose} projectId={TEST_PROJECT_ID} anchorRect={createAnchorRect()} />
+      </>
+    );
+
+    await user.click(screen.getByTestId("board-card"));
+
+    expect(boardClicked).toHaveBeenCalledTimes(1);
     expect(mockOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("la popover Usage ne ferme pas au défilement", () => {
+    mockUseUsageData.mockReturnValue(createUsageDataState({
+      providers: mockProviders,
+      loading: false,
+      error: null,
+      lastUpdated: new Date(),
+      refresh: mockRefresh,
+    }));
+
+    render(
+      <UsageIndicator isOpen={true} onClose={mockOnClose} projectId={TEST_PROJECT_ID} anchorRect={createAnchorRect()} />
+    );
+
+    fireEvent.wheel(document, { deltaY: 240 });
+    fireEvent.scroll(document);
+    fireEvent.wheel(window, { deltaY: -240 });
+    fireEvent.scroll(window);
+
+    expect(mockOnClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
+  });
+
+  /*
+   * FN-491 accepted consequence: `header-usage-btn` neither toggles nor carries `aria-controls`, so the trigger guard
+   * prevents a visible close-then-reopen cycle at the price of that icon no longer closing an open popover.
+   */
+  it("re-cliquer le déclencheur d'en-tête ne ferme pas et ne provoque aucun cycle", async () => {
+    const user = userEvent.setup();
+    mockUseUsageData.mockReturnValue(createUsageDataState({
+      providers: mockProviders,
+      loading: false,
+      error: null,
+      lastUpdated: new Date(),
+      refresh: mockRefresh,
+    }));
+
+    render(
+      <>
+        <button type="button" data-testid="header-usage-btn">Usage</button>
+        <UsageIndicator isOpen={true} onClose={mockOnClose} projectId={TEST_PROJECT_ID} anchorRect={createAnchorRect()} />
+      </>
+    );
+
+    await user.click(screen.getByTestId("header-usage-btn"));
+
+    expect(mockOnClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
   });
 
   it("calls onClose when Escape key is pressed", () => {
@@ -2960,5 +3038,154 @@ describe("UsageIndicator", () => {
     // Email should NOT be rendered
     expect(screen.queryByText("user@example.com")).not.toBeInTheDocument();
     expect(document.querySelector(".usage-provider-email")).not.toBeInTheDocument();
+  });
+});
+
+/*
+FNXC:PopoverLayering 2026-09-15-09:31:
+FN-413 requires the header-anchored Usage popover to outrank every dashboard-managed window while it is open.
+That only holds if the popover is portaled into the ROOT stacking context (floatingWindowStack.ts contract), so
+these cases pin the portal, the surface class across every data state, the host census, and the negative control.
+*/
+describe("UsageIndicator — dominant transient popover layering (FN-413)", () => {
+  const onClose = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.removeItem(USAGE_VIEW_MODE_KEY);
+    localStorage.removeItem(USAGE_HIDDEN_WINDOWS_KEY);
+    localStorage.removeItem(USAGE_PROVIDER_ORDER_KEY);
+    localStorage.removeItem(USAGE_MODAL_SIZE_KEY);
+    setViewportSize({ width: 1440, height: 900 });
+  });
+
+  const dataStates: Array<[string, Partial<MockUsageDataState>]> = [
+    ["loading", { providers: [], loading: true, hasFetched: false, error: null }],
+    ["error", { providers: [], loading: false, error: "boom" }],
+    ["empty provider list", { providers: [], loading: false, error: null }],
+    [
+      "populated providers",
+      {
+        providers: [
+          {
+            name: "Anthropic",
+            icon: "A",
+            status: "ok",
+            plan: "Pro",
+            windows: [{ label: "Session", percentUsed: 10, percentLeft: 90, resetText: "resets in 4h" }],
+          },
+        ] as ProviderUsage[],
+        loading: false,
+        error: null,
+      },
+    ],
+  ];
+
+  // (a)
+  it.each(dataStates)(
+    "renders the anchored popover portaled into document.body with the popover class (%s)",
+    (_label, overrides) => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({ refresh: vi.fn(), ...overrides }));
+
+      const { container } = render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={onClose}
+          projectId={TEST_PROJECT_ID}
+          anchorRect={createAnchorRect()}
+        />
+      );
+
+      const modal = screen.getByTestId("usage-modal");
+      expect(modal).toHaveClass("usage-modal--popover");
+      /*
+       * FN-491: the anchored branch no longer mounts the `usage-modal-overlay` backdrop — that pane froze the board.
+       * The portal proof below is what this case actually guards.
+       */
+      expect(screen.queryByTestId("usage-modal-overlay")).not.toBeInTheDocument();
+
+      const surfaceRoot = modal.parentElement as HTMLElement;
+      expect(surfaceRoot).not.toBeNull();
+      expect(container.contains(surfaceRoot)).toBe(false);
+      expect(document.body.contains(surfaceRoot)).toBe(true);
+    }
+  );
+
+  // (b) source census: every host that opens Usage with an anchor rect is known and wired.
+  it("census: exactly the known onOpenUsage callers pass a measured anchor rect", () => {
+    const headerSource = readAppFile("components/Header.tsx");
+    const anchoredHostIds = new Set<string>();
+
+    for (const match of headerSource.matchAll(/<button[\s\S]*?<\/button>/g)) {
+      const block = match[0];
+      if (!block.includes("onOpenUsage(")) continue;
+      if (!block.includes("getBoundingClientRect()")) continue;
+      const testId = block.match(/data-testid="([^"]+)"/)?.[1];
+      if (testId) anchoredHostIds.add(testId);
+    }
+
+    expect([...anchoredHostIds].sort()).toEqual([
+      "header-usage-btn",
+      "mobile-header-usage-btn",
+      "overflow-usage-btn",
+    ]);
+  });
+
+  // (c) negative control
+  it("renders no popover class and no portal when there is no anchor rect", () => {
+    mockUseUsageData.mockReturnValue(createUsageDataState({ refresh: vi.fn() }));
+
+    const { container } = render(
+      <UsageIndicator isOpen={true} onClose={onClose} projectId={TEST_PROJECT_ID} anchorRect={null} />
+    );
+
+    /*
+     * FN-491 removed the popover-only backdrop, so the falsifiable proof that this is the SHARED-WINDOW branch is the
+     * absence of `usage-modal--popover` together with the presence of the FloatingWindow overlay, which stays modal.
+     */
+    expect(screen.getByTestId("usage-modal")).not.toHaveClass("usage-modal--popover");
+    expect(screen.getByTestId("usage-modal-overlay")).toBeInTheDocument();
+    expect(container.querySelector(".usage-modal--popover")).toBeNull();
+  });
+
+  // (c bis) negative control: phone viewport with an anchor rect is not the popover branch
+  it("renders no popover class on a phone viewport even with an anchor rect", () => {
+    mockUseUsageData.mockReturnValue(createUsageDataState({ refresh: vi.fn() }));
+    setViewportSize({ width: 390, height: 780 });
+
+    render(
+      <UsageIndicator
+        isOpen={true}
+        onClose={onClose}
+        projectId={TEST_PROJECT_ID}
+        anchorRect={createAnchorRect()}
+      />
+    );
+
+    expect(screen.getByTestId("usage-modal")).not.toHaveClass("usage-modal--popover");
+    expect(screen.getByTestId("usage-modal-overlay")).toBeInTheDocument();
+  });
+
+  // (k) the surface root must stay display:contents so it introduces no intermediate stacking context.
+  it("keeps the popover surface root as a display:contents wrapper", () => {
+    mockUseUsageData.mockReturnValue(createUsageDataState({ refresh: vi.fn() }));
+
+    render(
+      <UsageIndicator
+        isOpen={true}
+        onClose={onClose}
+        projectId={TEST_PROJECT_ID}
+        anchorRect={createAnchorRect()}
+      />
+    );
+
+    const surfaceRoot = screen.getByTestId("usage-modal").parentElement as HTMLElement;
+    expect(surfaceRoot.className).toContain("dashboard-window-surface-root--contents");
+
+    const rule = loadAllAppCssBaseOnly().match(
+      /\.dashboard-window-surface-root--contents\s*\{([^}]*)\}/
+    );
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toContain("display: contents");
   });
 });

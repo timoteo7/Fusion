@@ -7,8 +7,8 @@
  * mailbox contract. Keep those symbols in this peel so types.ts only re-exports.
  */
 
-import type { TaskPriority } from "../board/board.js";
 import type { NativeStructureRef } from "../../types.js";
+import type { DashboardInboxCategory } from "../../messaging/inbox-categories.js";
 
 export type ParticipantType = "agent" | "user" | "system";
 
@@ -60,7 +60,6 @@ export function resolveEphemeralTaskCreationPolicy(settings: {
 export interface ProposedTaskMetadata {
   title: string;
   description: string;
-  priority?: TaskPriority;
   workflowId?: string;
   dependencies?: string[];
 }
@@ -131,6 +130,13 @@ export interface MessageMetadata extends Record<string, unknown> {
   mailKind?: MailKind;
   report?: MailReport;
   approvalRequestId?: string;
+  /*
+  FNXC:MailboxSubject 2026-09-15-04:40:
+  Every mail must carry an author AND a subject. `subject` is the author's explicit subject line;
+  it stays OPTIONAL because legacy persisted rows and existing system producers have none, and
+  those rows must remain valid and readable — surfaces derive a display subject instead.
+  */
+  subject?: string;
 }
 
 /** Message record stored in the system */
@@ -186,6 +192,8 @@ export interface MessageCreateInput {
 
 /** Filter options for querying messages */
 export interface MessageFilter {
+  /** Filter dashboard inbox notices by their canonical destination. */
+  category?: DashboardInboxCategory;
   /** Filter by message type */
   type?: MessageType;
   /** Filter by read status */

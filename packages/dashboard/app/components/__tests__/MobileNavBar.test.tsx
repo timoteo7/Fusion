@@ -1,117 +1,87 @@
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MobileNavBar } from "../MobileNavBar";
-import { MOBILE_NAV_SELECTABLE_ITEMS } from "../../../../core/src/board/mobile-nav-primary-items";
-import { MOBILE_MEDIA_QUERY } from "../../hooks/useViewportMode";
+import userEvent from "@testing-library/user-event";
+import { fetchScripts } from "../../api";
+import { createMobileNavGeometryStyle, MobileNavBar } from "../MobileNavBar";
+import { MOBILE_MEDIA_QUERY, TABLET_MEDIA_QUERY } from "../../hooks/useViewportMode";
+import { NavigationHistoryProvider, useNavigationHistory } from "../../hooks/useNavigationHistory";
 import { readAppFile } from "../../test/cssFixture";
+
+const mobileNavBarLayeringCss = readAppFile("components/MobileNavBar.css");
+
+/*
+ * FN-467 : la pill est pilotée par le réglage projet d'accès rapide, donc chaque destination du registre peut basculer
+ * entre l'onglet direct et le menu. Ces tables permettent d'asserter la répartition sur le DOM rendu.
+ */
+const MORE_TEST_IDS: Record<string, string> = {
+  "command-center": "mobile-more-item-command-center",
+  tasks: "mobile-more-item-tasks",
+  agents: "mobile-more-item-agents",
+  missions: "mobile-more-item-missions",
+  chat: "mobile-more-item-chat",
+  mailbox: "mobile-more-item-mailbox",
+  planning: "mobile-more-item-planning",
+  activity: "mobile-more-item-activity",
+  git: "mobile-more-item-git",
+  files: "mobile-more-item-files",
+  workflows: "mobile-more-item-workflow",
+  automation: "mobile-more-item-schedules",
+  "github-import": "mobile-more-item-github",
+  usage: "mobile-more-item-usage",
+  projects: "mobile-more-item-projects",
+  notes: "mobile-more-item-notes",
+  whiteboard: "mobile-more-item-whiteboard",
+  secrets: "mobile-more-item-secrets",
+  settings: "mobile-more-item-settings",
+  skills: "mobile-more-item-skills",
+  insights: "mobile-more-item-insights",
+  memory: "mobile-more-item-memory",
+  research: "mobile-more-item-research",
+  evals: "mobile-more-item-evals",
+  ideation: "mobile-more-item-ideation",
+  goals: "mobile-more-item-goals",
+  "dev-server": "mobile-more-item-dev-server",
+};
+const REGISTRY_ITEMS = Object.keys(MORE_TEST_IDS);
+
+function tabTestIds(container: HTMLElement): (string | undefined)[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(".mobile-nav-bar--native > .mobile-nav-tab")).map((tab) => tab.dataset.testid);
+}
+
+function pill(container: HTMLElement): HTMLElement {
+  return container.querySelector<HTMLElement>(".mobile-nav-bar--native")!;
+}
 
 vi.mock("../../api", () => ({
   fetchScripts: vi.fn(),
 }));
 
-import { fetchScripts } from "../../api";
+const initialClientHeightDescriptor = Object.getOwnPropertyDescriptor(document.documentElement, "clientHeight");
 
-function mockViewport(mode: "mobile" | "desktop") {
+/* FN-468 : la pill appartient au shell mobile (téléphone ET tablette), d'où le niveau `tablet` ici. */
+function mockViewport(mode: "mobile" | "tablet" | "desktop") {
   Object.defineProperty(window, "matchMedia", {
-    writable: true,
-    value: vi.fn().mockImplementation((query: string) => {
-      const isMobileQuery = query === MOBILE_MEDIA_QUERY || query.includes("max-width: 768px");
-      const isTabletQuery = query === "(min-width: 769px) and (max-width: 1024px)";
-      return {
-        matches: mode === "mobile" ? isMobileQuery : false,
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      };
-    }),
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: mode === "tablet"
+        ? query === TABLET_MEDIA_QUERY
+        : mode === "mobile" && (query === MOBILE_MEDIA_QUERY || query.includes("max-width: 768px")),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
   });
-}
-
-const mobileNavCss = readAppFile("components/MobileNavBar.css");
-
-function extractRuleBlock(css: string, selector: string): string {
-  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = css.match(new RegExp(`${escapedSelector}\\s*\\{([\\s\\S]*?)\\}`));
-  return match?.[1] ?? "";
-}
-
-function getRenderedMobileTabs(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>(".mobile-nav-bar > .mobile-nav-tab"));
-}
-
-function expectUniformMobileNavColumns(container: HTMLElement, expectedTabCount: number) {
-  const tabs = getRenderedMobileTabs(container);
-  expect(tabs).toHaveLength(expectedTabCount);
-
-  const navRule = extractRuleBlock(mobileNavCss, ".mobile-nav-bar");
-  expect(navRule).toContain("left: 0");
-  expect(navRule).toContain("right: var(--icb-right-offset, 0px)");
-  expect(navRule).toContain("padding-inline: var(--space-sm)");
-  expect(navRule).toMatch(/padding-inline:\s*var\(--space-[^)]+\)/);
-  expect(navRule).not.toMatch(/padding-left:\s*(?!0[;\s])/);
-  expect(navRule).not.toMatch(/padding-right:\s*(?!0[;\s])/);
-
-  const tabRule = extractRuleBlock(mobileNavCss, ".mobile-nav-tab");
-  expect(tabRule).toContain("--mobile-nav-icon-size: calc(var(--space-lg) + var(--space-sm) - (var(--space-xs) / 2))");
-  expect(tabRule).toContain("flex: 1 1 0");
-  expect(tabRule).toContain("min-width: 0");
-  expect(tabRule).toContain("align-items: center");
-  expect(tabRule).toMatch(/padding:\s*[^;]+\s+0;/);
-  expect(tabRule).not.toMatch(/margin-left|margin-right/);
-
-  const iconRule = extractRuleBlock(mobileNavCss, ".mobile-nav-tab svg");
-  expect(iconRule).toContain("width: var(--mobile-nav-icon-size)");
-  expect(iconRule).toContain("height: var(--mobile-nav-icon-size)");
-
-  const iconWrapperRule = extractRuleBlock(mobileNavCss, ".mobile-nav-tab-icon-wrapper");
-  expect(iconWrapperRule).toContain("position: relative");
-  expect(iconWrapperRule).toContain("display: flex");
-  expect(iconWrapperRule).toContain("flex: 0 0 var(--mobile-nav-icon-size)");
-  expect(iconWrapperRule).toContain("align-items: center");
-  expect(iconWrapperRule).toContain("justify-content: center");
-  expect(iconWrapperRule).toContain("width: var(--mobile-nav-icon-size)");
-  expect(iconWrapperRule).toContain("height: var(--mobile-nav-icon-size)");
-
-  const labelRule = extractRuleBlock(mobileNavCss, ".mobile-nav-tab-label");
-  expect(labelRule).toContain("width: 100%");
-  expect(labelRule).toContain("min-width: 0");
-  expect(labelRule).toContain("text-align: center");
-
-  for (const tab of tabs) {
-    expect(tab.className).toContain("mobile-nav-tab");
-    expect(tab.querySelector(".mobile-nav-tab-label")).toBeInTheDocument();
-    const iconSlots = tab.querySelectorAll(":scope > .mobile-nav-tab-icon-wrapper");
-    expect(iconSlots).toHaveLength(1);
-    expect(tab.querySelector(":scope > svg")).toBeNull();
-    expect(iconSlots[0].querySelector("svg")).toBeInTheDocument();
-  }
-
-  if (container.querySelector(".mobile-nav-tab-badge")) {
-    expect(extractRuleBlock(mobileNavCss, ".mobile-nav-tab-badge")).toContain("position: absolute");
-  }
-
-  if (container.querySelector(".mobile-nav-chat-unread-dot")) {
-    const dotRule = extractRuleBlock(mobileNavCss, ".mobile-nav-chat-unread-dot");
-    expect(dotRule).toContain("position: absolute");
-    expect(dotRule).toContain("top: 0");
-    expect(dotRule).toContain("right: 0");
-    expect(dotRule).not.toContain("*-1");
-  }
 }
 
 const createDefaultProps = () => ({
   view: "board" as const,
   onChangeView: vi.fn(),
   footerVisible: false,
-  modalOpen: false,
   onOpenSettings: vi.fn(),
   onOpenActivityLog: vi.fn(),
   onOpenMailbox: vi.fn(),
-  mailboxUnreadCount: 0,
-  mailboxPendingApprovalCount: 0,
   onOpenGitManager: vi.fn(),
   onOpenWorkflowEditor: vi.fn(),
   onOpenSchedules: vi.fn(),
@@ -121,1172 +91,889 @@ const createDefaultProps = () => ({
   onOpenGitHubImport: vi.fn(),
   onOpenPlanning: vi.fn(),
   onResumePlanning: vi.fn(),
-  activePlanningSessionCount: 0,
   onOpenUsage: vi.fn(),
   onViewAllProjects: vi.fn(),
   onRunScript: vi.fn(),
-  projectId: "proj_1",
+  projectId: "project-1",
 });
 
-describe("MobileNavBar", () => {
+function OfficialMobileShell(props: Partial<React.ComponentProps<typeof MobileNavBar>> = {}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return <MobileNavBar {...createDefaultProps()} {...props} navigationMenuOpen={menuOpen} onUiMenuOpenChange={setMenuOpen} />;
+}
+
+const COMPONENT_GEOMETRY = {
+  layoutViewportHeight: 844,
+  visualViewportHeight: 504,
+  viewportOffsetTop: 40,
+  systemOffset: 16,
+  floatingGap: 8,
+  pillHeight: 44,
+  popoverGap: 4,
+  safeTopInset: 12,
+  minimumItemHeight: 36,
+} as const;
+
+function readRenderedLength(element: HTMLElement, property: string): number {
+  const value = element.style.getPropertyValue(property);
+  if (!/^-?\d+(?:\.\d+)?px$/.test(value)) {
+    throw new Error(`Expected a concrete ${property} on ${element.className}, received ${JSON.stringify(value)}.`);
+  }
+  return Number.parseFloat(value);
+}
+
+/*
+FNXC:MobilePillPopover 2026-09-13-10:03:
+Scripts-state coverage resolves the pill and popover independently from the complete geometry style emitted by MobileNavBar. No rectangle is injected; a missing sibling lift therefore moves only the popover and makes the numerical non-overlap check fail.
+*/
+function resolveRenderedPopover(nav: HTMLElement, popover: HTMLElement) {
+  const navViewportTop = readRenderedLength(nav, "--mobile-nav-viewport-offset-top");
+  const popoverViewportTop = readRenderedLength(popover, "--mobile-nav-viewport-offset-top");
+  const expectedStyle = createMobileNavGeometryStyle(navViewportTop);
+  for (const property of [
+    "--mobile-nav-floating-gap",
+    "--mobile-nav-viewport-offset-top",
+    "--mobile-nav-pill-bottom",
+    "--mobile-nav-popover-bottom",
+  ] as const) {
+    expect(nav.style.getPropertyValue(property)).toBe(expectedStyle[property]);
+    expect(popover.style.getPropertyValue(property)).toBe(expectedStyle[property]);
+  }
+  expect(popoverViewportTop).toBe(navViewportTop);
+
+  const pillBottom = COMPONENT_GEOMETRY.layoutViewportHeight
+    - COMPONENT_GEOMETRY.systemOffset
+    - COMPONENT_GEOMETRY.floatingGap;
+  const pillTop = pillBottom - COMPONENT_GEOMETRY.pillHeight;
+  const popoverBottom = COMPONENT_GEOMETRY.layoutViewportHeight
+    - COMPONENT_GEOMETRY.systemOffset
+    - COMPONENT_GEOMETRY.floatingGap
+    - COMPONENT_GEOMETRY.pillHeight
+    - COMPONENT_GEOMETRY.popoverGap;
+  const popoverMaxHeight = popoverBottom - popoverViewportTop - COMPONENT_GEOMETRY.safeTopInset;
+  const items = Array.from(popover.querySelectorAll<HTMLElement>(".mobile-more-item"));
+  const lastItem = items.at(-1);
+  if (!lastItem) throw new Error("The production popover must contain a final navigation destination.");
+  const contentHeight = items.length * COMPONENT_GEOMETRY.minimumItemHeight;
+  const renderedPopoverHeight = Math.min(contentHeight, popoverMaxHeight);
+  const popoverTop = popoverBottom - renderedPopoverHeight;
+  const terminalScrollTop = Math.max(0, contentHeight - renderedPopoverHeight);
+  const terminalItemBottom = popoverTop + contentHeight - terminalScrollTop;
+
+  return {
+    lastItem,
+    pill: { top: pillTop, bottom: pillBottom },
+    popover: { top: popoverTop, bottom: popoverBottom, maxHeight: popoverMaxHeight },
+    viewportOffsetTop: popoverViewportTop,
+    terminalItemBottom,
+    terminalScrollTop,
+  };
+}
+
+describe("MobileNavBar official mobile shell", () => {
   beforeEach(() => {
     mockViewport("mobile");
+    vi.mocked(fetchScripts).mockReset();
+    vi.mocked(fetchScripts).mockResolvedValue({});
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(document.documentElement, "clientHeight", { configurable: true, value: 844 });
+  });
+  afterEach(() => {
+    document.documentElement.style.removeProperty("--mobile-nav-height");
+    document.documentElement.style.removeProperty("--mobile-nav-pill-height");
+    if (initialClientHeightDescriptor) {
+      Object.defineProperty(document.documentElement, "clientHeight", initialClientHeightDescriptor);
+    } else {
+      delete (document.documentElement as { clientHeight?: number }).clientHeight;
+    }
+  });
+
+  /*
+  FNXC:PopoverLayering 2026-09-15-09:31:
+  FN-413: the phone More menu must outrank every dashboard-managed window while open. The proof has two halves:
+  the surface is a SIBLING of `.mobile-nav-bar` (so nothing traps it in the bar's stacking context) and its declared
+  layer derives from the live `--fusion-max-z` ceiling rather than the legacy 90/91 pair.
+  */
+  // (f)
+  it("keeps the official pill popover outside the nav bar and above the live window ceiling", () => {
+    const { container } = render(<OfficialMobileShell />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+
+    const popover = screen.getByRole("menu", { name: "Navigate" });
+    expect(popover).toHaveClass("mobile-navigation-popover");
+    const navBar = container.querySelector<HTMLElement>(".mobile-nav-bar")!;
+    expect(navBar.contains(popover)).toBe(false);
+
+    const rule = mobileNavBarLayeringCss.match(/\.mobile-navigation-popover\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(rule).toMatch(/z-index:\s*calc\(var\(--fusion-max-z\)\s*\+\s*3\)/);
+  });
+
+  // (g) legacy sheet variant: unreachable at runtime today (officialDesignEnabled is a constant true),
+  // so its contract is pinned on the stylesheet plus the sibling structure of the markup branch.
+  it("keeps the legacy sheet variant and its backdrop on the ceiling-derived scale", () => {
+    const sheetRule = mobileNavBarLayeringCss.match(/\.mobile-more-sheet\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const backdropRule = mobileNavBarLayeringCss.match(/\.mobile-more-sheet-backdrop\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(sheetRule).toMatch(/z-index:\s*calc\(var\(--fusion-max-z\)\s*\+\s*3\)/);
+    expect(backdropRule).toMatch(/z-index:\s*calc\(var\(--fusion-max-z\)\s*\+\s*2\)/);
+
+    // The sheet, its backdrop and the pill popover are rendered as siblings of <nav>, never inside it.
+    const source = readAppFile("components/MobileNavBar.tsx");
+    const afterNav = source.slice(source.indexOf("</nav>"));
+    expect(afterNav).toContain("mobile-more-sheet-backdrop");
+    expect(afterNav).toContain("mobile-navigation-popover");
+    expect(afterNav).toContain("mobile-more-sheet");
+  });
+
+  /*
+   * FN-467 : la pill n'énumère plus quatre destinations figées ; elle rend les destinations résolues depuis le réglage
+   * projet d'accès rapide, dans l'ordre persisté, le hamburger restant toujours le dernier enfant.
+   *
+   * FN-511 : la rangée vaut CINQ destinations configurables, strictement identiques à celles du pied de page large, et
+   * `chat` y est une destination ordinaire : onglet direct quand il est résolu, ligne `mobile-more-item-chat` sinon,
+   * jamais les deux. Aucune promotion dynamique liée à la largeur ne subsiste.
+   */
+  // (d) défaut : cinq onglets, le Chat en dernier, et aucune ligne Chat dupliquée dans le menu.
+  it("rend les cinq destinations par défaut avec le Chat en dernier quand aucune sélection n'est fournie", () => {
+    const { container } = render(<OfficialMobileShell />);
+    expect(tabTestIds(container)).toEqual([
+      "mobile-nav-tab-command-center",
+      "mobile-nav-tab-tasks",
+      "mobile-nav-tab-planning",
+      "mobile-nav-tab-missions",
+      "mobile-nav-tab-chat",
+    ]);
+    expect(tabTestIds(container)).toHaveLength(5);
+    expect(container.querySelector(".mobile-nav-bar")).toHaveClass("mobile-nav-bar--native");
+    expect(pill(container).lastElementChild).toBe(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.queryByTestId("mobile-nav-tab-more")).toBeNull();
+    expect(Array.from(pill(container).children).every((child) => (child.getAttribute("aria-label") ?? "").length > 0 && child.querySelector("svg"))).toBe(true);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    // FN-511 : le Chat est déjà un onglet, donc il n'apparaît PAS aussi dans le menu.
+    expect(screen.queryByTestId("mobile-more-item-chat")).toBeNull();
+    expect(screen.getByTestId("mobile-more-item-mailbox")).toBeInTheDocument();
+  });
+
+  // (e) sélection vide → même repli que l'absence de sélection.
+  it("revient au défaut quand la sélection persistée est vide", () => {
+    const { container } = render(<OfficialMobileShell quickAccessItems={[]} />);
+    expect(tabTestIds(container)).toEqual([
+      "mobile-nav-tab-command-center",
+      "mobile-nav-tab-tasks",
+      "mobile-nav-tab-planning",
+      "mobile-nav-tab-missions",
+      "mobile-nav-tab-chat",
+    ]);
+  });
+
+  /*
+   * FN-511 : NON-RÉGRESSION DE MISE À JOUR. Une valeur persistée de quatre destinations sans `chat` est complétée par
+   * le résolveur, donc la pill rend cinq onglets avec le Chat en dernier, sans ligne `mobile-more-item-chat`.
+   */
+  it("complète une sélection héritée de quatre destinations avec le Chat en dernier onglet", () => {
+    const { container } = render(<OfficialMobileShell quickAccessItems={["command-center", "tasks", "planning", "missions"]} />);
+    expect(tabTestIds(container)).toEqual([
+      "mobile-nav-tab-command-center",
+      "mobile-nav-tab-tasks",
+      "mobile-nav-tab-planning",
+      "mobile-nav-tab-missions",
+      "mobile-nav-tab-chat",
+    ]);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.queryByTestId("mobile-more-item-chat")).toBeNull();
+  });
+
+  /*
+   * FN-511 : une sélection EXPLICITE de cinq destinations sans `chat` est rendue telle quelle, et le Chat redevient une
+   * ligne du menu — seul moyen de le retirer du pied de page.
+   */
+  it("rend une sélection explicite de cinq destinations sans Chat et renvoie le Chat dans le menu", () => {
+    const { container } = render(<OfficialMobileShell quickAccessItems={["command-center", "tasks", "missions", "mailbox", "planning"]} />);
+    expect(tabTestIds(container)).toEqual([
+      "mobile-nav-tab-command-center",
+      "mobile-nav-tab-tasks",
+      "mobile-nav-tab-missions",
+      "mobile-nav-tab-mailbox",
+      "mobile-nav-tab-planning",
+    ]);
+    expect(screen.queryByTestId("mobile-nav-tab-chat")).toBeNull();
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.getByTestId("mobile-more-item-chat")).toBeInTheDocument();
+  });
+
+  // (f) sélection peuplée et réordonnée → exactement ces destinations, dans cet ordre, puis le complément à cinq.
+  it("respecte l'ordre exact d'une sélection personnalisée", () => {
+    const { container } = render(<OfficialMobileShell quickAccessItems={["mailbox", "missions", "tasks"]} />);
+    expect(tabTestIds(container)).toEqual([
+      "mobile-nav-tab-mailbox",
+      "mobile-nav-tab-missions",
+      "mobile-nav-tab-tasks",
+      "mobile-nav-tab-planning",
+      "mobile-nav-tab-chat",
+    ]);
+    expect(pill(container).lastElementChild).toBe(screen.getByTestId("mobile-menu-trigger"));
+  });
+
+  // (g) doublons, identifiant inconnu et dépassement du plafond de cinq.
+  it("déduplique, rejette l'inconnu et plafonne la rangée à cinq destinations", () => {
+    const { container } = render(<OfficialMobileShell quickAccessItems={["tasks", "tasks", "nope", "mailbox", "planning", "missions", "command-center", "agents"]} />);
+    expect(tabTestIds(container)).toEqual([
+      "mobile-nav-tab-tasks",
+      "mobile-nav-tab-mailbox",
+      "mobile-nav-tab-planning",
+      "mobile-nav-tab-missions",
+      "mobile-nav-tab-command-center",
+    ]);
+    expect(screen.queryByTestId("mobile-nav-tab-agents")).toBeNull();
+    expect(screen.queryByTestId("mobile-nav-tab-chat")).toBeNull();
+    expect(pill(container).lastElementChild).toBe(screen.getByTestId("mobile-menu-trigger"));
+  });
+
+  /*
+   * (h) aucune destination rendable → aucune coquille de bouton, le hamburger reste seul. FN-511 : le complément à cinq
+   * rend les destinations par défaut toujours disponibles, donc la seule façon de vider la rangée est de rendre chaque
+   * destination résolue inéligible — ici par la propriété du Header (FN-481) combinée à un drapeau désactivé.
+   */
+  it("ne laisse aucune coquille d'onglet quand aucune destination résolue n'est éligible", () => {
+    const { container } = render(<OfficialMobileShell quickAccessItems={["memory"]} experimentalFeatures={{}} headerOwnedItems={["command-center", "tasks", "planning", "missions", "chat"]} />);
+    expect(tabTestIds(container)).toEqual([]);
+    expect(pill(container).children).toHaveLength(1);
+    expect(pill(container).firstElementChild).toBe(screen.getByTestId("mobile-menu-trigger"));
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.getByTestId("mobile-more-item-mailbox")).toBeInTheDocument();
+  });
+
+  /*
+   * (l) FN-511 : la répartition ne dépend PLUS de la largeur mesurée. Un téléphone en paysage, puis une tablette très
+   * large, rendent exactement la sélection résolue — aucune destination non configurée n'est promue.
+   */
+  it("rend la même rangée quelle que soit la largeur, sans promouvoir de destination non configurée", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 844 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 390 });
+    const landscape = render(<OfficialMobileShell quickAccessItems={["mailbox", "missions"]} />);
+    const narrowRow = tabTestIds(landscape.container);
+    expect(narrowRow).toEqual([
+      "mobile-nav-tab-mailbox",
+      "mobile-nav-tab-missions",
+      "mobile-nav-tab-tasks",
+      "mobile-nav-tab-planning",
+      "mobile-nav-tab-chat",
+    ]);
+    landscape.unmount();
+
+    mockViewport("tablet");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000 });
+    const wide = render(<OfficialMobileShell quickAccessItems={["mailbox", "missions"]} />);
+    expect(tabTestIds(wide.container)).toEqual(narrowRow);
+    expect(screen.queryByTestId("mobile-nav-tab-files")).toBeNull();
+    expect(screen.queryByTestId("mobile-nav-tab-git")).toBeNull();
+    wide.unmount();
+  });
+
+  /*
+   * FN-467 cas (j) : une rangée configurable peut renvoyer N'IMPORTE quelle destination dans le menu. Les quatre entrées
+   * qui ignoraient jusqu'ici l'argument `surface` doivent donc naviguer ET refermer le popover, conformément à
+   * FNXC:NativeShell 2026-09-09-22:40.
+   */
+  it.each([
+    ["command-center", "mobile-more-item-command-center", "command-center"],
+    /* FN-480 : sur mobile le slot persisté `tasks` rend et route List, le Board étant la surface de fond permanente. */
+    ["tasks", "mobile-more-item-tasks", "list"],
+    ["chat", "mobile-more-item-chat", "chat"],
+    ["mailbox", "mobile-more-item-mailbox", "mailbox"],
+  ])("navigue et referme le menu pour %s rendu dans la surface overflow", (_item, moreTestId, expectedView) => {
+    const props = createDefaultProps();
+    /* FN-511 : une sélection EXPLICITE de cinq destinations est nécessaire pour qu'aucun complément ne promeuve la destination testée. */
+    render(<OfficialMobileShell {...props} quickAccessItems={["planning", "missions", "agents", "git", "files"]} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.getByRole("menu", { name: "Navigate" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId(moreTestId));
+    expect(props.onChangeView).toHaveBeenCalledWith(expectedView);
+    expect(screen.queryByRole("menu", { name: "Navigate" })).toBeNull();
+  });
+
+  /*
+   * FN-467 cas (k) : chaque destination disponible apparaît dans EXACTEMENT une surface. L'union onglets ∪ menu reste
+   * constante quelle que soit la sélection, et l'intersection est toujours vide.
+   */
+  it("couvre toutes les destinations disponibles sans jamais en dupliquer une", () => {
+    const unions: string[][] = [];
+    for (const selection of [undefined, ["mailbox", "missions", "tasks"], ["agents", "files", "git", "workflows", "goals"]]) {
+      const view = render(<OfficialMobileShell quickAccessItems={selection} />);
+      fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+      const tabs = REGISTRY_ITEMS.filter((item) => screen.queryByTestId(`mobile-nav-tab-${item}`) !== null);
+      const menu = REGISTRY_ITEMS.filter((item) => screen.queryByTestId(MORE_TEST_IDS[item]) !== null);
+      expect(tabs.filter((item) => menu.includes(item))).toEqual([]);
+      expect(tabs.length).toBeGreaterThan(0);
+      unions.push([...tabs, ...menu].sort());
+      view.unmount();
+    }
+    expect(unions[1]).toEqual(unions[0]);
+    expect(unions[2]).toEqual(unions[0]);
+  });
+
+  /*
+   * FN-467 cas (k) : l'état actif suit la nouvelle répartition. La pill officielle ne marque l'état actif que sur ses
+   * onglets (le hamburger n'a jamais porté `mobile-nav-tab--active`, cette classe appartient à la variante héritée),
+   * donc l'invariant observable est : la destination courante est marquée une fois quand elle est un onglet, et aucune
+   * n'est marquée quand elle a basculé dans le menu.
+   */
+  it("marque la destination active seulement quand elle est rendue comme onglet", () => {
+    const asTab = render(<OfficialMobileShell view="agents" quickAccessItems={["agents"]} />);
+    expect(screen.getByTestId("mobile-nav-tab-agents")).toHaveAttribute("aria-current", "page");
+    expect(document.querySelectorAll('.mobile-nav-tab[aria-current="page"]')).toHaveLength(1);
+    asTab.unmount();
+
+    render(<OfficialMobileShell view="agents" quickAccessItems={["tasks"]} />);
+    expect(screen.queryByTestId("mobile-nav-tab-agents")).toBeNull();
+    expect(document.querySelectorAll('.mobile-nav-tab[aria-current="page"]')).toHaveLength(0);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.getByTestId("mobile-more-item-agents")).toBeInTheDocument();
+  });
+
+  /*
+   * FN-480 — sur le shell mobile, le Board est la surface projet permanente sous les drawers, donc le slot d'accès
+   * rapide persisté `tasks` rend et route **List**. Ces cas couvrent l'énumération de surfaces : onglet direct (a),
+   * état actif (d) et retrait de l'ancien bouton codé en dur (e). Le cas (b) vit dans la table overflow ci-dessus.
+   */
+  // (a) onglet direct : reproduction du symptôme — le raccourci ne doit plus renvoyer vers la vue déjà affichée.
+  it("rend le slot d'accès rapide `tasks` comme List et navigue vers la liste", () => {
+    const props = createDefaultProps();
+    render(<OfficialMobileShell {...props} />);
+
+    const tab = screen.getByTestId("mobile-nav-tab-tasks");
+    expect(tab).toHaveAttribute("aria-label", "List");
+
+    fireEvent.click(tab);
+    expect(props.onChangeView).toHaveBeenCalledWith("list");
+    expect(props.onChangeView).not.toHaveBeenCalledWith("board");
+  });
+
+  // (d) état actif : `list` marque l'onglet, `board` n'en marque aucun (surface de fond, pas une destination).
+  it("marque l'onglet `tasks` sur la vue liste et aucun onglet sur le Board", () => {
+    const onList = render(<OfficialMobileShell view="list" />);
+    expect(screen.getByTestId("mobile-nav-tab-tasks")).toHaveAttribute("aria-current", "page");
+    expect(document.querySelectorAll('.mobile-nav-tab[aria-current="page"]')).toHaveLength(1);
+    onList.unmount();
+
+    render(<OfficialMobileShell view="board" />);
+    expect(document.querySelectorAll('.mobile-nav-tab[aria-current="page"]')).toHaveLength(0);
+  });
+
+  // (e) retrait : plus aucun bouton List codé en dur, sur les quatre états de sélection, et aucune coquille ajoutée.
+  it.each([
+    ["sélection absente", undefined],
+    ["tasks en accès rapide", ["tasks", "planning"]],
+    ["tasks en menu", ["planning"]],
+    ["sélection vide", []],
+  ] as [string, string[] | undefined][])("ne rend plus de bouton List codé en dur (%s)", (_label, selection) => {
+    const { container, unmount } = render(<OfficialMobileShell quickAccessItems={selection} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+
+    expect(screen.queryByTestId("mobile-more-item-list")).toBeNull();
+    expect(pill(container).lastElementChild).toBe(screen.getByTestId("mobile-menu-trigger"));
+    const listProducers = [
+      screen.queryByTestId("mobile-nav-tab-tasks"),
+      screen.queryByTestId("mobile-more-item-tasks"),
+    ].filter(Boolean);
+    expect(listProducers).toHaveLength(1);
+    unmount();
+  });
+
+  /*
+   * FN-480 : le producteur téléphone de List est désormais le slot d'accès rapide `tasks`. Avec une sélection qui ne
+   * le contient pas, il est rendu dans le menu sous `mobile-more-item-tasks` ; les assertions de focus/Escape, vrai
+   * sujet de ce cas, sont inchangées.
+   */
+  it("opens the single navigation menu, routes List, and restores focus on Escape", async () => {
+    const user = userEvent.setup();
+    const props = createDefaultProps();
+    render(<OfficialMobileShell {...props} quickAccessItems={["planning", "missions", "agents", "git", "files"]} />);
+    const trigger = screen.getByTestId("mobile-menu-trigger");
+    await user.click(trigger);
+    expect(screen.getByRole("menu", { name: "Navigate" })).toHaveClass("mobile-navigation-popover");
+    fireEvent.click(screen.getByTestId("mobile-more-item-tasks"));
+    expect(props.onChangeView).toHaveBeenCalledWith("list");
+
+    await user.click(trigger);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "Navigate" })).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it.each(["empty", "loading", "populated"] as const)("keeps %s Scripts content inside the production-resolved popover above the pill", async (scriptsState) => {
+    if (scriptsState === "loading") {
+      vi.mocked(fetchScripts).mockReturnValue(new Promise(() => undefined));
+    } else if (scriptsState === "populated") {
+      vi.mocked(fetchScripts).mockResolvedValue([
+        { name: "build", command: "pnpm build" },
+        { name: "verify", command: "pnpm verify:fast", description: "Verify changes" },
+      ]);
+    }
+
+    const { container } = render(<OfficialMobileShell keyboardOpen keyboardMetrics={{ keyboardOverlap: 300, viewportHeight: COMPONENT_GEOMETRY.visualViewportHeight, viewportOffsetTop: COMPONENT_GEOMETRY.viewportOffsetTop }} />);
+    const trigger = screen.getByTestId("mobile-menu-trigger");
+    expect(trigger).toHaveAttribute("aria-controls", "mobile-navigation-popover");
+    fireEvent.click(trigger);
+    const popover = screen.getByRole("menu", { name: "Navigate" });
+    fireEvent.click(screen.getByTestId("mobile-more-terminal-split-toggle"));
+
+    if (scriptsState === "loading") {
+      await waitFor(() => expect(screen.getByTestId("mobile-more-scripts-loading")).toBeInTheDocument());
+    } else if (scriptsState === "populated") {
+      await waitFor(() => expect(screen.getByTestId("mobile-more-script-item-verify")).toBeInTheDocument());
+    } else {
+      await waitFor(() => expect(screen.getByText("No scripts — add one…")).toBeInTheDocument());
+    }
+
+    const geometry = resolveRenderedPopover(container.querySelector<HTMLElement>(".mobile-nav-bar")!, popover);
+    /*
+    FNXC:MobilePillKeyboard 2026-09-16-16:27:
+    FN-463 removed the keyboard lift, so the pill's bottom anchor is the layout-viewport placement alone even while
+    an input owns the keyboard. The popover therefore keeps its exclusive boundary one --space-xs above the pill
+    without any viewport-derived displacement.
+    */
+    expect(geometry.viewportOffsetTop).toBe(COMPONENT_GEOMETRY.viewportOffsetTop);
+    expect(geometry.pill.bottom).toBe(
+      COMPONENT_GEOMETRY.layoutViewportHeight - COMPONENT_GEOMETRY.systemOffset - COMPONENT_GEOMETRY.floatingGap,
+    );
+    expect(geometry.pill.top).toBeGreaterThanOrEqual(COMPONENT_GEOMETRY.viewportOffsetTop);
+    expect(geometry.popover.top).toBeGreaterThanOrEqual(COMPONENT_GEOMETRY.viewportOffsetTop + COMPONENT_GEOMETRY.safeTopInset);
+    expect(geometry.popover.bottom).toBeLessThan(geometry.pill.top);
+    expect(geometry.pill.top - geometry.popover.bottom).toBe(COMPONENT_GEOMETRY.popoverGap);
+    expect(geometry.popover.maxHeight).toBeGreaterThan(0);
+    expect(geometry.terminalScrollTop).toBeGreaterThanOrEqual(0);
+    expect(geometry.terminalItemBottom).toBeLessThanOrEqual(geometry.popover.bottom);
+    expect(geometry.lastItem).toBe(screen.getByTestId("mobile-more-item-settings"));
+    expect(popover).toHaveAttribute("id", "mobile-navigation-popover");
+    expect(container.querySelector(".mobile-more-sheet-backdrop")).toBeNull();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps Whiteboard absent until its independent flag is enabled", () => {
+    const disabled = render(<OfficialMobileShell experimentalFeatures={{}} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.queryByTestId("mobile-more-item-whiteboard")).toBeNull();
+    disabled.unmount();
+
+    render(<OfficialMobileShell experimentalFeatures={{ whiteboardView: true }} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.getByTestId("mobile-more-item-whiteboard")).toHaveTextContent("Alpha");
+  });
+
+  /*
+   * (i) FN-467 : Chat n'est plus un onglet par défaut (il n'est pas promouvable en réglages), donc sa pastille vit
+   * désormais dans le menu. Un indicateur suit la SURFACE de sa destination : onglet quand elle est en accès direct,
+   * ligne de menu sinon.
+   *
+   * FN-495 : le plafond descend à quatre, donc Mailbox quitte le défaut. La sélection explicite ci-dessous garde
+   * Mailbox en onglet pour prouver l'indicateur d'onglet, et le second cas prouve qu'au défaut ses indicateurs
+   * suivent la ligne du menu, comme le Chat.
+   */
+  it("preserves unread and planning indicators on official destinations", () => {
+    const explicit = render(<OfficialMobileShell quickAccessItems={["command-center", "tasks", "planning", "mailbox"]} chatHasUnreadResponse mailboxUnreadCount={3} mailboxPendingApprovalCount={1} planningNeedsInput />);
+    expect(screen.getByLabelText("Pending approvals")).toHaveClass("status-dot");
+    expect(screen.getByLabelText("Planning needs your input")).toHaveClass("status-dot");
+    expect(screen.getByText("3")).toHaveClass("mobile-nav-tab-badge");
+
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.getByLabelText("Unread chat response")).toHaveClass("status-dot");
+    explicit.unmount();
+
+    render(<OfficialMobileShell chatHasUnreadResponse mailboxUnreadCount={3} mailboxPendingApprovalCount={1} planningNeedsInput />);
+    expect(screen.getByLabelText("Planning needs your input")).toHaveClass("status-dot");
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.getByLabelText("Unread chat response")).toHaveClass("status-dot");
+    expect(screen.getByLabelText("Pending approvals")).toHaveClass("status-dot");
+    expect(screen.getByText("3")).toHaveClass("mobile-more-item-badge");
+  });
+
+  it("hides for modal, keyboard-independent hidden state, and desktop viewports", () => {
+    const view = render(<OfficialMobileShell modalOpen />);
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
+    view.rerender(<OfficialMobileShell hidden />);
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
+    view.unmount();
+    mockViewport("desktop");
+    render(<OfficialMobileShell />);
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
+  });
+
+  /*
+  Cas (u) — FN-468 : le montage de la pill est décidé par le prédicat de shell, pas par le seul mode `mobile`. La
+  tablette n'était pas seulement masquée en CSS : le composant refusait de se monter. `modalOpen` et `hidden` ne
+  sont PAS neutralisés par cet élargissement.
+  */
+  it("mounts on tablet as well as phone, never on desktop, and still obeys modalOpen and hidden", () => {
+    for (const mode of ["mobile", "tablet"] as const) {
+      mockViewport(mode);
+      const mounted = render(<OfficialMobileShell />);
+      expect(screen.queryByRole("navigation", { name: "Primary navigation" }), mode).not.toBeNull();
+      expect(document.querySelectorAll(".mobile-nav-tab").length, `${mode} tabs`).toBeGreaterThan(0);
+      expect(
+        document.documentElement.style.getPropertyValue("--mobile-nav-height"),
+        `${mode} published height`,
+      ).not.toBe("");
+      mounted.unmount();
+    }
+
+    mockViewport("tablet");
+    const modal = render(<OfficialMobileShell modalOpen />);
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
+    modal.unmount();
+
+    const hiddenView = render(<OfficialMobileShell hidden />);
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
+    hiddenView.unmount();
+
+    mockViewport("desktop");
+    render(<OfficialMobileShell />);
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
+    expect(document.documentElement.style.getPropertyValue("--mobile-nav-height")).toBe("");
+  });
+
+  /*
+  Cas (v) — FN-468 : l'état clavier de la barre mobile reste piloté par le téléphone (`isMobile`), donc sur tablette
+  `keyboardOpen` vaut faux et ne peut pas supprimer la pill nouvellement montée.
+  */
+  it("keeps the tablet pill mounted because the phone keyboard state never applies there", () => {
+    mockViewport("tablet");
+    render(<OfficialMobileShell keyboardOpen={false} />);
+    const nav = screen.getByRole("navigation", { name: "Primary navigation" });
+    expect(nav.className).not.toContain("mobile-nav-bar--keyboard-open");
+  });
+
+  /* FN-467 : Chat n'est plus promouvable en onglet direct, la preuve de routage unique porte donc sur une destination sélectionnable. */
+  it("routes direct destinations exactly once", () => {
+    const props = createDefaultProps();
+    render(<OfficialMobileShell {...props} />);
+    fireEvent.click(screen.getByTestId("mobile-nav-tab-command-center"));
+    expect(props.onChangeView).toHaveBeenCalledTimes(1);
+    expect(props.onChangeView).toHaveBeenCalledWith("command-center");
+  });
+});
+
+/*
+FNXC:MobileNav 2026-09-14-19:51:
+Scrolling the mobile navigation popover then tapping an entry must open that entry. The opening focus affordance is
+emitted once per open and with `preventScroll`, because a repeated or scrolling focus() returns the `overflow-y: auto`
+surface to scrollTop 0 and moves the list under the finger between touchstart and click. The spy below reproduces that
+browser behavior: a focus() without `preventScroll` resets the enclosing popover's scroll position.
+*/
+type RecordedFocus = { target: HTMLElement; options?: FocusOptions };
+
+const originalFocus = HTMLElement.prototype.focus;
+
+function installFocusRecorder(recorded: RecordedFocus[]) {
+  return vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function focusMock(
+    this: HTMLElement,
+    options?: FocusOptions,
+  ) {
+    recorded.push({ target: this, options });
+    if (!options?.preventScroll) {
+      const scrollable = this.closest<HTMLElement>(".mobile-navigation-popover");
+      if (scrollable) scrollable.scrollTop = 0;
+    }
+    originalFocus.call(this, options);
+  });
+}
+
+function menuFocusCalls(recorded: RecordedFocus[]) {
+  return recorded.filter((entry) => entry.target.closest(".mobile-navigation-popover") !== null);
+}
+
+function exposeScrollPosition(element: HTMLElement, value: number) {
+  let scrollTop = value;
+  Object.defineProperty(element, "scrollTop", {
+    configurable: true,
+    get: () => scrollTop,
+    set: (next: number) => { scrollTop = next; },
+  });
+}
+
+/*
+FNXC:MobileNav 2026-09-14-19:51:
+This shell reproduces App's mount exactly: `useNavigationHistory` feeds a NavigationHistoryProvider, so every parent
+re-render used to hand the popover a new context identity. Props are supplied by the caller so a re-render does not
+fabricate new handler identities of its own.
+*/
+function NavigationHistoryShell({
+  navProps,
+  mailboxUnreadCount,
+  withProvider = true,
+}: {
+  navProps: Partial<React.ComponentProps<typeof MobileNavBar>>;
+  mailboxUnreadCount?: number;
+  withProvider?: boolean;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const navigationHistory = useNavigationHistory({ enabled: true });
+  const bar = (
+    <MobileNavBar
+      {...(navProps as React.ComponentProps<typeof MobileNavBar>)}
+      mailboxUnreadCount={mailboxUnreadCount}
+      navigationMenuOpen={menuOpen}
+      onUiMenuOpenChange={setMenuOpen}
+    />
+  );
+  if (!withProvider) return bar;
+  const { pushNav, replaceCurrent, removeNav, promoteNav } = navigationHistory;
+  return (
+    <NavigationHistoryProvider value={{ pushNav, replaceCurrent, removeNav, promoteNav }}>
+      {bar}
+    </NavigationHistoryProvider>
+  );
+}
+
+describe("MobileNavBar navigation popover keeps its scroll position", () => {
+  let recordedFocus: RecordedFocus[];
+  let focusSpy: ReturnType<typeof installFocusRecorder>;
+
+  beforeEach(() => {
+    mockViewport("mobile");
+    vi.mocked(fetchScripts).mockReset();
+    vi.mocked(fetchScripts).mockResolvedValue({});
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 844 });
+    Object.defineProperty(document.documentElement, "clientHeight", { configurable: true, value: 844 });
+    recordedFocus = [];
+    focusSpy = installFocusRecorder(recordedFocus);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("renders eight top-level tab buttons including dedicated List and keeps skills in More when showSkillsTab is true", () => {
-    render(<MobileNavBar {...createDefaultProps()} showSkillsTab={true} />);
-
-    expect(screen.getByTestId("mobile-nav-tab-command-center")).toBeDefined();
-    expect(screen.getByTestId("mobile-nav-tab-tasks")).toBeDefined();
-    expect(screen.getByTestId("mobile-nav-tab-agents")).toBeDefined();
-    expect(screen.getByTestId("mobile-nav-tab-missions")).toBeDefined();
-    expect(screen.getByTestId("mobile-nav-tab-chat")).toBeDefined();
-    expect(screen.getByTestId("mobile-nav-tab-mailbox")).toBeDefined();
-    expect(screen.getByTestId("mobile-nav-tab-list")).toBeDefined();
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-    expect(screen.queryByTestId("mobile-nav-tab-roadmaps")).toBeNull();
-    expect(screen.getByTestId("mobile-nav-tab-more")).toBeDefined();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-skills")).toBeDefined();
-  });
-
-  it("promotes Planning and routes demoted Missions to More without an empty tab", () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} mobileNavPrimaryItems={["command-center", "tasks", "agents", "planning", "chat", "mailbox"]} />);
-    expect(screen.getByTestId("mobile-nav-tab-planning")).toBeInTheDocument();
-    expect(screen.queryByTestId("mobile-nav-tab-missions")).toBeNull();
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-missions")).toBeInTheDocument();
-    expect(container.querySelector('[data-testid="mobile-nav-tab-missions"]')).toBeNull();
-  });
-
-  it("promotes eligible settings and always keeps More", () => {
-    render(<MobileNavBar {...createDefaultProps()} mobileNavPrimaryItems={["settings", "planning"]} />);
-    expect(screen.getByTestId("mobile-nav-tab-settings")).toBeInTheDocument();
-    expect(screen.getByTestId("mobile-nav-tab-planning")).toBeInTheDocument();
-    expect(screen.getByTestId("mobile-nav-tab-more")).toBeInTheDocument();
-  });
-
-  it("renders every available selectable destination exactly once across tab and More", () => {
-    const gated = new Set(["skills", "insights", "memory", "research", "evals", "ideation", "goals", "todos", "dev-server"]);
-    const moreTestIds: Record<string, string> = { automation: "schedules", "github-import": "github", workflows: "workflow" };
-    for (const item of MOBILE_NAV_SELECTABLE_ITEMS) {
-      const { unmount } = render(<MobileNavBar {...createDefaultProps()} mobileNavPrimaryItems={[item]} showSkillsTab experimentalFeatures={{ insights: true, memoryView: true, researchView: true, evalsView: true, ideationView: true, goalsView: true, todoView: true, devServerView: true }} />);
-      if (item === "ideation") {
-        expect(screen.queryByTestId("mobile-nav-tab-ideation")).toBeNull();
-        fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-        expect(screen.getAllByTestId("mobile-more-item-ideation")).toHaveLength(1);
-      } else {
-        expect(screen.getAllByTestId(`mobile-nav-tab-${item}`)).toHaveLength(1);
-        fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-        expect(screen.queryByTestId(`mobile-more-item-${moreTestIds[item] ?? item}`)).toBeNull();
-      }
-      unmount();
+    focusSpy.mockRestore();
+    document.documentElement.style.removeProperty("--mobile-nav-height");
+    document.documentElement.style.removeProperty("--mobile-nav-pill-height");
+    if (initialClientHeightDescriptor) {
+      Object.defineProperty(document.documentElement, "clientHeight", initialClientHeightDescriptor);
+    } else {
+      delete (document.documentElement as { clientHeight?: number }).clientHeight;
     }
-    expect(gated.size).toBe(9);
   });
 
-  it("keeps enabled Ideation in More when persisted customization lists it", () => {
-    render(<MobileNavBar {...createDefaultProps()} mobileNavPrimaryItems={["ideation"]} experimentalFeatures={{ ideationView: true }} />);
+  it("focuses the first entry once per open, with preventScroll, across parent re-renders that change the navigation-history identity", () => {
+    const navProps = createDefaultProps();
+    const view = render(<NavigationHistoryShell navProps={navProps} mailboxUnreadCount={0} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
 
-    expect(screen.queryByTestId("mobile-nav-tab-ideation")).toBeNull();
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getAllByTestId("mobile-more-item-ideation")).toHaveLength(1);
-  });
-
-  it("does not render legacy roadmaps tab", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{}} />);
-    expect(screen.queryByTestId("mobile-nav-tab-roadmaps")).toBeNull();
-  });
-
-  it("keeps skills available in More without rendering legacy roadmaps destinations", () => {
-    render(<MobileNavBar {...createDefaultProps()} showSkillsTab={true} experimentalFeatures={{}} />);
-
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-    expect(screen.queryByTestId("mobile-nav-tab-roadmaps")).toBeNull();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-skills")).toBeDefined();
-    expect(screen.queryByTestId("mobile-more-item-roadmaps")).toBeNull();
-  });
-
-  it("keeps skills in the More sheet regardless of legacy roadmaps view value", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="board" showSkillsTab={true} experimentalFeatures={{}} />);
-
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-skills")).toBeDefined();
-  });
-
-  it("does not render skills tab when showSkillsTab is false", () => {
-    render(<MobileNavBar {...createDefaultProps()} showSkillsTab={false} />);
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-  });
-
-  it("does not render skills tab when showSkillsTab is omitted", () => {
-    render(<MobileNavBar {...createDefaultProps()} />);
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-  });
-
-  it("keeps every mobile tab in an equal-width column across tab, active, badge, and status-dot variants", () => {
-    const sevenTabRender = render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        showSkillsTab={false}
-        view="command-center"
-        chatHasUnreadResponse={true}
-        mailboxUnreadCount={7}
-        mailboxPendingApprovalCount={2}
-      />,
-    );
-    expectUniformMobileNavColumns(sevenTabRender.container, 8);
-    expect(screen.getByTestId("mobile-nav-tab-command-center").className).toContain("mobile-nav-tab--active");
-    expect(screen.getByLabelText("Unread chat response")).toBeInTheDocument();
-    expect(screen.getByLabelText("Pending approvals")).toBeInTheDocument();
-    expect(screen.getByTestId("mobile-nav-tab-mailbox").querySelector(".mobile-nav-tab-badge")?.textContent).toBe("7");
-    sevenTabRender.unmount();
-
-    // Skills is never a top-level tab, so enabling it keeps the top-level column count at eight
-    // and the skills destination, plus its active view, lives in the More sheet.
-    const skillsEnabledRender = render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        showSkillsTab={true}
-        view="skills"
-        chatHasUnreadResponse={true}
-        mailboxUnreadCount={101}
-        mailboxPendingApprovalCount={1}
-      />,
-    );
-    expectUniformMobileNavColumns(skillsEnabledRender.container, 8);
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-    expect(screen.getByTestId("mobile-nav-tab-more").className).toContain("mobile-nav-tab--active");
-    expect(screen.getByTestId("mobile-nav-tab-mailbox").querySelector(".mobile-nav-tab-badge")?.textContent).toBe("99+");
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-skills")).toBeDefined();
-    skillsEnabledRender.unmount();
-
-    const pluginVariantRender = render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        showSkillsTab={true}
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-spacing-check",
-            view: { viewId: "wide", label: "Very Long Plugin Destination", componentPath: "./WidePluginView", icon: "Workflow", placement: "primary", order: 1 },
-          },
-        ]}
-      />,
-    );
-    expectUniformMobileNavColumns(pluginVariantRender.container, 8);
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-spacing-check-wide")).toBeNull();
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-plugin-fusion-plugin-spacing-check-wide")).toBeDefined();
-  });
-
-  /*
-  FNXC:Navigation 2026-08-15-22:15:
-  FN-8762 (5b2b31d2c9) extracted Todo Lists into the bundled `fusion-plugin-todos`
-  plugin: the host `todos` More-sheet item and `experimentalFeatures.todoView` gate
-  are gone, and Todos now surfaces via `pluginDashboardViews` with overflow placement.
-  These tests keep the same coverage (More-sheet only, routing, More-tab active) in
-  the plugin form.
-  */
-  const todosPluginView = {
-    pluginId: "fusion-plugin-todos",
-    view: { viewId: "todos", label: "Todos", componentPath: "./dashboard-view", icon: "CheckSquare", placement: "overflow" as const, order: 70 },
-  };
-
-  it("keeps Todos in the mobile More sheet and routes to the todos plugin view", () => {
-    const props = createDefaultProps();
-    render(
-      <MobileNavBar
-        {...props}
-        pluginDashboardViews={[todosPluginView]}
-      />,
-    );
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-plugin-fusion-plugin-todos-todos"));
-
-    expect(props.onChangeView).toHaveBeenCalledWith("plugin:fusion-plugin-todos:todos");
-  });
-
-  it("Mailbox is a primary tab and is not duplicated in the More sheet", () => {
-    render(<MobileNavBar {...createDefaultProps()} mailboxUnreadCount={3} mailboxPendingApprovalCount={1} />);
-
-    expect(screen.getByTestId("mobile-nav-tab-mailbox")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-mailbox")).toBeNull();
-  });
-
-  it("Todos lives only in the More sheet, never a primary tab", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        pluginDashboardViews={[todosPluginView]}
-      />,
-    );
-
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-todos-todos")).toBeNull();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-plugin-fusion-plugin-todos-todos")).toBeInTheDocument();
-  });
-
-  it("marks the mobile More tab active for the todos plugin view", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        view="plugin:fusion-plugin-todos:todos"
-        pluginDashboardViews={[todosPluginView]}
-      />,
-    );
-
-    expect(screen.getByTestId("mobile-nav-tab-more")).toHaveClass("mobile-nav-tab--active");
-  });
-
-  it("shows Artifacts in More and routes to the stable documents view", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-documents")).toHaveTextContent("Artifacts");
-    fireEvent.click(screen.getByTestId("mobile-more-item-documents"));
-
-    expect(props.onChangeView).toHaveBeenCalledWith("documents");
-  });
-
-  it("shows secrets in More and routes to secrets view", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-secrets"));
-
-    expect(props.onChangeView).toHaveBeenCalledWith("secrets");
-  });
-
-  it("shows mailbox pending-approval indicator when mailbox tab is inactive", () => {
-    render(<MobileNavBar {...createDefaultProps()} mailboxPendingApprovalCount={2} />);
-    expect(screen.getByLabelText("Pending approvals")).toBeInTheDocument();
-  });
-
-  it("hides mailbox pending-approval indicator when mailbox tab is active", () => {
-    render(<MobileNavBar {...createDefaultProps()} mailboxPendingApprovalCount={2} view="mailbox" />);
-    expect(screen.queryByLabelText("Pending approvals")).toBeNull();
-  });
-
-  it("keeps dependency graph in More and routes to canonical graph task view", () => {
-    const props = createDefaultProps();
-    render(
-      <MobileNavBar
-        {...props}
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "graph", label: "Graph", componentPath: "./GraphView", icon: "Map", placement: "more" },
-          },
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "queue", label: "Queue", componentPath: "./QueueView", icon: "Workflow" },
-          },
-        ]}
-      />,
-    );
-
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-dependency-graph-graph")).toBeNull();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    const graphItem = screen.getByTestId("mobile-more-item-plugin-fusion-plugin-dependency-graph-graph");
-    fireEvent.click(graphItem);
-    expect(props.onChangeView).toHaveBeenCalledWith("graph");
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    const overflowItem = screen.getByTestId("mobile-more-item-plugin-fusion-plugin-dependency-graph-queue");
-    expect(overflowItem.querySelector(".lucide-workflow")).toBeTruthy();
-    fireEvent.click(overflowItem);
-    expect(props.onChangeView).toHaveBeenCalledWith("plugin:fusion-plugin-dependency-graph:queue");
-  });
-
-  it("demotes primary plugin tabs on mobile and renders them in More", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "graph", label: "Graph", componentPath: "./GraphView", icon: "Map", placement: "primary", order: 1 },
-          },
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "queue", label: "Queue", componentPath: "./QueueView", icon: "Workflow", placement: "primary", order: 2 },
-          },
-        ]}
-      />,
-    );
-
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-dependency-graph-graph")).toBeNull();
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-dependency-graph-queue")).toBeNull();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-plugin-fusion-plugin-dependency-graph-graph")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-plugin-fusion-plugin-dependency-graph-queue")).toBeDefined();
-  });
-
-  it("marks More active when current view is graph", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        view="graph"
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "graph", label: "Graph", componentPath: "./GraphView", icon: "Map", placement: "more" },
-          },
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "queue", label: "Queue", componentPath: "./QueueView", icon: "Workflow" },
-          },
-        ]}
-      />,
-    );
-
-    expect(screen.getByTestId("mobile-nav-tab-more").className).toContain("mobile-nav-tab--active");
-  });
-
-  it("marks More active when current plugin view is overflow-only", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        view="plugin:fusion-plugin-dependency-graph:queue"
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "graph", label: "Graph", componentPath: "./GraphView", icon: "Map", placement: "more" },
-          },
-          {
-            pluginId: "fusion-plugin-dependency-graph",
-            view: { viewId: "queue", label: "Queue", componentPath: "./QueueView", icon: "Workflow" },
-          },
-        ]}
-      />,
-    );
-
-    expect(screen.getByTestId("mobile-nav-tab-more").className).toContain("mobile-nav-tab--active");
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-dependency-graph-graph")).toBeNull();
-  });
-
-  it("active tab is highlighted for mailbox", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="mailbox" />);
-    expect(screen.getByTestId("mobile-nav-tab-mailbox").className).toContain("mobile-nav-tab--active");
-  });
-
-  it("mailbox tab calls onChangeView with 'mailbox'", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="board" />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-mailbox"));
-    expect(props.onChangeView).toHaveBeenCalledWith("mailbox");
-  });
-
-  it("places Command Center as the first mobile tab while primary plugins stay More-only", () => {
-    const props = createDefaultProps();
-    const { container } = render(
-      <MobileNavBar
-        {...props}
-        view="board"
-        mailboxUnreadCount={3}
-        mailboxPendingApprovalCount={1}
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-compound-engineering",
-            view: { viewId: "compound-engineering", label: "Compound Engineering", componentPath: "./CompoundEngineeringView", icon: "Workflow", placement: "primary", order: 1 },
-          },
-        ]}
-      />,
-    );
-
-    const mailboxTab = screen.getByTestId("mobile-nav-tab-mailbox");
-    const commandCenterTab = screen.getByTestId("mobile-nav-tab-command-center");
-    // Command Center is now the first top-level tab, before Tasks.
-    expect(commandCenterTab).toBe(container.querySelector(".mobile-nav-bar > .mobile-nav-tab"));
-    expect(commandCenterTab.previousElementSibling).toBeNull();
-    expect(mailboxTab.querySelector(".mobile-nav-tab-badge")?.textContent).toBe("3");
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-compound-engineering-compound-engineering")).toBeNull();
-
-    fireEvent.click(commandCenterTab);
-    expect(props.onChangeView).toHaveBeenCalledWith("command-center");
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-command-center")).toBeNull();
-    expect(screen.getByTestId("mobile-more-item-plugin-fusion-plugin-compound-engineering-compound-engineering")).toBeDefined();
-  });
-
-  it("agents tab calls onChangeView with 'agents'", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="board" />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-agents"));
-    expect(props.onChangeView).toHaveBeenCalledWith("agents");
-  });
-
-  it("agents tab is active when view is 'agents'", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="agents" />);
-    expect(screen.getByTestId("mobile-nav-tab-agents").className).toContain("mobile-nav-tab--active");
-  });
-
-  it("shows mailbox unread badge when mailboxUnreadCount > 0", () => {
-    render(<MobileNavBar {...createDefaultProps()} mailboxUnreadCount={5} />);
-    const badge = screen.getByTestId("mobile-nav-tab-mailbox").querySelector(".mobile-nav-tab-badge");
-    expect(badge).toBeDefined();
-    expect(badge?.textContent).toBe("5");
-  });
-
-  it("keeps mailbox unread badge on the primary tab only", () => {
-    render(<MobileNavBar {...createDefaultProps()} mailboxUnreadCount={7} />);
-
-    const tabBadge = screen.getByTestId("mobile-nav-tab-mailbox").querySelector(".mobile-nav-tab-badge");
-    expect(tabBadge).toBeDefined();
-    expect(tabBadge?.textContent).toBe("7");
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-mailbox")).toBeNull();
-  });
-
-  it("tasks tab calls onChangeView with 'board' when coming from a non-tasks view", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="missions" />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-tasks"));
-    expect(props.onChangeView).toHaveBeenCalledWith("board");
-  });
-
-  it("tasks tab calls onChangeView with 'board' when already on board", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="board" />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-tasks"));
-    expect(props.onChangeView).toHaveBeenCalledWith("board");
-  });
-
-  it("tasks tab returns to board when currently on list", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="list" />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-tasks"));
-    expect(props.onChangeView).toHaveBeenCalledWith("board");
-  });
-
-  it("tasks tab is active when view is 'board'", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="board" />);
-    expect(screen.getByTestId("mobile-nav-tab-tasks").className).toContain("mobile-nav-tab--active");
-  });
-
-  it("list tab is active and routes to list when view is 'list'", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="list" />);
-    expect(screen.getByTestId("mobile-nav-tab-list").className).toContain("mobile-nav-tab--active");
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-list"));
-    expect(props.onChangeView).toHaveBeenCalledWith("list");
-  });
-
-  it("missions tab calls onChangeView with 'missions'", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="board" />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-missions"));
-    expect(props.onChangeView).toHaveBeenCalledWith("missions");
-  });
-
-  it("missions tab is active when view is 'missions'", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="missions" />);
-    expect(screen.getByTestId("mobile-nav-tab-missions").className).toContain("mobile-nav-tab--active");
-  });
-
-  it("missions tab is not active when view is 'board'", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="board" />);
-    expect(screen.getByTestId("mobile-nav-tab-missions").className).not.toContain("mobile-nav-tab--active");
-  });
-
-  it("shows chat unread indicator when chatHasUnreadResponse is true and chat tab is inactive", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="board" chatHasUnreadResponse={true} />);
-    expect(screen.getByLabelText("Unread chat response")).toBeInTheDocument();
-  });
-
-  it("hides chat unread indicator when chat tab is active", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="chat" chatHasUnreadResponse={true} />);
-    expect(screen.queryByLabelText("Unread chat response")).toBeNull();
-  });
-
-  /*
-  FNXC:Navigation 2026-07-05-00:00:
-  FN-7614: planning-awaiting-input moved from a top-of-board banner (broken Resume redirect) to a yellow
-  needs-input dot on the Planning More-sheet item and the More tab icon, mirroring the chat unread dot pattern.
-  The existing activePlanningSessionCount count badge must remain unaffected.
-  */
-  describe("planningNeedsInput dot (FN-7614)", () => {
-    it("shows a needs-input dot on the More tab icon when planningNeedsInput is true and the sheet is closed", () => {
-      render(<MobileNavBar {...createDefaultProps()} view="board" planningNeedsInput={true} />);
-      expect(screen.getByLabelText("Planning needs your input")).toBeInTheDocument();
-    });
-
-    it("hides the More tab dot when planningNeedsInput is false", () => {
-      render(<MobileNavBar {...createDefaultProps()} view="board" planningNeedsInput={false} />);
-      expect(screen.queryByLabelText("Planning needs your input")).toBeNull();
-    });
-
-    it("hides the More tab dot while already on the planning view", () => {
-      render(<MobileNavBar {...createDefaultProps()} view="planning" planningNeedsInput={true} />);
-      expect(screen.queryByLabelText("Planning needs your input")).toBeNull();
-    });
-
-    it("shows a needs-input dot on the Planning More-sheet item and keeps the count badge unaffected", () => {
-      render(<MobileNavBar {...createDefaultProps()} view="board" planningNeedsInput={true} activePlanningSessionCount={2} />);
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-
-      const planningItem = screen.getByTestId("mobile-more-item-planning");
-      expect(planningItem.querySelector(".status-dot.status-dot--pending")).toBeTruthy();
-      expect(planningItem).toHaveTextContent("2");
-    });
-
-    it("hides the Planning More-sheet dot when planningNeedsInput is false while the count badge still renders", () => {
-      render(<MobileNavBar {...createDefaultProps()} view="board" planningNeedsInput={false} activePlanningSessionCount={3} />);
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-
-      const planningItem = screen.getByTestId("mobile-more-item-planning");
-      expect(planningItem.querySelector(".status-dot.status-dot--pending")).toBeNull();
-      expect(planningItem).toHaveTextContent("3");
-    });
-  });
-
-  it("skills More-sheet item calls onChangeView with 'skills'", () => {
-    const props = createDefaultProps();
-    render(<MobileNavBar {...props} view="board" showSkillsTab={true} />);
-
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-skills"));
-    expect(props.onChangeView).toHaveBeenCalledWith("skills");
-  });
-
-  it("marks the More tab active when view is 'skills' since skills lives only in More", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="skills" showSkillsTab={true} />);
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-    expect(screen.getByTestId("mobile-nav-tab-more").className).toContain("mobile-nav-tab--active");
-  });
-
-  it("does not mark the More tab active for skills when view is 'board'", () => {
-    render(<MobileNavBar {...createDefaultProps()} view="board" showSkillsTab={true} />);
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-    expect(screen.getByTestId("mobile-nav-tab-more").className).not.toContain("mobile-nav-tab--active");
-  });
-
-  it("opens and toggles the more sheet", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(container.querySelector(".mobile-more-sheet")).not.toBeNull();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-  });
-
-  it("renders shell connection control in More sheet when provided", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        shellConnectionControl={<button type="button">Manage connections</button>}
-      />,
-    );
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-
-    expect(screen.getByTestId("mobile-more-shell-connection")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Manage connections" })).toBeInTheDocument();
-  });
-
-  it("sheet contains expected navigation items including activity log", () => {
-    render(<MobileNavBar {...createDefaultProps()} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-
-    expect(screen.queryByTestId("mobile-more-item-mailbox")).toBeNull();
-    expect(screen.getByTestId("mobile-nav-tab-mailbox")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-activity")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-git")).toBeDefined();
-    expect(screen.queryByTestId("mobile-more-item-stash-recovery")).toBeNull();
-    expect(screen.getByTestId("mobile-more-item-terminal")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-files")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-planning")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-workflow")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-schedules")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-github")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-usage")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-projects")).toBeDefined();
-    expect(screen.queryByTestId("mobile-more-item-command-center")).toBeNull();
-    expect(screen.queryByTestId("mobile-more-item-chat")).toBeNull();
-    expect(screen.queryByTestId("mobile-more-item-roadmaps")).toBeNull();
-    expect(screen.queryByTestId("mobile-more-item-insights")).toBeNull();
-    expect(screen.getByTestId("mobile-more-item-settings")).toBeDefined();
-  });
-
-  it("pins omitted Settings below the More divider as the final selectable item", () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-
-    const sheet = container.querySelector(".mobile-more-sheet");
-    const separator = sheet?.querySelector(".mobile-more-separator");
-    const settings = screen.getByTestId("mobile-more-item-settings");
-
-    expect(sheet).toBeInTheDocument();
-    expect(separator).toBeInTheDocument();
-    expect(separator!.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(Array.from(sheet!.querySelectorAll(".mobile-more-item")).at(-1)).toBe(settings);
-  });
-
-  it("does not duplicate Settings in More when Settings is a primary tab", () => {
-    render(<MobileNavBar {...createDefaultProps()} mobileNavPrimaryItems={["settings"]} />);
-
-    expect(screen.getByTestId("mobile-nav-tab-settings")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-settings")).toBeNull();
-  });
-
-  it("shows the stash orphan badge on the Git Manager item instead of a Stash Recovery item", () => {
-    render(<MobileNavBar {...createDefaultProps()} stashOrphanCount={8} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-
-    const gitItem = screen.getByTestId("mobile-more-item-git");
-    expect(gitItem.querySelector(".mobile-more-item-badge")?.textContent).toBe("8");
-    expect(screen.queryByTestId("mobile-more-item-stash-recovery")).toBeNull();
-  });
-
-  it("does not show legacy roadmaps in more sheet", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{}} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-roadmaps")).toBeNull();
-  });
-
-  it("renders Compound Engineering primary plugin only in More with the pinned Boxes icon", () => {
-    const { container } = render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-compound-engineering",
-            view: { viewId: "compound-engineering", label: "Compound Engineering", componentPath: "./CompoundEngineeringView", icon: "Sparkles", placement: "primary", order: 36 },
-          },
-        ]}
-      />,
-    );
+    const popover = screen.getByRole("menu", { name: "Navigate" });
+    exposeScrollPosition(popover, 180);
 
-    // Command Center is the first top-level tab, before Tasks.
-    expect(screen.getByTestId("mobile-nav-tab-command-center")).toBe(container.querySelector(".mobile-nav-bar > .mobile-nav-tab"));
-    expect(screen.getByTestId("mobile-nav-tab-command-center").previousElementSibling).toBeNull();
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-compound-engineering-compound-engineering")).toBeNull();
+    view.rerender(<NavigationHistoryShell navProps={navProps} mailboxUnreadCount={1} />);
+    view.rerender(<NavigationHistoryShell navProps={navProps} mailboxUnreadCount={2} />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    const compoundItem = screen.getByTestId("mobile-more-item-plugin-fusion-plugin-compound-engineering-compound-engineering");
-    expect(compoundItem).toBeDefined();
-    expect(compoundItem.querySelector(".lucide-boxes")).not.toBeNull();
-    expect(compoundItem.querySelector(".lucide-sparkles")).toBeNull();
-    expect(compoundItem.querySelector(".lucide-grid-3x3")).toBeNull();
-    expect(screen.queryAllByTestId("mobile-more-item-plugin-fusion-plugin-compound-engineering-compound-engineering")).toHaveLength(1);
-    expect(screen.queryByTestId("mobile-more-item-command-center")).toBeNull();
+    const calls = menuFocusCalls(recordedFocus);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].options).toEqual({ preventScroll: true });
+    expect(popover.scrollTop).toBe(180);
   });
 
-  it("removes Compound Engineering from More after disable and uninstall without creating a primary tab", () => {
-    const props = createDefaultProps();
-    const compoundEngineeringView = [{
-      pluginId: "fusion-plugin-compound-engineering",
-      view: { viewId: "compound-engineering", label: "Compound Engineering", componentPath: "./CompoundEngineeringView", icon: "Boxes", placement: "primary" as const, order: 36 },
-    }];
-    const testId = "mobile-more-item-plugin-fusion-plugin-compound-engineering-compound-engineering";
-    const rendered = render(<MobileNavBar {...props} pluginDashboardViews={compoundEngineeringView} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId(testId)).toBeInTheDocument();
-    expect(screen.queryByTestId("mobile-nav-tab-plugin-fusion-plugin-compound-engineering-compound-engineering")).toBeNull();
-
-    rendered.rerender(<MobileNavBar {...props} pluginDashboardViews={[]} />);
-    expect(screen.queryByTestId(testId)).toBeNull();
-    rendered.rerender(<MobileNavBar {...props} pluginDashboardViews={compoundEngineeringView} />);
-    expect(screen.getByTestId(testId)).toBeInTheDocument();
-    rendered.rerender(<MobileNavBar {...props} pluginDashboardViews={[]} />);
-    expect(screen.queryByTestId(testId)).toBeNull();
-  });
-
-  it("renders the hosted roadmaps plugin entry when roadmap plugin view is registered", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultProps()}
-        experimentalFeatures={{}}
-        pluginDashboardViews={[
-          {
-            pluginId: "fusion-plugin-roadmap",
-            view: { viewId: "roadmaps", label: "Roadmaps", componentPath: "./RoadmapsView", icon: "Map", placement: "primary" },
-          },
-        ]}
-      />,
-    );
-
-    expect(screen.queryByTestId("mobile-nav-tab-roadmaps")).toBeNull();
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-plugin-fusion-plugin-roadmap-roadmaps")).toBeInTheDocument();
-  });
-
-  it("shows insights in more sheet when experimentalFeatures.insights is true", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{ insights: true }} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-insights")).toBeDefined();
-  });
-
-  it("shows research in more sheet when experimentalFeatures.researchView is true", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{ researchView: true }} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-research")).toBeDefined();
-  });
-
-  it("shows Ideation in More only when ideationView is enabled and routes to it", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} experimentalFeatures={{ ideationView: true }} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-ideation"));
-
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onChangeView).toHaveBeenCalledWith("ideation");
-  });
-
-  it("does not show Ideation in more sheet when ideationView is disabled", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{ ideationView: false }} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-ideation")).toBeNull();
-  });
-
-  it("does not show research in more sheet when experimentalFeatures.researchView is false", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{ researchView: false }} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-research")).toBeNull();
-  });
-
-  it("does not show nodes in more sheet because Nodes lives in Command Center", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{}} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-nodes")).toBeNull();
-  });
-
-  it("does not show memory in more sheet when memoryView is not enabled", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{}} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-memory")).toBeNull();
-  });
-
-  it("shows memory in more sheet when memoryView is enabled", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{ memoryView: true }} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-memory")).toBeDefined();
-  });
-
-  it("insights item in more sheet calls onChangeView with 'insights'", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} experimentalFeatures={{ insights: true }} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-insights"));
-
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onChangeView).toHaveBeenCalledWith("insights");
-  });
-
-  it("research item in more sheet calls onChangeView with 'research'", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} experimentalFeatures={{ researchView: true }} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-research"));
-
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onChangeView).toHaveBeenCalledWith("research");
-  });
-
-  it("hides evals item in more sheet when evalsView is not enabled", () => {
-    render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{}} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-evals")).toBeNull();
-  });
-
-  it("evals item in more sheet calls onChangeView with 'evals' when evalsView is enabled", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} experimentalFeatures={{ evalsView: true }} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-evals"));
-
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onChangeView).toHaveBeenCalledWith("evals");
-  });
-
-  it("gates goals item in more sheet, routes to goalsView, and marks More active on goals view", () => {
-    const hidden = render(<MobileNavBar {...createDefaultProps()} experimentalFeatures={{}} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.queryByTestId("mobile-more-item-goals")).toBeNull();
-    hidden.unmount();
-
-    const props = createDefaultProps();
-    const { container } = render(
-      <MobileNavBar
-        {...props}
-        view="goalsView"
-        experimentalFeatures={{ goalsView: true }}
-      />,
-    );
-
-    const moreTab = screen.getByTestId("mobile-nav-tab-more");
-    expect(moreTab.className).toContain("mobile-nav-tab--active");
-
-    fireEvent.click(moreTab);
-    fireEvent.click(screen.getByTestId("mobile-more-item-goals"));
-
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onChangeView).toHaveBeenCalledWith("goalsView");
-  });
-
-  it("activity log item in more sheet calls onOpenActivityLog", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-activity"));
-
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onOpenActivityLog).toHaveBeenCalledOnce();
-  });
+  it("opens the destination tapped after scrolling instead of resetting the popover", () => {
+    const navProps = createDefaultProps();
+    const view = render(<NavigationHistoryShell navProps={navProps} mailboxUnreadCount={0} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
 
-  it("closes sheet and calls handler when item is clicked", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} />);
+    const popover = screen.getByRole("menu", { name: "Navigate" });
+    exposeScrollPosition(popover, 180);
+    view.rerender(<NavigationHistoryShell navProps={navProps} mailboxUnreadCount={1} />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
+    expect(popover.scrollTop).toBe(180);
     fireEvent.click(screen.getByTestId("mobile-more-item-settings"));
 
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onOpenSettings).toHaveBeenCalledOnce();
+    expect(navProps.onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu", { name: "Navigate" })).toBeNull();
   });
 
-  it("calls onViewAllProjects from the Projects more-sheet item", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} />);
+  it("re-arms the opening focus so every open focuses exactly once", () => {
+    const navProps = createDefaultProps();
+    render(<NavigationHistoryShell navProps={navProps} />);
+    const trigger = screen.getByTestId("mobile-menu-trigger");
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    fireEvent.click(screen.getByTestId("mobile-more-item-projects"));
-
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    expect(props.onViewAllProjects).toHaveBeenCalledOnce();
-  });
-
-  it("chat remains accessible via the primary mobile tab and is absent from More", () => {
-    const props = createDefaultProps();
-    const { container } = render(<MobileNavBar {...props} view="board" />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-chat"));
-    expect(props.onChangeView).toHaveBeenCalledWith("chat");
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(container.querySelector(".mobile-more-sheet")).not.toBeNull();
-    expect(screen.queryByTestId("mobile-more-item-chat")).toBeNull();
-  });
-
-  it("closes sheet on backdrop click", () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    const backdrop = container.querySelector(".mobile-more-sheet-backdrop");
-    expect(backdrop).not.toBeNull();
-
-    fireEvent.click(backdrop!);
-    expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-  });
-
-  it("closes sheet on Escape", async () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
+    fireEvent.click(trigger);
+    expect(menuFocusCalls(recordedFocus)).toHaveLength(1);
     fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "Navigate" })).toBeNull();
 
-    await waitFor(() => {
-      expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    });
+    fireEvent.click(trigger);
+    const calls = menuFocusCalls(recordedFocus);
+    expect(calls).toHaveLength(2);
+    expect(calls.map((entry) => entry.options)).toEqual([{ preventScroll: true }, { preventScroll: true }]);
   });
 
-  describe("More-sheet drag dismissal", () => {
-    const openSheet = (container: HTMLElement) => {
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-      const sheet = container.querySelector<HTMLDivElement>(".mobile-more-sheet");
-      if (!sheet) throw new Error("Expected the More sheet to open");
-      Object.defineProperty(sheet, "getBoundingClientRect", {
-        configurable: true,
-        value: () => ({ height: 400 }),
-      });
-      return sheet;
-    };
+  it("focuses once for a reduced destination set", () => {
+    const navProps = { ...createDefaultProps(), showSkillsTab: false, experimentalFeatures: {} };
+    const view = render(<NavigationHistoryShell navProps={navProps} mailboxUnreadCount={0} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(screen.queryByTestId("mobile-more-item-whiteboard")).toBeNull();
 
-    const startDrag = (target: Element, startY = 100) => {
-      fireEvent.touchStart(target, { touches: [{ clientY: startY }] });
-    };
+    view.rerender(<NavigationHistoryShell navProps={navProps} mailboxUnreadCount={4} />);
 
-    const moveDrag = (sheet: Element, currentY: number) =>
-      fireEvent.touchMove(sheet, { touches: [{ clientY: currentY }] });
-
-    const endDrag = (sheet: Element, endY: number) => {
-      fireEvent.touchEnd(sheet, { changedTouches: [{ clientY: endY }] });
-    };
-
-    it("dismisses a top-anchored downward drag past the distance threshold", () => {
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-
-      startDrag(sheet);
-      expect(moveDrag(sheet, 300)).toBe(false);
-      endDrag(sheet, 300);
-
-      expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    });
-
-    it("preserves interior scrolling and does not prevent its downward touchmove", () => {
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-      sheet.scrollTop = 20;
-
-      startDrag(sheet);
-      expect(moveDrag(sheet, 300)).toBe(true);
-      endDrag(sheet, 300);
-
-      expect(container.querySelector(".mobile-more-sheet")).not.toBeNull();
-    });
-
-    it("snaps back after a slow below-threshold drag", () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date("2026-07-16T12:00:00Z"));
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-
-      startDrag(sheet);
-      moveDrag(sheet, 150);
-      vi.advanceTimersByTime(500);
-      endDrag(sheet, 150);
-
-      expect(container.querySelector(".mobile-more-sheet")).not.toBeNull();
-      expect(sheet.style.transform).toBe("translateY(0px)");
-    });
-
-    it("dismisses when a handle-anchored drag starts while the sheet is scrolled", () => {
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-      sheet.scrollTop = 20;
-      const handle = sheet.querySelector(".mobile-more-sheet-handle");
-      expect(handle).not.toBeNull();
-
-      startDrag(handle!);
-      expect(moveDrag(sheet, 300)).toBe(false);
-      endDrag(sheet, 300);
-
-      expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    });
-
-    it("dismisses with the scripts submenu open without swallowing its normal toggle tap", async () => {
-      vi.mocked(fetchScripts).mockResolvedValue({});
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-
-      fireEvent.click(screen.getByTestId("mobile-more-terminal-split-toggle"));
-      await waitFor(() => expect(screen.getByTestId("mobile-more-scripts-manage")).toBeInTheDocument());
-
-      startDrag(sheet);
-      moveDrag(sheet, 300);
-      endDrag(sheet, 300);
-      expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    });
-
-    it("never dismisses for an upward drag", () => {
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-
-      startDrag(sheet, 300);
-      expect(moveDrag(sheet, 100)).toBe(true);
-      endDrag(sheet, 100);
-
-      expect(container.querySelector(".mobile-more-sheet")).not.toBeNull();
-    });
-
-    it("dismisses on a fast downward flick below the distance threshold", () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date("2026-07-16T12:00:00Z"));
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-
-      startDrag(sheet);
-      moveDrag(sheet, 160);
-      vi.advanceTimersByTime(50);
-      endDrag(sheet, 160);
-
-      expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    });
-
-    it("resets a cancelled drag to the open position", () => {
-      const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-      const sheet = openSheet(container);
-
-      startDrag(sheet);
-      moveDrag(sheet, 300);
-      expect(sheet.className).toContain("mobile-more-sheet--dragging");
-      expect(sheet.style.transform).toBe("translateY(200px)");
-
-      fireEvent.touchCancel(sheet);
-      expect(container.querySelector(".mobile-more-sheet")).not.toBeNull();
-      expect(sheet.className).not.toContain("mobile-more-sheet--dragging");
-      expect(sheet.style.transform).toBe("translateY(0px)");
-    });
+    expect(menuFocusCalls(recordedFocus)).toHaveLength(1);
   });
 
-  it("returns null when modalOpen is true", () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} modalOpen={true} />);
-    expect(container.querySelector(".mobile-nav-bar")).toBeNull();
+  /* FN-480 : le producteur survivant de List dans le menu est `mobile-more-item-tasks` (slot hors accès rapide). */
+  it("focuses once and routes the tapped destination without a navigation-history provider", () => {
+    const navProps = { ...createDefaultProps(), quickAccessItems: ["planning", "missions", "agents", "git", "files"] };
+    const view = render(<NavigationHistoryShell navProps={navProps} withProvider={false} mailboxUnreadCount={0} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+
+    const popover = screen.getByRole("menu", { name: "Navigate" });
+    exposeScrollPosition(popover, 96);
+    view.rerender(<NavigationHistoryShell navProps={navProps} withProvider={false} mailboxUnreadCount={5} />);
+
+    expect(menuFocusCalls(recordedFocus)).toHaveLength(1);
+    expect(popover.scrollTop).toBe(96);
+    fireEvent.click(screen.getByTestId("mobile-more-item-tasks"));
+    expect(navProps.onChangeView).toHaveBeenCalledWith("list");
   });
 
-  it("renders nav bar with keyboard-open class when keyboardOpen is true on mobile", () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} keyboardOpen={true} />);
-    expect(container.querySelector(".mobile-nav-bar")).not.toBeNull();
-    expect(container.querySelector(".mobile-nav-bar--keyboard-open")).not.toBeNull();
-  });
-
-  it("renders nav bar without keyboard-open class when keyboardOpen is false on mobile", () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} keyboardOpen={false} />);
-    expect(container.querySelector(".mobile-nav-bar")).not.toBeNull();
-    expect(container.querySelector(".mobile-nav-bar--keyboard-open")).toBeNull();
-  });
-
-  it("applies footer-visible class when footer is shown", () => {
-    const { container } = render(<MobileNavBar {...createDefaultProps()} footerVisible={true} />);
-    expect(container.querySelector(".mobile-nav-bar--with-footer")).not.toBeNull();
-  });
-
-  it("returns null on desktop viewport", () => {
+  it("mounts no popover and emits no focus on desktop", () => {
     mockViewport("desktop");
-    const { container } = render(<MobileNavBar {...createDefaultProps()} />);
-    expect(container.querySelector(".mobile-nav-bar")).toBeNull();
-  });
+    const navProps = createDefaultProps();
+    render(<NavigationHistoryShell navProps={navProps} />);
 
-  describe("scripts submenu", () => {
-    beforeEach(() => {
-      vi.mocked(fetchScripts).mockReset();
-    });
-
-    it("terminal item has a split toggle that opens scripts submenu", async () => {
-      vi.mocked(fetchScripts).mockResolvedValue({});
-      render(<MobileNavBar {...createDefaultProps()} />);
-
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-      const toggle = screen.getByTestId("mobile-more-terminal-split-toggle");
-      expect(toggle).toBeDefined();
-
-      fireEvent.click(toggle);
-      await waitFor(() => {
-        expect(screen.getByTestId("mobile-more-scripts-manage")).toBeDefined();
-      });
-    });
-
-    it("scripts are fetched when submenu opens", async () => {
-      vi.mocked(fetchScripts).mockResolvedValue({
-        build: "pnpm build",
-        test: "pnpm test",
-      });
-      render(<MobileNavBar {...createDefaultProps()} />);
-
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-      fireEvent.click(screen.getByTestId("mobile-more-terminal-split-toggle"));
-
-      await waitFor(() => {
-        expect(screen.getByTestId("mobile-more-script-item-build")).toBeDefined();
-        expect(screen.getByTestId("mobile-more-script-item-test")).toBeDefined();
-      });
-    });
-
-    it("clicking a script item calls onRunScript and closes sheet", async () => {
-      vi.mocked(fetchScripts).mockResolvedValue({
-        build: "pnpm build",
-      });
-      const props = createDefaultProps();
-      const { container } = render(<MobileNavBar {...props} />);
-
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-      fireEvent.click(screen.getByTestId("mobile-more-terminal-split-toggle"));
-
-      await waitFor(() => {
-        expect(screen.getByTestId("mobile-more-script-item-build")).toBeDefined();
-      });
-
-      fireEvent.click(screen.getByTestId("mobile-more-script-item-build"));
-      expect(props.onRunScript).toHaveBeenCalledWith("build", "pnpm build");
-      expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    });
-
-    it("manage scripts button calls onOpenScripts and closes sheet", async () => {
-      vi.mocked(fetchScripts).mockResolvedValue({
-        build: "pnpm build",
-      });
-      const props = createDefaultProps();
-      const { container } = render(<MobileNavBar {...props} />);
-
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-      fireEvent.click(screen.getByTestId("mobile-more-terminal-split-toggle"));
-
-      await waitFor(() => {
-        expect(screen.getByTestId("mobile-more-scripts-manage")).toBeDefined();
-      });
-
-      fireEvent.click(screen.getByTestId("mobile-more-scripts-manage"));
-      expect(props.onOpenScripts).toHaveBeenCalledOnce();
-      expect(container.querySelector(".mobile-more-sheet")).toBeNull();
-    });
-
-    it("empty scripts state shows 'No scripts' item", async () => {
-      vi.mocked(fetchScripts).mockResolvedValue({});
-      render(<MobileNavBar {...createDefaultProps()} />);
-
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-      fireEvent.click(screen.getByTestId("mobile-more-terminal-split-toggle"));
-
-      await waitFor(() => {
-        const manageBtn = screen.getByTestId("mobile-more-scripts-manage");
-        expect(manageBtn).toBeDefined();
-        expect(manageBtn.textContent).toContain("No scripts — add one…");
-      });
-    });
-
-    it("loading state shows spinner while fetching", async () => {
-      let resolveFetch!: (value: Record<string, string>) => void;
-      vi.mocked(fetchScripts).mockImplementation(
-        () => new Promise((resolve) => { resolveFetch = resolve; }),
-      );
-      render(<MobileNavBar {...createDefaultProps()} />);
-
-      fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-      fireEvent.click(screen.getByTestId("mobile-more-terminal-split-toggle"));
-
-      expect(screen.getByTestId("mobile-more-scripts-loading")).toBeDefined();
-
-      // Resolve to clean up
-      resolveFetch({});
-      await waitFor(() => {
-        expect(screen.queryByTestId("mobile-more-scripts-loading")).toBeNull();
-      });
-    });
+    expect(screen.queryByRole("menu", { name: "Navigate" })).toBeNull();
+    expect(screen.queryByTestId("mobile-menu-trigger")).toBeNull();
+    expect(recordedFocus).toHaveLength(0);
   });
 });
+
+/*
+FNXC:HeaderNavigationOwnership 2026-09-17-02:14:
+FN-481 : « si le bouton d'accès est présent dans le header à cette vue, il ne doit pas être présent en plus dans le
+footer ni dans "more" ». Ces cas prouvent le retrait des DEUX producteurs (rangée directe et menu) pour chaque
+destination possédée par le Header, la conservation de toutes les autres, et le fait qu'une pill sans Header ne perd
+rien.
+*/
+describe("MobileNavBar exclut les accès déjà possédés par le Header", () => {
+  beforeEach(() => {
+    mockViewport("mobile");
+    vi.mocked(fetchScripts).mockReset();
+    vi.mocked(fetchScripts).mockResolvedValue({});
+  });
+
+  function openMenuWith(props: Partial<React.ComponentProps<typeof MobileNavBar>> = {}) {
+    const rendered = render(<OfficialMobileShell {...props} />);
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    return rendered;
+  }
+
+  it("garde toutes les destinations quand aucune propriété de Header n'est déclarée", () => {
+    openMenuWith();
+    for (const item of ["usage", "projects", "notes", "activity"]) {
+      const inRow = screen.queryByTestId(`mobile-nav-tab-${item}`);
+      const inMenu = screen.queryByTestId(MORE_TEST_IDS[item]!);
+      expect(Boolean(inRow) || Boolean(inMenu)).toBe(true);
+    }
+  });
+
+  it.each([
+    ["téléphone", ["usage", "projects"]],
+    ["tablette", ["usage", "projects", "notes", "activity"]],
+  ])("retire les deux producteurs des destinations possédées en %s", (_label, owned) => {
+    openMenuWith({ headerOwnedItems: owned });
+    for (const item of owned) {
+      expect(screen.queryByTestId(`mobile-nav-tab-${item}`)).toBeNull();
+      expect(screen.queryByTestId(MORE_TEST_IDS[item]!)).toBeNull();
+    }
+  });
+
+  it("conserve Notes et Activity en bas sur téléphone, où le Header ne les rend pas", () => {
+    const props = createDefaultProps();
+    render(<MobileNavBar {...props} headerOwnedItems={["usage", "projects"]} navigationMenuOpen onUiMenuOpenChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("mobile-more-item-notes"));
+    expect(props.onChangeView).toHaveBeenCalledWith("notes");
+    fireEvent.click(screen.getByTestId("mobile-more-item-activity"));
+    expect(props.onOpenActivityLog).toHaveBeenCalled();
+  });
+
+  it("précède la répartition : une destination sélectionnée ET promouvable est retirée partout", () => {
+    /* `settings` est à la fois sélectionnable en accès rapide et présent dans l'ordre de promotion. */
+    const { container } = openMenuWith({
+      quickAccessItems: ["settings", "planning"],
+      headerOwnedItems: ["settings"],
+    });
+
+    expect(tabTestIds(container)).not.toContain("mobile-nav-tab-settings");
+    expect(screen.queryByTestId("mobile-more-item-settings")).toBeNull();
+    /* Le séparateur ne doit pas rester seul quand son unique groupe a disparu. */
+    expect(document.querySelector(".mobile-more-separator")).toBeNull();
+    expect(screen.getByTestId("mobile-nav-tab-planning")).toBeInTheDocument();
+  });
+
+  it("n'ajoute aucun bouton vide et garde le hamburger en dernier", () => {
+    const { container } = openMenuWith({ headerOwnedItems: ["usage", "projects", "notes", "activity"] });
+
+    expect(pill(container).lastElementChild).toBe(screen.getByTestId("mobile-menu-trigger"));
+    for (const button of Array.from(document.querySelectorAll<HTMLElement>(".mobile-more-item"))) {
+      expect(button.textContent?.trim().length ?? 0).toBeGreaterThan(0);
+    }
+    for (const tab of Array.from(container.querySelectorAll<HTMLElement>(".mobile-nav-bar--native > .mobile-nav-tab"))) {
+      expect(tab.getAttribute("aria-label")?.trim().length ?? 0).toBeGreaterThan(0);
+    }
+  });
+
+  it("ne rend aucun bouton de repli inerte quand le callback de la destination est absent", () => {
+    render(
+      <MobileNavBar
+        {...createDefaultProps()}
+        onOpenUsage={undefined}
+        onViewAllProjects={undefined}
+        onOpenActivityLog={undefined}
+        navigationMenuOpen
+        onUiMenuOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("mobile-more-item-usage")).toBeNull();
+    expect(screen.queryByTestId("mobile-more-item-projects")).toBeNull();
+    expect(screen.queryByTestId("mobile-more-item-activity")).toBeNull();
+    /* Notes passe par le routage de vue existant et reste donc disponible. */
+    expect(screen.getByTestId("mobile-more-item-notes")).toBeInTheDocument();
+  });
+
+  it("tolère une liste d'exclusions vide, dupliquée ou inconnue", () => {
+    const { unmount } = openMenuWith({ headerOwnedItems: [] });
+    expect(screen.getByTestId("mobile-more-item-usage")).toBeInTheDocument();
+    unmount();
+
+    openMenuWith({ headerOwnedItems: ["usage", "usage", "destination-inconnue"] });
+    expect(screen.queryByTestId("mobile-more-item-usage")).toBeNull();
+    expect(screen.getByTestId("mobile-more-item-projects")).toBeInTheDocument();
+  });
+
+  it("garde un focus utile quand la propriété du Header retire l'élément focalisé du menu ouvert", () => {
+    const props = createDefaultProps();
+    const view = render(<MobileNavBar {...props} headerOwnedItems={[]} navigationMenuOpen onUiMenuOpenChange={vi.fn()} />);
+
+    const usageEntry = screen.getByTestId("mobile-more-item-usage");
+    usageEntry.focus();
+    expect(document.activeElement).toBe(usageEntry);
+
+    view.rerender(<MobileNavBar {...props} headerOwnedItems={["usage"]} navigationMenuOpen onUiMenuOpenChange={vi.fn()} />);
+
+    expect(screen.queryByTestId("mobile-more-item-usage")).toBeNull();
+    const popover = screen.getByRole("menu", { name: "Navigate" });
+    expect(popover.contains(document.activeElement)).toBe(true);
+  });
+
+  it("ne vole pas le focus lors d'un simple rafraîchissement sans changement de propriétaire", () => {
+    const props = createDefaultProps();
+    const view = render(<MobileNavBar {...props} headerOwnedItems={["usage"]} navigationMenuOpen onUiMenuOpenChange={vi.fn()} />);
+    const notesEntry = screen.getByTestId("mobile-more-item-notes");
+    notesEntry.focus();
+
+    view.rerender(<MobileNavBar {...props} headerOwnedItems={["usage"]} navigationMenuOpen mailboxUnreadCount={3} onUiMenuOpenChange={vi.fn()} />);
+
+    expect(document.activeElement).toBe(screen.getByTestId("mobile-more-item-notes"));
+  });
+});
+
+/*
+FNXC:MobileNavGesture 2026-09-17-16:53:
+FN-511 supprime la suite « ouvre le Chat par un glissement du pied de page vers le haut » : le geste n'ouvre plus le
+Chat, donc le sujet de ces cas a disparu du produit. La couverture du geste vit désormais dans
+`MobileNavBar.menu-gesture.test.tsx`, où il ouvre le MENU de navigation derrière l'option projet
+`mobileNavMenuSwipeGesture`.
+*/
+

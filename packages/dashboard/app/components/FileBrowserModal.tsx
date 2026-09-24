@@ -1,7 +1,7 @@
 import "./FileBrowser.css";
 import { useState, useCallback, useEffect, useMemo, useId, useLayoutEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { X, Save, RotateCcw, Folder, FileType, ArrowLeft, ChevronDown, ChevronUp } from "lucide-react";
+import { Save, RotateCcw, Folder, FileType, ChevronDown, ChevronUp } from "lucide-react";
 import { useWorkspaceFileBrowser } from "../hooks/useWorkspaceFileBrowser";
 import { useWorkspaceFileEditor } from "../hooks/useWorkspaceFileEditor";
 import { useAutoSavePreference } from "../hooks/useAutoSavePreference";
@@ -11,14 +11,12 @@ import { FileBrowser } from "./FileBrowser";
 import { FileEditor } from "./FileEditor";
 import { FloatingWindow } from "./FloatingWindow";
 import { WorkspaceSelector } from "./WorkspaceSelector";
+import { ViewHeader } from "./ViewHeader";
+import { ViewSidebar } from "./ViewSidebar";
 import { getFilePreviewKind, IMAGE_PREVIEW_EXTENSIONS, VIDEO_PREVIEW_EXTENSIONS, AUDIO_PREVIEW_EXTENSIONS, PDF_PREVIEW_EXTENSIONS } from "../utils/file-preview-kind";
 import { getScopedItem, setScopedItem } from "../utils/projectStorage";
 
 const MOBILE_BREAKPOINT = 768;
-const SIDEBAR_DEFAULT_WIDTH = 280;
-const SIDEBAR_MIN_WIDTH = 180;
-const SIDEBAR_MAX_WIDTH = 500;
-const SIDEBAR_STORAGE_KEY = "fusion:file-browser-sidebar-width";
 const FILES_LINE_NUMBERS_STORAGE_KEY = "kb-files-line-numbers";
 
 /**
@@ -79,13 +77,13 @@ export function FileBrowserModal({
 }: FileBrowserModalProps) {
   const { t } = useTranslation("app");
   const { projectName, workspaces } = useWorkspaces(projectId);
+  const isDirectFileView = typeof initialFile === "string" && initialFile.trim().length > 0;
   const [currentWorkspace, setCurrentWorkspace] = useState(initialWorkspace);
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(() => isDirectFileView ? initialFile : null);
   const modalRef = useRef<HTMLDivElement>(null);
   const [viewportMobile, setViewportMobile] = useState(false);
   const [modalWidth, setModalWidth] = useState<number | null>(null);
   const [mobileView, setMobileView] = useState<"list" | "editor">("list");
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [showLineNumbers, setShowLineNumbers] = useState(false);
   const [toolbarActionsExpanded, setToolbarActionsExpanded] = useState(false);
   const toolbarActionsId = useId();
@@ -98,7 +96,7 @@ export function FileBrowserModal({
     loading: browserLoading,
     error: browserError,
     refresh,
-  } = useWorkspaceFileBrowser(currentWorkspace, true, projectId);
+  } = useWorkspaceFileBrowser(currentWorkspace, !isDirectFileView, projectId);
 
   const selectedPreviewKind = useMemo(() => getFilePreviewKind(selectedFile), [selectedFile]);
   const isPreviewOnlyFile = selectedPreviewKind !== null;
@@ -174,32 +172,21 @@ export function FileBrowserModal({
     }
   }, [isMobile, selectedFile]);
 
+  /*
+  FNXC:FileBrowser 2026-09-13-08:37:
+  Une ouverture générale de Files reste un navigateur à deux panneaux, tandis qu’un initialFile non vide désigne une vue directe consacrée au fichier. La vue directe ne charge ni ne monte une seconde arborescence et ne propose jamais de retour vers une liste absente, sur desktop comme sur mobile.
+  */
   useEffect(() => {
-    if (!initialFile) {
+    if (!isDirectFileView) {
       setSelectedFile(null);
       return;
     }
 
     setSelectedFile(initialFile);
-    setPath(getParentDirectory(initialFile));
     if (isMobile) {
       setMobileView("editor");
     }
-  }, [initialFile, isMobile, setPath]);
-
-  useEffect(() => {
-    try {
-      const rawWidth = localStorage.getItem(SIDEBAR_STORAGE_KEY);
-      if (!rawWidth) return;
-      const parsedWidth = Number.parseInt(rawWidth, 10);
-      if (!Number.isNaN(parsedWidth)) {
-        const clampedWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, parsedWidth));
-        setSidebarWidth(clampedWidth);
-      }
-    } catch {
-      // Ignore storage errors.
-    }
-  }, []);
+  }, [initialFile, isDirectFileView, isMobile]);
 
   useEffect(() => {
     const savedPreference = getScopedItem(FILES_LINE_NUMBERS_STORAGE_KEY, projectId);
@@ -245,87 +232,20 @@ export function FileBrowserModal({
   const previousWorkspaceRef = useRef(currentWorkspace);
   useEffect(() => {
     const workspaceChanged = previousWorkspaceRef.current !== currentWorkspace;
-    if (workspaceChanged && selectedFile) {
+    if (workspaceChanged && selectedFile && !isDirectFileView) {
       setPath(getParentDirectory(selectedFile));
       if (isMobile) {
         setMobileView("editor");
       }
     }
     previousWorkspaceRef.current = currentWorkspace;
-  }, [currentWorkspace, isMobile, selectedFile, setPath]);
+  }, [currentWorkspace, isDirectFileView, isMobile, selectedFile, setPath]);
 
   const handleWorkspaceSelect = useCallback((workspace: string) => {
     setCurrentWorkspace(workspace);
     setMobileView(selectedFile ? "editor" : "list");
     onWorkspaceChange?.(workspace);
   }, [onWorkspaceChange, selectedFile]);
-
-  const persistSidebarWidth = useCallback((width: number) => {
-    try {
-      localStorage.setItem(SIDEBAR_STORAGE_KEY, String(width));
-    } catch {
-      // Ignore storage errors.
-    }
-  }, []);
-
-  const handleResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (isMobile) {
-      return;
-    }
-
-    event.preventDefault();
-    event.stopPropagation();
-
-    const resizeHandle = event.currentTarget;
-    if (typeof resizeHandle.setPointerCapture === "function") {
-      resizeHandle.setPointerCapture(event.pointerId);
-    }
-
-    const startX = event.clientX;
-    const startWidth = sidebarWidth;
-    let latestWidth = startWidth;
-
-    document.body.style.userSelect = "none";
-
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const nextWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth + deltaX));
-      latestWidth = nextWidth;
-      setSidebarWidth(nextWidth);
-    };
-
-    const onPointerUp = (upEvent: PointerEvent) => {
-      if (typeof resizeHandle.releasePointerCapture === "function") {
-        resizeHandle.releasePointerCapture(upEvent.pointerId);
-      }
-
-      document.body.style.userSelect = "";
-      document.removeEventListener("pointermove", onPointerMove);
-      document.removeEventListener("pointerup", onPointerUp);
-      persistSidebarWidth(latestWidth);
-    };
-
-    document.addEventListener("pointermove", onPointerMove);
-    document.addEventListener("pointerup", onPointerUp);
-  }, [isMobile, persistSidebarWidth, sidebarWidth]);
-
-  const handleResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (isMobile) {
-      return;
-    }
-
-    const step = 20;
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
-      return;
-    }
-
-    event.preventDefault();
-
-    const delta = event.key === "ArrowLeft" ? -step : step;
-    const nextWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, sidebarWidth + delta));
-    setSidebarWidth(nextWidth);
-    persistSidebarWidth(nextWidth);
-  }, [isMobile, persistSidebarWidth, sidebarWidth]);
 
   const handleToggleLineNumbers = useCallback(() => {
     setShowLineNumbers((previousValue) => {
@@ -380,69 +300,79 @@ export function FileBrowserModal({
       minSize={{ width: 360, height: 420 }}
       /* FNXC:ModalGeometryPersistence 2026-07-15-19:30: File Browser is a ≤768px full-screen sheet; preserve its desktop position and size for movable reopen. */
       suspendGeometryPersistenceOnMobile
-      persistGeometryKey="fusion:files-modal-window"
     >
       {/*
        * FNXC:FileBrowser 2026-06-22-15:22:
        * The file browser modal uses the shared FloatingWindow shell so it is smoothly movable/resizable like Chat and task detail pop-outs, with a transparent non-blurring backdrop and its own title row as the drag handle.
        */}
       <div ref={modalRef} className={`modal file-browser-modal${isMobile ? " file-browser-modal--narrow" : ""}`}>
-        <div className="modal-header file-browser-modal-header">
-          <div className="file-browser-header-title">
-            <Folder size={18} />
-            <span>{modalTitle}</span>
-            {selectedFile && (
-              <span className="file-browser-header-path">
-                {selectedFile}
-              </span>
-            )}
-          </div>
-          <div className="file-browser-header-actions">
-            <WorkspaceSelector
-              currentWorkspace={currentWorkspace}
-              projectName={projectName}
-              workspaces={workspaces}
-              onSelect={handleWorkspaceSelect}
-            />
-            <button className="modal-close" onClick={onClose} aria-label={t("actions.close", "Close")}>
-              <X size={20} />
-            </button>
-          </div>
-        </div>
+        <ViewHeader
+          className="modal-header file-browser-modal-header"
+          icon={Folder}
+          title={(
+            <>
+              <span>{modalTitle}</span>
+              {selectedFile ? <span className="file-browser-header-path">{selectedFile}</span> : null}
+            </>
+          )}
+          /*
+          FNXC:FileBrowser 2026-09-15-16:33:
+          FN-427: this back IS a real internal navigation (open file -> file list), so it is kept in every narrow
+          presentation, drawer included, unlike a back whose only effect would be to dismiss the surface. It renders
+          exactly when the list exists (`!isDirectFileView`), the layout is single-pane (`isMobile`), and a file is
+          currently open (`mobileView === "editor"`). The direct file view deliberately has no back and no tree: it was
+          opened for one file and has no list to return to (see FNXC:FileBrowserDocs 2026-09-13-08:37); its way out is
+          the canonical close, or the drawer handle/backdrop/Escape in drawer presentation.
+          */
+          backAction={!isDirectFileView && isMobile && selectedFile && mobileView === "editor" ? {
+            label: t("fileBrowser.back", "Back to file list"),
+            onClick: handleBackToList,
+          } : undefined}
+          /*
+          FNXC:StandardizedDrawers 2026-09-15-04:56:
+          FN-406: the close is handed to ViewHeader through `onClose` instead of being built locally, so the single
+          drawer-chrome rule removes it in phone drawer presentation. On desktop, tablet, and a phone without the
+          `data-mobile-drawers` opt-in the canonical control renders exactly as before.
+          */
+          onClose={onClose}
+          closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+          actions={(
+            <div className="file-browser-header-actions">
+              <WorkspaceSelector
+                currentWorkspace={currentWorkspace}
+                projectName={projectName}
+                workspaces={workspaces}
+                onSelect={handleWorkspaceSelect}
+              />
+            </div>
+          )}
+        />
 
         <div className="file-browser-body">
-          <div
-            className={`file-browser-sidebar ${isMobile ? "mobile" : ""} ${mobileView === "list" ? "active" : ""}`}
-            style={isMobile ? undefined : { width: `${sidebarWidth}px` }}
-          >
-            <FileBrowser
-              entries={entries}
-              currentPath={currentPath}
-              onSelectFile={handleSelectFile}
-              onNavigate={setPath}
-              loading={browserLoading}
-              error={browserError}
-              onRetry={refresh}
-              workspace={currentWorkspace}
-              onRefresh={refresh}
-              projectId={projectId}
-              showProjectFileControls={currentWorkspace === "project"}
-            />
-          </div>
-
-          {!isMobile && (
-            <div
-              className="file-browser-resize-handle"
-              role="separator"
-              aria-orientation="vertical"
-              aria-valuemin={SIDEBAR_MIN_WIDTH}
-              aria-valuemax={SIDEBAR_MAX_WIDTH}
-              aria-valuenow={sidebarWidth}
-              aria-label={t("fileBrowser.resizeSidebar", "Resize sidebar")}
-              tabIndex={0}
-              onPointerDown={handleResizeStart}
-              onKeyDown={handleResizeKeyDown}
-            />
+          {!isDirectFileView && (
+            <ViewSidebar
+              ariaLabel={t("fileBrowser.fileList", "Files")}
+              resizeLabel={t("fileBrowser.resizeSidebar", "Resize sidebar")}
+              hostIdentity="file-browser"
+              mobile={isMobile}
+              className={`file-browser-sidebar ${isMobile ? "mobile" : ""} ${mobileView === "list" ? "active" : ""}`}
+              panelClassName="file-browser-sidebar__panel"
+              separatorTestId="file-browser-resize-handle"
+            >
+              <FileBrowser
+                entries={entries}
+                currentPath={currentPath}
+                onSelectFile={handleSelectFile}
+                onNavigate={setPath}
+                loading={browserLoading}
+                error={browserError}
+                onRetry={refresh}
+                workspace={currentWorkspace}
+                onRefresh={refresh}
+                projectId={projectId}
+                showProjectFileControls={currentWorkspace === "project"}
+              />
+            </ViewSidebar>
           )}
 
           <div className={`file-browser-content ${isMobile ? "mobile" : ""} ${mobileView === "editor" ? "active" : ""}`}>
@@ -450,16 +380,6 @@ export function FileBrowserModal({
               <>
                 <div className="file-browser-toolbar">
                   <div className="file-browser-file-info">
-                    {isMobile && mobileView === "editor" && (
-                      <button
-                        className="file-browser-back-button"
-                        onClick={handleBackToList}
-                        aria-label={t("fileBrowser.back", "Back to file list")}
-                      >
-                        <ArrowLeft size={16} />
-                        <span>{t("actions.back", "Back")}</span>
-                      </button>
-                    )}
                     {!selectedIsBinaryFile && !isNarrowEditorView && (
                       <button
                         className="btn btn-sm btn-icon file-editor-toolbar-button"

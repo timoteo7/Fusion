@@ -3,8 +3,12 @@ FNXC:BoardWorkflows 2026-06-20-09:02:
 The board needs a neutral first-paint shell whenever workflow lanes are enabled but metadata is not ready, so users never see the legacy single-lane board flash before workflow lanes load.
 */
 .board.board-workflows-skeleton {
+  box-sizing: border-box;
   display: flex;
+  flex: 1 1 auto;
   align-items: stretch;
+  height: 100%;
+  min-height: 0;
   gap: var(--column-gap, var(--space-md));
   overflow-x: auto;
   overflow-y: hidden;
@@ -91,7 +95,34 @@ The closed grabbing hand must remain visible across every Board descendant even 
   }
 }
 
+/*
+FNXC:NativeBoardHeight 2026-09-11-16:14:
+The live Board, loading skeleton, and empty workflow state share the same parent-relative flex height and symmetric block padding. The project shell alone reserves the desktop footer or mobile pill, so columns end one Board padding token above that boundary without viewport calculations or duplicated safe-area terms.
+*/
+.board {
+  --board-padding: var(--ui-density-md);
+  --column-gap: var(--ui-density-md);
+}
+
+.board-workflow-toolbar {
+  gap: var(--ui-density-sm);
+  padding: var(--ui-density-sm) var(--ui-density-md);
+  background: var(--bg);
+}
+
+.board-workflows-skeleton__column {
+  gap: var(--ui-density-sm);
+  padding: var(--ui-density-md);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
 @media (max-width: 768px) {
+  .board {
+    --board-padding: var(--ui-density-sm);
+    --column-gap: var(--ui-density-sm);
+  }
+
   .board.board-workflows-skeleton {
     gap: var(--space-sm);
     padding: var(--space-sm);

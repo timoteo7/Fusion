@@ -51,6 +51,9 @@ until operators enable this flag. Persisted focus topics remain inert while it i
 */
 export const CHAT_FOCUS_FLAG = "chatFocus" as const;
 
+/* FNXC:WhiteboardAlpha 2026-09-10-05:42: Whiteboard remains absent from every route affordance unless this global, default-off Alpha flag is explicitly enabled. */
+export const WHITEBOARD_VIEW_FLAG = "whiteboardView" as const;
+
 export function isExperimentalFeatureEnabled(
   settings: Pick<Settings, "experimentalFeatures"> | undefined,
   key: string,

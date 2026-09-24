@@ -25,6 +25,13 @@ const defaultSettings: Settings = {
   testCommand: "",
   buildCommand: "",
   experimentalFeatures: { insights: true, roadmap: true, skillsView: true, agentsView: true, evalsView: true, todoView: true, leftSidebarNav: false, rightDock: false },
+  /*
+   * FN-419: a wide project shell always suppresses the Header view shortcuts, because exactly one primary navigation
+   * surface owns routing. These navigation-HISTORY cases previously drove the Header shortcuts while the wide footer
+   * was also mounted — the duplicate-navigation state this task removes — so they now route through the left column,
+   * whose destinations expose the same `title` attributes. The history invariants under test are unchanged.
+   */
+  navigationPlacement: "sidebar" as const,
 };
 
 const mockSubscribeSse = vi.fn((..._args: any[]) => vi.fn());
@@ -92,9 +99,6 @@ const mockUseTasks = vi.fn(() => ({
   retryTask: vi.fn(),
   updateTask: vi.fn(),
   duplicateTask: vi.fn(),
-  archiveTask: vi.fn(),
-  unarchiveTask: vi.fn(),
-  archiveAllDone: vi.fn(),
   refreshTasks: vi.fn(),
 }));
 
@@ -275,9 +279,6 @@ vi.mock("../../components/EvalsView", () => ({
 }));
 
 
-vi.mock("../../components/QuickChatFAB", () => ({
-  QuickChatFAB: () => null,
-}));
 
 vi.mock("../../components/ScriptsModal", () => ({
   ScriptsModal: ({ isOpen }: { isOpen: boolean }) =>
@@ -418,7 +419,6 @@ describe("Navigation history integration", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    defaultSettings.openMobileTasksInPopup = false;
     mockSubscribeSse.mockReset();
     mockSubscribeSse.mockReturnValue(vi.fn());
     mockCreateTask.mockReset();
@@ -432,9 +432,6 @@ describe("Navigation history integration", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     mockProjectsState.projects = [];
@@ -563,8 +560,7 @@ describe("Navigation history integration", () => {
     await renderAppAndWait();
 
     const pushCallsBefore = (window.history.pushState as any).mock.calls.length;
-    fireEvent.click(screen.getByTestId("view-toggle-overflow-trigger"));
-    fireEvent.click(screen.getByTestId("view-overflow-evals"));
+    fireEvent.click(await screen.findByTestId("sidebar-nav-evals"));
 
     await waitFor(() => {
       expect(screen.getByTestId("evals-view")).toBeTruthy();
@@ -581,8 +577,7 @@ describe("Navigation history integration", () => {
     await renderAppAndWait();
 
     const pushCallsBefore = (window.history.pushState as any).mock.calls.length;
-    fireEvent.click(screen.getByTestId("view-toggle-overflow-trigger"));
-    fireEvent.click(await screen.findByTestId("view-overflow-plugin-fusion-plugin-todos-todos"));
+    fireEvent.click(await screen.findByTestId("sidebar-nav-plugin-fusion-plugin-todos-todos"));
 
     await waitFor(() => {
       expect(screen.getByTestId("todo-view-root")).toBeTruthy();
@@ -633,9 +628,6 @@ describe("Navigation history integration", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -668,9 +660,6 @@ describe("Navigation history integration", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -713,7 +702,13 @@ describe("Navigation history integration", () => {
     });
   });
 
-  it("returns desktop board-detail Back to board to the board without breaking history", async () => {
+  /*
+  FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+  FN-442 removed the desktop board-card route into the full main-panel task detail, so the Back-to-board affordance that
+  route owned no longer exists for a board card. What survives is the navigation invariant: a desktop board card opens
+  the floating task window over a board that is never replaced, and closing it leaves the board with history intact.
+  */
+  it("returns desktop board-detail close to the board without breaking history", async () => {
     mockUseViewportMode.mockReturnValue("desktop");
     const task = makeTask("FN-1", "Desktop Detail Card");
     mockUseTasks.mockImplementation(() => ({
@@ -725,9 +720,6 @@ describe("Navigation history integration", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -737,22 +729,23 @@ describe("Navigation history integration", () => {
     fireEvent.click(screen.getByTestId("open-task-FN-1"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("task-detail-main-panel-content")).toBeTruthy();
-      expect(screen.queryByTestId("board-view")).toBeNull();
+      expect(screen.getByTestId("task-detail-popup-content")).toBeTruthy();
     });
-    expect((window.history.pushState as any).mock.calls.length).toBeGreaterThan(pushCallsBefore);
+    expect(screen.queryByTestId("task-detail-main-panel-content")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back to board" })).toBeNull();
 
-    // FNXC:BoardNavigation 2026-06-29-20:45: Desktop board-card detail keeps the same full-panel Back-to-board history contract while mobile adds scroll restoration coverage.
-    fireEvent.click(screen.getByRole("button", { name: "Back to board" }));
+    // FNXC:BoardNavigation 2026-09-16-02:53: the board stays mounted behind the task window, and closing the window still returns cleanly without breaking history.
+    fireEvent.keyDown(document, { key: "Escape" });
     dispatchPopState({ navIndex: 0 });
 
     await waitFor(() => {
-      expect(screen.queryByTestId("task-detail-main-panel-content")).toBeNull();
+      expect(screen.queryByTestId("task-detail-popup-content")).toBeNull();
       expect(screen.getByTestId("board-view")).toBeTruthy();
     });
+    expect((window.history.pushState as any).mock.calls.length).toBeGreaterThanOrEqual(pushCallsBefore);
   });
 
-  it("restores mobile board scroll after Back to board", async () => {
+  it("restores horizontal mobile Board scroll but starts its columns at the top after Back", async () => {
     mockUseViewportMode.mockReturnValue("mobile");
     const task = makeTask("FN-1", "Scrolled Mobile Card");
     mockUseTasks.mockImplementation(() => ({
@@ -764,9 +757,6 @@ describe("Navigation history integration", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -777,7 +767,7 @@ describe("Navigation history integration", () => {
     board.scrollLeft = 240;
     todoBody.scrollTop = 380;
 
-    // FNXC:BoardNavigation 2026-06-29-20:45: Mobile Back-to-board must return to the clicked card's horizontal board offset and vertical lane offset after the full-panel detail replaces the board.
+    // FNXC:BoardNavigation 2026-09-09-22:29: Mobile Back-to-board preserves horizontal lane context while treating the return as a fresh vertical arrival, so every column starts at the top.
     fireEvent.click(screen.getByTestId("open-task-FN-1"));
 
     await waitFor(() => {
@@ -790,11 +780,18 @@ describe("Navigation history integration", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("task-detail-main-panel-content")).toBeNull();
       expect(screen.getByTestId("board-view").scrollLeft).toBe(240);
-      expect(screen.getByTestId("todo-column-body").scrollTop).toBe(380);
+      expect(screen.getByTestId("todo-column-body").scrollTop).toBe(0);
     });
   });
 
-  it("opens board files-changed actions inline on the changes tab instead of in a modal", async () => {
+  /*
+  FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+  FN-442: a board files-changed chip deep-links to the Changes tab of the floating task window instead of the embedded
+  main-panel Changes page, and must still never open the blocking TaskDetailModal. The case runs on desktop because the
+  chip route is viewport-independent and the mobile dismissal cases below already own swipe-back coverage.
+  */
+  it("opens board files-changed actions on the changes tab instead of in a modal", async () => {
+    mockUseViewportMode.mockReturnValue("desktop");
     const task = {
       ...makeTask("FN-1", "Inline Changes Detail"),
       modifiedFiles: ["packages/dashboard/app/App.tsx"],
@@ -808,40 +805,41 @@ describe("Navigation history integration", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
-    await renderMobileAppAndWait();
+    await renderAppAndWait();
 
-    // FNXC:TaskDetail 2026-06-23-00:41: Board files-changed chips must deep-link to the embedded main-panel Changes tab. They should not open the TaskDetailModal, otherwise the board loses the inline changes-page flow.
+    /*
+    FNXC:TaskDetail 2026-09-16-02:53:
+    FN-442: a board files-changed chip deep-links to the Changes tab of the floating task window instead of the embedded
+    main-panel Changes page. It must still never open the blocking TaskDetailModal, and a swipe-back must still dismiss
+    the surface it did open.
+    */
     fireEvent.click(screen.getByTestId("open-task-changes-FN-1"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("task-detail-main-panel-content")).toBeTruthy();
-      expect(screen.getByText("tab:changes")).toBeTruthy();
+      expect(screen.getByTestId("task-detail-popup-content")).toHaveTextContent("tab:changes");
     });
     expect(screen.queryByTestId("task-detail-modal")).toBeNull();
+    expect(screen.getByTestId("board-view")).toBeTruthy();
 
-    dispatchPopState({ navIndex: 0 });
+    fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => {
-      expect(screen.queryByTestId("task-detail-main-panel-content")).toBeNull();
+      expect(screen.queryByTestId("task-detail-popup-content")).toBeNull();
       expect(screen.getByTestId("board-view")).toBeTruthy();
     });
   });
 
-  it("opens board files-changed in the popup Changes tab when task popups are enabled", async () => {
-    defaultSettings.openMobileTasksInPopup = true;
+  /* FNXC:TaskDetailDefaultTab 2026-09-16-02:53: FN-442 made the popup route unconditional, so no project setting is enabled here. */
+  it("opens board files-changed in the popup Changes tab", async () => {
     const task = {
       ...makeTask("FN-popup", "Popup Changes Detail"),
       modifiedFiles: ["packages/dashboard/app/App.tsx"],
     };
     mockUseTasks.mockImplementation(() => ({
       tasks: [task], createTask: mockCreateTask, moveTask: vi.fn(), deleteTask: vi.fn(), mergeTask: vi.fn(),
-      retryTask: vi.fn(), updateTask: vi.fn(), duplicateTask: vi.fn(), archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(), archiveAllDone: vi.fn(), refreshTasks: vi.fn(),
+      retryTask: vi.fn(), updateTask: vi.fn(), duplicateTask: vi.fn(),
     }));
 
     await renderMobileAppAndWait();

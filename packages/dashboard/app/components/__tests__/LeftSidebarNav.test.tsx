@@ -29,15 +29,6 @@ const projects: ProjectInfo[] = [
 
 const leftSidebarNavCss = loadComponentCss("LeftSidebarNav.css");
 const obsoleteCollapseToggleFloatingClass = "left-sidebar-nav__collapse-toggle--" + "floating";
-const newTaskSurfaceEnumeration = [
-  "[x] Components that render the affordance: Grep confirms LeftSidebarNav is the only persistent sidebar renderer and App.tsx mounts it once.",
-  "[x] Providers / execution paths: the click handler invokes the onNewTask prop, which App.tsx binds to openNewTaskWithNav.",
-  "[x] Breakpoints / viewport modes: desktop/tablet render the sidebar CTA; mobile intentionally hides the sidebar so MobileNavBar and board creation remain canonical there.",
-  "[x] Sidebar states: expanded shows icon plus label, collapsed/rail keeps the icon-only button clickable with aria-label and title.",
-  "[x] Data/flag states: leftSidebarNav enabled renders the sidebar CTA, leftSidebarNav false omits the entire sidebar shell via App.tsx, and absent onNewTask omits the CTA shell.",
-  "[x] Leftover shells: the CTA precedes the nav list without displacing nav sections, footer buttons, or the resize handle.",
-];
-
 function getCssRuleBlock(css: string, selector: string) {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = css.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`));
@@ -75,22 +66,50 @@ function expectNoSidebarBrandOrProjectAffordances(container: HTMLElement) {
   expect(container.querySelector(".left-sidebar-nav__wordmark")).toBeNull();
 }
 
-function expectCollapseToggleImmediatelyBeforeSettings() {
-  const footer = screen.getByTestId("sidebar-nav-settings").closest(".left-sidebar-nav__footer");
+/*
+FNXC:Navigation 2026-09-16-20:52:
+FN-473 moved the collapse toggle out of the footer into a sidebar header region rendered as the aside's first child.
+The old helpers asserted the retired footer contract (footer membership, `left-sidebar-nav__item` row styling, the
+"Collapse" text label); this helper encodes the new one, including the surface census that the affordance stays unique.
+*/
+function expectCollapseToggleInSidebarHeader() {
+  const sidebar = screen.getByTestId("left-sidebar-nav");
+  const header = sidebar.querySelector(".left-sidebar-nav__header");
   const toggle = screen.getByTestId("sidebar-nav-collapse-toggle");
-  const settings = screen.getByTestId("sidebar-nav-settings");
-  expect(footer).not.toBeNull();
-  expect(toggle.closest(".left-sidebar-nav__footer")).toBe(footer);
-  expect(toggle).toHaveClass("left-sidebar-nav__item");
+  const footer = screen.getByTestId("sidebar-nav-settings").closest(".left-sidebar-nav__footer");
+
+  expect(document.querySelectorAll('[data-testid="sidebar-nav-collapse-toggle"]')).toHaveLength(1);
+  expect(header).not.toBeNull();
+  expect(sidebar.firstElementChild).toBe(header);
+  expect(toggle.closest(".left-sidebar-nav__header")).toBe(header);
+  expect(toggle.closest(".left-sidebar-nav__footer")).toBeNull();
   expect(toggle).toHaveClass("left-sidebar-nav__collapse-toggle");
   expect(toggle).not.toHaveClass(obsoleteCollapseToggleFloatingClass);
-  expect(footer?.children[0]).toBe(toggle);
-  expect(toggle.nextElementSibling).toBe(settings);
-  expect(footer?.lastElementChild).toBe(settings);
+  expect(footer).not.toBeNull();
+  expect(footer?.querySelector(".left-sidebar-nav__collapse-toggle")).toBeNull();
+  expect(footer?.lastElementChild).toBe(screen.getByTestId("sidebar-nav-settings"));
+}
+
+/*
+FNXC:Navigation 2026-09-16-20:52:
+FN-473 rebuilds the toggle with the exact design of Header's `header-right-dock-toggle`: the canonical borderless
+icon-only `btn-icon` variant (FN-471), one svg glyph, no text label, and a matching title/accessible-name pair.
+*/
+function expectRightDockToggleDesignParity(expectedName: string, expectedPressed: "true" | "false") {
+  const toggle = screen.getByTestId("sidebar-nav-collapse-toggle");
+  expect(toggle).toHaveClass("btn-icon");
+  expect(toggle).not.toHaveClass("btn");
+  expect(toggle).not.toHaveClass("btn-sm");
+  expect(toggle).not.toHaveClass("left-sidebar-nav__item");
+  expect(toggle.textContent?.trim() ?? "").toBe("");
+  expect(toggle.querySelectorAll("svg")).toHaveLength(1);
+  expect(toggle).toHaveAccessibleName(expectedName);
+  expect(toggle).toHaveAttribute("title", expectedName);
+  expect(toggle).toHaveAttribute("aria-pressed", expectedPressed);
 }
 
 function expectSettingsLastInFooter() {
-  expectCollapseToggleImmediatelyBeforeSettings();
+  expectCollapseToggleInSidebarHeader();
 }
 
 function renderSidebar(overrides: Partial<ComponentProps<typeof LeftSidebarNav>> = {}) {
@@ -125,83 +144,52 @@ describe("LeftSidebarNav", () => {
     window.localStorage.clear();
   });
 
-  it("documents and asserts the sidebar New Task surface enumeration", () => {
-    expect(newTaskSurfaceEnumeration).toHaveLength(6);
-    for (const item of newTaskSurfaceEnumeration) {
-      expect(item).toMatch(/^\[x\]/);
-    }
-
-    const singleSidebarRendererMatches = [
-      ...leftSidebarNavCss.matchAll(/\.left-sidebar-nav/g),
-    ];
-    expect(singleSidebarRendererMatches.length).toBeGreaterThan(0);
+  it("renders Whiteboard and its Alpha badge only when explicitly enabled", () => {
+    const disabled = renderSidebar({ experimentalFeatures: {} });
+    expect(screen.queryByTestId("sidebar-nav-whiteboard")).toBeNull();
+    disabled.unmount();
+    const { onChangeView } = renderSidebar({ experimentalFeatures: { whiteboardView: true } });
+    const entry = screen.getByTestId("sidebar-nav-whiteboard");
+    expect(within(entry).getByText("Alpha")).toBeInTheDocument();
+    fireEvent.click(entry);
+    expect(onChangeView).toHaveBeenCalledWith("whiteboard");
   });
 
-  it("renders the New Task CTA in the footer above Collapse and invokes the provided global trigger", () => {
+  /*
+   * FN-439 cas (h) : sous la disposition barre latérale, la sidebar est le propriétaire unique de la destination List
+   * maintenant que le Header ne la produit plus sur tablette/ordinateur.
+   */
+  it("rend List comme destination de la barre latérale et route vers la vue list", () => {
+    const active = renderSidebar({ view: "list" });
+    expect(screen.getByTestId("sidebar-nav-list")).toHaveAttribute("aria-current", "page");
+    active.unmount();
+
+    const { onChangeView } = renderSidebar();
+    const entry = screen.getByTestId("sidebar-nav-list");
+    expect(entry).not.toHaveAttribute("aria-current");
+    fireEvent.click(entry);
+    expect(onChangeView).toHaveBeenCalledWith("list");
+  });
+
+  it("keeps general History out after the official design promotion", () => {
+    renderSidebar();
+    expect(screen.queryByTestId("sidebar-nav-patchnode")).toBeNull();
+  });
+
+  it("never duplicates the App-owned New Task action in the navigation footer", () => {
     const onNewTask = vi.fn();
-    renderSidebar({ onNewTask });
-
-    const sidebar = screen.getByTestId("left-sidebar-nav");
-    const newTaskButton = screen.getByTestId("sidebar-nav-new-task");
-    const footer = sidebar.querySelector(".left-sidebar-nav__footer");
-    const collapseToggle = screen.getByTestId("sidebar-nav-collapse-toggle");
-
-    // FNXC:Navigation 2026-06-23-02:30: New Task moved into the footer, directly above Collapse.
-    expect(footer?.contains(newTaskButton)).toBe(true);
-    expect(newTaskButton.nextElementSibling).toBe(collapseToggle);
-    expect(newTaskButton).toHaveAccessibleName("New Task");
-    expect(newTaskButton).toHaveAttribute("title", "New Task");
-    expect(newTaskButton).toHaveTextContent("New Task");
-    expect(newTaskButton.querySelector("svg")).not.toBeNull();
-
-    fireEvent.click(newTaskButton);
-    expect(onNewTask).toHaveBeenCalledOnce();
-    expect(onNewTask).toHaveBeenCalledWith();
-  });
-
-  it("omits the New Task CTA when no trigger prop is provided", () => {
-    const { container } = renderSidebar();
+    const { container } = renderSidebar({ onNewTask });
 
     expect(screen.queryByTestId("sidebar-nav-new-task")).toBeNull();
     expect(container.querySelector(".left-sidebar-nav__new-task")).toBeNull();
-    expect(screen.getByTestId("left-sidebar-nav").children[0]).toBe(screen.getByRole("navigation", { name: "Primary navigation" }));
+    expect(screen.getByTestId("sidebar-nav-collapse-toggle")).toBeInTheDocument();
+    expect(onNewTask).not.toHaveBeenCalled();
   });
 
-  it("keeps the New Task CTA accessible, clickable, centered, and label-hidden in rail mode", () => {
-    const onNewTask = vi.fn();
-    window.localStorage.setItem("fusion:left-sidebar-collapsed", "true");
-    renderSidebar({ onNewTask });
-
-    const sidebar = screen.getByTestId("left-sidebar-nav");
-    const newTaskButton = screen.getByTestId("sidebar-nav-new-task");
-    expect(sidebar).toHaveClass("left-sidebar-nav--collapsed");
-    expect(newTaskButton).toHaveAccessibleName("New Task");
-    expect(newTaskButton).toHaveAttribute("title", "New Task");
-    expect(newTaskButton.querySelector(".left-sidebar-nav__label")).toHaveTextContent("New Task");
-
-    fireEvent.click(newTaskButton);
-    expect(onNewTask).toHaveBeenCalledOnce();
-
-    const newTaskRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav__new-task");
-    const collapsedNewTaskRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav--collapsed .left-sidebar-nav__new-task");
-    expect(newTaskRule).toContain("justify-content: center");
-    expect(collapsedNewTaskRule).toContain("justify-content: center");
-    expect(leftSidebarNavCss).toMatch(/\.left-sidebar-nav--collapsed \.left-sidebar-nav__label,\s*\.left-sidebar-nav--collapsed \.left-sidebar-nav__badge\s*\{[\s\S]*?display:\s*none;/);
-  });
-
-  it("keeps the New Task CTA styling tokenized without hardcoded px or colors", () => {
-    const newTaskRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav__new-task");
-    const hoverRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav__new-task:hover,\n.left-sidebar-nav__new-task:focus-visible");
-
-    // FNXC:Navigation 2026-06-23-02:45: New Task moved to the footer — no inset margins so it matches the Collapse/Settings footer items.
-    expect(newTaskRule).toContain("margin: 0");
-    expect(newTaskRule).toContain("border-radius: var(--radius-md)");
-    expect(newTaskRule).toContain("background: var(--accent)");
-    expect(newTaskRule).toContain("color: var(--accent-text)");
-    expect(newTaskRule).not.toMatch(/\d+px/i);
-    expect(newTaskRule).not.toMatch(/#|rgb\(/i);
-    expect(hoverRule).not.toMatch(/\d+px/i);
-    expect(hoverRule).not.toMatch(/#|rgb\(/i);
+  it("omits standalone recommendations and artifacts destinations", () => {
+    renderSidebar();
+    expect(screen.queryByTestId("sidebar-nav-recommendations")).toBeNull();
+    expect(screen.queryByTestId("sidebar-nav-documents")).toBeNull();
   });
 
   it("renders core destinations, enabled overflow destinations, plugins, and bottom settings", () => {
@@ -211,14 +199,12 @@ describe("LeftSidebarNav", () => {
 
     for (const testId of [
       "sidebar-nav-board",
-      "sidebar-nav-list",
       "sidebar-nav-command-center",
       "sidebar-nav-agents",
       "sidebar-nav-chat",
       "sidebar-nav-mailbox",
       "sidebar-nav-planning",
       "sidebar-nav-missions",
-      "sidebar-nav-documents",
       "sidebar-nav-goals",
       "sidebar-nav-automations",
       "sidebar-nav-import-tasks",
@@ -236,7 +222,7 @@ describe("LeftSidebarNav", () => {
       expect(screen.getByTestId(testId)).toBeDefined();
     }
 
-    expect(screen.getByTestId("sidebar-nav-documents")).toHaveTextContent("Artifacts");
+    expect(screen.getByTestId("sidebar-nav-skills")).toHaveTextContent("Skills");
     expect(screen.getByTestId("sidebar-nav-planning")).toHaveTextContent("Planning");
     expect(screen.getByTestId("sidebar-nav-import-tasks")).toHaveTextContent("Import Tasks");
     expect(screen.queryByTestId("sidebar-nav-stash-recovery")).toBeNull();
@@ -268,7 +254,7 @@ describe("LeftSidebarNav", () => {
     /*
     FNXC:Navigation 2026-06-22-12:00:
     Assert the intentional single-list order (top to bottom) for the entries present under the default render flags.
-    command-center precedes agents; skills/memory (flag-gated) sit immediately after mailbox and before planning; documents (Artifacts) follows missions; automations -> import-tasks -> workflows are contiguous after compound/goals.
+    command-center precedes agents; Mailbox is followed by skills/memory (flag-gated); automations -> import-tasks -> workflows remain contiguous.
     */
     const primaryButtons = within(primaryNav).getAllByRole("button");
     const orderedTestIds = [
@@ -282,7 +268,6 @@ describe("LeftSidebarNav", () => {
       "sidebar-nav-mailbox",
       "sidebar-nav-skills",
       "sidebar-nav-memory",
-      "sidebar-nav-documents",
       "sidebar-nav-goals",
       "sidebar-nav-automations",
       "sidebar-nav-import-tasks",
@@ -296,12 +281,11 @@ describe("LeftSidebarNav", () => {
     expect(orderedIndices).toEqual([...orderedIndices].sort((a, b) => a - b));
     expect(orderedIndices.every((index) => index >= 0)).toBe(true);
     expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-command-center"))).toBeLessThan(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-agents")));
-    // FNXC:Navigation 2026-06-23-01:30: Planning + Missions now sit directly after List and before Agents; Documents (Artifacts) follows Memory.
+    /* FN-439: List sits immediately after Board again, so Planning follows List instead of Board. */
+    expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-list"))).toBe(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-board")) + 1);
     expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-planning"))).toBe(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-list")) + 1);
     expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-missions"))).toBe(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-planning")) + 1);
     expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-agents"))).toBe(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-missions")) + 1);
-    expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-documents"))).toBe(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-memory")) + 1);
-    // Skills and Memory sit immediately after Mailbox.
     expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-skills"))).toBe(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-mailbox")) + 1);
     expect(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-memory"))).toBe(primaryButtons.indexOf(screen.getByTestId("sidebar-nav-skills")) + 1);
 
@@ -382,6 +366,7 @@ describe("LeftSidebarNav", () => {
 
     expect(screen.getByTestId("left-sidebar-nav")).toHaveStyle({ width: "224px", minWidth: "224px" });
     expect(screen.getByTestId("sidebar-nav-board")).toHaveAccessibleName("Board");
+    // FN-439: List is a rail destination again (the Header stopped producing it on tablet/desktop), with the shortened label.
     expect(screen.getByTestId("sidebar-nav-list")).toHaveAccessibleName("List");
     expect(screen.getByTestId("sidebar-nav-agents")).toHaveAccessibleName("Agents");
     expect(screen.getByTestId("sidebar-nav-missions")).toHaveAccessibleName("Missions");
@@ -517,31 +502,37 @@ describe("LeftSidebarNav", () => {
     },
   );
 
-  it("renders the collapse toggle in the footer above Settings in expanded and collapsed states", () => {
+  it("renders the collapse toggle in the sidebar header with right-dock design parity in expanded and collapsed states", () => {
     const { container } = renderSidebar();
     const sidebar = screen.getByTestId("left-sidebar-nav");
     const expandedToggle = screen.getByTestId("sidebar-nav-collapse-toggle");
 
     expectNoSidebarBrandOrProjectAffordances(container);
-    expectCollapseToggleImmediatelyBeforeSettings();
-    expect(expandedToggle).toHaveAttribute("aria-pressed", "false");
-    expect(expandedToggle).toHaveAccessibleName("Collapse sidebar");
-    expect(expandedToggle).toHaveAttribute("title", "Collapse sidebar");
-    expect(expandedToggle).toHaveTextContent("Collapse");
-    expect(expandedToggle.querySelector("svg")).not.toBeNull();
+    expectCollapseToggleInSidebarHeader();
+    expectRightDockToggleDesignParity("Collapse sidebar", "false");
     expect(within(sidebar).getAllByRole("button").at(-1)).toBe(screen.getByTestId("sidebar-nav-settings"));
 
     fireEvent.click(expandedToggle);
 
-    const collapsedToggle = screen.getByTestId("sidebar-nav-collapse-toggle");
     expect(sidebar.className).toContain("left-sidebar-nav--collapsed");
     expectNoSidebarBrandOrProjectAffordances(container);
-    expectCollapseToggleImmediatelyBeforeSettings();
-    expect(collapsedToggle).toHaveAttribute("aria-pressed", "true");
-    expect(collapsedToggle).toHaveAccessibleName("Expand sidebar");
-    expect(collapsedToggle).toHaveAttribute("title", "Expand sidebar");
-    expect(collapsedToggle.querySelector("svg")).not.toBeNull();
+    expectCollapseToggleInSidebarHeader();
+    expectRightDockToggleDesignParity("Expand sidebar", "true");
     expect(within(sidebar).getAllByRole("button").at(-1)).toBe(screen.getByTestId("sidebar-nav-settings"));
+  });
+
+  it("renders exactly one collapse affordance and keeps it in the header after a collapsed remount", () => {
+    const firstRender = renderSidebar();
+    expectCollapseToggleInSidebarHeader();
+    expectRightDockToggleDesignParity("Collapse sidebar", "false");
+
+    firstRender.unmount();
+    window.localStorage.setItem("fusion:left-sidebar-collapsed", "true");
+    renderSidebar();
+
+    expect(screen.getByTestId("left-sidebar-nav")).toHaveClass("left-sidebar-nav--collapsed");
+    expectCollapseToggleInSidebarHeader();
+    expectRightDockToggleDesignParity("Expand sidebar", "true");
   });
 
   it("keeps expanded depth above board content while collapsed and mobile navigation remain flat", () => {
@@ -570,9 +561,23 @@ describe("LeftSidebarNav", () => {
 
     const toggleRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav__collapse-toggle");
     expect(toggleRule).toContain("flex-shrink: 0");
-    expect(toggleRule).toContain("justify-content: flex-start");
+    // FN-473 retired the full-width footer row, so the old flex-start alignment must not linger as a dead declaration.
+    expect(toggleRule).not.toContain("justify-content");
     expect(toggleRule).not.toMatch(/#|rgb\(/i);
     expect(toggleRule).not.toMatch(/position:\s*absolute/);
+    // FN-471 canon: geometry is owned by the shared .btn-icon base, never re-declared with a forbidden box here.
+    expect(toggleRule).not.toMatch(/(?:min-)?(?:width|height|inline-size|block-size)\s*:/);
+
+    const headerRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav__header");
+    expect(headerRule).toContain("display: flex");
+    expect(headerRule).toContain("align-items: center");
+    expect(headerRule).toContain("justify-content: flex-end");
+    expect(headerRule).toContain("padding: var(--space-sm)");
+    expect(headerRule).not.toMatch(/\d+px|#|rgb\(/i);
+    expect(headerRule).not.toMatch(/40px|44px|48px|56px|64px|--touch-target-min-size|--ui-touch-height/);
+
+    const collapsedHeaderRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav--collapsed .left-sidebar-nav__header");
+    expect(collapsedHeaderRule).toContain("justify-content: center");
 
     const itemRule = getCssRuleBlock(leftSidebarNavCss, ".left-sidebar-nav__item");
     expect(itemRule).toContain("gap: var(--space-sm)");
@@ -581,7 +586,7 @@ describe("LeftSidebarNav", () => {
     expect(itemRule).not.toMatch(/#|rgb\(/i);
   });
 
-  it("toggles collapsed rail mode, keeps bottom settings reachable, and restores it on remount", () => {
+  it("toggles collapsed rail mode from the header, keeps bottom settings reachable, and restores it on remount", () => {
     const firstRender = renderSidebar();
     const sidebar = screen.getByTestId("left-sidebar-nav");
 
@@ -671,9 +676,6 @@ describe("LeftSidebarNav", () => {
   it("routes clicks to view changes and settings callback without Secrets/Todos shortcuts", () => {
     const onOpenSettings = vi.fn();
     const { onChangeView } = renderSidebar({ todosEnabled: true, onOpenSettings });
-
-    fireEvent.click(screen.getByTestId("sidebar-nav-list"));
-    expect(onChangeView).toHaveBeenCalledWith("list");
 
     fireEvent.click(screen.getByTestId("sidebar-nav-planning"));
     expect(onChangeView).toHaveBeenCalledWith("planning");

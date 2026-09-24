@@ -13,7 +13,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentDetail, AgentState, AgentHeartbeatRun, AgentBudgetStatus, ModelInfo, MemoryFileInfo, AgentCapability, PluginRuntimeInfo, SkillContent, AgentOnboardingSummary, AgentMailboxResponse, AgentPromptSizePoint } from "../api";
-import { fetchAgent, updateAgent, updateAgentState, deleteAgent, isAgentHeartbeatEnabled, withAgentHeartbeatEnabled, fetchAgentLogsWithMeta, fetchAgentRunLogs, fetchAgentChildren, fetchAgentRuns, fetchAgentRunDetail, startAgentRun, stopAgentRun, updateAgentInstructions, updateAgentSoul, updateAgentMemory, fetchAgentMemoryFiles, fetchAgentMemoryFile, fetchAgentMemoryConsolidations, saveAgentMemoryFile, fetchAgentTasks, fetchChainOfCommand, fetchAgentBudgetStatus, resetAgentBudget, fetchWorkspaceFileContent, saveWorkspaceFileContent, fetchModels, fetchPluginRuntimes, fetchAgents, fetchSettings, fetchSettingsByScope, upgradeAgentHeartbeatProcedure, fetchSkillContent, uploadAgentAvatar, deleteAgentAvatar, fetchAgentMailbox, markMessageRead, fetchAgentPromptSizes } from "../api";
+import { fetchAgent, updateAgent, updateAgentState, deleteAgent, isAgentHeartbeatEnabled, withAgentHeartbeatEnabled, fetchAgentLogsWithMeta, fetchAgentRunLogs, fetchAgentChildren, fetchAgentRuns, fetchAgentRunDetail, startAgentRun, stopAgentRun, updateAgentInstructions, updateAgentSoul, updateAgentMemory, fetchAgentMemoryFiles, fetchAgentMemoryFile, fetchAgentMemoryConsolidations, saveAgentMemoryFile, fetchAgentTasks, fetchChainOfCommand, fetchAgentBudgetStatus, resetAgentBudget, fetchWorkspaceFileContent, saveWorkspaceFileContent, fetchModels, fetchPluginRuntimes, fetchAgents, fetchSettings, fetchSettingsByScope, upgradeAgentHeartbeatProcedure, fetchSkillContent, uploadAgentAvatar, deleteAgentAvatar, fetchAgentMailbox, markMessageRead, archiveMessage, unarchiveMessage, deleteMessage, fetchAgentPromptSizes } from "../api";
 import type { Agent, MemoryConsolidationEvent } from "../api";
 import type { AgentLogEntry, Task, Message, ParticipantType, AgentPermissionPolicy, AgentPermissionPolicyRules, AgentPermission, ThinkingLevel, Settings as CoreSettings } from "@fusion/core";
 import {
@@ -26,7 +26,9 @@ import {
 import { AgentLogViewer } from "./AgentLogViewer";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { AgentReflectionsTab } from "./AgentReflectionsTab";
+import { resolveMailboxMessageSubject } from "./mailboxSubject";
 import { getAgentHealthStatus } from "../utils/agentHealth";
+import { getTaskTitleDisplayText } from "../utils/taskTitleDisplay";
 import type { AgentHealthStatus } from "../utils/agentHealth";
 import { SkillMultiselect } from "./SkillMultiselect";
 import { subscribeSse } from "../sse-bus";
@@ -37,7 +39,14 @@ import { classifyAgentSkill, formatAgentSkillBadgeLabel } from "../utils/agentSk
 import { useDiscoveredSkillsCache } from "../hooks/useDiscoveredSkillsCache";
 import { CustomModelDropdown } from "./CustomModelDropdown";
 import { useConfirm } from "../hooks/useConfirm";
+import { useListItemContextMenu } from "../hooks/useListItemContextMenu";
+import { ListItemContextMenu } from "./ListItemContextMenu";
+import { buildMailboxMessageActions, mailboxRowMenuKey, mailboxRowMenuMessageId } from "./mailboxMessageActions";
 import { FloatingWindow } from "./FloatingWindow";
+import { ModalCloseButton } from "./ModalCloseButton";
+import { HideInDrawer } from "./ViewDrawer";
+import { ViewHeader } from "./ViewHeader";
+import { ViewLayout } from "./ViewLayout";
 import { AgentAvatar } from "./AgentAvatar";
 import { FileEditor } from "./FileEditor";
 import { AgentErrorIndicator } from "./AgentErrorDetailsModal";
@@ -64,7 +73,7 @@ const AGENT_ROLE_DEFAULT_PERMISSION_MAP: Record<AgentCapability, AgentPermission
   executor: ["tasks:execute", "agents:view", "messages:read", "messages:send"],
   reviewer: ["tasks:review", "agents:view", "messages:read", "messages:send"],
   merger: ["tasks:merge", "agents:view", "messages:read"],
-  scheduler: ["tasks:assign", "tasks:create", "tasks:archive", "agents:view", "automations:manage", "missions:manage", "messages:read"],
+  scheduler: ["tasks:assign", "tasks:create", "agents:view", "automations:manage", "missions:manage", "messages:read"],
   engineer: ["tasks:execute", "tasks:review", "agents:view", "messages:read", "messages:send"],
   custom: [],
 };
@@ -171,8 +180,6 @@ virtualization dependency — see AGENTS.md "Reuse Components ... (No Drift)".
 Log tails read bottom-up, so the window is anchored to the END of the array (newest visible by
 default) and grows backwards, the mirror image of the board's top-anchored window.
 */
-const LOG_WINDOW_INITIAL = MAX_LOG_ENTRIES;
-const LOG_WINDOW_INCREMENT = MAX_LOG_ENTRIES;
 
 /*
 FNXC:AgentLogResync 2026-07-26-18:02:
@@ -227,43 +234,9 @@ function WindowedAgentLogViewer({
   testId: string;
   showMissingDetailHint?: boolean;
 }) {
-  const { t } = useTranslation("app");
-  const [visibleCount, setVisibleCount] = useState(LOG_WINDOW_INITIAL);
-
-  useEffect(() => {
-    setVisibleCount(LOG_WINDOW_INITIAL);
-  }, [resetKey]);
-
-  const hiddenCount = Math.max(0, entries.length - visibleCount);
-  const visibleEntries = useMemo(
-    () => (entries.length > visibleCount ? entries.slice(entries.length - visibleCount) : entries),
-    [entries, visibleCount],
-  );
-
-  const handleLoadOlder = useCallback(() => {
-    setVisibleCount((current) => current + LOG_WINDOW_INCREMENT);
-  }, []);
-
-  return (
-    <>
-      {hiddenCount > 0 && (
-        <div className="log-window-loader">
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            data-testid={`${testId}-load-older`}
-            onClick={handleLoadOlder}
-          >
-            {t("agents.loadOlderLogs", "Load {{count}} older ({{remaining}} remaining)", {
-              count: Math.min(LOG_WINDOW_INCREMENT, hiddenCount),
-              remaining: hiddenCount,
-            })}
-          </button>
-        </div>
-      )}
-      <AgentLogViewer entries={visibleEntries} loading={false} showMissingDetailHint={showMissingDetailHint} />
-    </>
-  );
+  void resetKey;
+  void testId;
+  return <AgentLogViewer entries={entries} loading={false} showMissingDetailHint={showMissingDetailHint} />;
 }
 
 function pickDefaultAgentMemoryPath(files: MemoryFileInfo[], currentPath: string): string {
@@ -941,7 +914,6 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
         Legacy Agent Detail stored only size, while FloatingWindow requires size plus position.
         Use a new key for a deliberate one-time geometry reset rather than restoring an ambiguous partial payload.
         */
-        persistGeometryKey={`floating-window:${floatingWindowKey}`}
         suspendGeometryPersistenceOnMobile
         suspendGeometryPersistenceOnShortViewport
         /*
@@ -985,22 +957,15 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
   const isResumeAllDisabled = isBulkEligibilityLoading || bulkResumeEligibleCount === 0;
 
   const detailContent = (
-      <div className={detailShellClassName}>
-        {/* Header */}
-        <div className="agent-detail-header">
-          {/* Identity area: icon + name + badges */}
-          <div className="agent-detail-identity">
-            {inline && showInlineBackButton ? (
-              <button
-                type="button"
-                className="btn agent-detail-inline-back"
-                onClick={onClose}
-                aria-label={t("agents.backToAgents", "Back to agents")}
-              >
-                <ChevronLeft size={16} />
-                {t("agents.agentsLabel", "Agents")}
-              </button>
-            ) : null}
+      <ViewLayout className={detailShellClassName} contentOwnsScroll header={<>
+        {/*
+        FNXC:StandardizedAgentDetail 2026-09-13-16:55:
+        Agent detail uses the shared title owner in inline and floating hosts. Embedded list-to-detail navigation is the canonical ChevronLeft before identity, never a second row inside detail content.
+        */}
+        <ViewHeader
+          className="agent-detail-header"
+          backAction={inline && showInlineBackButton ? { label: t("agents.backToAgents", "Back to agents"), onClick: onClose } : undefined}
+          title={<div className="agent-detail-identity">
             <div className="agent-detail-icon">
               <AgentAvatar agent={agent} size={36} />
             </div>
@@ -1019,9 +984,8 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
                 </span>
               </div>
             </div>
-          </div>
-
-          <div className="agent-detail-header-actions">
+          </div>}
+          actions={<div className="agent-detail-header-actions">
             {/* Lifecycle controls: compact action buttons */}
             <div className="agent-detail-controls">
               {/* State-dependent action buttons */}
@@ -1164,14 +1128,21 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
               <button className="btn-icon" onClick={() => void loadAgent()} title={t("common.refresh", "Refresh")} aria-label={t("common.refresh", "Refresh")}>
                 <RefreshCw size={16} />
               </button>
+              {/*
+              FNXC:StandardizedDrawers 2026-09-15-04:56:
+              FN-406: one shared rule decides drawer chrome. HideInDrawer removes this close only in phone drawer
+              presentation; inline hosting keeps its existing owner-provided dismissal.
+              */}
               {!inline && (
-                <button className="btn-icon" onClick={onClose} aria-label={t("common.close", "Close")} title={t("common.close", "Close")}>
-                  <X size={20} />
-                </button>
+                <HideInDrawer>
+                  <ModalCloseButton onClick={onClose} aria-label={t("common.close", "Close")} title={t("common.close", "Close")} />
+                </HideInDrawer>
               )}
             </div>
-          </div>
-        </div>
+          </div>}
+        />
+      </>}
+      >
 
         {/* Tabs */}
         <div className="agent-detail-tabs">
@@ -1346,7 +1317,7 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
             )}
           </div>
         )}
-      </div>
+      </ViewLayout>
   );
 
   if (inline) {
@@ -1366,7 +1337,6 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
       defaultSize={{ width: 608, height: 640 }}
       minSize={{ width: 400, height: 320 }}
       /* FNXC:ModalTouchGeometry 2026-07-26-19:05: The legacy size-only key is deliberately replaced by FloatingWindow geometry, causing one intentional reset per user. */
-      persistGeometryKey={`floating-window:${floatingWindowKey}`}
       suspendGeometryPersistenceOnMobile
       suspendGeometryPersistenceOnShortViewport
       /* FNXC:ModalTouchGeometry 2026-07-26-19:05: Preserve Agent Detail's unconditional paired mouse-only dismissal instead of broader pointer-down/touch dismissal. */
@@ -1866,6 +1836,7 @@ function MailTab({
   onRefresh: () => void;
 }) {
   const { t } = useTranslation("app");
+  const { confirm } = useConfirm();
   const [activeSubtab, setActiveSubtab] = useState<"inbox" | "outbox">("inbox");
   const [knownAgents, setKnownAgents] = useState<Agent[]>([]);
 
@@ -1937,11 +1908,64 @@ function MailTab({
     onRefresh();
   };
 
-  const renderMessage = (message: Message) => (
+  /*
+  FNXC:MailboxRowActions 2026-09-17-03:18:
+  FN-486 : l'onglet Mail d'un agent sert les mêmes commandes de ligne que les deux autres producteurs, par
+  le menu contextuel partagé. Il n'a PAS de composeur, donc aucune commande « Répondre » n'est fournie et
+  aucune édition n'est inventée ; la suppression garde une confirmation applicative et le rafraîchissement
+  existant. La fermeture du détail suit l'identité : muter une autre ligne ne referme pas le message ouvert.
+  */
+  const rowMenu = useListItemContextMenu({ contextId: `${projectId ?? ""}:${agent.id}:${activeSubtab}` });
+  const rowMenuMessage = useMemo(() => {
+    const id = mailboxRowMenuMessageId(rowMenu.anchor?.key);
+    if (!id) return null;
+    return [...(mailbox?.inbox ?? []), ...(mailbox?.outbox ?? [])].find((candidate) => candidate.id === id) ?? null;
+  }, [mailbox, rowMenu.anchor?.key]);
+  useEffect(() => {
+    if (rowMenu.anchor && !rowMenuMessage) rowMenu.close();
+  }, [rowMenu, rowMenuMessage]);
+
+  const runMailMutation = async (message: Message, run: () => Promise<unknown>, failure: string) => {
+    try {
+      await run();
+      if (selectedMessageId === message.id) setSelectedMessageId(null);
+      onRefresh();
+    } catch (err) {
+      addToast?.(getErrorMessage(err) || failure, "error");
+    }
+  };
+
+  const rowMenuActions = rowMenuMessage
+    ? buildMailboxMessageActions(rowMenuMessage, t, {
+      onArchive: (message) => void runMailMutation(message, () => archiveMessage(message.id, projectId), t("mailbox.archiveFailed", "Failed to archive message")),
+      onRestore: (message) => void runMailMutation(message, () => unarchiveMessage(message.id, projectId), t("mailbox.restoreFailed", "Failed to restore message")),
+      onDelete: (message) => void (async () => {
+        if (!await confirm({
+          title: t("mailbox.deleteTitle", "Delete message?"),
+          message: t("mailbox.deleteBody", "This action cannot be undone."),
+          confirmLabel: t("mailbox.delete", "Delete"),
+          danger: true,
+        })) return;
+        await runMailMutation(message, () => deleteMessage(message.id, projectId), t("mailbox.deleteFailed", "Failed to delete message"));
+      })(),
+    })
+    : [];
+
+  /*
+  FNXC:MailboxSubject 2026-09-15-04:40:
+  Operator requirement: every mail row shows an AUTHOR and a SUBJECT, never the raw head of the body
+  (a completion notice used to render literally as "## Task completed: FN-325"). The subject comes
+  from the shared resolveMailboxMessageSubject used by MailboxView/MailboxModal, and the preview
+  element is omitted entirely when the body holds nothing beyond the subject line.
+  */
+  const renderMessage = (message: Message) => {
+    const { subject, bodyPreview } = resolveMailboxMessageSubject(message, t);
+    return (
     <button
       key={message.id}
       type="button"
       className={cn("mailbox-item", "agent-mail-tab-message", activeSubtab === "inbox" && !message.read && "unread", selectedMessageId === message.id && "agent-mail-tab-message--selected")}
+      {...rowMenu.getRowProps(mailboxRowMenuKey(message.id))}
       onClick={() => void handleMessageClick(message)}
       aria-pressed={selectedMessageId === message.id}
     >
@@ -1957,14 +1981,23 @@ function MailTab({
           )}
           <span className="mailbox-item-time">{formatMailboxTimestamp(message.createdAt, t)}</span>
         </div>
-        <div className="mailbox-item-preview">{message.content.slice(0, 80)}{message.content.length > 80 ? "…" : ""}</div>
+        <div className="mailbox-item-subject" data-testid={`mailbox-item-subject-${message.id}`}>{subject}</div>
+        {bodyPreview ? <div className="mailbox-item-preview">{bodyPreview}</div> : null}
       </div>
       {activeSubtab === "inbox" && !message.read ? <div className="mailbox-item-unread-dot" aria-label={t("agents.unreadMessage", "Unread message")} /> : null}
     </button>
-  );
+    );
+  };
 
   return (
     <div className="agent-mail-tab">
+      <ListItemContextMenu
+        anchor={rowMenu.anchor}
+        ariaLabel={t("mailbox.messageActionsAria", "Message actions")}
+        actions={rowMenuActions}
+        onClose={rowMenu.close}
+        data-testid="agent-detail-mail-context-menu"
+      />
       <div className="agent-mail-tab-header">
         <h3>{t("agents.agentMail", "{{name}} Mail", { name: agent.name })}</h3>
         <button className="btn btn-sm" onClick={handleRefresh} disabled={isLoading}>
@@ -2018,6 +2051,11 @@ function MailTab({
               {activeSubtab === "inbox" ? t("agents.backToInbox", "Back to Inbox") : t("agents.backToOutbox", "Back to Outbox")}
             </button>
             <div className="agent-mail-tab-detail-meta">
+              {/* FNXC:MailboxSubject 2026-09-15-04:40: An opened agent mail states its subject before the participants, matching the mailbox detail views. */}
+              <div className="agent-mail-tab-detail-row">
+                <span className="agent-mail-tab-detail-label">{t("agents.mailSubject", "Subject")}</span>
+                <span data-testid="agent-mail-tab-detail-subject">{resolveMailboxMessageSubject(selectedMessage, t).subject}</span>
+              </div>
               <div className="agent-mail-tab-detail-row">
                 <span className="agent-mail-tab-detail-label">{t("agents.mailFrom", "From")}</span>
                 <span>{mailboxParticipantLabel(selectedMessage.fromId, selectedMessage.fromType, agentNamesById, t)}</span>
@@ -2638,8 +2676,14 @@ function formatDuration(start: Date, end: Date): string {
   return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
 }
 
+/*
+FNXC:TaskTitleDisplay 2026-09-14-17:05:
+FN-391: the LABEL SOURCE is the shared projection (explicit title in full, else the description's
+exact 220-character prefix, else the ID). The 80-character shortening here stays because it is this
+row's own geometry constraint, applied on top of the canonical text — it is not a second title rule.
+*/
 function truncateTaskLabel(task: Task): string {
-  const source = task.title?.trim() || task.description?.trim() || task.id;
+  const source = getTaskTitleDisplayText(task);
   return source.length > 80 ? `${source.slice(0, 77)}...` : source;
 }
 
@@ -2718,7 +2762,7 @@ function TasksTab({
               } as Record<string, string>)[task.column] ?? task.column
             }</span>
           </div>
-          <div className="agent-task-title" title={task.title || task.description || task.id}>
+          <div className="agent-task-title" title={getTaskTitleDisplayText(task)}>
             {truncateTaskLabel(task)}
           </div>
           <div className="agent-task-status">

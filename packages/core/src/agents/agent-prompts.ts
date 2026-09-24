@@ -284,6 +284,10 @@ Fast planning also requires \`## Original Description\` (verbatim operator text)
 FNXC:FastPlanning 2026-08-27-10:22:
 Fast plans need the same plain-language product summary as standard plans so operators can
 verify at a glance that the task intent survived the compressed planning path.
+
+FNXC:FastPlanning 2026-09-04-01:38:
+The heading number is the 0-based execution index consumed by parseStepFileScopes and
+extractStepSection. A 1-based example previously scheduled a phantom step at steps.length.
 */
 const FAST_TRIAGE_PROMPT_TEXT = `You are a task specification agent for "fn". This task is running in **fast mode**.
 
@@ -294,13 +298,12 @@ Write a lean, executable PROMPT.md quickly. Preserve safety gates, but skip heav
 ## Fast-mode priorities
 - Read only source/docs needed for precision; keep prose brief with concrete file paths, commands, and outcomes.
 - Do not expand scope. If work is covered, report the duplicate instead of writing a new spec.
-- Preserve required safety sections for bugs, workflow routing, forensic tasks, and decision-only work.
 
 ## Duplicate check
-Before writing a spec, call \`fn_task_list\` for active work, then call \`fn_task_search\` with \`includeDone: false\` and \`includeArchived: false\` for 2-4 targeted keyword phrases from the title/description, such as file paths, symptoms, and symbols. Do not search completed or archived work for duplicate candidates. When an active match is a duplicate, do not write a spec — but still write PROMPT.md, with its entire contents being the single line \`DUPLICATE: {existing-task-id}\` and nothing else. That file is how the duplicate is recorded; announcing it only in your reply leaves no plan behind and re-plans the task in a loop.
+Before writing a spec, call \`fn_task_list\` for active work, then call \`fn_task_search\` with \`includeDone: false\` for 2-4 targeted keyword phrases from the title/description, such as file paths, symptoms, and symbols. Do not search completed work for duplicate candidates. When an active match is a duplicate, do not write a spec — but still write PROMPT.md, with its entire contents being the single line \`DUPLICATE: {existing-task-id}\` and nothing else. That file is how the duplicate is recorded; announcing it only in your reply leaves no plan behind and re-plans the task in a loop.
 
 ## Required PROMPT.md shape
-Write PROMPT.md with Original Description, What This Delivers, Before → After Transformation, Mission, Dependencies, Context to Read First, File Scope, Steps, Documentation Requirements, Completion Criteria, Git Commit Convention, and Do NOT. Put \`## Original Description\` immediately after the title/\`Created\`/\`Size\` metadata with the operator's original task description copied **verbatim** (do not paraphrase). Immediately after it, write \`## What This Delivers\` in plain product language so anyone can verify at a glance what the operator will gain; do not use file paths, symbols, or framework terms. Put \`## Before → After Transformation\` next, before \`## Mission\`, with concise Before/After bullets: current state, target state, why it satisfies the user's request at a glance. In \`## Steps\`, every executable heading MUST use \`### Step N: <name>\` (e.g. \`### Step 1: Preflight\`). Do not write bare \`### Preflight\` / \`### Implementation\` headings, and do not add review-level, triage subtask, or proactive subtask headings.
+Write PROMPT.md with Original Description, What This Delivers, Before → After Transformation, Mission, Plan Premises, Dependencies, Context to Read First, File Scope, Steps, Documentation Requirements, Completion Criteria, Git Commit Convention, and Do NOT. Put \`## Original Description\` immediately after the title/\`Created\`/\`Size\` metadata with the operator's original task description copied **verbatim** (do not paraphrase). Immediately after it, write \`## What This Delivers\` in plain product language so anyone can verify at a glance what the operator will gain; do not use file paths, symbols, or framework terms. Put \`## Before → After Transformation\` next, before \`## Mission\`, with concise Before/After bullets: current state, target state, why it satisfies the user's request at a glance. In \`## Steps\`, every executable heading MUST use \`### Step N: <name>\` (e.g. \`### Step 0: Preflight\`), numbered 0-based from \`### Step 0:\` through \`### Step N-1:\` with no gaps. Do not write bare \`### Preflight\` / \`### Implementation\` headings, and do not add review-level, triage subtask, or proactive subtask headings.
 
 ## Surface Enumeration
 For bug fixes and UI-affordance add/remove tasks, the spec MUST include a \`## Surface Enumeration\` section. The workflow Plan Review gate validates this before execution when plan review is enabled.
@@ -395,6 +398,10 @@ Follow this structure exactly:
 
 {One paragraph: what you're building and why it matters}
 
+## Plan Premises
+
+- {One exact JSON object per bullet. Use only \`{"kind":"file-exists|file-absent","path":"project/relative/path"}\` or \`{"kind":"text-present|text-absent","path":"project/relative/path","literal":"exact non-empty text"}\`. Include one to a few real, atomic implementation assumptions; never prose, commands, globs, regex, goals, or tautologies.}
+
 ## Surface Enumeration
 
 {Required for bug-fix tasks and UI-affordance add/remove tasks (adding, removing, or restructuring icons, buttons, chevrons/arrows, toggles, badges, menu entries, click targets): a checklist enumerating every surface the fixed invariant must hold across. Include every provider/bridge for streaming and agent paths; desktop AND mobile breakpoints; empty/undefined/duplicate/populated data states; and every hook/component/module that shares the affected logic. For UI-affordance add/remove tasks, enumerate every component that renders the affordance by searching the codebase for the icon/class/testid — not just the component the user pointed at. Explicitly check for leftover shells after removal (empty buttons, orphaned click targets, now-unused wrappers, dangling aria-labels) across both desktop and mobile breakpoints. Use the canonical checklist in docs/testing.md as the starting point.}
@@ -422,9 +429,9 @@ Follow this structure exactly:
 
 ## Steps
 
-> Optional: a step heading may carry a \`(depends: N,M)\` annotation listing the 1-indexed
-> step numbers it depends on — e.g. \`### Step 3 (depends: 1): Title\`. Annotate ONLY steps
-> that are genuinely independent of their immediate predecessor; an unannotated step is
+> Optional: a step heading may carry a \`(depends: N,M)\` annotation listing literal \`### Step N\`
+> heading numbers (0-based; Step 0 is Preflight) — e.g. \`### Step 3 (depends: 1): Title\`. Annotate
+> ONLY steps that are genuinely independent of their immediate predecessor; an unannotated step is
 > assumed to depend on the one before it (fully sequential). Be conservative — only mark a
 > step independent when it truly does not read or modify the prior step's output.
 
@@ -589,8 +596,8 @@ Verified facts about this codebase's storage — cite these correctly so Plan Re
 - New Postgres migrations must be **registered explicitly** in \`packages/core/src/postgres/schema-applier.ts\` (version constant + bookkeeping check); a \`.sql\` file dropped in the migrations dir that is not wired there silently never runs.
 
 ## Duplicate check
-Before writing a spec, first call \`fn_task_list\` to see active tasks, then call \`fn_task_search\` with \`includeDone: false\` and \`includeArchived: false\` for 2-4 distinct keyword phrases from the task title and description (for example file paths, error symptoms, and symbol names).
-Do not search completed or archived work for duplicate candidates.
+Before writing a spec, first call \`fn_task_list\` to see active tasks, then call \`fn_task_search\` with \`includeDone: false\` for 2-4 distinct keyword phrases from the task title and description (for example file paths, error symptoms, and symbol names).
+Do not search completed work for duplicate candidates.
 If an actionable task already covers the same work (even if worded differently), do not write a spec.
 Instead you MUST still write PROMPT.md, with its ENTIRE contents being this one line and nothing else:
 \`DUPLICATE: {existing-task-id}\`
@@ -714,6 +721,16 @@ If the task targets a different task ID (audit, forensic walk, historical reconc
 <!-- Frontend UX criteria are applied deterministically by packages/core/src/frontend-ux-policy.ts and mirror the "frontend-ux-design" reviewer persona in packages/core/src/types.ts. -->`;;
 
 // FN-6235: single source for the built-in reviewer policy; the engine REVIEWER_SYSTEM_PROMPT duplicate was removed.
+/*
+FNXC:ReviewVerdictAuthority 2026-09-02-19:16:
+Reviewer headings remain readable operator context and retain fail-safe downgrade routing, but only one trailing structured JSON object authorizes approval. Repeat this contract in every Plan, Code, and Spec format block so no reviewer role is instructed to emit a shape the parser can no longer approve.
+*/
+const REVIEWER_JSON_VERDICT_CONTRACT = `### Authoritative Verdict
+End the response with exactly one trailing JSON object and stop:
+{"verdict":"APPROVE|APPROVE_WITH_NOTES|REVISE|RETHINK","notes":"..."}
+
+The \`verdict\` value must be exactly \`APPROVE\`, \`APPROVE_WITH_NOTES\`, \`REVISE\`, or \`RETHINK\`. The \`notes\` value must contain one to three non-empty sentences naming what was checked and why the verdict was reached. The JSON object, not the human-readable heading, is authoritative for approval. A response with no verdict object is treated as a failed review and is never an approval.`;
+
 const REVIEWER_PROMPT_TEXT = `You are an independent code and plan reviewer.
 
 ## Your Role
@@ -786,6 +803,8 @@ Concrete examples:
 
 ### Suggestions
 - [Optional improvements, not blocking]
+
+${REVIEWER_JSON_VERDICT_CONTRACT}
 \`\`\`
 
 ## Code Review Format
@@ -810,6 +829,8 @@ Concrete examples:
 
 ### Suggestions
 - [Optional improvements, not blocking]
+
+${REVIEWER_JSON_VERDICT_CONTRACT}
 \`\`\`
 
 ## Spec Review Format
@@ -841,6 +862,8 @@ Concrete examples:
 
 ### Suggestions
 - [Optional improvements, not blocking]
+
+${REVIEWER_JSON_VERDICT_CONTRACT}
 \`\`\`
 
 ## Plan Granularity
@@ -888,7 +911,7 @@ the changes into the assigned worktree.
 export function buildPlanningDuplicatePolicyInstruction(): string {
   return `## Duplicate policy for this task
 
-Only active tasks can be duplicate blockers. A matching task in a done or archived column is historical evidence, not a duplicate verdict: inspect it for context, then write a new plan for the reported work or regression. Do not emit \`DUPLICATE: ...\` for completed or archived work.`;
+Only active tasks can be duplicate blockers. A matching task in a workflow Complete column or a deleted historical record is context, not a duplicate verdict: write a new plan for the reported work or regression. Do not emit \`DUPLICATE: ...\` for completed or deleted work.`;
 }
 
 /**
@@ -1105,6 +1128,8 @@ submissions to a high bar for correctness, security, and maintainability.
 
 ### Suggestions
 - [Optional improvements, not blocking]
+
+${REVIEWER_JSON_VERDICT_CONTRACT}
 \`\`\`
 
 ## Code Review Format
@@ -1138,6 +1163,8 @@ submissions to a high bar for correctness, security, and maintainability.
 
 ### Suggestions
 - [Optional improvements, not blocking]
+
+${REVIEWER_JSON_VERDICT_CONTRACT}
 \`\`\`
 
 ## Spec Review Format
@@ -1169,6 +1196,8 @@ submissions to a high bar for correctness, security, and maintainability.
 
 ### Suggestions
 - [Optional improvements, not blocking]
+
+${REVIEWER_JSON_VERDICT_CONTRACT}
 \`\`\`
 
 ## Safety Rules

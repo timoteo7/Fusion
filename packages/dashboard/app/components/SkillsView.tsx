@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 import { useTranslation } from "react-i18next";
 import { Zap, RefreshCw, X, ChevronRight, ChevronDown, AlertCircle, Loader2, ArrowLeft } from "lucide-react";
 import { ViewHeader } from "./ViewHeader";
+import { ViewLayout } from "./ViewLayout";
+import { ViewSidebar } from "./ViewSidebar";
 import { MailboxMessageContent } from "./MailboxMessageContent";
 import {
   fetchDiscoveredSkills,
@@ -132,7 +134,6 @@ export function SkillsView({ projectId, addToast, onClose }: SkillsViewProps) {
     }
   }, [projectId]);
 
-  // Initial load
   useEffect(() => {
     void loadDiscoveredSkills();
     void loadCatalog("");
@@ -464,26 +465,34 @@ export function SkillsView({ projectId, addToast, onClose }: SkillsViewProps) {
     );
   };
 
-  return (
-    <div
-      className="skills-view"
-      data-testid="skills-view"
-      data-selected={selectedSkillId ? "true" : "false"}
-    >
-      {/*
-      FNXC:Navigation 2026-06-22-01:10:
-      Skills adopts the shared ViewHeader (Command Center-modeled) for a consistent main-content title row. Icon matches the left-sidebar nav (Zap). The discovered-count badge plus Close and Refresh controls move into the header actions cluster so they keep working.
-      */}
+  /*
+  FNXC:Navigation 2026-06-22-01:10:
+  Skills adopts the shared ViewHeader (Command Center-modeled) for a consistent main-content title row. Icon matches the left-sidebar nav (Zap). The discovered-count badge plus Close and Refresh controls move into the header actions cluster so they keep working.
+
+  FNXC:SnippetsDestination 2026-09-14-04:12:
+  Snippets left this view for its own destination, so the header, the count badge and Refresh address skills only.
+  The tab bar is gone with them: a destination that hosts one domain needs no tab to choose it.
+
+  FNXC:StandardizedViewLayout 2026-09-13-22:40:
+  The header is supplied through the shared layout's header zone rather than as a child, so it stays a fixed sibling of the bounded content instead of scrolling away inside it.
+  */
+  const skillsHeader = (
       <ViewHeader
         icon={Zap}
-        title={t("skills.title", "Skills")}
+        title={t("skills.titleSkillsOnly", "Skills")}
+        backAction={selectedSkillId ? { label: t("skills.backToList", "Back to skills"), onClick: clearSelection } : undefined}
         actions={
           <>
-            <span className="skills-view-count" aria-label={t("skills.discoveredCount", "{{count}} discovered skills", { count: discoveredSkills.length })}>{discoveredSkills.length} {t("skills.discovered", "discovered")}</span>
+            <span
+              className="skills-view-count"
+              aria-label={t("skills.discoveredCount", "{{count}} discovered skills", { count: discoveredSkills.length })}
+            >
+              {`${discoveredSkills.length} ${t("skills.discovered", "discovered")}`}
+            </span>
             <button
               className="btn-icon skills-view-close touch-target"
               onClick={onClose}
-              aria-label={t("skills.closeView", "Close skills view")}
+              aria-label={t("skills.closeViewSkillsOnly", "Close Skills view")}
             >
               <X size={16} />
             </button>
@@ -492,6 +501,7 @@ export function SkillsView({ projectId, addToast, onClose }: SkillsViewProps) {
               className="btn btn-sm"
               onClick={() => void loadDiscoveredSkills()}
               disabled={isLoadingDiscovered}
+              aria-label={t("skills.refreshSkillsLabel", "Refresh skills")}
             >
               <RefreshCw size={14} className={isLoadingDiscovered ? "spin" : ""} />
               {t("common.refresh", "Refresh")}
@@ -499,17 +509,38 @@ export function SkillsView({ projectId, addToast, onClose }: SkillsViewProps) {
           </>
         }
       />
+  );
+
+  return (
+    <ViewLayout
+      header={skillsHeader}
+      className="skills-view"
+      data-testid="skills-view"
+      data-selected={selectedSkillId ? "true" : "false"}
+    >
 
       {/*
       FNXC:Skills 2026-06-23-01:45:
-      Master/detail body. Holds the two always-rendered panes. CSS (container query on the `.skills-view` root) lays them out side-by-side when wide and stacks them (list, then detail-on-top) when narrow.
+      Master/detail body. CSS (container query on the `.skills-view` root) lays the list and detail side-by-side when
+      wide and stacks them (list, then detail-on-top) when narrow.
+
+      FNXC:SnippetsDestination 2026-09-14-04:12:
+      No longer a tab panel: with Snippets moved out, this body is the view's only content and needs neither the
+      `tabpanel` role, the tab-controlled id/labelling, nor a hidden state.
       */}
-      <div className="skills-view-body">
+      <div
+        className="skills-view-body"
+        data-testid="skills-panel-skills"
+      >
         {/* FNXC:Skills 2026-06-23-01:45: LEFT pane = master list (search + discovered + catalog). Always in the DOM; CSS hides it only in the narrow stack once a skill is selected. */}
-        <div className="skills-view__list" data-testid="skills-list">
+        <ViewSidebar className="skills-view__list" ariaLabel={t("skills.skillsDescription", "Skills")} panelTestId="skills-list">
       {/* Scrollable content area */}
       <div className="skills-view-content">
-        {/* Search — at top for both sections */}
+        <p className="skills-view-section-description">
+          {t("skills.skillsDescription", "Browse, enable, and install skills available to this project.")}
+        </p>
+
+        {/* Search — at top for both skill sections */}
         <div className="skills-view-search">
           <input
             type="text"
@@ -669,7 +700,7 @@ export function SkillsView({ projectId, addToast, onClose }: SkillsViewProps) {
           )}
         </section>
       </div>
-        </div>
+        </ViewSidebar>
 
         {/*
         FNXC:Skills 2026-06-23-01:45:
@@ -678,16 +709,6 @@ export function SkillsView({ projectId, addToast, onClose }: SkillsViewProps) {
         <div className="skills-view__detail" data-testid="skill-detail">
           <div className="skills-view-detail-header">
             {/* FNXC:Skills 2026-06-23-01:45: BACK only matters in the narrow stack (returns to the list); CSS hides it when wide since the list is always visible. Mirrors DockFilesView's back affordance. */}
-            <button
-              type="button"
-              className="btn btn-sm btn-icon skills-view-detail-back"
-              onClick={clearSelection}
-              aria-label={t("skills.backToList", "Back to skills")}
-              title={t("skills.backToList", "Back to skills")}
-              data-testid="skills-detail-back"
-            >
-              <ArrowLeft size={14} />
-            </button>
             <span className="skills-view-detail-title">
               {selectedSkill?.name ?? t("skills.detailTitle", "Skill")}
             </span>
@@ -707,6 +728,7 @@ export function SkillsView({ projectId, addToast, onClose }: SkillsViewProps) {
           </div>
         </div>
       </div>
-    </div>
+
+    </ViewLayout>
   );
 }

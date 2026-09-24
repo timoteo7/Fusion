@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           # The pre.json anchor check needs the newest `chore(release):` commit
           # that touched .changeset/pre.json (its ledger baseline) and the `v*`
@@ -102,7 +102,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js and pnpm
         uses: ./.github/actions/setup-node-pnpm
@@ -137,7 +137,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js and pnpm
         uses: ./.github/actions/setup-node-pnpm
@@ -170,6 +170,12 @@ jobs:
             plugins/fusion-plugin-hermes-runtime/dist
             plugins/fusion-plugin-openclaw-runtime/dist
             plugins/fusion-plugin-paperclip-runtime/dist
+            plugins/fusion-plugin-roadmap/dist
+            plugins/fusion-plugin-claude-runtime/dist
+            plugins/fusion-plugin-cursor-runtime/dist
+            plugins/fusion-plugin-droid-runtime/dist
+            plugins/fusion-plugin-grok-runtime/dist
+            plugins/fusion-plugin-omp-runtime/dist
             .fusion/cache/plugin-build-cache.json
           key: gate-dist-${{ runner.os }}-${{ steps.dist-hash.outputs.hash }}
           restore-keys: |
@@ -219,7 +225,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js and pnpm
         uses: ./.github/actions/setup-node-pnpm
@@ -258,6 +264,12 @@ jobs:
             plugins/fusion-plugin-hermes-runtime/dist
             plugins/fusion-plugin-openclaw-runtime/dist
             plugins/fusion-plugin-paperclip-runtime/dist
+            plugins/fusion-plugin-roadmap/dist
+            plugins/fusion-plugin-claude-runtime/dist
+            plugins/fusion-plugin-cursor-runtime/dist
+            plugins/fusion-plugin-droid-runtime/dist
+            plugins/fusion-plugin-grok-runtime/dist
+            plugins/fusion-plugin-omp-runtime/dist
             .fusion/cache/plugin-build-cache.json
           key: gate-dist-${{ runner.os }}-${{ steps.dist-hash.outputs.hash }}
           restore-keys: |

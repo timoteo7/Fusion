@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { X, Search, Puzzle, ToggleRight } from "lucide-react";
+import { Search, Puzzle, ToggleRight } from "lucide-react";
 import type { WorkflowDefinition, WorkflowStepTemplate } from "@fusion/core";
 import type { WorkflowEditorNodeKind } from "./nodes/WorkflowNodeTypes";
 import { nodeHelpFor } from "./nodes/node-help";
 import { FloatingWindow } from "./FloatingWindow";
+import { ViewHeader } from "./ViewHeader";
 import "./WorkflowAddStepModal.css";
 
 /*
@@ -151,23 +152,22 @@ export function WorkflowAddStepModal({
       className="floating-window--workflow-add-step"
       defaultSize={{ width: 640, height: 560 }}
       minSize={{ width: 360, height: 280 }}
-      persistGeometryKey="floating-window:workflow-add-step"
       suspendGeometryPersistenceOnMobile
       suspendGeometryPersistenceOnShortViewport
       closeOnOutsidePointerDown
     >
       <div className="wf-add-step-dialog">
-        <header className="wf-add-step-header">
-          <h3>{t("workflowNodes.addStepTitle", "Add a step")}</h3>
-          <button
-            type="button"
-            className="btn-icon wf-add-step-close"
-            aria-label={t("common.close", "Close")}
-            onClick={onClose}
-          >
-            <X size={16} />
-          </button>
-        </header>
+        {/*
+        FNXC:StandardizedViewLayout 2026-09-13-22:40:
+        FN-379 remediation: the step picker shares the canonical header rather than its own title row.
+        */}
+        <ViewHeader
+          className="wf-add-step-header"
+          headingLevel={3}
+          title={t("workflowNodes.addStepTitle", "Add a step")}
+          onClose={onClose}
+          closeButtonProps={{ className: "wf-add-step-close", "aria-label": t("common.close", "Close") }}
+        />
         <div className="wf-add-step-search">
           <Search size={14} aria-hidden />
           <input

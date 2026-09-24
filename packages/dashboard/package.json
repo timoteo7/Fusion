@@ -1,6 +1,6 @@
 {
   "name": "@fusion/dashboard",
-  "version": "0.77.0",
+  "version": "0.78.0-beta.4",
   "license": "MIT",
   "description": "Fusion dashboard: React UI and HTTP API server for monitoring and controlling the Fusion AI coding agent.",
   "homepage": "https://github.com/Runfusion/Fusion#readme",
@@ -31,6 +31,26 @@
       "types": "./app/components/ViewHeader.tsx",
       "import": "./app/components/ViewHeader.tsx"
     },
+    "./app/components/ViewLayout": {
+      "types": "./app/components/ViewLayout.tsx",
+      "import": "./app/components/ViewLayout.tsx"
+    },
+    "./app/components/ViewSidebar": {
+      "types": "./app/components/ViewSidebar.tsx",
+      "import": "./app/components/ViewSidebar.tsx"
+    },
+    "./app/components/ViewActionButton": {
+      "types": "./app/components/ViewActionButton.tsx",
+      "import": "./app/components/ViewActionButton.tsx"
+    },
+    "./app/context/ViewLayoutContext": {
+      "types": "./app/context/ViewLayoutContext.tsx",
+      "import": "./app/context/ViewLayoutContext.tsx"
+    },
+    "./app/hooks/useViewSidebarWidth": {
+      "types": "./app/hooks/useViewSidebarWidth.ts",
+      "import": "./app/hooks/useViewSidebarWidth.ts"
+    },
     "./app/utils/copyToClipboard": {
       "types": "./app/utils/copyToClipboard.ts",
       "import": "./app/utils/copyToClipboard.ts"
@@ -38,6 +58,14 @@
     "./app/utils/projectStorage": {
       "types": "./app/utils/projectStorage.ts",
       "import": "./app/utils/projectStorage.ts"
+    },
+    "./app/plugins/PluginDashboardViewHeader": {
+      "types": "./app/plugins/PluginDashboardViewHeader.tsx",
+      "import": "./app/plugins/PluginDashboardViewHeader.tsx"
+    },
+    "./app/plugins/PluginDashboardViewHost": {
+      "types": "./app/plugins/PluginDashboardViewHost.tsx",
+      "import": "./app/plugins/PluginDashboardViewHost.tsx"
     },
     "./app/plugins/pluginViewRegistry": {
       "types": "./app/plugins/pluginViewRegistry.tsx",
@@ -104,8 +132,8 @@
     "@codemirror/state": "^6.7.1",
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.36.4",
-    "@earendil-works/pi-ai": "0.84.1",
-    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "@fontsource/pixelify-sans": "^5.3.0",
     "@fusion-plugin-examples/claude-runtime": "workspace:*",
     "@fusion-plugin-examples/cli-printing-press": "workspace:*",
@@ -131,7 +159,7 @@
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.11.2",
-    "archiver": "^7.0.1",
+    "archiver": "^8.0.0",
     "express": "^5.1.0",
     "html2canvas": "^1.4.1",
     "i18next": "^26.3.6",
@@ -141,7 +169,7 @@
     "lucide-react": "^1.7.0",
     "mermaid": "^11.4.0",
     "multer": "^2.1.1",
-    "node-pty": "npm:@homebridge/node-pty-prebuilt-multiarch@^0.13.1",
+    "node-pty": "npm:@lydell/node-pty@1.2.0-beta.15",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -162,7 +190,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.5.0",
-    "@types/archiver": "^7.0.0",
+    "@types/archiver": "^8.0.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "@types/qrcode": "^1.5.6",

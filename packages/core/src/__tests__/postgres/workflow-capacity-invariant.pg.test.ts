@@ -164,6 +164,53 @@ pgTest("in-transaction column capacity — ground truth (Phase A3)", () => {
 
   });
 
+  it.each([
+    { holderWorkflowId: "builtin:coding-ideas", contenderWorkflowId: "builtin:coding-ideas" },
+    { holderWorkflowId: "builtin:coding-ideas", contenderWorkflowId: "builtin:coding-ideas" },
+  ])(
+    "treats $holderWorkflowId holder and $contenderWorkflowId contender as one capacity pool",
+    async ({ holderWorkflowId, contenderWorkflowId }) => {
+      /*
+      FNXC:WorkflowSuccession 2026-09-06-02:54:
+      Seed through the low-level writer because public selection requests deliberately persist only the successor. Both historical-holder and historical-contender orderings must bind the same transaction-authoritative capacity budget.
+      */
+      const store = h.store();
+      await store.updateSettings({ maxConcurrent: 1 });
+      await assertMovePathLive();
+
+      const holder = await store.createTask({ description: "successor capacity holder" });
+      await store.writeTaskWorkflowSelection(holder.id, holderWorkflowId, []);
+      await store.moveTask(holder.id, "todo");
+      await store.moveTask(holder.id, "in-progress");
+
+      const contender = await store.createTask({ description: "successor capacity contender" });
+      await store.writeTaskWorkflowSelection(contender.id, contenderWorkflowId, []);
+      await store.moveTask(contender.id, "todo");
+
+      const observedPoolIds: string[] = [];
+      const originalCounter = store.countActiveInCapacitySlotAsync;
+      store.countActiveInCapacitySlotAsync = async (params) => {
+        observedPoolIds.push(params.workflowId);
+        return originalCounter.call(store, params);
+      };
+
+      let error: Error | null;
+      try {
+        error = await store
+          .moveTask(contender.id, "in-progress")
+          .then(() => null, (cause: unknown) => cause as Error);
+      } finally {
+        store.countActiveInCapacitySlotAsync = originalCounter;
+      }
+
+      expect(observedPoolIds).toContain("builtin:coding-ideas");
+      expect((error as unknown as { rejection?: { code?: string } })?.rejection?.code).toBe(
+        "capacity-exhausted",
+      );
+      expect((await store.getTask(contender.id))?.column).toBe("todo");
+    },
+  );
+
   it("DISCRIMINATOR: with an EXPLICIT builtin:coding selection the sentinels agree and the limit BINDS", async () => {
     /*
     This is what proves R1 is a sentinel mismatch rather than "capacity is not

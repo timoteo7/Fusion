@@ -1,10 +1,12 @@
 import "./SecretsView.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, ChevronDown, ChevronRight, Copy, Eye, EyeOff, Lock, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, Eye, EyeOff, Lock, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import { ViewHeader } from "./ViewHeader";
+import { ViewActionButton } from "./ViewActionButton";
 import { copyTextToClipboard } from "../utils/copyToClipboard";
 import { withProjectId } from "../api/client/health";
+import { FloatingWindow } from "./FloatingWindow";
 
 type ToastKind = "info" | "success" | "error";
 type SecretScope = "project" | "global";
@@ -376,8 +378,8 @@ export const SecretsView = ({ addToast, projectId }: SecretsViewProps) => {
         title={t("secrets.title", "Secrets")}
         actions={
           <>
-            <button className="btn btn-sm" onClick={() => void loadSecrets()}><RefreshCw {...actionIconProps} /> {t("secrets.refresh", "Refresh")}</button>
-            <button className="btn btn-primary btn-sm" onClick={openCreate}><Plus {...actionIconProps} /> {t("secrets.addSecret", "Add Secret")}</button>
+            <ViewActionButton icon={RefreshCw} iconClassName="secrets-action-icon" label={t("secrets.refresh", "Refresh")} onClick={() => void loadSecrets()} />
+            <ViewActionButton kind="create" iconClassName="secrets-action-icon" label={t("secrets.addSecret", "Add Secret")} onClick={openCreate} />
           </>
         }
       />
@@ -469,12 +471,31 @@ export const SecretsView = ({ addToast, projectId }: SecretsViewProps) => {
       </article>
 
       {syncModalOpen ? (
-        <div className="modal-overlay open" role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-label={syncPassphraseConfigured ? t("secrets.rotateSyncPassphraseModalTitle", "Rotate sync passphrase") : t("secrets.setSyncPassphraseModalTitle", "Set sync passphrase")}>
-            <div className="modal-header">
-              <h3>{syncPassphraseConfigured ? t("secrets.rotateSyncPassphraseModalTitle", "Rotate sync passphrase") : t("secrets.setSyncPassphraseModalTitle", "Set sync passphrase")}</h3>
-              <button className="modal-close" onClick={closeSyncModal} aria-label={t("secrets.closeAriaLabel", "Close")}>×</button>
-            </div>
+        /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: FN-394 hosts the secret dialogs in the shared window; their inputs keep their DOM identity across a move, a snap, and a restore. */
+        <FloatingWindow
+          windowKey="secret-sync-passphrase"
+          modal
+          hideHeader
+          surfaceGroup="dialog"
+          title={syncPassphraseConfigured ? t("secrets.rotateSyncPassphraseModalTitle", "Rotate sync passphrase") : t("secrets.setSyncPassphraseModalTitle", "Set sync passphrase")}
+          ariaLabel={syncPassphraseConfigured ? t("secrets.rotateSyncPassphraseModalTitle", "Rotate sync passphrase") : t("secrets.setSyncPassphraseModalTitle", "Set sync passphrase")}
+          onClose={closeSyncModal}
+          dragHandleSelector=".secrets-sync-modal .modal-header"
+          className="floating-window--dialog floating-window--secret-sync-passphrase"
+          defaultSize={{ width: 560, height: 420 }}
+          minSize={{ width: 320, height: 240 }}
+          suspendGeometryPersistenceOnMobile
+          suspendGeometryPersistenceOnShortViewport
+        >
+          <div className="modal secrets-sync-modal">
+            {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Nested secret dialogs share the canonical header. */}
+            <ViewHeader
+              className="modal-header"
+              headingLevel={3}
+              title={syncPassphraseConfigured ? t("secrets.rotateSyncPassphraseModalTitle", "Rotate sync passphrase") : t("secrets.setSyncPassphraseModalTitle", "Set sync passphrase")}
+              onClose={closeSyncModal}
+              closeButtonProps={{ "aria-label": t("secrets.closeAriaLabel", "Close") }}
+            />
             <div className="secrets-modal-body">
               <div className="form-group"><label>{t("secrets.passphraseLabel", "Passphrase")}</label><input aria-label={t("secrets.passphraseLabel", "Passphrase")} className="input" type="password" autoComplete="new-password" value={syncPassphrase} onChange={(e) => setSyncPassphrase(e.target.value)} /></div>
               <div className="form-group"><label>{t("secrets.confirmPassphraseLabel", "Confirm passphrase")}</label><input aria-label={t("secrets.confirmPassphraseLabel", "Confirm passphrase")} className="input" type="password" autoComplete="new-password" value={syncPassphraseConfirm} onChange={(e) => setSyncPassphraseConfirm(e.target.value)} /></div>
@@ -482,16 +503,33 @@ export const SecretsView = ({ addToast, projectId }: SecretsViewProps) => {
             </div>
             <div className="modal-actions"><div className="modal-actions-right"><button className="btn" onClick={closeSyncModal}>{t("secrets.cancelBtn", "Cancel")}</button><button className="btn btn-primary" onClick={() => void submitSyncPassphrase()} disabled={!syncPassphraseMatches || syncSaving}>{syncPassphraseConfigured ? t("secrets.rotateSyncPassphrase", "Rotate") : t("secrets.setPassphrase", "Set passphrase")}</button></div></div>
           </div>
-        </div>
+        </FloatingWindow>
       ) : null}
 
       {showModal ? (
-        <div className="modal-overlay open" role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-label={editing ? t("secrets.editSecretModalTitle", "Edit secret") : t("secrets.addSecretModalTitle", "Add secret")}>
-            <div className="modal-header">
-              <h3>{editing ? t("secrets.editSecretModalTitle", "Edit secret") : t("secrets.addSecretModalTitle", "Add secret")}</h3>
-              <button className="modal-close" onClick={() => setShowModal(false)} aria-label={t("secrets.closeAriaLabel", "Close")}>×</button>
-            </div>
+        <FloatingWindow
+          windowKey={editing ? "edit-secret" : "add-secret"}
+          modal
+          hideHeader
+          surfaceGroup="dialog"
+          title={editing ? t("secrets.editSecretModalTitle", "Edit secret") : t("secrets.addSecretModalTitle", "Add secret")}
+          ariaLabel={editing ? t("secrets.editSecretModalTitle", "Edit secret") : t("secrets.addSecretModalTitle", "Add secret")}
+          onClose={() => setShowModal(false)}
+          dragHandleSelector=".secrets-edit-modal .modal-header"
+          className="floating-window--dialog floating-window--secret-edit"
+          defaultSize={{ width: 640, height: 600 }}
+          minSize={{ width: 320, height: 280 }}
+          suspendGeometryPersistenceOnMobile
+          suspendGeometryPersistenceOnShortViewport
+        >
+          <div className="modal secrets-edit-modal">
+            <ViewHeader
+              className="modal-header"
+              headingLevel={3}
+              title={editing ? t("secrets.editSecretModalTitle", "Edit secret") : t("secrets.addSecretModalTitle", "Add secret")}
+              onClose={() => setShowModal(false)}
+              closeButtonProps={{ "aria-label": t("secrets.closeAriaLabel", "Close") }}
+            />
             <div className="secrets-modal-body">
               <div className="form-group"><label>{t("secrets.keyLabel", "Key")}</label><input className="input" value={form.key} onChange={(e) => setForm((c) => ({ ...c, key: e.target.value }))} /></div>
               <div className="form-group"><label>{t("secrets.valueLabel", "Value")}</label><div className="secrets-value-row"><input className="input" type={showValue ? "text" : "password"} autoComplete="off" spellCheck={false} value={form.value} onChange={(e) => setForm((c) => ({ ...c, value: e.target.value }))} /><button type="button" className="btn btn-icon secrets-visibility-toggle" onClick={() => setShowValue((s) => !s)} aria-label={showValue ? t("secrets.hideValueAriaLabel", "Hide value") : t("secrets.showValueAriaLabel", "Show value")}>{showValue ? <EyeOff {...actionIconProps} /> : <Eye {...actionIconProps} />}</button></div></div>
@@ -504,7 +542,7 @@ export const SecretsView = ({ addToast, projectId }: SecretsViewProps) => {
             </div>
             <div className="modal-actions"><div className="modal-actions-right"><button className="btn" onClick={() => setShowModal(false)}>{t("secrets.cancelBtn", "Cancel")}</button><button className="btn btn-primary" onClick={() => void submit()}>{editing ? t("secrets.saveBtn", "Save") : t("secrets.createBtn", "Create")}</button></div></div>
           </div>
-        </div>
+        </FloatingWindow>
       ) : null}
     </section>
   );

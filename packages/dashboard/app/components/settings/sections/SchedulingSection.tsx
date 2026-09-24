@@ -1,6 +1,5 @@
 import { useTranslation } from "react-i18next";
 import { DEFAULT_PROJECT_SETTINGS } from "@fusion/core";
-import { resolveEffectiveConcurrency } from "../../../../../core/src/workflows/workflow-capacity.js";
 import { MovedSettingsStub } from "./MovedSettingsStub";
 import { SettingsToggleRow } from "../SettingsToggleRow";
 import { SettingsSelectRow } from "../SettingsSelectRow";
@@ -8,8 +7,6 @@ import { SettingsNumberRow } from "../SettingsNumberRow";
 import { SettingsTextRow } from "../SettingsTextRow";
 import { SettingsHelpTip } from "../SettingsHelpTip";
 import type { SettingsFormState, SetSettingsForm } from "./context";
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const AUTO_ARCHIVE_DEFAULT_AFTER_DAYS = 2;
 export interface SchedulingSectionProps {
     form: SettingsFormState;
     setForm: SetSettingsForm;
@@ -34,7 +31,6 @@ The `overlapIgnorePaths` allowlist deliberately keeps its bespoke markup: it is 
 */
 export function SchedulingSection({ form, setForm, concurrencyLoading = false, onOverlapIgnorePathChange, onOpenOverlapPathPicker, onRemoveOverlapIgnorePath, onAddOverlapIgnorePath, onOpenWorkflowSettings, }: SchedulingSectionProps) {
     const { t } = useTranslation("app");
-    const concurrency = resolveEffectiveConcurrency(form);
     return (<>
       <h4 className="settings-section-heading">{t("settings.scheduling.scheduling", "Scheduling")}</h4>
       {/* FNXC:ExecutorToolFailureRetry 2026-08-06-14:56: project controls tune bounded same-model retry before terminal executor parking; one terminal tool error qualifies by default while values still floor to core's resolver contract. */}
@@ -48,7 +44,7 @@ export function SchedulingSection({ form, setForm, concurrencyLoading = false, o
         descriptor={{
           key: "maxConcurrent",
           label: t("settings.scheduling.maxConcurrentTasks", "Max Concurrent Tasks"),
-          help: t("settings.scheduling.maxConcurrentTasksHint", `Default: ${DEFAULT_PROJECT_SETTINGS.maxConcurrent}. The effective ceiling is the lower of Max Concurrent Tasks and Max Worktrees while worktree limiting is on.`),
+          help: t("settings.scheduling.maxConcurrentTasksHint", `Default: ${DEFAULT_PROJECT_SETTINGS.maxConcurrent}. Caps every AI-active task, including planning, independently of Max Worktrees.`),
           scope: "project",
           min: 1,
           max: 50,
@@ -57,11 +53,6 @@ export function SchedulingSection({ form, setForm, concurrencyLoading = false, o
         value={form.maxConcurrent ?? null}
         onChange={(v) => setForm((f) => ({ ...f, maxConcurrent: v ?? undefined } as SettingsFormState))}
       />
-      {concurrency.bindingKnob === "maxWorktrees" && (
-        <SettingsHelpTip>
-          {`Effective concurrency ceiling: ${concurrency.effectiveLimit}, bound by Max Worktrees.`}
-        </SettingsHelpTip>
-      )}
       <SettingsNumberRow
         descriptor={{
           key: "maxConcurrentVerifications",
@@ -196,75 +187,6 @@ export function SchedulingSection({ form, setForm, concurrencyLoading = false, o
         }}
         value={form.specStalenessMaxAgeMs !== undefined ? Math.round(form.specStalenessMaxAgeMs / 3600000) : null}
         onChange={(v) => setForm((f) => ({ ...f, specStalenessMaxAgeMs: v !== null ? v * 3600000 : undefined }))}
-      />
-      <SettingsToggleRow
-        descriptor={{
-          key: "autoArchiveDoneTasksEnabled",
-          label: t("settings.scheduling.enableAutomaticTaskArchiving", " Enable automatic task archiving "),
-          help: t("settings.scheduling.completedTasksOlderThanTheThresholdAreMoved", "Completed tasks older than the threshold are moved out of the active task database. Default: enabled."),
-          scope: "project",
-        }}
-        value={form.autoArchiveDoneTasksEnabled ?? true}
-        onChange={(v) => setForm((f) => ({
-            ...f,
-            autoArchiveDoneTasksEnabled: v === true,
-        }))}
-      />
-      {/* FNXC:SettingsScheduling 2026-07-15-17:35: The threshold and log mode are gated on the archiving toggle and disabled rather than hidden, so an operator turning archiving on can see the values that will take effect. An unset threshold displays the schema default (2 days) rather than an empty field, because archiving is on by default and a blank box would misread as "never". */}
-      <SettingsNumberRow
-        descriptor={{
-          key: "autoArchiveDoneAfterMs",
-          label: t("settings.scheduling.archiveCompletedTasksAfterDays", "Archive Completed Tasks After (days)"),
-          help: t("settings.scheduling.numberOfDaysATaskCanStayIn", "Number of days a task can stay in Done before it is archived. Default: 2 days (48 hours)."),
-          scope: "project",
-          min: 1,
-          step: 1,
-          disabled: form.autoArchiveDoneTasksEnabled === false,
-        }}
-        value={form.autoArchiveDoneAfterMs !== undefined ? Math.round(form.autoArchiveDoneAfterMs / MS_PER_DAY) : AUTO_ARCHIVE_DEFAULT_AFTER_DAYS}
-        onChange={(v) => setForm((f) => ({
-            ...f,
-            autoArchiveDoneAfterMs: v === null ? undefined : v * MS_PER_DAY,
-        }))}
-      />
-      <SettingsSelectRow
-        descriptor={{
-          key: "archiveAgentLogMode",
-          label: t("settings.scheduling.archiveAgentLog", "Archive Agent Log"),
-          help: t("settings.scheduling.compactModeKeepsArchiveSizeLowWhilePreserving", "Compact mode keeps archive size low while preserving recent agent activity for context. Default: compact."),
-          scope: "project",
-          disabled: form.autoArchiveDoneTasksEnabled === false,
-          options: [
-            { value: "compact", label: t("settings.scheduling.compactSummaryAndRecentEntries", "Compact summary and recent entries") },
-            { value: "none", label: t("settings.scheduling.doNotArchiveAgentLogs", "Do not archive agent logs") },
-            { value: "full", label: t("settings.scheduling.fullAgentLog", "Full agent log") },
-          ],
-        }}
-        value={form.archiveAgentLogMode ?? "compact"}
-        onChange={(v) => setForm((f) => ({
-            ...f,
-            archiveAgentLogMode: v as "none" | "compact" | "full",
-        }))}
-      />
-      {/**
-       * FNXC:DuplicateIntake 2026-07-07-00:00 (FN-7658):
-       * Operators do not want same-agent duplicate tasks (FN-4892 intake heuristic)
-       * silently archived on creation — they want visibility and a chance to decide
-       * via the near-duplicate flag/UI. Default off; this toggle restores the old
-       * aggressive auto-archive behavior when enabled.
-       */}
-      <SettingsToggleRow
-        descriptor={{
-          key: "autoArchiveDuplicateTasksEnabled",
-          label: t("settings.scheduling.autoArchiveDuplicateTasks", " Automatically archive duplicate tasks "),
-          help: t("settings.scheduling.autoArchiveDuplicateTasksHelp", "Automatically archive tasks detected as same-agent duplicates on creation (off by default). When disabled, duplicates are flagged in place with the yellow Duplicate chip and Keep/Archive actions instead of being archived automatically."),
-          scope: "project",
-        }}
-        value={form.autoArchiveDuplicateTasksEnabled ?? false}
-        onChange={(v) => setForm((f) => ({
-            ...f,
-            autoArchiveDuplicateTasksEnabled: v === true,
-        }))}
       />
       <SettingsSelectRow
         descriptor={{

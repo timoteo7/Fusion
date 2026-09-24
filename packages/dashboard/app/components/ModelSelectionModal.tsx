@@ -1,3 +1,4 @@
+import { ViewHeader } from "./ViewHeader";
 import { useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -5,9 +6,10 @@ import type { ModelPreset, ThinkingLevel } from "@fusion/core";
 import type { ModelInfo } from "../api";
 import { applyPresetToSelection } from "../utils/modelPresets";
 import { CustomModelDropdown } from "./CustomModelDropdown";
-import { Brain, X } from "lucide-react";
+import { Brain } from "lucide-react";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { useOverlayDismiss } from "../hooks/useOverlayDismiss";
+import { FloatingWindow } from "./FloatingWindow";
 
 const PRESET_OPTION_SEPARATOR = "──────────";
 
@@ -206,17 +208,34 @@ export function ModelSelectionModal({
   const hasMergerOverride = Boolean(mergerValue);
 
   return (
-    <div className="modal-overlay open" {...overlayDismiss} role="dialog" aria-modal="true" data-testid="model-selection-modal">
-      <div className="modal modal-lg">
-        <div className="modal-header">
-          <div className="detail-title-row">
-            <Brain size={20} style={{ color: "var(--todo)" }} />
-            <h3>{t("modelSelection.title", "Select Models")}</h3>
-          </div>
-          <button className="modal-close" onClick={onClose} aria-label={t("actions.close", "Close")} data-testid="model-selection-close">
-            <X size={20} />
-          </button>
-        </div>
+    /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: FN-394 shares one window mechanic across every dashboard dialog: standard centred opening, edge/top snapping, and restore. */
+    <FloatingWindow
+      windowKey="model-selection"
+      modal
+      hideHeader
+      surfaceGroup="dialog"
+      title={t("modelSelection.title", "Select Models")}
+      ariaLabel={t("modelSelection.title", "Select Models")}
+      onClose={onClose}
+      dragHandleSelector=".model-selection-dialog .modal-header"
+      className="floating-window--dialog floating-window--model-selection"
+      defaultSize={{ width: 880, height: 640 }}
+      minSize={{ width: 360, height: 280 }}
+      suspendGeometryPersistenceOnMobile
+      suspendGeometryPersistenceOnShortViewport
+      testId="model-selection-modal"
+      backdropMouseHandlers={overlayDismiss}
+    >
+      <div className="modal modal-lg model-selection-dialog">
+        {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Shared dialog chrome owns the icon, title, and canonical close. */}
+        <ViewHeader
+          className="modal-header"
+          headingLevel={3}
+          icon={Brain}
+          title={t("modelSelection.title", "Select Models")}
+          onClose={onClose}
+          closeButtonProps={{ "aria-label": t("actions.close", "Close"), "data-testid": "model-selection-close" }}
+        />
 
         <div className="planning-modal-body">
           {modelsLoading ? (
@@ -390,6 +409,6 @@ export function ModelSelectionModal({
           )}
         </div>
       </div>
-    </div>
+    </FloatingWindow>
   );
 }

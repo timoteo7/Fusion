@@ -90,10 +90,7 @@ describe("projectStorage", () => {
         "kb-dashboard-list-collapsed",
         "kb-dashboard-selected-tasks",
         "kb-dashboard-list-selected-task",
-        "kb-dashboard-list-sidebar-width",
-        "kb-dashboard-mailbox-sidebar-width",
-        "kb-dashboard-agents-sidebar-width",
-        "kb-dashboard-github-import-list-width",
+        "kb-dashboard-view-sidebar-width",
         "kb-dashboard-github-import-state",
         "kb-quick-entry-text",
         "kb-inline-create-text",
@@ -108,8 +105,6 @@ describe("projectStorage", () => {
         "kb-usage-modal-size",
         "kb-usage-provider-order",
         "kb-chat-active-session",
-        "kb-dashboard-working-branch-filter",
-        "kb-dashboard-base-branch-filter",
         "kb-capacity-risk-banner-dismissed",
         "kb-github-setup-warning-missing-since",
         "kb-files-line-numbers",
@@ -118,22 +113,24 @@ describe("projectStorage", () => {
         "fusion-plugin-dependency-graph:positions",
       ]),
     );
-    /*
-    FNXC:ProjectStorage 2026-07-14-19:20:
-    Keep PROJECT_STORAGE_KEYS length lockstep with the source array (todo hide-done, github import state, github setup warning dismissals).
-    */
-    expect(PROJECT_STORAGE_KEYS).toHaveLength(33);
+    expect(PROJECT_STORAGE_KEYS).toHaveLength(28);
   });
 
-  it("stores branch filter values as scoped strings per project", () => {
-    setScopedItem("kb-dashboard-working-branch-filter", "feature/a", "proj-1");
-    setScopedItem("kb-dashboard-base-branch-filter", "__fusion:no-branch__", "proj-1");
-    setScopedItem("kb-dashboard-working-branch-filter", "feature/b", "proj-2");
-
-    expect(getScopedItem("kb-dashboard-working-branch-filter", "proj-1")).toBe("feature/a");
-    expect(getScopedItem("kb-dashboard-base-branch-filter", "proj-1")).toBe("__fusion:no-branch__");
-    expect(getScopedItem("kb-dashboard-working-branch-filter", "proj-2")).toBe("feature/b");
-    expect(getScopedItem("kb-dashboard-working-branch-filter", "proj-3")).toBeNull();
+  it("routes every migrated sidebar through the one shared width preference", () => {
+    // The per-view rail widths collapsed into a single shared project-scoped preference.
+    for (const retired of [
+      "kb-dashboard-list-sidebar-width",
+      "kb-dashboard-mailbox-sidebar-width",
+      "kb-dashboard-agents-sidebar-width",
+      "kb-dashboard-github-import-list-width",
+      "fusion:file-browser-sidebar-width",
+      "fusion:settings-nav-width",
+    ]) {
+      expect(PROJECT_STORAGE_KEYS).not.toContain(retired);
+    }
+    expect(PROJECT_STORAGE_KEYS.filter((key) => key.includes("sidebar-width"))).toEqual([
+      "kb-dashboard-view-sidebar-width",
+    ]);
   });
 
   it("getScopedItem returns null when localStorage.getItem is unavailable", () => {

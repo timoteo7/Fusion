@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import fs from "fs";
 import path from "path";
 import { ExecutorStatusBar } from "../ExecutorStatusBar";
+import { readAppFile } from "../../test/cssFixture";
 
 const viewportModeMock = vi.hoisted(() => ({ value: "desktop" as "desktop" | "tablet" | "mobile" }));
 const mockFetchScripts = vi.hoisted(() => vi.fn());
@@ -17,6 +18,9 @@ useViewportMode: () => viewportModeMock.value,
 
 vi.mock("../../api", () => ({
   fetchScripts: (...args: unknown[]) => mockFetchScripts(...args),
+  normalizeScriptCatalog: (value: Record<string, string> | Array<{ name: string; command: string; description?: string }>) => Array.isArray(value)
+    ? value
+    : Object.entries(value).map(([name, command]) => ({ name, command })),
 }));
 
 // Mock the useExecutorStats hook
@@ -49,7 +53,6 @@ import type { AiSessionSummary, ExecutorStats } from "../../api";
 
 const mockUseExecutorStats = useExecutorStats as ReturnType<typeof vi.fn>;
 const executorStatusBarCss = fs.readFileSync(path.join(__dirname, "../ExecutorStatusBar.css"), "utf-8");
-const terminalLauncherCss = fs.readFileSync(path.join(__dirname, "../TerminalLauncher.css"), "utf-8");
 
 function getCssRuleBlock(css: string, selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -199,7 +202,21 @@ describe("ExecutorStatusBar", () => {
       expect(statusBar).toHaveTextContent("FN-010 · 5 todo");
       expect(statusBar).not.toHaveTextContent("Done");
       expect(statusBar.firstElementChild).not.toHaveClass("executor-status-bar__divider");
-      expect(statusBar.lastElementChild).toHaveClass("executor-status-bar__segment--engine-controls");
+      expect(statusBar.lastElementChild).toHaveClass("dashboard-window-visibility-toggle__placeholder");
+      expect(statusBar.lastElementChild?.previousElementSibling).toHaveClass("executor-status-bar__segment--engine-controls");
+    });
+
+    /*
+     * FN-484 : la feuille partagée du contrôle de visibilité ne peint plus de trait séparateur, donc aucune coquille
+     * bordée ne subsiste dans CE hôte non plus; sa géométrie partagée (`align-self: stretch`) reste inchangée, seule la
+     * règle hôte de DesktopActionBar dévie.
+     */
+    it("ne laisse aucun trait séparateur sur l'emplacement du contrôle de visibilité", () => {
+      const toggleCss = readAppFile("components/DashboardWindowVisibilityToggle.css").replace(/\/\*[\s\S]*?\*\//g, "");
+      const placeholderRule = toggleCss.match(/(?:^|\n)\.dashboard-window-visibility-toggle__placeholder\s*\{([^}]*)\}/)?.[1] ?? "";
+      expect(placeholderRule).toBeTruthy();
+      expect(placeholderRule).not.toMatch(/border/);
+      expect(placeholderRule).toMatch(/align-self:\s*stretch/);
     });
 
     it("shows overlap bottleneck summary with stable tie-break ordering", () => {
@@ -328,6 +345,19 @@ describe("ExecutorStatusBar", () => {
       await waitFor(() => expect(mockFetchScripts).toHaveBeenCalledWith(undefined));
     });
 
+    it("runs the enriched catalog command from the desktop footer", async () => {
+      const user = userEvent.setup();
+      const onRunScript = vi.fn();
+      mockFetchScripts.mockResolvedValueOnce([
+        { name: "Build production", command: "pnpm build", description: "Production bundle" },
+      ]);
+      render(<ExecutorStatusBar tasks={emptyTasks} onToggleTerminal={vi.fn()} onOpenScripts={vi.fn()} onRunScript={onRunScript} />);
+      await user.click(screen.getByTestId("scripts-btn"));
+      expect(await screen.findByText("Production bundle")).toBeInTheDocument();
+      await user.click(screen.getByTestId("quick-script-item-Build production"));
+      expect(onRunScript).toHaveBeenCalledWith("Build production", "pnpm build");
+    });
+
     it("keeps the footer terminal scripts chevron usable when scripts are empty", async () => {
       const user = userEvent.setup();
       mockFetchScripts.mockResolvedValueOnce({});
@@ -339,140 +369,24 @@ describe("ExecutorStatusBar", () => {
       expect(await screen.findByTestId("quick-scripts-empty")).toBeInTheDocument();
     });
 
-    it("renders the peer Quick Chat and Terminal footer launchers on tablet", () => {
-      viewportModeMock.value = "tablet";
+    /*
+    FNXC:ChatSurfaceUnification 2026-09-14-11:35:
+    FN-390 removes every legacy Quick Chat footer affordance and its empty shell across desktop, tablet, and mobile. Terminal remains independently available on non-mobile footers.
+    */
+    it.each(["desktop", "tablet", "mobile"] as const)("omits the retired Quick Chat footer launcher in %s mode", (mode) => {
+      viewportModeMock.value = mode;
 
-      render(
-        <ExecutorStatusBar
-          tasks={emptyTasks}
-          onToggleTerminal={vi.fn()}
-          onOpenScripts={vi.fn()}
-          onRunScript={vi.fn()}
-          quickChatButtonMode="footer"
-          onOpenQuickChat={vi.fn()}
-        />,
-      );
-
-      expect(screen.getByTestId("executor-quick-chat-launcher-segment")).toBeInTheDocument();
-      expect(screen.getByTestId("executor-terminal-launcher-segment")).toBeInTheDocument();
-      expect(screen.getByTestId("terminal-toggle-btn")).toBeInTheDocument();
-    });
-
-    it("renders the Quick Chat footer launcher beside Terminal when footer mode is enabled", async () => {
-      const user = userEvent.setup();
-      const onOpenQuickChat = vi.fn();
-
-      render(
-        <ExecutorStatusBar
-          tasks={emptyTasks}
-          onToggleTerminal={vi.fn()}
-          onOpenScripts={vi.fn()}
-          onRunScript={vi.fn()}
-          quickChatButtonMode="footer"
-          onOpenQuickChat={onOpenQuickChat}
-        />,
-      );
-
-      expect(screen.getByTestId("executor-quick-chat-launcher-segment")).toBeInTheDocument();
-      expect(screen.getByTestId("executor-terminal-launcher-segment")).toBeInTheDocument();
-      await user.click(screen.getByTestId("executor-quick-chat-launcher"));
-
-      expect(onOpenQuickChat).toHaveBeenCalledTimes(1);
-    });
-
-    it("keeps Quick Chat and Terminal footer launchers on the same font and color tokens", () => {
-      render(
-        <ExecutorStatusBar
-          tasks={emptyTasks}
-          onToggleTerminal={vi.fn()}
-          onOpenScripts={vi.fn()}
-          onRunScript={vi.fn()}
-          quickChatButtonMode="footer"
-          onOpenQuickChat={vi.fn()}
-        />,
-      );
-
-      const quickChatLauncher = screen.getByTestId("executor-quick-chat-launcher");
-      const terminalLauncher = screen.getByTestId("terminal-toggle-btn");
-      expect(quickChatLauncher).toHaveClass("executor-status-bar__footer-launcher");
-      expect(terminalLauncher).toHaveClass("terminal-launcher__main");
-      expect(screen.getByTestId("executor-quick-chat-launcher-segment")).toBeInTheDocument();
-      expect(screen.getByTestId("executor-terminal-launcher-segment")).toBeInTheDocument();
-
-      const quickChatRule = getCssRuleBlock(executorStatusBarCss, ".executor-status-bar__footer-launcher");
-      const quickChatHoverRule = getCssRuleBlock(executorStatusBarCss, ".executor-status-bar__footer-launcher:hover");
-      const quickChatFocusRule = getCssRuleBlock(executorStatusBarCss, ".executor-status-bar__footer-launcher:focus-visible");
-      const terminalFooterRule = getCssRuleBlock(terminalLauncherCss, ".terminal-launcher--footer");
-      const terminalControlRule = getCssRuleBlockByPattern(
-        terminalLauncherCss,
-        /\.terminal-launcher--footer \.terminal-launcher__main,\s*\.terminal-launcher--footer \.terminal-launcher__chevron\s*\{([^}]*)\}/,
-      );
-      const terminalLabelRule = getCssRuleBlock(terminalLauncherCss, ".terminal-launcher--footer .terminal-launcher__label");
-      const terminalHoverRule = getCssRuleBlockByPattern(
-        terminalLauncherCss,
-        /\.terminal-launcher--footer \.terminal-launcher__main:hover,\s*\.terminal-launcher--footer \.terminal-launcher__chevron:hover\s*\{([^}]*)\}/,
-      );
-      const terminalFocusRule = getCssRuleBlockByPattern(
-        terminalLauncherCss,
-        /\.terminal-launcher--footer \.terminal-launcher__main:focus-visible,\s*\.terminal-launcher--footer \.terminal-launcher__chevron:focus-visible\s*\{([^}]*)\}/,
-      );
-
-      expect(quickChatRule).toContain("color: inherit");
-      expect(quickChatRule).toContain("font-family: var(--font-primary)");
-      expect(quickChatRule).toContain("font-size: inherit");
-      expect(quickChatRule).toContain("font-weight: 500");
-      expect(quickChatRule).toContain("line-height: 1");
-      expect(quickChatHoverRule).toContain("color: var(--text)");
-      expect(quickChatFocusRule).toContain("box-shadow: var(--focus-ring-strong)");
-
-      expect(terminalFooterRule).toContain("color: inherit");
-      expect(terminalFooterRule).toContain("font-family: var(--font-primary)");
-      expect(terminalFooterRule).toContain("font-size: inherit");
-      expect(terminalFooterRule).toContain("font-weight: 500");
-      expect(terminalFooterRule).toContain("line-height: 1");
-      expect(terminalControlRule).toContain("color: inherit");
-      expect(terminalControlRule).toContain("font-family: inherit");
-      expect(terminalControlRule).toContain("font-size: inherit");
-      expect(terminalControlRule).toContain("font-weight: inherit");
-      expect(terminalControlRule).toContain("line-height: inherit");
-      expect(terminalLabelRule).toContain("font-size: inherit");
-      expect(terminalLabelRule).toContain("font-weight: inherit");
-      expect(terminalLabelRule).toContain("line-height: inherit");
-      expect(terminalHoverRule).toContain("color: var(--text)");
-      expect(terminalFocusRule).toContain("box-shadow: var(--focus-ring-strong)");
-
-      [quickChatRule, quickChatHoverRule, quickChatFocusRule, terminalFooterRule, terminalControlRule, terminalLabelRule, terminalHoverRule, terminalFocusRule].forEach(expectNoHardcodedColors);
-    });
-
-    it("omits the Quick Chat footer launcher for floating, off, and mobile modes", () => {
-      const { rerender } = render(
-        <ExecutorStatusBar
-          tasks={emptyTasks}
-          quickChatButtonMode="floating"
-          onOpenQuickChat={vi.fn()}
-        />,
-      );
+      render(<ExecutorStatusBar tasks={emptyTasks} onToggleTerminal={vi.fn()} onOpenScripts={vi.fn()} onRunScript={vi.fn()} />);
 
       expect(screen.queryByTestId("executor-quick-chat-launcher-segment")).toBeNull();
-
-      rerender(
-        <ExecutorStatusBar
-          tasks={emptyTasks}
-          quickChatButtonMode="off"
-          onOpenQuickChat={vi.fn()}
-        />,
-      );
-      expect(screen.queryByTestId("executor-quick-chat-launcher-segment")).toBeNull();
-
-      viewportModeMock.value = "mobile";
-      rerender(
-        <ExecutorStatusBar
-          tasks={emptyTasks}
-          quickChatButtonMode="footer"
-          onOpenQuickChat={vi.fn()}
-        />,
-      );
-      expect(screen.queryByTestId("executor-quick-chat-launcher-segment")).toBeNull();
+      expect(screen.queryByTestId("executor-quick-chat-launcher")).toBeNull();
+      expect(screen.queryByText("Quick Chat")).toBeNull();
+      expect(screen.queryByLabelText(/open quick chat|minimize all chats|restore all chats/i)).toBeNull();
+      if (mode === "mobile") {
+        expect(screen.queryByTestId("executor-terminal-launcher-segment")).toBeNull();
+      } else {
+        expect(screen.getByTestId("executor-terminal-launcher-segment")).toBeInTheDocument();
+      }
     });
 
     it("omits the terminal launcher from the footer on mobile", () => {
@@ -550,7 +464,13 @@ describe("ExecutorStatusBar", () => {
       expect(statusBar.contains(tooltip)).toBe(false);
       const tooltipRule = getCssRuleBlock(executorStatusBarCss, ".executor-status-bar__stat-tooltip");
       expect(tooltipRule).toContain("position: fixed");
-      expect(tooltipRule).toContain("z-index: var(--z-popover, 60)");
+      /*
+      FNXC:ExecutorFooter 2026-09-17-05:36:
+      FN-488 moved this tooltip off the static `--z-popover` layer: the pinned bottom terminal now claims the shared
+      10100+ window band in the very strip the footer tooltip is painted into, so a layer of 60 hid it. It follows the
+      live `--fusion-max-z` ceiling instead, exactly like the DesktopActionBar open menu and the usage popover.
+      */
+      expect(tooltipRule).toContain("z-index: calc(var(--fusion-max-z, 11001) + 2)");
       expectNoHardcodedColors(tooltipRule);
     });
 
@@ -743,6 +663,7 @@ describe("ExecutorStatusBar", () => {
       const statusBar = screen.getByLabelText("Executor status");
       expect(statusBar).toHaveTextContent("Loading...");
       expect(statusBar).toHaveClass("executor-status-bar--loading");
+      expect(statusBar.lastElementChild).toHaveClass("dashboard-window-visibility-toggle__placeholder");
     });
 
     it("renders the populated idle footer instead of loading when loaded data has zero running tasks", () => {
@@ -876,6 +797,7 @@ describe("ExecutorStatusBar", () => {
       const statusBar = screen.getByRole("status");
       expect(statusBar).toHaveTextContent("Stats unavailable");
       expect(statusBar).toHaveClass("executor-status-bar--error");
+      expect(statusBar.lastElementChild).toHaveClass("dashboard-window-visibility-toggle__placeholder");
     });
 
     it.each(["desktop", "mobile"] as const)("shows connecting state for sustained suspension errors on %s", (viewportMode) => {
@@ -893,6 +815,11 @@ describe("ExecutorStatusBar", () => {
       expect(statusBar).toHaveTextContent("Connecting…");
       expect(statusBar).not.toHaveTextContent("Failed to fetch");
       expect(statusBar).toHaveClass("executor-status-bar--connecting");
+      if (viewportMode === "mobile") {
+        expect(statusBar.querySelector(".dashboard-window-visibility-toggle__placeholder")).toBeNull();
+      } else {
+        expect(statusBar.lastElementChild).toHaveClass("dashboard-window-visibility-toggle__placeholder");
+      }
     });
 
     it("does not show stat segments when error is present", () => {

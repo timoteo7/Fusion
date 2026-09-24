@@ -8,14 +8,14 @@
  * Drizzle. The actual tsvector/GIN full-text search implementation is delivered
  * by the `fts-replacement` feature (separate milestone); this module provides
  * the LIKE-based fallback query structure and the shared predicate builders
- * (soft-delete filtering, archived filtering, token sanitization) that
+ * (soft-delete filtering, historical-sentinel filtering, token sanitization) that
  * fts-replacement builds on top of.
  *
  * The search query structure preserves these invariants:
  *   - Soft-delete visibility: live search filters `deleted_at IS NULL`
  *     (VAL-DATA-005). Soft-deleted tasks never appear in search results.
- *   - Archived filtering: when `includeArchived` is false, archived tasks
- *     (`column = 'archived'`) are excluded.
+ *   - Historical compatibility: when `includeArchived` is false, rows carrying
+ *     the `archived` persistence sentinel are excluded.
  *   - Token sanitization: FTS5 operators are stripped so both code paths see
  *     the same token set. Empty/whitespace queries fall back to listTasks.
  *
@@ -62,25 +62,19 @@ export function sanitizeSearchTokens(query: string): string[] {
  * FNXC:TaskStoreSearch 2026-06-24-10:40:
  * Build the "live task" search predicate: `deleted_at IS NULL` (soft-delete
  * visibility, VAL-DATA-005) AND, when `includeArchived` is false,
- * `column != 'archived'`. This is the shared predicate every search path
- * applies so soft-deleted tasks never appear in results and archived tasks
- * can be optionally excluded.
+ * `column != 'archived'`. This is the shared predicate every search path applies so
+ * soft-deleted and historical-sentinel tasks never appear in ordinary results.
  *
- * @param includeArchived Whether to include archived tasks in the results.
+ * @param includeArchived Whether migration/forensic results may include historical snapshots.
  * @returns The composed SQL predicate.
  */
 export function liveSearchPredicate(
   includeArchived: boolean,
   projectId?: string,
   /*
-  FNXC:WorkflowResolvedColumns 2026-07-31-23:59:
-  The board's own archive lanes, resolved by the caller. Omitted → the `archived` literal, which is
-  the documented degraded answer and what every unwired caller keeps.
-
-  This is a LANE question, not the archive STATE marker: "exclude cards the board considers archived
-  from live search". The parity test's triage classifies all eight Drizzle sites; the two STATE ones
-  (`cleanupArchivedTasksImpl`, `listSoftDeletedColumnDriftCandidates`) are marked at their sites and
-  must NOT be resolved — this one must.
+  FNXC:TaskArchiveRemoval 2026-09-04-18:25 DELIBERATE-LITERAL:
+  Search excludes historical persistence sentinels, not a workflow archive role. The optional set
+  remains part of the low-level migration/forensic compatibility surface; omission means `archived`.
   */
   archivedColumns?: ReadonlySet<string>,
 ): SQL {
@@ -91,8 +85,7 @@ export function liveSearchPredicate(
   // scopedStore.searchTasks(): without it a task in project B is rejected as a
   // duplicate of a same-titled task in project A on the shared embedded-PG table.
   const projectScope = projectId ? eq(schema.project.tasks.projectId, projectId) : undefined;
-  /* One `ne` per archive lane: the resolved set is legacy-seeded, so an unconverted board still
-     produces exactly the single `ne(column, "archived")` this replaces. */
+  /* One exclusion per historical sentinel; ordinary production callers pass the fixed singleton. */
   const archivedExclusions = archivedColumns && archivedColumns.size > 0
     ? [...archivedColumns].map((lane) => ne(schema.project.tasks.column, lane))
     : [ne(schema.project.tasks.column, "archived")];
@@ -123,21 +116,28 @@ export function liveSearchPredicate(
  * @param tokens The sanitized search tokens.
  * @returns The composed LIKE predicate, or `undefined` if tokens is empty.
  */
+const SEARCHABLE_COLUMN_REFS: SQL[] = [
+  sql`${schema.project.tasks.id}`,
+  sql`${schema.project.tasks.title}`,
+  sql`${schema.project.tasks.description}`,
+  sql`${schema.project.tasks.comments}::text`,
+];
+
+function buildLiteralSubstringPredicate(query: string): SQL | undefined {
+  const literal = query.trim();
+  if (!literal) return undefined;
+  const pattern = `%${literal.replace(/[\\%_]/g, "\\$&")}%`;
+  return or(...SEARCHABLE_COLUMN_REFS.map(
+    (column) => sql`${column} ILIKE ${pattern} ESCAPE '\\'`,
+  )) as SQL;
+}
+
 export function buildLikeSearchPredicate(tokens: readonly string[]): SQL | undefined {
   if (tokens.length === 0) return undefined;
 
-  // The comments column is jsonb in PostgreSQL; cast to text for ILIKE.
-  // The other columns (id, title, description) are already text.
-  const columnRefs: SQL[] = [
-    sql`${schema.project.tasks.id}`,
-    sql`${schema.project.tasks.title}`,
-    sql`${schema.project.tasks.description}`,
-    sql`${schema.project.tasks.comments}::text`,
-  ];
-
   const perTokenClauses: SQL[] = tokens.map((token) => {
     const pattern = `%${token.replace(/[\\%_]/g, "\\$&")}%`;
-    const columnLikes = columnRefs.map(
+    const columnLikes = SEARCHABLE_COLUMN_REFS.map(
       (col) => sql`${col} ILIKE ${pattern} ESCAPE '\\'`,
     );
     return or(...columnLikes) as SQL;
@@ -153,8 +153,8 @@ export function buildLikeSearchPredicate(tokens: readonly string[]): SQL | undef
  * fts-replacement feature will add a tsvector-based variant that produces the
  * same row membership but ranked by relevance.
  *
- * Soft-deleted tasks are always excluded (VAL-DATA-005). Archived tasks are
- * excluded unless `includeArchived` is true.
+ * Soft-deleted tasks are always excluded (VAL-DATA-005). Historical-sentinel rows
+ * are excluded unless `includeArchived` is explicitly true.
  *
  * @param db The Drizzle instance.
  * @param query The raw user query.
@@ -170,7 +170,7 @@ export async function searchTasksLike(
   const tokens = sanitizeSearchTokens(query);
   if (tokens.length === 0) return [];
 
-  const includeArchived = options?.includeArchived ?? true;
+  const includeArchived = options?.includeArchived ?? false;
   const textPredicate = buildLikeSearchPredicate(tokens);
   if (!textPredicate) return [];
 
@@ -201,7 +201,7 @@ export async function countSearchTasksLike(
   const tokens = sanitizeSearchTokens(query);
   if (tokens.length === 0) return 0;
 
-  const includeArchived = options?.includeArchived ?? true;
+  const includeArchived = options?.includeArchived ?? false;
   const textPredicate = buildLikeSearchPredicate(tokens);
   if (!textPredicate) return 0;
 
@@ -216,7 +216,7 @@ export async function countSearchTasksLike(
 /**
  * FNXC:TaskStoreSearch 2026-06-24-11:00:
  * Archive search query structure. The archive database (`archive.archived_tasks`)
- * stores append-only snapshots of archived tasks. This helper provides the
+ * stores append-only historical task snapshots. This helper provides the
  * LIKE-based search predicate over the archive's denormalized text columns
  * (`title`, `description`). The fts-replacement feature will add a tsvector
  * variant for archive search parity (VAL-SEARCH-005).
@@ -224,7 +224,7 @@ export async function countSearchTasksLike(
  * @param db The Drizzle instance.
  * @param query The raw user query.
  * @param limit The maximum number of results.
- * @returns The matching archived-task entries (parsed from task_json).
+ * @returns The matching historical snapshot entries (parsed from task_json).
  */
 export async function searchArchivedTasksLike(
   db: AsyncDataLayer["db"] | DbTransaction,
@@ -327,6 +327,24 @@ export function buildTsqueryFragment(query: string): SQL | undefined {
 }
 
 /**
+ * FNXC:TaskStoreSearch 2026-09-11-22:33:
+ * Task membership always includes a case-insensitive literal substring match across ID, title, description, and comments. Lexical queries additionally retain GIN-backed OR/prefix recall, while punctuation-bearing queries such as `.txt`, `%`, and `_` stay literal so tokenization cannot admit rows that omit characters the user typed; LIKE wildcards are escaped before binding.
+ */
+export function buildTaskSearchPredicate(query: string): SQL | undefined {
+  const literalPredicate = buildLiteralSubstringPredicate(query);
+  if (!literalPredicate) return undefined;
+
+  // Punctuation carries user intent (task IDs, paths, extensions). Do not let
+  // tsvector tokenization erase it and broaden membership.
+  if (/[^\p{L}\p{N}\s]/u.test(query.trim())) return literalPredicate;
+
+  const tsquery = buildTsqueryFragment(query);
+  return tsquery
+    ? or(sql`${schema.project.tasks.searchVector} @@ ${tsquery}`, literalPredicate) as SQL
+    : literalPredicate;
+}
+
+/**
  * FNXC:TaskStoreSearch 2026-06-24-13:10:
  * Search tasks via the tsvector/GIN full-text index. This is the PostgreSQL
  * replacement for the SQLite FTS5 search path (VAL-SEARCH-001 search parity,
@@ -334,8 +352,8 @@ export function buildTsqueryFragment(query: string): SQL | undefined {
  * predicate uses the GIN index (idxTasksSearchVector) for fast ranked lookup.
  *
  * Soft-deleted tasks are always excluded (VAL-DATA-005) because the live-search
- * predicate filters `deleted_at IS NULL`. Archived tasks (`column = 'archived'`)
- * are excluded unless `includeArchived` is true.
+ * predicate filters `deleted_at IS NULL`. Historical-sentinel rows (`column = 'archived'`)
+ * are excluded unless `includeArchived` is explicitly true.
  *
  * Results are ordered by `ts_rank` (relevance) descending, then by `created_at`
  * ascending for a stable tiebreak. This mirrors the FTS5 `ORDER BY rank` path.
@@ -353,30 +371,24 @@ export async function searchTasksTsvector(
   query: string,
   options?: { limit?: number; offset?: number; includeArchived?: boolean; projectId?: string; archivedColumns?: ReadonlySet<string> },
 ): Promise<Record<string, unknown>[]> {
-  const tokens = sanitizeSearchTokens(query);
-  if (tokens.length === 0) return [];
+  const searchPredicate = buildTaskSearchPredicate(query);
+  if (!searchPredicate) return [];
 
-  // Re-join sanitized tokens for plainto_tsquery. Sanitization strips FTS5
-  // operators so the tsquery sees clean tokens, matching the membership
-  // semantics of the LIKE fallback (both paths see the same token set).
-  const cleanQuery = tokens.join(" ");
-  const tsquery = buildTsqueryFragment(cleanQuery);
-  if (!tsquery) return [];
-
-  const includeArchived = options?.includeArchived ?? true;
+  const includeArchived = options?.includeArchived ?? false;
   const conditions = [
-    sql`${schema.project.tasks.searchVector} @@ ${tsquery}`,
+    searchPredicate,
     liveSearchPredicate(includeArchived, options?.projectId, options?.archivedColumns),
   ];
+  const tsquery = /[^\p{L}\p{N}\s]/u.test(query.trim()) ? undefined : buildTsqueryFragment(query);
+  const rankOrder = tsquery
+    ? sql`ts_rank(${schema.project.tasks.searchVector}, ${tsquery}) DESC`
+    : sql`length(${schema.project.tasks.id}) * 0`;
 
   const baseQuery = db
     .select()
     .from(schema.project.tasks)
     .where(and(...conditions))
-    .orderBy(
-      sql`ts_rank(${schema.project.tasks.searchVector}, ${tsquery}) DESC`,
-      asc(schema.project.tasks.createdAt),
-    );
+    .orderBy(rankOrder, asc(schema.project.tasks.createdAt));
 
   const rows = options?.limit && options.limit > 0
     ? await baseQuery.limit(options.limit).offset(options.offset ?? 0)
@@ -394,16 +406,12 @@ export async function countSearchTasksTsvector(
   query: string,
   options?: { includeArchived?: boolean; projectId?: string; archivedColumns?: ReadonlySet<string> },
 ): Promise<number> {
-  const tokens = sanitizeSearchTokens(query);
-  if (tokens.length === 0) return 0;
+  const searchPredicate = buildTaskSearchPredicate(query);
+  if (!searchPredicate) return 0;
 
-  const cleanQuery = tokens.join(" ");
-  const tsquery = buildTsqueryFragment(cleanQuery);
-  if (!tsquery) return 0;
-
-  const includeArchived = options?.includeArchived ?? true;
+  const includeArchived = options?.includeArchived ?? false;
   const conditions = [
-    sql`${schema.project.tasks.searchVector} @@ ${tsquery}`,
+    searchPredicate,
     liveSearchPredicate(includeArchived, options?.projectId, options?.archivedColumns),
   ];
   const rows = await db

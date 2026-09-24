@@ -60,7 +60,6 @@ vi.mock("../Column", () => ({
     onToggleAutoMerge,
     planAutoApproveEnabled,
     onTogglePlanAutoApprove,
-    onArchiveAllDone,
     favoriteProviders,
     favoriteModels,
     onToggleFavorite,
@@ -77,7 +76,7 @@ vi.mock("../Column", () => ({
     onOpenDetail,
     onMoveTask,
     onDeleteTask,
-    onReviseTask,
+    onRestoreRevertTask,
   }: {
     column: string;
     tasks: Task[];
@@ -89,7 +88,6 @@ vi.mock("../Column", () => ({
     onToggleAutoMerge?: () => void;
     planAutoApproveEnabled?: boolean;
     onTogglePlanAutoApprove?: () => void;
-    onArchiveAllDone?: unknown;
     favoriteProviders?: string[];
     favoriteModels?: string[];
     onToggleFavorite?: (provider: string) => void;
@@ -106,11 +104,11 @@ vi.mock("../Column", () => ({
     onOpenDetail?: (task: Task) => void;
     onMoveTask?: (id: string, column: string) => Promise<Task>;
     onDeleteTask?: unknown;
-    onReviseTask?: (task: Task) => void;
+    onRestoreRevertTask?: (id: string, body?: { mode?: string }) => Promise<unknown>;
   }) => {
     columnRenderCounts[column] = (columnRenderCounts[column] ?? 0) + 1;
     return (
-      <div data-testid={`column-${column}`} data-tasks={JSON.stringify(tasks)} data-workflow-badges={JSON.stringify(Object.fromEntries(taskWorkflowBadges ?? new Map()))} data-collapsed={collapsed ? "true" : "false"} data-has-quick-create={onQuickCreate ? "yes" : "no"} data-has-new-task={onNewTask ? "yes" : "no"} data-has-auto-merge-toggle={onToggleAutoMerge ? "yes" : "no"} data-has-plan-auto-approve-toggle={onTogglePlanAutoApprove ? "yes" : "no"} data-plan-auto-approve-enabled={planAutoApproveEnabled ? "true" : "false"} data-has-archive-all={onArchiveAllDone ? "yes" : "no"} data-favorite-providers={JSON.stringify(favoriteProviders ?? [])} data-favorite-models={JSON.stringify(favoriteModels ?? [])} data-has-toggle-favorite={onToggleFavorite ? "yes" : "no"} data-has-toggle-model-favorite={onToggleModelFavorite ? "yes" : "no"} data-is-search-active={isSearchActive ? "true" : "false"} data-done-sort-mode={doneSortMode ?? ""} data-has-done-sort-handler={onDoneSortModeChange ? "yes" : "no"} data-workflow-id={workflowId ?? ""} data-workflow-options={JSON.stringify((workflowOptions ?? []).map((workflow) => workflow.id))} data-default-workflow-id={defaultWorkflowId ?? ""} data-column-display-name={columnDisplayName ?? ""} data-has-can-drop={canDropTask ? "yes" : "no"} data-has-planning={onPlanningMode ? "yes" : "no"}>
+      <div data-testid={`column-${column}`} data-tasks={JSON.stringify(tasks)} data-workflow-badges={JSON.stringify(Object.fromEntries(taskWorkflowBadges ?? new Map()))} data-collapsed={collapsed ? "true" : "false"} data-has-quick-create={onQuickCreate ? "yes" : "no"} data-has-new-task={onNewTask ? "yes" : "no"} data-has-auto-merge-toggle={onToggleAutoMerge ? "yes" : "no"} data-has-plan-auto-approve-toggle={onTogglePlanAutoApprove ? "yes" : "no"} data-plan-auto-approve-enabled={planAutoApproveEnabled ? "true" : "false"} data-favorite-providers={JSON.stringify(favoriteProviders ?? [])} data-favorite-models={JSON.stringify(favoriteModels ?? [])} data-has-toggle-favorite={onToggleFavorite ? "yes" : "no"} data-has-toggle-model-favorite={onToggleModelFavorite ? "yes" : "no"} data-is-search-active={isSearchActive ? "true" : "false"} data-done-sort-mode={doneSortMode ?? ""} data-has-done-sort-handler={onDoneSortModeChange ? "yes" : "no"} data-workflow-id={workflowId ?? ""} data-workflow-options={JSON.stringify((workflowOptions ?? []).map((workflow) => workflow.id))} data-default-workflow-id={defaultWorkflowId ?? ""} data-column-display-name={columnDisplayName ?? ""} data-has-can-drop={canDropTask ? "yes" : "no"} data-has-planning={onPlanningMode ? "yes" : "no"}>
         {onQuickCreate ? (
           <button type="button" data-testid={`mock-quick-create-${column}`} onClick={() => void (onQuickCreate as (input: { description: string; column?: string; workflowId?: string }) => Promise<unknown>)({ description: `Create from ${column}`, column, workflowId: "wf-custom" })}>
             quick-create-{column}
@@ -127,7 +125,7 @@ vi.mock("../Column", () => ({
             <span data-testid={`board-task-card-title-${task.id}`}>{task.title ?? task.description ?? task.id}</span>
             <button type="button" data-testid={`board-task-card-control-${task.id}`} onClick={(event) => event.stopPropagation()}>card control</button>
             {onDeleteTask ? <button type="button">Delete</button> : null}
-            {onReviseTask ? <button type="button" onClick={() => onReviseTask(task)}>Revise</button> : null}
+            {onRestoreRevertTask ? <button type="button" onClick={() => void onRestoreRevertTask(task.id, { mode: "auto" })}>Restore revert</button> : null}
             <span data-has-move-task={String(Boolean(onMoveTask))} />
           </article>
         ))}
@@ -139,17 +137,17 @@ vi.mock("../Column", () => ({
 }));
 
 /*
-FNXC:TaskRevert 2026-08-01-20:06:
-The aggregate resolution section renders TaskCard directly rather than through the
-Column mock. Keep this focused Board suite isolated from TaskCard's badge-fetching
-hooks while exposing the card traits and Delete/Revise callbacks it must receive.
+FNXC:TaskRevert 2026-09-15-10:00:
+FN-416: the reverted card no longer renders Delete/Revise buttons; its resolution action is the
+context-menu restore. This mock exposes the card traits and the restore callback the Board must forward,
+while keeping this focused suite isolated from TaskCard's badge-fetching hooks.
 */
 vi.mock("../TaskCard", () => ({
-  TaskCard: ({ task, taskColumnFlags, onDeleteTask, onReviseTask }: { task: Task; taskColumnFlags?: { complete?: boolean }; onDeleteTask?: unknown; onReviseTask?: (task: Task) => void }) => (
+  TaskCard: ({ task, taskColumnFlags, onDeleteTask, onRestoreRevertTask }: { task: Task; taskColumnFlags?: { complete?: boolean }; onDeleteTask?: unknown; onRestoreRevertTask?: (id: string, body?: { mode?: string }) => Promise<unknown> }) => (
     <article data-testid={`board-resolution-card-${task.id}`} data-complete={String(taskColumnFlags?.complete === true)}>
       <span>{task.title}</span>
       {onDeleteTask ? <button type="button">Delete</button> : null}
-      {onReviseTask ? <button type="button" onClick={() => onReviseTask(task)}>Revise</button> : null}
+      {onRestoreRevertTask ? <button type="button" onClick={() => void onRestoreRevertTask(task.id, { mode: "auto" })}>Restore revert</button> : null}
     </article>
   ),
 }));
@@ -177,7 +175,6 @@ const DEFAULT_WORKFLOW = {
     { id: "in-progress", name: "In progress", flags: { countsTowardWip: true } },
     { id: "in-review", name: "In review", flags: { mergeBlocker: true } },
     { id: "done", name: "Done", flags: { complete: true } },
-    { id: "archived", name: "Archived", flags: { archived: true } },
   ],
 };
 
@@ -234,13 +231,10 @@ function createBoardProps(overrides = {}) {
     onQuickCreate: noopAsync,
     onNewTask: noop,
     autoMerge: true,
-    onToggleAutoMerge: noop,
     planAutoApproveEnabled: false,
     onTogglePlanAutoApprove: noop,
     globalPaused: false,
     onUpdateTask: undefined,
-    onArchiveTask: undefined,
-    onUnarchiveTask: undefined,
     ...overrides,
   };
 }
@@ -337,7 +331,6 @@ const DEFAULT_LANE_PAYLOAD = {
         { id: "in-progress", name: "In progress", flags: { countsTowardWip: true } },
         { id: "in-review", name: "In review", flags: { mergeBlocker: true } },
         { id: "done", name: "Done", flags: { complete: true } },
-        { id: "archived", name: "Archived", flags: { archived: true } },
       ],
     },
   ],
@@ -651,41 +644,6 @@ describe("Board", () => {
       expect(todoTasks).toHaveLength(0);
     });
 
-    /*
-    FNXC:WorkflowBoard 2026-07-29-00:00 (U12):
-    UN-SKIPPED, with the fix rather than with a new expected number.
-
-    This test measured the LEGACY single-lane board — whose Column props were all
-    stable — so it passed for years without covering the board operators actually use.
-    Deleting the legacy board (U12 part 1) repointed it at the real one, where the
-    invariant was FALSE: toggling the archived column re-rendered every other column
-    (todo rendered 3x, not 2x). I skipped it then rather than weaken it.
-
-    The cause is now measured, not guessed: instrumenting `React.memo`'s comparator to
-    print which props change identity on the toggle named exactly one — `canDropTask`,
-    an arrow allocated inline in Board's render. With it bound through a `useMemo`
-    cache, the only column that re-renders on a collapse is `archived` itself.
-
-    So this now guards a real invariant on the real board: a Board state change must
-    not re-render unrelated columns (and, beneath them, every card).
-    */
-    it("keeps unaffected columns stable when archived collapse toggles", () => {
-      const tasks: Task[] = [
-        createTask({ id: "FN-001", description: "Todo task", column: "todo" }),
-        createTask({ id: "FN-002", description: "Archived task", column: "archived" }),
-      ];
-
-      renderBoard({ tasks });
-
-      const initialTodoRenders = columnRenderCounts.todo;
-      const initialArchivedRenders = columnRenderCounts.archived;
-
-      fireEvent.click(screen.getByRole("button", { name: "toggle-archived" }));
-
-      expect(columnRenderCounts.archived).toBeGreaterThan(initialArchivedRenders);
-      expect(columnRenderCounts.todo).toBe(initialTodoRenders);
-    });
-
     it("only re-renders the affected column when a task updates", () => {
       const tasks: Task[] = [
         createTask({ id: "FN-001", description: "Todo task", column: "todo", title: "Original" }),
@@ -778,57 +736,45 @@ describe("Board", () => {
         expect(doneTasks.map((t: Task) => t.id)).toEqual(["FN-012", "FN-011", "FN-010"]);
       });
 
-      it("threads Done sort state through the legacy board without altering other columns", () => {
+      /*
+      FNXC:TaskQueueOrder 2026-09-17-12:07:
+      FN-509 deleted the per-lane sort mode with the column "…" menu, so the three cases that
+      threaded a Done sort choice, kept independent per-lane modes, and passed that state to an empty
+      Done column no longer have a subject. They are replaced by the new truth: every lane orders
+      itself, no lane receives a mode or a change handler, and a legacy priority value does nothing.
+      */
+      it("orders every lane itself, with no sort mode or handler threaded to any column", () => {
         const tasks: Task[] = [
           createTask({ id: "FN-003", description: "Old done", column: "done", columnMovedAt: "2024-01-01T09:00:00.000Z" }),
           createTask({ id: "FN-001", description: "New done", column: "done", columnMovedAt: "2024-01-01T11:00:00.000Z" }),
           createTask({ id: "FN-002", description: "Tie low id", column: "done", columnMovedAt: "2024-01-01T10:00:00.000Z" }),
           createTask({ id: "FN-004", description: "Tie high id", column: "done", columnMovedAt: "2024-01-01T10:00:00.000Z" }),
-          createTask({ id: "FN-050", description: "Todo fifty", column: "todo", priority: "normal", createdAt: "2024-01-01T10:00:00.000Z" }),
-          createTask({ id: "FN-010", description: "Todo ten", column: "todo", priority: "normal", createdAt: "2024-01-01T10:00:00.000Z" }),
+          createTask({ id: "FN-050", description: "Todo fifty", column: "todo", priority: "urgent", createdAt: "2024-01-01T10:00:00.000Z" }),
+          createTask({ id: "FN-010", description: "Todo ten", column: "todo", priority: "low", createdAt: "2024-01-01T10:00:00.000Z" }),
         ];
 
         renderBoard({ tasks });
 
         const readIds = (column: string) => (JSON.parse(screen.getByTestId(`column-${column}`).getAttribute("data-tasks") || "[]") as Task[]).map((task) => task.id);
-        expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "completion-date-desc");
-        expect(screen.getByTestId("column-done")).toHaveAttribute("data-has-done-sort-handler", "yes");
+
+        // Complete keeps most-recent ARRIVAL first with the deterministic id tiebreak.
         expect(readIds("done")).toEqual(["FN-001", "FN-002", "FN-004", "FN-003"]);
+        // The waiting lane is arrival-ordered; the legacy urgent/low values change nothing.
         expect(readIds("todo")).toEqual(["FN-010", "FN-050"]);
-        expect(screen.getByTestId("column-todo")).toHaveAttribute("data-has-done-sort-handler", "yes");
 
-        fireEvent.click(within(screen.getByTestId("column-done")).getByRole("button", { name: "sort-done-by-id" }));
-
-        expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "task-id-desc");
-        expect(readIds("done")).toEqual(["FN-004", "FN-003", "FN-002", "FN-001"]);
-        expect(readIds("todo")).toEqual(["FN-010", "FN-050"]);
+        // No lane is handed an ordering mode or a way to change one.
+        for (const column of ["done", "todo"]) {
+          expect(screen.getByTestId(`column-${column}`)).toHaveAttribute("data-done-sort-mode", "");
+          expect(screen.getByTestId(`column-${column}`)).toHaveAttribute("data-has-done-sort-handler", "no");
+        }
       });
 
-      it("keeps independent sort modes for each Board lane", () => {
-        const tasks: Task[] = [
-          createTask({ id: "FN-10", description: "Older todo", column: "todo", columnMovedAt: "2024-01-01T09:00:00.000Z" }),
-          createTask({ id: "FN-2", description: "Newer todo", column: "todo", columnMovedAt: "2024-01-01T11:00:00.000Z" }),
-          createTask({ id: "FN-20", description: "Older done", column: "done", columnMovedAt: "2024-01-01T09:00:00.000Z" }),
-          createTask({ id: "FN-3", description: "Newer done", column: "done", columnMovedAt: "2024-01-01T11:00:00.000Z" }),
-        ];
-        renderBoard({ tasks });
-        const readIds = (column: string) => (JSON.parse(screen.getByTestId(`column-${column}`).getAttribute("data-tasks") || "[]") as Task[]).map((task) => task.id);
-
-        expect(readIds("todo")).toEqual(["FN-2", "FN-10"]);
-        expect(readIds("done")).toEqual(["FN-3", "FN-20"]);
-        fireEvent.click(within(screen.getByTestId("column-todo")).getByRole("button", { name: "sort-todo-by-id" }));
-        expect(readIds("todo")).toEqual(["FN-10", "FN-2"]);
-        expect(readIds("done")).toEqual(["FN-3", "FN-20"]);
-        fireEvent.click(within(screen.getByTestId("column-done")).getByRole("button", { name: "sort-done-by-id" }));
-        expect(readIds("done")).toEqual(["FN-20", "FN-3"]);
-      });
-
-      it("passes Done sort state to an empty legacy Done column", () => {
+      it("threads no sort state to an empty Complete column either", () => {
         renderBoard({ tasks: [] });
 
         expect(screen.getByTestId("column-done")).toHaveAttribute("data-tasks", "[]");
-        expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "completion-date-desc");
-        expect(screen.getByTestId("column-done")).toHaveAttribute("data-has-done-sort-handler", "yes");
+        expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "");
+        expect(screen.getByTestId("column-done")).toHaveAttribute("data-has-done-sort-handler", "no");
       });
 
       it("orders todo by arrival timestamp before task ID", () => {
@@ -867,10 +813,11 @@ describe("Board", () => {
 
         const todoTasks = JSON.parse(screen.getByTestId("column-todo").getAttribute("data-tasks") || "[]") as Task[];
         expect(todoTasks).toHaveLength(4);
-        expect(todoTasks.map((t: Task) => t.id)).toEqual(["FN-001", "FN-002", "FN-003", "FN-004"]);
+        // Arrival order (07:00, 08:00, 09:00, 10:00); the urgent/high/low values do nothing.
+        expect(todoTasks.map((t: Task) => t.id)).toEqual(["FN-002", "FN-003", "FN-004", "FN-001"]);
       });
 
-      it("orders same-column arrivals newest first", () => {
+      it("orders same-column arrivals oldest first, so the longest wait leads", () => {
         const tasks: Task[] = [
           createTask({ id: "FN-020", description: "Newest", column: "todo", priority: "high", createdAt: "2024-01-01T12:00:00.000Z" }),
           createTask({ id: "FN-021", description: "Oldest", column: "todo", priority: "high", createdAt: "2024-01-01T09:00:00.000Z" }),
@@ -880,7 +827,8 @@ describe("Board", () => {
         renderBoard({ tasks });
 
         const todoTasks = JSON.parse(screen.getByTestId("column-todo").getAttribute("data-tasks") || "[]") as Task[];
-        expect(todoTasks.map((t: Task) => t.id)).toEqual(["FN-020", "FN-021", "FN-022"]);
+        // 09:00, then 10:00, then 12:00 — the shared "high" value changes nothing.
+        expect(todoTasks.map((t: Task) => t.id)).toEqual(["FN-021", "FN-022", "FN-020"]);
       });
 
       it("uses task ID as deterministic tie-breaker when todo createdAt matches", () => {
@@ -947,7 +895,7 @@ describe("Board", () => {
     });
 
     describe("column default ordering merging pinning", () => {
-      it("uses arrival order for merging and non-merging in-review tasks", () => {
+      it("pins an active merge above a waiting review card in the review lane", () => {
         const tasks: Task[] = [
           createTask({
             id: "FN-010",
@@ -966,10 +914,11 @@ describe("Board", () => {
         renderBoard({ tasks });
 
         const inReviewTasks = JSON.parse(screen.getByTestId("column-in-review").getAttribute("data-tasks") || "[]") as Task[];
-        expect(inReviewTasks.map((task) => task.id)).toEqual(["FN-011", "FN-010"]);
+        // FN-010 is merging, so it is genuinely ACTIVE and leads the waiting card behind it.
+        expect(inReviewTasks.map((task) => task.id)).toEqual(["FN-010", "FN-011"]);
       });
 
-      it("uses arrival order for merging-pr and review-ready tasks", () => {
+      it("pins an active PR merge above a waiting review card", () => {
         const tasks: Task[] = [
           createTask({
             id: "FN-020",
@@ -988,10 +937,10 @@ describe("Board", () => {
         renderBoard({ tasks });
 
         const inReviewTasks = JSON.parse(screen.getByTestId("column-in-review").getAttribute("data-tasks") || "[]") as Task[];
-        expect(inReviewTasks.map((task) => task.id)).toEqual(["FN-021", "FN-020"]);
+        expect(inReviewTasks.map((task) => task.id)).toEqual(["FN-020", "FN-021"]);
       });
 
-      it("uses arrival order for merging-fix and review-ready tasks", () => {
+      it("pins an active merge-fix above a waiting review card", () => {
         const tasks: Task[] = [
           createTask({
             id: "FN-060",
@@ -1010,7 +959,7 @@ describe("Board", () => {
         renderBoard({ tasks });
 
         const inReviewTasks = JSON.parse(screen.getByTestId("column-in-review").getAttribute("data-tasks") || "[]") as Task[];
-        expect(inReviewTasks.map((task) => task.id)).toEqual(["FN-061", "FN-060"]);
+        expect(inReviewTasks.map((task) => task.id)).toEqual(["FN-060", "FN-061"]);
       });
 
       it("sorts same-arrival tasks by numeric task ID", () => {
@@ -1380,8 +1329,8 @@ describe("Board", () => {
     it("passes plan auto-approval toggle only to the legacy Triage column", () => {
       renderBoard({ planAutoApproveEnabled: true });
 
-      expect(screen.getByTestId("column-triage").getAttribute("data-has-plan-auto-approve-toggle")).toBe("yes");
-      expect(screen.getByTestId("column-triage").getAttribute("data-plan-auto-approve-enabled")).toBe("true");
+      expect(screen.getByTestId("column-triage").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no" /* FN-509: the column-menu shortcut is gone from every lane */);
+      expect(screen.getByTestId("column-triage").getAttribute("data-plan-auto-approve-enabled")).toBe("false");
       for (const col of COLUMNS.filter((column) => column !== "triage")) {
         expect(screen.getByTestId(`column-${col}`).getAttribute("data-has-plan-auto-approve-toggle")).toBe("no");
       }
@@ -1405,7 +1354,7 @@ describe("Board", () => {
       renderBoard({ tasks: [mkTask({ id: "FN-1", column: "idea" })], planAutoApproveEnabled: true });
 
       await waitFor(() => expect(screen.getByTestId("column-idea")).toBeDefined());
-      expect(screen.getByTestId("column-idea").getAttribute("data-has-plan-auto-approve-toggle")).toBe("yes");
+      expect(screen.getByTestId("column-idea").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no" /* FN-509: the column-menu shortcut is gone from every lane */);
       expect(screen.getByTestId("column-hold").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no");
       expect(screen.getByTestId("column-work").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no");
       expect(screen.getByTestId("column-review").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no");
@@ -1419,7 +1368,7 @@ describe("Board", () => {
       renderBoard({ tasks: [mkTask({ id: "FN-1", column: "triage" })], planAutoApproveEnabled: true });
 
       await waitFor(() => expect(screen.getByTestId("column-triage")).toBeDefined());
-      expect(screen.getByTestId("column-triage").getAttribute("data-has-plan-auto-approve-toggle")).toBe("yes");
+      expect(screen.getByTestId("column-triage").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no" /* FN-509: the column-menu shortcut is gone from every lane */);
       expect(screen.getByTestId("column-todo").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no");
     });
 
@@ -1433,7 +1382,7 @@ describe("Board", () => {
       });
 
       await waitFor(() => expect(screen.getByTestId("column-triage")).toBeDefined());
-      expect(screen.getByTestId("column-triage").getAttribute("data-has-plan-auto-approve-toggle")).toBe("yes");
+      expect(screen.getByTestId("column-triage").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no" /* FN-509: the column-menu shortcut is gone from every lane */);
       expect(screen.getByTestId("column-todo").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no");
       expect(screen.getByTestId("column-in-progress").getAttribute("data-has-plan-auto-approve-toggle")).toBe("no");
     });
@@ -1457,7 +1406,9 @@ describe("Board", () => {
       enableFlag({ [reverted.id]: shippedWorkflow.id }, [DEFAULT_WORKFLOW, shippedWorkflow]);
       window.localStorage.setItem(scopedKey(BOARD_WORKFLOW_SELECTION_STORAGE_KEY, projectId), ALL_WORKFLOWS_BOARD_VIEW_ID);
 
-      renderBoard({ projectId, tasks: [reverted, reverted], onDeleteTask: vi.fn().mockResolvedValue(reverted), onReviseTask: vi.fn() });
+      /* FN-416: the Board forwards the restore-the-revert action instead of a Revise draft callback. */
+      const onRestoreRevertTask = vi.fn().mockResolvedValue({ mode: "git", clean: true, restoreCommitSha: "restore-sha" });
+      renderBoard({ projectId, tasks: [reverted, reverted], onDeleteTask: vi.fn().mockResolvedValue(reverted), onRestoreRevertTask });
 
       await waitFor(() => expect(screen.getByTestId("column-shipped")).toBeDefined());
       const shippedColumn = screen.getByTestId("column-shipped");
@@ -1465,7 +1416,8 @@ describe("Board", () => {
       expect(shippedColumn).toHaveAttribute("data-tasks", expect.stringContaining(reverted.id));
       expect(screen.queryByTestId("board-reverted-tasks")).toBeNull();
       expect(within(shippedColumn).getByRole("button", { name: "Delete" })).toBeInTheDocument();
-      expect(within(shippedColumn).getByRole("button", { name: "Revise" })).toBeInTheDocument();
+      expect(within(shippedColumn).queryByRole("button", { name: "Revise" })).toBeNull();
+      expect(within(shippedColumn).getByRole("button", { name: "Restore revert" })).toBeInTheDocument();
     });
 
     it("deduplicates reverted work in its selected-workflow column", async () => {
@@ -1493,7 +1445,13 @@ describe("Board", () => {
       expect(screen.queryByTestId("board-reverted-tasks")).toBeNull();
     });
 
-    it("passes auto-merge toggle to selected workflow human-review columns", async () => {
+    /*
+    FNXC:HumanMergeApproval 2026-09-17-18:09:
+    FN-514 REMOVED the review column's Auto-merge toggle, so this asserts the opposite contract: no
+    lane header — human-review or otherwise — receives that handler any more. Delivery is decided per
+    card through the lock, not by a project-wide switch on a column header.
+    */
+    it("passes no auto-merge toggle to a selected workflow's human-review column", async () => {
       const workflow = {
         ...DEFAULT_WORKFLOW,
         columns: [
@@ -1506,19 +1464,19 @@ describe("Board", () => {
       renderBoard({ tasks: [mkTask({ id: "FN-1", column: "review" })] });
 
       await waitFor(() => expect(screen.getByTestId("column-review")).toBeDefined());
-      expect(screen.getByTestId("column-review").getAttribute("data-has-auto-merge-toggle")).toBe("yes");
+      expect(screen.getByTestId("column-review").getAttribute("data-has-auto-merge-toggle")).toBe("no");
     });
 
-    it("keeps workflow create and edit actions visible when only one workflow exists", async () => {
-      const onCreateWorkflow = vi.fn();
-      const onOpenWorkflowEditor = vi.fn();
+    /*
+    FN-407: the Board cases that drove `onCreateWorkflow`/`onOpenWorkflowEditor` through the switcher popover
+    are DELETED — the quick switcher is now selection-only and Board no longer accepts those props. The
+    single-workflow case is replaced below by the invariant that the Board host renders no edit/create
+    affordance and still keeps its toolbar free of empty button shells.
+    */
+    it("renders a selection-only workflow toolbar when only one workflow exists", async () => {
       enableFlag({ "FN-1": "builtin:coding" }, [DEFAULT_WORKFLOW]);
 
-      renderBoard({
-        tasks: [mkTask({ id: "FN-1", column: "triage" })],
-        onCreateWorkflow,
-        onOpenWorkflowEditor,
-      });
+      renderBoard({ tasks: [mkTask({ id: "FN-1", column: "triage" })] });
 
       await waitFor(() => expect(screen.getByTestId("column-triage")).toBeDefined());
       const selector = screen.getByTestId("workflow-switcher");
@@ -1526,59 +1484,25 @@ describe("Board", () => {
       expect(document.querySelector(".board-workflow-create-btn")).toBeNull();
 
       fireEvent.click(selector);
-      fireEvent.click(screen.getByTestId("workflow-switcher-create"));
-      fireEvent.click(selector);
-      fireEvent.click(screen.getByTestId("workflow-switcher-edit-builtin:coding"));
-      expect(onCreateWorkflow).toHaveBeenCalledTimes(1);
-      expect(onOpenWorkflowEditor).toHaveBeenCalledTimes(1);
-      expect(onOpenWorkflowEditor).toHaveBeenCalledWith("builtin:coding");
-    });
-
-    it("preserves workflow toolbar partial action visibility", async () => {
-      const onCreateWorkflow = vi.fn();
-      enableFlag({}, [DEFAULT_WORKFLOW]);
-      const { unmount } = renderBoard({ onCreateWorkflow });
-
-      await waitFor(() => expect(document.querySelector(".board-workflow-toolbar")).not.toBeNull());
-      expect(document.querySelector(".board-workflow-create-btn")).toBeNull();
-      fireEvent.click(screen.getByTestId("workflow-switcher"));
-      fireEvent.click(screen.getByTestId("workflow-switcher-create"));
-      expect(screen.queryByTestId("workflow-switcher-edit-builtin:coding")).toBeNull();
-      expect(onCreateWorkflow).toHaveBeenCalledTimes(1);
-      unmount();
-
-      const onOpenWorkflowEditor = vi.fn();
-      enableFlag({}, [DEFAULT_WORKFLOW]);
-      renderBoard({ onOpenWorkflowEditor });
-
-      await waitFor(() => expect(document.querySelector(".board-workflow-toolbar")).not.toBeNull());
-      expect(document.querySelector(".board-workflow-edit-btn")).toBeNull();
-      fireEvent.click(screen.getByTestId("workflow-switcher"));
+      expect(screen.queryAllByTestId(/^workflow-switcher-edit-/)).toHaveLength(0);
       expect(screen.queryByTestId("workflow-switcher-create")).toBeNull();
-      fireEvent.click(screen.getByTestId("workflow-switcher-edit-builtin:coding"));
-      expect(onOpenWorkflowEditor).toHaveBeenCalledTimes(1);
     });
 
     it("renders workflow toolbar actions without a collapse affordance", async () => {
-      const onCreateWorkflow = vi.fn();
-      const onOpenWorkflowEditor = vi.fn();
       enableFlag(
         { "FN-1": "builtin:coding", "FN-2": "wf-custom" },
         [DEFAULT_WORKFLOW, CUSTOM_WORKFLOW],
       );
       renderBoard({
         tasks: [mkTask({ id: "FN-1" }), mkTask({ id: "FN-2", column: "intake" })],
-        onCreateWorkflow,
-        onOpenWorkflowEditor,
       });
 
       const selector = await screen.findByTestId("workflow-switcher");
       expect(document.querySelector(".board-workflow-edit-btn")).toBeNull();
       expect(document.querySelector(".board-workflow-create-btn")).toBeNull();
       fireEvent.click(selector);
-      expect(screen.getByTestId("workflow-switcher-create")).toBeDefined();
-      expect(screen.getByTestId("workflow-switcher-edit-builtin:coding")).toBeDefined();
-      expect(screen.getByTestId("workflow-switcher-edit-wf-custom")).toBeDefined();
+      expect(screen.queryByTestId("workflow-switcher-create")).toBeNull();
+      expect(screen.queryAllByTestId(/^workflow-switcher-edit-/)).toHaveLength(0);
       const toolbar = document.querySelector(".board-workflow-toolbar");
       expect(toolbar).not.toBeNull();
       expect(toolbar?.hasAttribute("data-collapsed")).toBe(false);
@@ -1587,22 +1511,19 @@ describe("Board", () => {
       expect(screen.queryByTestId("board-workflow-collapse-toggle")).toBeNull();
     });
 
-    it("relocates workflow selector, edit, and create controls into the header slot", async () => {
-      const onCreateWorkflow = vi.fn();
-      const onOpenWorkflowEditor = vi.fn();
+    it("relocates the real populated workflow selector into the header without a fallback toolbar", async () => {
+      const longWorkflow = { ...CUSTOM_WORKFLOW, name: "Workflow with a deliberately long delivery name" };
       const headerSlot = document.createElement("div");
       headerSlot.id = "header-workflow-slot";
       headerSlot.className = "header-workflow-slot";
       document.body.appendChild(headerSlot);
       enableFlag(
         { "FN-1": "builtin:coding", "FN-2": "wf-custom" },
-        [DEFAULT_WORKFLOW, CUSTOM_WORKFLOW],
+        [DEFAULT_WORKFLOW, longWorkflow],
       );
       try {
         renderBoard({
           tasks: [mkTask({ id: "FN-1" }), mkTask({ id: "FN-2", column: "intake" })],
-          onCreateWorkflow,
-          onOpenWorkflowEditor,
           workflowControlsInHeader: true,
         });
 
@@ -1614,15 +1535,79 @@ describe("Board", () => {
         expect(document.querySelector(".board-workflow-view > .board-workflow-toolbar")).toBeNull();
 
         fireEvent.click(selector);
-        expect(screen.getByTestId("workflow-switcher-create")).toBeInTheDocument();
+        expect(screen.queryByTestId("workflow-switcher-create")).toBeNull();
+        expect(screen.queryAllByTestId(/^workflow-switcher-edit-/)).toHaveLength(0);
         fireEvent.click(screen.getByTestId("workflow-switcher-option-wf-custom"));
         await waitFor(() => expect(screen.getByTestId("column-intake")).toBeDefined());
+        expect(selector).toHaveTextContent(longWorkflow.name);
         expect(screen.queryByTestId("column-todo")).toBeNull();
-        fireEvent.click(selector);
-        fireEvent.click(screen.getByTestId("workflow-switcher-edit-wf-custom"));
-        expect(onOpenWorkflowEditor).toHaveBeenCalledWith("wf-custom");
+        expect(document.querySelectorAll(".board-workflow-toolbar")).toHaveLength(1);
       } finally {
         headerSlot.remove();
+      }
+    });
+
+    /*
+    FNXC:WorkflowControls 2026-09-15-01:44:
+    FN-405 symptom regression: the header slot can mount AFTER Board (project shell mounted after the
+    view, breakpoint swap replacing the slot node). Board used to resolve `#header-workflow-slot` once
+    and never retry, so the selector stayed in the inline `.board-workflow-toolbar` rendered UNDER the
+    header forever. The shared resolver must relocate it once the slot appears, exactly once.
+    */
+    it("relocates the workflow selector when the header slot mounts after the first render", async () => {
+      enableFlag({ "FN-1": "builtin:coding", "FN-2": "wf-custom" }, [DEFAULT_WORKFLOW, CUSTOM_WORKFLOW]);
+      const headerSlot = document.createElement("div");
+      headerSlot.id = "header-workflow-slot";
+      headerSlot.className = "header-workflow-slot";
+      try {
+        renderBoard({
+          tasks: [mkTask({ id: "FN-1" }), mkTask({ id: "FN-2", column: "intake" })],
+          workflowControlsInHeader: true,
+        });
+
+        await screen.findByTestId("workflow-switcher");
+        // No slot yet: the documented inline fallback is the only safe placement.
+        await waitFor(() => expect(document.querySelector(".board-workflow-view > .board-workflow-toolbar")).not.toBeNull());
+
+        document.body.appendChild(headerSlot);
+
+        await waitFor(() => expect(headerSlot.querySelector(".board-workflow-toolbar")).not.toBeNull());
+        expect(headerSlot.contains(screen.getByTestId("workflow-switcher"))).toBe(true);
+        expect(document.querySelector(".board-workflow-view > .board-workflow-toolbar")).toBeNull();
+        expect(document.querySelectorAll(".board-workflow-toolbar")).toHaveLength(1);
+      } finally {
+        headerSlot.remove();
+      }
+    });
+
+    it("migrates the workflow selector when the header slot node is replaced", async () => {
+      enableFlag({ "FN-1": "builtin:coding", "FN-2": "wf-custom" }, [DEFAULT_WORKFLOW, CUSTOM_WORKFLOW]);
+      const mobileSlot = document.createElement("div");
+      mobileSlot.id = "header-workflow-slot";
+      mobileSlot.className = "header-workflow-slot header-workflow-slot--mobile";
+      document.body.appendChild(mobileSlot);
+      const desktopSlot = document.createElement("div");
+      desktopSlot.id = "header-workflow-slot";
+      desktopSlot.className = "header-workflow-slot";
+      try {
+        renderBoard({
+          tasks: [mkTask({ id: "FN-1" }), mkTask({ id: "FN-2", column: "intake" })],
+          workflowControlsInHeader: true,
+        });
+
+        await waitFor(() => expect(mobileSlot.querySelector(".board-workflow-toolbar")).not.toBeNull());
+
+        // Breakpoint swap: same id, different node.
+        mobileSlot.remove();
+        document.body.appendChild(desktopSlot);
+
+        await waitFor(() => expect(desktopSlot.querySelector(".board-workflow-toolbar")).not.toBeNull());
+        expect(mobileSlot.querySelector(".board-workflow-toolbar")).toBeNull();
+        expect(document.querySelector(".board-workflow-view > .board-workflow-toolbar")).toBeNull();
+        expect(document.querySelectorAll(".board-workflow-toolbar")).toHaveLength(1);
+      } finally {
+        mobileSlot.remove();
+        desktopSlot.remove();
       }
     });
 
@@ -1634,8 +1619,6 @@ describe("Board", () => {
       try {
         renderBoard({
           tasks: [mkTask({ id: "FN-1" }), mkTask({ id: "FN-2", column: "intake" })],
-          onCreateWorkflow: vi.fn(),
-          onOpenWorkflowEditor: vi.fn(),
         });
 
         await screen.findByTestId("workflow-switcher");
@@ -1663,7 +1646,9 @@ describe("Board", () => {
         expect(headerSlot.querySelector(".board-workflow-create-btn")).toBeNull();
         fireEvent.click(screen.getByTestId("workflow-switcher"));
         expect(screen.getByTestId("workflow-switcher-option-__all_workflows__")).toBeInTheDocument();
-        expect(screen.queryByTestId("workflow-switcher-edit-__all_workflows__")).toBeNull();
+        // FN-407: no row carries an edit affordance any more, aggregate or real.
+        expect(screen.queryAllByTestId(/^workflow-switcher-edit-/)).toHaveLength(0);
+        expect(screen.queryByTestId("workflow-switcher-create")).toBeNull();
       } finally {
         headerSlot.remove();
       }
@@ -1679,7 +1664,6 @@ describe("Board", () => {
           "FN-custom-done": "wf-custom",
           "FN-stale": "wf-deleted",
           "FN-hidden": "builtin:coding",
-          "FN-archived": "builtin:coding",
         },
         [
           {
@@ -1704,28 +1688,25 @@ describe("Board", () => {
           mkTask({ id: "FN-custom-done", column: "done" }),
           mkTask({ id: "FN-stale", column: "todo" }),
           mkTask({ id: "FN-hidden", column: "quiet" }),
-          mkTask({ id: "FN-archived", column: "archived" }),
         ],
       });
 
       await openWorkflowSwitcher();
       const aggregateOption = screen.getByTestId(`workflow-switcher-option-${ALL_WORKFLOWS_BOARD_VIEW_ID}`);
       expect(aggregateOption).toHaveTextContent("All workflows");
-      expect(within(aggregateOption).getByTitle("Todo: 3")).toBeInTheDocument();
-      expect(within(aggregateOption).getByTitle("In Progress: 1")).toBeInTheDocument();
-      expect(within(aggregateOption).getByTitle("Done: 2")).toBeInTheDocument();
+      expect(within(aggregateOption).getByTitle("Plan: 3")).toBeInTheDocument();
+      expect(within(aggregateOption).getByTitle("Progress: 1")).toBeInTheDocument();
+      expect(within(aggregateOption).getByTitle("Review: 0")).toBeInTheDocument();
       expect(within(aggregateOption).getByTitle("1 merging")).toBeInTheDocument();
-      expect(within(screen.getByTestId("workflow-switcher-option-builtin:coding")).getByTitle("Todo: 2")).toBeInTheDocument();
-      expect(within(screen.getByTestId("workflow-switcher-option-builtin:coding")).getByTitle("In Progress: 1")).toBeInTheDocument();
-      expect(within(screen.getByTestId("workflow-switcher-option-builtin:coding")).getByTitle("Done: 1")).toBeInTheDocument();
-      expect(within(screen.getByTestId("workflow-switcher-option-wf-custom")).getByTitle("Todo: 1")).toBeInTheDocument();
-      expect(within(screen.getByTestId("workflow-switcher-option-wf-custom")).getByTitle("In Progress: 0")).toBeInTheDocument();
-      expect(within(screen.getByTestId("workflow-switcher-option-wf-custom")).getByTitle("Done: 1")).toBeInTheDocument();
+      expect(within(screen.getByTestId("workflow-switcher-option-builtin:coding")).getByTitle("Plan: 2")).toBeInTheDocument();
+      expect(within(screen.getByTestId("workflow-switcher-option-builtin:coding")).getByTitle("Progress: 1")).toBeInTheDocument();
+      expect(within(screen.getByTestId("workflow-switcher-option-builtin:coding")).getByTitle("Review: 0")).toBeInTheDocument();
+      expect(within(screen.getByTestId("workflow-switcher-option-wf-custom")).getByTitle("Plan: 1")).toBeInTheDocument();
+      expect(within(screen.getByTestId("workflow-switcher-option-wf-custom")).getByTitle("Progress: 0")).toBeInTheDocument();
+      expect(within(screen.getByTestId("workflow-switcher-option-wf-custom")).getByTitle("Review: 0")).toBeInTheDocument();
     });
 
     it("renders one selected workflow at a time and switches workflows from the dropdown", async () => {
-      const onCreateWorkflow = vi.fn();
-      const onOpenWorkflowEditor = vi.fn();
       enableFlag(
         { "FN-1": "builtin:coding", "FN-2": "wf-custom", "FN-3": "wf-custom" },
         [DEFAULT_WORKFLOW, CUSTOM_WORKFLOW],
@@ -1736,8 +1717,6 @@ describe("Board", () => {
           mkTask({ id: "FN-2", column: "intake" }),
           mkTask({ id: "FN-3", column: "intake" }),
         ],
-        onCreateWorkflow,
-        onOpenWorkflowEditor,
       });
       const selector = await screen.findByTestId("workflow-switcher");
       expect(selector).toHaveTextContent("Coding");
@@ -1749,11 +1728,9 @@ describe("Board", () => {
       expect(document.querySelector(".board-workflow-edit-btn")).toBeNull();
       expect(document.querySelector(".board-workflow-create-btn")).toBeNull();
       fireEvent.click(selector);
-      fireEvent.click(screen.getByTestId("workflow-switcher-create"));
-      fireEvent.click(selector);
-      fireEvent.click(screen.getByTestId("workflow-switcher-edit-builtin:coding"));
-      expect(onCreateWorkflow).toHaveBeenCalledTimes(1);
-      expect(onOpenWorkflowEditor).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("workflow-switcher-create")).toBeNull();
+      expect(screen.queryAllByTestId(/^workflow-switcher-edit-/)).toHaveLength(0);
+      fireEvent.keyDown(selector, { key: "Escape" });
       expect(JSON.parse(screen.getByTestId("column-todo").getAttribute("data-tasks") || "[]").map((task: Task) => task.id)).toEqual(["FN-1"]);
       expect(screen.getByTestId("column-todo")).toHaveAttribute("data-workflow-badges", "{}");
       expect(screen.queryByTestId("column-intake")).toBeNull();
@@ -1762,10 +1739,6 @@ describe("Board", () => {
       await waitFor(() => expect(screen.getByTestId("column-intake")).toBeDefined());
       expect(JSON.parse(screen.getByTestId("column-intake").getAttribute("data-tasks") || "[]").map((task: Task) => task.id).sort()).toEqual(["FN-2", "FN-3"]);
       expect(screen.queryByTestId("column-todo")).toBeNull();
-
-      fireEvent.click(screen.getByTestId("workflow-switcher"));
-      fireEvent.click(screen.getByTestId("workflow-switcher-edit-wf-custom"));
-      expect(onOpenWorkflowEditor).toHaveBeenCalledWith("wf-custom");
     });
 
     it("passes workflow options and the selected workflow default to per-workflow quick-add", async () => {
@@ -1917,45 +1890,6 @@ describe("Board", () => {
       expect(screen.getByTestId("column-intake")).toHaveAttribute("data-tasks", expect.stringContaining("FN-custom"));
     });
 
-    it("keeps hidden workflow tasks out of shared aggregate columns and archived columns collapsed", async () => {
-      const customWorkflow = {
-        id: "wf-archive-hidden",
-        name: "Archive + Hidden Flow",
-        columns: [
-          { id: "ready", name: "Ready", flags: { intake: true } },
-          { id: "quiet", name: "Quiet", flags: { hiddenFromBoard: true } },
-          { id: "cold-storage", name: "Cold storage", flags: { archived: true } },
-        ],
-      };
-      const visibleQuietWorkflow = {
-        id: "wf-visible-quiet",
-        name: "Visible Quiet Flow",
-        columns: [
-          { id: "quiet", name: "Visible quiet", flags: { intake: true } },
-        ],
-      };
-      enableFlag(
-        { "FN-ready": "wf-archive-hidden", "FN-quiet-hidden": "wf-archive-hidden", "FN-quiet-visible": "wf-visible-quiet", "FN-cold": "wf-archive-hidden" },
-        [DEFAULT_WORKFLOW, customWorkflow, visibleQuietWorkflow],
-      );
-      renderBoard({
-        tasks: [
-          mkTask({ id: "FN-ready", column: "ready" }),
-          mkTask({ id: "FN-quiet-hidden", column: "quiet" }),
-          mkTask({ id: "FN-quiet-visible", column: "quiet" }),
-          mkTask({ id: "FN-cold", column: "cold-storage" }),
-        ],
-      });
-
-      await selectWorkflow("__all_workflows__");
-
-      expect(screen.getByTestId("column-ready")).toHaveAttribute("data-tasks", expect.stringContaining("FN-ready"));
-      expect(screen.getByTestId("column-quiet")).toHaveAttribute("data-tasks", expect.stringContaining("FN-quiet-visible"));
-      expect(screen.getByTestId("column-quiet")).not.toHaveAttribute("data-tasks", expect.stringContaining("FN-quiet-hidden"));
-      expect(screen.getByTestId("column-cold-storage")).toHaveAttribute("data-tasks", expect.stringContaining("FN-cold"));
-      expect(screen.getByTestId("column-cold-storage")).toHaveAttribute("data-collapsed", "true");
-      expect(screen.getByRole("main").lastElementChild).toBe(screen.getByTestId("column-cold-storage"));
-    });
 
     it("uses default workflow column labels and flags for duplicate aggregate column ids", async () => {
       const duplicateNameWorkflow = {
@@ -2003,15 +1937,6 @@ describe("Board", () => {
       expect(workflowSwitcherOptionIds()).toEqual(["__all_workflows__", "builtin:coding", "wf-custom"]);
     });
 
-    it("renders archived cards in the selected workflow archived column", async () => {
-      enableFlag({ "FN-1": "builtin:coding", "FN-9": "builtin:coding" });
-      renderBoard({ tasks: [mkTask({ id: "FN-1" }), mkTask({ id: "FN-9", column: "archived" })] });
-      await waitFor(() => expect(screen.getByTestId("column-archived")).toBeDefined());
-      const todoIds = JSON.parse(screen.getByTestId("column-todo").getAttribute("data-tasks") || "[]").map((task: Task) => task.id);
-      expect(todoIds).toEqual(["FN-1"]);
-      const archivedIds = JSON.parse(screen.getByTestId("column-archived").getAttribute("data-tasks") || "[]").map((task: Task) => task.id);
-      expect(archivedIds).toEqual(["FN-9"]);
-    });
 
     it("renders selected workflow columns as direct children of the horizontal board", async () => {
       enableFlag({ "FN-1": "builtin:coding" }, [DEFAULT_WORKFLOW, CUSTOM_WORKFLOW]);
@@ -2023,7 +1948,6 @@ describe("Board", () => {
         "column-in-progress",
         "column-in-review",
         "column-done",
-        "column-archived",
       ]);
     });
 
@@ -2213,98 +2137,22 @@ describe("Board", () => {
       }
     });
 
-    it("archived column is collapsible in workflow mode", async () => {
-      enableFlag({ "FN-9": "builtin:coding" });
-      renderBoard({ tasks: [mkTask({ id: "FN-9", column: "archived" })] });
 
-      const archivedColumn = await screen.findByTestId("column-archived");
-      expect(archivedColumn.getAttribute("data-collapsed")).toBe("true");
 
-      fireEvent.click(screen.getByRole("button", { name: "toggle-archived" }));
-      expect(screen.getByTestId("column-archived").getAttribute("data-collapsed")).toBe("false");
-
-      fireEvent.click(screen.getByRole("button", { name: "toggle-archived" }));
-      expect(screen.getByTestId("column-archived").getAttribute("data-collapsed")).toBe("true");
-    });
-
-    it("workflow without archived column does not render one", async () => {
-      enableFlag({ "FN-1": CUSTOM_WORKFLOW.id }, [CUSTOM_WORKFLOW]);
-      renderBoard({ tasks: [mkTask({ id: "FN-1", column: "intake" })] });
-
-      await waitFor(() => expect(screen.getByTestId("column-intake")).toBeDefined());
-      expect(screen.queryByTestId("column-archived")).toBeNull();
-    });
-
-    it("built-in workflow Done uses the selected Done sort mode", async () => {
-      const tasks = [
-        mkTask({ id: "FN-003", column: "done", columnMovedAt: "2024-01-01T09:00:00.000Z" }),
-        mkTask({ id: "FN-001", column: "done", columnMovedAt: "2024-01-01T11:00:00.000Z" }),
-        mkTask({ id: "FN-002", column: "done", columnMovedAt: "2024-01-01T10:00:00.000Z" }),
-        mkTask({ id: "FN-004", column: "done", columnMovedAt: "2024-01-01T10:00:00.000Z" }),
-        mkTask({ id: "FN-050", column: "todo", priority: "normal", createdAt: "2024-01-01T10:00:00.000Z" }),
-        mkTask({ id: "FN-010", column: "todo", priority: "normal", createdAt: "2024-01-01T10:00:00.000Z" }),
-      ];
-      enableFlag(Object.fromEntries(tasks.map((task) => [task.id, "builtin:coding"])));
-      renderBoard({ tasks });
-
-      const readIds = (column: string) => (JSON.parse(screen.getByTestId(`column-${column}`).getAttribute("data-tasks") || "[]") as Task[]).map((task) => task.id);
-      await waitFor(() => expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "completion-date-desc"));
-      expect(readIds("done")).toEqual(["FN-001", "FN-002", "FN-004", "FN-003"]);
-      expect(readIds("todo")).toEqual(["FN-010", "FN-050"]);
-      expect(screen.getByTestId("column-todo")).toHaveAttribute("data-has-done-sort-handler", "yes");
-
-      fireEvent.click(within(screen.getByTestId("column-done")).getByRole("button", { name: "sort-done-by-id" }));
-
-      expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "task-id-desc");
-      expect(readIds("done")).toEqual(["FN-004", "FN-003", "FN-002", "FN-001"]);
-      expect(readIds("todo")).toEqual(["FN-010", "FN-050"]);
-    });
-
-    it("passes Done sort state to an empty built-in workflow Done column", async () => {
-      enableFlag({});
+    /*
+    FNXC:TaskQueueOrder 2026-09-17-12:07:
+    FN-509 deleted the selectable Complete order with the column "…" menu, so the four cases that
+    threaded a chosen mode through the built-in Done lane, delegated a controlled change, passed the
+    state to an empty lane, and repeated it for a custom complete column have no subject left. What
+    replaces them is the fact that matters: no complete lane, built-in or custom, receives an
+    ordering mode or a way to change one.
+    */
+    it("threads no Done ordering mode or handler to any complete lane", async () => {
       renderBoard({ tasks: [] });
 
-      await waitFor(() => expect(screen.getByTestId("column-done")).toHaveAttribute("data-tasks", "[]"));
-      expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "completion-date-desc");
-      expect(screen.getByTestId("column-done")).toHaveAttribute("data-has-done-sort-handler", "yes");
-    });
-
-    it("uses the selected Done sort mode for custom complete workflow columns", async () => {
-      const workflow = {
-        id: "wf-shipped",
-        name: "Custom shipped",
-        columns: [
-          { id: "todo", name: "Todo", flags: { intake: true } },
-          { id: "shipped", name: "Shipped", flags: { complete: true } },
-        ],
-      };
-      const tasks = [
-        mkTask({ id: "FN-003", column: "shipped", priority: "normal", columnMovedAt: "2024-01-01T09:00:00.000Z" }),
-        mkTask({ id: "FN-001", column: "shipped", priority: "normal", columnMovedAt: "2024-01-01T11:00:00.000Z" }),
-        mkTask({ id: "FN-002", column: "shipped", priority: "normal", columnMovedAt: "2024-01-01T10:00:00.000Z" }),
-      ];
-      enableFlag({ "FN-003": workflow.id, "FN-001": workflow.id, "FN-002": workflow.id }, [workflow]);
-      renderBoard({ tasks });
-
-      const readIds = () => (JSON.parse(screen.getByTestId("column-shipped").getAttribute("data-tasks") || "[]") as Task[]).map((task) => task.id);
-      await waitFor(() => expect(screen.getByTestId("column-shipped")).toHaveAttribute("data-done-sort-mode", "completion-date-desc"));
-      expect(screen.getByTestId("column-shipped")).toHaveAttribute("data-has-done-sort-handler", "yes");
-      expect(readIds()).toEqual(["FN-001", "FN-002", "FN-003"]);
-
-      fireEvent.click(screen.getByRole("button", { name: "sort-shipped-by-id" }));
-
-      expect(screen.getByTestId("column-shipped")).toHaveAttribute("data-done-sort-mode", "task-id-desc");
-      expect(readIds()).toEqual(["FN-003", "FN-002", "FN-001"]);
-    });
-
-    it("done column in workflow mode receives onArchiveAllDone prop", async () => {
-      const onArchiveAllDone = vi.fn();
-      enableFlag({ "FN-1": "builtin:coding" });
-      renderBoard({ tasks: [mkTask({ id: "FN-1", column: "done" })], onArchiveAllDone });
-
-      await waitFor(() => expect(screen.getByTestId("column-done")).toBeDefined());
-      expect(screen.getByTestId("column-done").getAttribute("data-has-archive-all")).toBe("yes");
-      expect(screen.getByTestId("column-todo").getAttribute("data-has-archive-all")).toBe("no");
+      await waitFor(() => expect(screen.getByTestId("column-done")).toBeTruthy());
+      expect(screen.getByTestId("column-done")).toHaveAttribute("data-done-sort-mode", "");
+      expect(screen.getByTestId("column-done")).toHaveAttribute("data-has-done-sort-handler", "no");
     });
 
     it("re-fetches board-workflows when the workflow switcher opens", async () => {

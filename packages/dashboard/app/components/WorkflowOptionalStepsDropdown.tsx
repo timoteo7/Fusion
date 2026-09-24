@@ -27,6 +27,7 @@
  * active option; outside-click closes.
  */
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { UiButton, UiInput, UiListBox, UiListBoxItem, UiPopoverSurface } from "./ui";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
@@ -146,7 +147,7 @@ export function WorkflowOptionalStepsDropdown({
 
   return (
     <div className="wf-optional-steps-dropdown">
-      <button
+      <UiButton
         ref={triggerRef}
         type="button"
         id={labelId}
@@ -163,27 +164,27 @@ export function WorkflowOptionalStepsDropdown({
       >
         <span>{triggerLabel}</span>
         <ChevronDown size={12} aria-hidden />
-      </button>
+      </UiButton>
 
       {isOpen &&
         position &&
         createPortal(
-          <div
+          <UiPopoverSurface
             ref={panelRef}
+            triggerRef={triggerRef}
+            onClose={() => setIsOpen(false)}
             className="wf-optional-steps-dropdown-panel"
-            role="listbox"
-            aria-multiselectable="true"
-            aria-label={t("workflowOptionalSteps.title", "Optional steps")}
-            data-testid="wf-optional-steps-dropdown-panel"
             style={{ top: position.top, left: position.left, minWidth: position.width }}
             onKeyDown={onPanelKeyDown}
           >
+            <UiListBox data-testid="wf-optional-steps-dropdown-panel" aria-label={t("workflowOptionalSteps.title", "Optional steps")} aria-multiselectable="true">
             {steps.map((step, i) => {
               const checked = enabledIds.includes(step.templateId);
               return (
-                <div
+                <UiListBoxItem
                   key={step.templateId}
-                  role="option"
+                  id={step.templateId}
+                  textValue={step.name}
                   aria-checked={checked}
                   tabIndex={i === activeIndex ? 0 : -1}
                   ref={(el) => {
@@ -193,7 +194,7 @@ export function WorkflowOptionalStepsDropdown({
                   data-testid={`wf-optional-steps-dropdown-option-${step.templateId}`}
                   onClick={() => onToggle(step.templateId)}
                 >
-                  <input
+                  <UiInput
                     type="checkbox"
                     checked={checked}
                     tabIndex={-1}
@@ -209,10 +210,11 @@ export function WorkflowOptionalStepsDropdown({
                       <span className="wf-optional-steps-dropdown-option-desc">{step.description}</span>
                     )}
                   </div>
-                </div>
+                </UiListBoxItem>
               );
             })}
-          </div>,
+            </UiListBox>
+          </UiPopoverSurface>,
           document.body,
         )}
     </div>

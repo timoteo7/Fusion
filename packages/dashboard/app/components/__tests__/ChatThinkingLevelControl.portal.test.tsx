@@ -1,16 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ChatThinkingLevelControl } from "../ChatThinkingLevelControl";
+import { FloatingWindow, FLOATING_WINDOW_GEOMETRY_CHANGE_EVENT } from "../FloatingWindow";
 import { loadAllAppCss } from "../../test/cssFixture";
 
 const models = [
   { provider: "openai", id: "gpt-4o", name: "GPT-4o", reasoning: true, contextWindow: 128000 },
   { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude Sonnet", reasoning: true, contextWindow: 200000 },
-];
-
-const agents = [
-  { id: "agent-001", name: "Alpha", role: "executor" },
-  { id: "agent-002", name: "Beta", role: "reviewer" },
 ];
 
 const openModelPortal = async () => {
@@ -30,6 +26,10 @@ describe("ChatThinkingLevelControl with the real CustomModelDropdown portal", ()
     const portal = await openModelPortalWithRender({ onChangeModel });
 
     expect(portal).toHaveAttribute("data-menu-width", "readable");
+    const brainPortal = screen.getByTestId("chat-thinking-popover");
+    expect(brainPortal.parentElement).toBe(document.body);
+    expect(brainPortal).toHaveStyle({ position: "fixed" });
+    fireEvent.pointerDown(brainPortal);
     fireEvent.pointerDown(portal);
 
     expect(screen.getByTestId("chat-thinking-popover")).toBeInTheDocument();
@@ -50,6 +50,42 @@ describe("ChatThinkingLevelControl with the real CustomModelDropdown portal", ()
     expect(screen.getByTestId("model-combobox-portal")).toBeInTheDocument();
   });
 
+  it("forwards add and remove favorite actions through the real model portal without selecting a model", async () => {
+    const onChangeModel = vi.fn();
+    const onToggleModelFavorite = vi.fn();
+    const { unmount } = render(
+      <ChatThinkingLevelControl
+        level={null}
+        onChange={vi.fn()}
+        onChangeModel={onChangeModel}
+        onToggleModelFavorite={onToggleModelFavorite}
+        models={models}
+      />,
+    );
+
+    let portal = await openModelPortal();
+    fireEvent.click(within(portal).getByRole("button", { name: "Add GPT-4o to favorites" }));
+    expect(onToggleModelFavorite).toHaveBeenCalledWith("openai/gpt-4o");
+    expect(onChangeModel).not.toHaveBeenCalled();
+    expect(screen.getByTestId("chat-thinking-popover")).toBeInTheDocument();
+
+    unmount();
+    render(
+      <ChatThinkingLevelControl
+        level={null}
+        onChange={vi.fn()}
+        onChangeModel={onChangeModel}
+        onToggleModelFavorite={onToggleModelFavorite}
+        models={models}
+        favoriteModels={["openai/gpt-4o", "openai/gpt-4o", "stale/missing"]}
+      />,
+    );
+    portal = await openModelPortal();
+    expect(within(portal).getAllByRole("button", { name: "Remove GPT-4o from favorites" })).toHaveLength(1);
+    fireEvent.click(within(portal).getByRole("button", { name: "Remove GPT-4o from favorites" }));
+    expect(onToggleModelFavorite).toHaveBeenLastCalledWith("openai/gpt-4o");
+  });
+
   it("still closes the brain popup for a genuine outside pointerdown", async () => {
     await openModelPortalWithRender({ onChangeModel: vi.fn() });
 
@@ -58,18 +94,75 @@ describe("ChatThinkingLevelControl with the real CustomModelDropdown portal", ()
     await waitFor(() => expect(screen.queryByTestId("chat-thinking-popover")).not.toBeInTheDocument());
   });
 
-  it("keeps inline agent selection, thinking-level selection, Escape, and empty states working", () => {
+  it("keeps the Brain and model portals above real floating-chat and task-detail modal hosts", async () => {
+    const css = loadAllAppCss();
+    const readSharedStackOffset = (selector: string) => {
+      const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rule = css.match(new RegExp(`${escapedSelector}\\s*\\{[^}]*z-index:\\s*calc\\(var\\(--fusion-max-z\\)\\s*\\+\\s*(\\d+)\\s*\\)`, "s"));
+      expect(rule, `${selector} must derive its layer from --fusion-max-z`).not.toBeNull();
+      return Number(rule?.[1]);
+    };
+    const brainOffset = readSharedStackOffset(".chat-thinking-popover");
+    const modelOffset = readSharedStackOffset(".model-combobox-dropdown");
+
+    for (const host of [
+      { key: "floating-chat", layer: "utility" as const, modal: false },
+      { key: "task-detail-modal", layer: "task-detail" as const, modal: true },
+    ]) {
+      const view = render(
+        <FloatingWindow
+          title={host.key}
+          windowKey={`fn-307-${host.key}`}
+          testId={`fn-307-${host.key}-host`}
+          layer={host.layer}
+          modal={host.modal}
+          onClose={vi.fn()}
+        >
+          <ChatThinkingLevelControl level={null} onChange={vi.fn()} onChangeModel={vi.fn()} models={models} />
+        </FloatingWindow>,
+      );
+
+      fireEvent.click(screen.getByTestId("chat-thinking-btn"));
+      const brainPortal = await screen.findByTestId("chat-thinking-popover");
+      fireEvent.pointerDown(brainPortal);
+
+      let hostLayer = Number(screen.getByTestId(`fn-307-${host.key}-host`).style.zIndex);
+      let sharedCeiling = Number(document.documentElement.style.getPropertyValue("--fusion-max-z"));
+      expect(sharedCeiling).toBeGreaterThanOrEqual(hostLayer);
+      expect(sharedCeiling + brainOffset).toBeGreaterThan(hostLayer);
+
+      fireEvent.click(within(screen.getByTestId("chat-thinking-model-picker")).getByRole("button", { name: "Model" }));
+      const modelPortal = await screen.findByTestId("model-combobox-portal");
+      hostLayer = Number(screen.getByTestId(`fn-307-${host.key}-host`).style.zIndex);
+      sharedCeiling = Number(document.documentElement.style.getPropertyValue("--fusion-max-z"));
+      const brainLayer = sharedCeiling + brainOffset;
+      const modelLayer = sharedCeiling + modelOffset;
+      expect(brainPortal.parentElement).toBe(document.body);
+      expect(modelPortal.parentElement).toBe(document.body);
+      expect(sharedCeiling).toBeGreaterThanOrEqual(hostLayer);
+      expect(brainLayer).toBeGreaterThan(hostLayer);
+      expect(modelLayer).toBeGreaterThan(brainLayer);
+
+      view.unmount();
+    }
+  });
+
+  /*
+  FNXC:Chat-ModelSwitch 2026-09-14-23:48:
+  FN-396: the popover keeps model selection, thinking-level selection, Escape and the empty model state. The removed
+  Model/Agent toggle and agent list must not reappear on any host, including the narrow one.
+  */
+  it("keeps inline model selection, thinking-level selection, Escape, and the empty model state working", () => {
     const onChange = vi.fn();
     const onChangeModel = vi.fn();
     const { rerender } = render(
-      <ChatThinkingLevelControl level={null} onChange={onChange} onChangeModel={onChangeModel} models={models} agents={agents} />,
+      <ChatThinkingLevelControl level={null} onChange={onChange} onChangeModel={onChangeModel} models={models} agentId="agent-002" agentName="Beta" />,
     );
 
     fireEvent.click(screen.getByTestId("chat-thinking-btn"));
-    fireEvent.click(screen.getByTestId("chat-thinking-mode-agent"));
-    fireEvent.click(screen.getByTestId("chat-thinking-agent-agent-002"));
-    expect(onChangeModel).toHaveBeenCalledWith({ agentId: "agent-002" });
-    expect(screen.getByTestId("chat-thinking-popover")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-thinking-mode-agent")).toBeNull();
+    expect(screen.queryByTestId("chat-thinking-agent-agent-002")).toBeNull();
+    expect(screen.getByTestId("chat-thinking-current-agent")).toHaveTextContent("Beta");
 
     fireEvent.click(screen.getByTestId("chat-thinking-option-high"));
     expect(onChange).toHaveBeenCalledWith("high");
@@ -79,28 +172,129 @@ describe("ChatThinkingLevelControl with the real CustomModelDropdown portal", ()
     fireEvent.keyDown(screen.getByTestId("chat-thinking-btn"), { key: "Escape" });
     expect(screen.queryByTestId("chat-thinking-popover")).not.toBeInTheDocument();
 
-    rerender(<ChatThinkingLevelControl level={null} onChange={onChange} onChangeModel={onChangeModel} models={[]} agents={[]} />);
+    rerender(<ChatThinkingLevelControl level={null} onChange={onChange} onChangeModel={onChangeModel} models={[]} />);
     fireEvent.click(screen.getByTestId("chat-thinking-btn"));
-    fireEvent.click(screen.getByTestId("chat-thinking-mode-model"));
     expect(screen.getByTestId("chat-thinking-model-empty")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("chat-thinking-mode-agent"));
-    expect(screen.getByTestId("chat-thinking-agent-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-thinking-agent-empty")).toBeNull();
+    expect(screen.queryByTestId("chat-thinking-mode-toggle")).toBeNull();
+  });
+
+  it("renders no agent affordance in a narrow chat host", () => {
+    const narrowHost = document.createElement("div");
+    narrowHost.className = "chat-view chat-view--narrow";
+    document.body.appendChild(narrowHost);
+    try {
+      render(
+        <ChatThinkingLevelControl level={null} onChange={vi.fn()} onChangeModel={vi.fn()} models={models} agentId="agent-002" agentName="Beta" />,
+        { container: narrowHost },
+      );
+      fireEvent.click(screen.getByTestId("chat-thinking-btn"));
+
+      expect(screen.getByTestId("chat-thinking-model-picker")).toBeInTheDocument();
+      expect(screen.queryByTestId("chat-thinking-mode-toggle")).toBeNull();
+      expect(screen.queryByTestId("chat-thinking-agent-list")).toBeNull();
+      expect(document.querySelector(".chat-thinking-mode-toggle")).toBeNull();
+    } finally {
+      narrowHost.remove();
+    }
   });
 });
 
-describe("ChatThinkingLevelControl mobile popover CSS contract", () => {
-  it("anchors the mobile brain popup to the input area with tokenized viewport gutters", () => {
-    const css = loadAllAppCss();
-    const mobileStart = css.indexOf("@media (max-width: 768px)", css.indexOf(".chat-thinking-btn"));
-    const mobileCss = css.slice(mobileStart, css.indexOf(".chat-thinking-agent-list", mobileStart));
+describe("ChatThinkingLevelControl mobile popover overlay contract", () => {
+  it("opens upward inside the layout viewport and reanchors on resize without entering the composer subtree", async () => {
+    const originalRect = Element.prototype.getBoundingClientRect;
+    Object.defineProperties(document.documentElement, {
+      clientWidth: { configurable: true, value: 360 },
+      clientHeight: { configurable: true, value: 640 },
+    });
+    Element.prototype.getBoundingClientRect = vi.fn(() => ({
+      top: 580, bottom: 620, left: 300, right: 340, width: 40, height: 40, x: 300, y: 580, toJSON: () => ({}),
+    } as DOMRect));
 
-    expect(mobileStart).toBeGreaterThanOrEqual(0);
-    expect(mobileCss).toMatch(/\.chat-thinking-level-root\s*\{[^}]*position:\s*static;/);
-    expect(mobileCss).toMatch(/\.chat-thinking-popover\s*\{[^}]*left:\s*var\(--space-md\);[^}]*right:\s*var\(--space-md\);[^}]*width:\s*auto;[^}]*max-width:\s*none;[^}]*max-inline-size:\s*none;/);
+    try {
+      const composer = document.createElement("div");
+      composer.className = "chat-input-area";
+      document.body.appendChild(composer);
+      const { container, unmount } = render(
+        <ChatThinkingLevelControl level={null} onChange={vi.fn()} onChangeModel={vi.fn()} models={models} />,
+        { container: composer },
+      );
+      fireEvent.click(screen.getByTestId("chat-thinking-btn"));
+      const portal = await screen.findByTestId("chat-thinking-popover");
+
+      expect(portal.parentElement).toBe(document.body);
+      expect(container.contains(portal)).toBe(false);
+      expect(portal).toHaveAttribute("data-open-direction", "up");
+      expect(portal.style.position).toBe("fixed");
+      expect(Number.parseFloat(portal.style.left)).toBeGreaterThanOrEqual(16);
+      expect(Number.parseFloat(portal.style.left) + Number.parseFloat(portal.style.width)).toBeLessThanOrEqual(344);
+
+      Element.prototype.getBoundingClientRect = vi.fn(() => ({
+        top: 100, bottom: 140, left: 20, right: 60, width: 40, height: 40, x: 20, y: 100, toJSON: () => ({}),
+      } as DOMRect));
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => expect(portal).toHaveAttribute("data-open-direction", "down"));
+
+      fireEvent.click(screen.getByTestId("chat-thinking-btn"));
+      expect(screen.queryByTestId("chat-thinking-popover")).not.toBeInTheDocument();
+      unmount();
+      composer.remove();
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect;
+    }
+  });
+
+  /*
+  FNXC:ModelDropdown 2026-09-15-03:49:
+  The Brain popover is the portaled host of the chat model picker. Dragging or resizing a floating chat
+  window fires neither resize nor scroll, so without the floating-window geometry event and the pointer
+  drag listeners the popover (and the nested model list) stayed detached at its old screen position.
+  */
+  it("re-anchors the brain popover on host floating-window geometry changes and pointer drags", async () => {
+    const originalRect = Element.prototype.getBoundingClientRect;
+    const setRect = (top: number, bottom: number) => {
+      Element.prototype.getBoundingClientRect = vi.fn(() => ({
+        top, bottom, left: 20, right: 60, width: 40, height: bottom - top, x: 20, y: top, toJSON: () => ({}),
+      } as DOMRect));
+    };
+    try {
+      setRect(300, 340);
+      render(<ChatThinkingLevelControl level={null} onChange={vi.fn()} onChangeModel={vi.fn()} models={models} />);
+      fireEvent.click(screen.getByTestId("chat-thinking-btn"));
+      const popover = await screen.findByTestId("chat-thinking-popover");
+      const initialTop = popover.style.top;
+
+      setRect(120, 160);
+      fireEvent(window, new CustomEvent(FLOATING_WINDOW_GEOMETRY_CHANGE_EVENT));
+      await waitFor(() => expect(popover.style.top).not.toBe(initialTop));
+      const afterGeometryTop = popover.style.top;
+
+      setRect(360, 400);
+      fireEvent.pointerMove(document);
+      await waitFor(() => expect(popover.style.top).not.toBe(afterGeometryTop));
+      const afterDragTop = popover.style.top;
+
+      setRect(200, 240);
+      fireEvent.pointerUp(document);
+      await waitFor(() => expect(popover.style.top).not.toBe(afterDragTop));
+
+      // Repositioning must never dismiss the popover or unmount the nested model picker.
+      expect(screen.getByTestId("chat-thinking-popover")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-thinking-model-picker")).toBeInTheDocument();
+    } finally {
+      Element.prototype.getBoundingClientRect = originalRect;
+    }
+  });
+
+  it("keeps the CSS contract fixed and free of narrow composer-relative overrides", () => {
+    const css = loadAllAppCss();
+    expect(css).toMatch(/\.chat-thinking-popover\s*\{[^}]*position:\s*fixed;/);
+    expect(css).not.toMatch(/\.task-planner-chat-composer\s+\.chat-thinking-popover\s*\{/);
+    expect(css).not.toMatch(/\.chat-view--narrow\s+\.chat-thinking-popover\s*\{/);
   });
 });
 
 async function openModelPortalWithRender({ onChangeModel }: { onChangeModel: ReturnType<typeof vi.fn> }) {
-  render(<ChatThinkingLevelControl level={null} onChange={vi.fn()} onChangeModel={onChangeModel} models={models} agents={agents} />);
+  render(<ChatThinkingLevelControl level={null} onChange={vi.fn()} onChangeModel={onChangeModel} models={models} />);
   return openModelPortal();
 }

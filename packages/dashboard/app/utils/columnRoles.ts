@@ -35,10 +35,16 @@ export interface ColumnRoleFlags {
   was discarding them.
   */
   readonly complete?: boolean;
-  readonly archived?: boolean;
   readonly countsTowardWip?: boolean;
   readonly mergeBlocker?: boolean;
   readonly humanReview?: boolean;
+  /*
+  FNXC:TaskDescriptionEditing 2026-09-14-18:00:
+  FN-391 needs the server-resolved `manualIntake` fact (an intake column that does NOT auto-triage,
+  produced by `board-workflows.ts`) because description editing is narrower than generic field
+  editing: it is legal only where no AI has started working from the text.
+  */
+  readonly manualIntake?: boolean;
 }
 
 /**
@@ -86,8 +92,13 @@ export function isPreImplementationColumnRole(flags: ColumnRoleFlags | undefined
  * wait-for-capacity lane — listing an intake card as "upcoming work" in the worktree view would
  * report a card that has no plan yet as ready to run.
  *
- * Same shape, different degraded answer — the asymmetry U11 verified for
- * `isPreExecutionHoldColumn` and this file already documents elsewhere.
+ * Same shape, different degraded answer — the asymmetry U11 verified across the pre-execution
+ * predicates (traits first, legacy id only as the no-metadata fallback), which this file already
+ * documents elsewhere.
+ *
+ * FNXC:WorkflowResolvedColumns 2026-09-15-10:40:
+ * The Task-Context-Menu twin this note used to name by symbol was deleted with its Plan affordance
+ * (FN-417). The asymmetry it illustrated is unchanged and still applies to the helpers in this file.
  */
 export function isHoldColumnRole(flags: ColumnRoleFlags | undefined, columnId: string): boolean {
   /*
@@ -107,8 +118,14 @@ export function isHoldColumnRole(flags: ColumnRoleFlags | undefined, columnId: s
   return flags ? flags.hold === true : columnId === "todo";
 }
 
-/** Legacy pre-implementation id pair, used only when a column has no resolved traits. */
-const LEGACY_FIELD_EDITABLE_COLUMN_IDS: ReadonlySet<string> = new Set(["triage", "todo"]);
+/*
+FNXC:TaskDescriptionEditing 2026-09-14-19:10:
+Legacy pre-implementation ids, used only when a column has no resolved traits. FN-391 adds `ideas`:
+the manual-intake lane is the ONE place a description is still editable, so leaving it out of the
+degraded set meant an Ideas card during first paint (or in a column its workflow no longer declares)
+lost every field affordance — the exact silent degradation this fallback exists to prevent.
+*/
+const LEGACY_FIELD_EDITABLE_COLUMN_IDS: ReadonlySet<string> = new Set(["triage", "todo", "ideas"]);
 
 /**
  * May a card's title/description be edited in this column?
@@ -129,7 +146,6 @@ const LEGACY_FIELD_EDITABLE_COLUMN_IDS: ReadonlySet<string> = new Set(["triage",
 export function isFieldEditableColumnRole(
   flags: (ColumnRoleFlags & {
     readonly complete?: boolean;
-    readonly archived?: boolean;
     readonly countsTowardWip?: boolean;
     readonly mergeBlocker?: boolean;
     readonly humanReview?: boolean;
@@ -137,7 +153,7 @@ export function isFieldEditableColumnRole(
   columnId: string,
 ): boolean {
   if (!flags) return LEGACY_FIELD_EDITABLE_COLUMN_IDS.has(columnId);
-  if (flags.complete || flags.archived || flags.countsTowardWip || flags.mergeBlocker || flags.humanReview) {
+  if (flags.complete || flags.countsTowardWip || flags.mergeBlocker || flags.humanReview) {
     return false;
   }
   return flags.intake === true || flags.hold === true;
@@ -149,16 +165,14 @@ export function isFieldEditableColumnRole(
 
 /*
 FNXC:WorkflowResolvedColumns 2026-07-30-19:00 (fleet phase — completing the pattern, not adding one):
-THE FOUR ROLES THE HELPERS WERE MISSING.
+THE MID-FLIGHT AND TERMINAL ROLES THE HELPERS WERE MISSING.
 
-The fleet work order says "existing role helpers ONLY; no new abstractions". Measured against the
-census, the existing helpers cover `intake` and `hold` — which is 42 of the 722 backlog guards. The
-other 680 (94%) are `done` 195, `in-review` 200, `archived` 147, `in-progress` 138, and there was no
-helper for any of them. Every fleet worker hits that on their first file.
+The existing helpers originally covered only intake and hold. Complete, review, and implementation
+callers need the same flags-first behavior rather than copied id comparisons.
 
 These are not a new abstraction. They are the SAME one — flags-first, legacy id only as the
 documented no-metadata fallback — applied to the roles it did not yet cover. The alternative is
-inlining a flags-plus-fallback expression at 680 sites, which recreates exactly the copy-paste drift
+inlining flags-plus-fallback expressions at every call site, which recreates the copy-paste drift
 the helpers were created to remove: three inline copies in ListView is what started this file.
 
 Every flag used here is already produced by the trait registry and already passed by callers —
@@ -168,14 +182,11 @@ floor. Widening the interface threads nothing new through any call site.
 
 WHY EACH KEEPS AN ID FALLBACK. `columnFlags` is legitimately absent during first paint and for a card
 in a column its workflow no longer declares. A bare trait read returns false there, which is silent
-degradation — a Done card stops rendering as complete, an archived card stops being filtered out.
-Same reasoning recorded at the top of this file, unchanged.
+degradation — a Done card stops rendering as complete. Same reasoning recorded at the top of this file.
 */
 
 /** Terminal-success id, used only when a column has no resolved traits. */
 const LEGACY_COMPLETE_COLUMN_ID = "done";
-/** Archived id, used only when a column has no resolved traits. */
-const LEGACY_ARCHIVED_COLUMN_ID = "archived";
 /** Implementation-lane id, used only when a column has no resolved traits. */
 const LEGACY_WIP_COLUMN_ID = "in-progress";
 /** Review-lane id, used only when a column has no resolved traits. */
@@ -184,16 +195,10 @@ const LEGACY_REVIEW_COLUMN_ID = "in-review";
 /**
  * Is this the terminal-success column?
  *
- * `archived` is deliberately NOT included: an archived card is finished but not *completed*, and
- * surfaces that count throughput would double-count it.
+ * The historical `archived` sentinel is deliberately not included; startup reconciliation owns it.
  */
 export function isCompleteColumnRole(flags: ColumnRoleFlags | undefined, columnId: string): boolean {
   return flags ? flags.complete === true : columnId === LEGACY_COMPLETE_COLUMN_ID;
-}
-
-/** Is this the archived column — globally hidden, excluded from board and capacity? */
-export function isArchivedColumnRole(flags: ColumnRoleFlags | undefined, columnId: string): boolean {
-  return flags ? flags.archived === true : columnId === LEGACY_ARCHIVED_COLUMN_ID;
 }
 
 /**
@@ -219,4 +224,39 @@ export function isReviewColumnRole(flags: ColumnRoleFlags | undefined, columnId:
   return flags
     ? flags.mergeBlocker === true || flags.humanReview === true
     : columnId === LEGACY_REVIEW_COLUMN_ID;
+}
+
+/** Historical manual-intake lane id, used only when a column has no resolved traits. */
+const LEGACY_MANUAL_INTAKE_COLUMN_ID = "ideas";
+
+/**
+ * May a card's DESCRIPTION be edited in this column?
+ *
+ * FNXC:TaskDescriptionEditing 2026-09-14-18:00:
+ * FN-391 splits description editing away from {@link isFieldEditableColumnRole}. The two questions
+ * are genuinely different and conflating them is what made the old rule wrong in both directions:
+ *
+ * - OTHER settings (dependencies, branch, models, workflow steps) stay editable across the
+ *   pre-implementation lanes, because changing them does not contradict a plan already written.
+ * - The DESCRIPTION is the authoritative statement the plan was derived from. Once a card has left
+ *   manual intake, an AI has planned or is executing against that text, so rewriting it silently
+ *   desynchronizes the spec from the card. The operator's rule is explicit: editable only while the
+ *   card is still in Ideas, i.e. still waiting for a human to release it.
+ *
+ * `manualIntake` is the AUTHORITY — the server-resolved fact that this intake column does not
+ * auto-triage — so a renamed board keeps the affordance. Any terminal, executing or review trait
+ * vetoes it even when `manualIntake` is somehow also present. The legacy `ideas` id is used ONLY
+ * when no trait metadata resolved at all (first paint, or a card stranded in a column its workflow
+ * no longer declares), for the reason recorded at the top of this file: a bare trait read returns
+ * false there and silently drops the affordance.
+ */
+export function isDescriptionEditableColumnRole(
+  flags: ColumnRoleFlags | undefined,
+  columnId: string,
+): boolean {
+  if (!flags) return columnId === LEGACY_MANUAL_INTAKE_COLUMN_ID;
+  if (flags.complete || flags.countsTowardWip || flags.mergeBlocker || flags.humanReview) {
+    return false;
+  }
+  return flags.manualIntake === true;
 }

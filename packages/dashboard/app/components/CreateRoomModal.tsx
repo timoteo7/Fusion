@@ -1,3 +1,4 @@
+import { ViewHeader } from "./ViewHeader";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { fetchAgents } from "../api";
@@ -53,9 +54,8 @@ export function CreateRoomModal({ isOpen, onClose, onCreate, projectId, existing
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const agentLoadEpochRef = useRef(0);
   /*
-  FNXC:ModalTouchGeometry 2026-07-26-19:25:
-  Create Room is a blocking child of Quick Chat. The shared utility layer now claims its fresh
-  portal z-index on every mount, keeping this dialog above Chat without a bespoke overlay counter.
+  FNXC:ModalTouchGeometry 2026-09-14-11:35:
+  Create Room is a blocking child of Chat. The shared utility layer claims a fresh portal z-index on mount, keeping this dialog above its canonical or detached host without a bespoke counter.
   */
 
   useEffect(() => {
@@ -202,17 +202,20 @@ export function CreateRoomModal({ isOpen, onClose, onCreate, projectId, existing
       className="floating-window--create-room"
       defaultSize={{ width: 640, height: 640 }}
       minSize={{ width: 360, height: 400 }}
-      persistGeometryKey="floating-window:create-room"
       suspendGeometryPersistenceOnMobile
       suspendGeometryPersistenceOnShortViewport
       closeOnOutsidePointerDown
       layer="utility"
     >
       <div ref={modalRef} className="modal create-room-modal">
-        <div className="modal-header">
-          <h3>{t("createRoom.title", "Create room")}</h3>
-          <button type="button" className="modal-close" aria-label={t("actions.close", "Close")} onClick={onClose}>×</button>
-        </div>
+        {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Shared dialog chrome; `.modal-header` stays for the drag handle selector. */}
+        <ViewHeader
+          className="modal-header"
+          headingLevel={3}
+          title={t("createRoom.title", "Create room")}
+          onClose={onClose}
+          closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+        />
 
         <div className="form-group create-room-modal-name-group">
           <label htmlFor="create-room-name">{t("createRoom.nameLabel", "Room name")}</label>

@@ -7,6 +7,19 @@ function getCssRuleBlock(css: string, selector: string): string {
   return ruleMatch?.[1] ?? "";
 }
 
+/*
+FNXC:TaskDetailStructure 2026-09-15-14:23:
+The strip is declared by several top-level rules that layer onto one another, so asserting a single
+captured block pins whichever one happens to come first in source order rather than the cascade result.
+Union the declarations instead: a positive assertion then means "some layer declares it" and a negative
+assertion means "no layer declares it", which is what the contract is actually about.
+*/
+function getCssRuleBlocks(css: string, selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(?:^|[}\n])\\s*(?:[^{}]*,\\s*)?${escapedSelector}(?:\\s*,[^{}]*)?\\s*\\{([^}]*)\\}`, "g");
+  return [...css.matchAll(pattern)].map((match) => match[1] ?? "").join("\n");
+}
+
 function expectNoOuterPaddingOverride(css: string, selector: string): void {
   const ruleBlock = getCssRuleBlock(css, selector);
   expect(ruleBlock, `${selector} rule`).not.toBe("");
@@ -20,28 +33,62 @@ describe("TaskDetailModal CSS contract", () => {
     expect(css).toMatch(/\.detail-source-header\s*\{[^}]*align-items\s*:\s*flex-start\s*;/);
   });
 
+  it("garde la barre d'onglets plane et matérialise uniquement la sélection", async () => {
+    const css = await loadAllAppCssBaseOnly();
+    const strip = getCssRuleBlocks(css, '.detail-tabs');
+    const tab = getCssRuleBlocks(css, '.detail-tab');
+    const active = getCssRuleBlocks(css, '.detail-tab-active');
+
+    /*
+    FNXC:TaskDetailStructure 2026-09-14-21:15:
+    The strip is borderless and carries the shared secondary surface token — the pill group reads as
+    one control rather than a bordered toolbar. This assertion previously required a transparent
+    strip, a contract the pill-group design deliberately replaced; what still matters (and is still
+    asserted) is that no border is drawn, the token is a design token, and only the ACTIVE tab is
+    materialized.
+    */
+    expect(strip).toContain("border: 0;");
+    expect(strip).toContain("background: var(--surface-secondary);");
+    expect(strip).not.toMatch(/background:\s*(#|rgb)/i);
+    expect(tab).toContain("background: transparent !important;");
+    /*
+    FNXC:TaskDetailStructure 2026-09-14-21:15:
+    The ACTIVE tab is materialized as a raised pill (surface token plus elevation), not an underline.
+    The invariant this case guards is unchanged: exactly the active tab is materialized, it uses
+    design tokens, and it never inverts to the neutral FOREGROUND colour as a background.
+    */
+    expect(active).toContain("background: var(--surface) !important;");
+    expect(active).toContain("box-shadow: var(--shadow-sm);");
+    expect(active).not.toContain("background: var(--text)");
+  });
+
   it("FN-5879/FN-6864 keeps the base detail tab strip horizontally scrollable and touch-pannable without shrinking tabs", async () => {
     const css = await loadAllAppCssBaseOnly();
 
     expect(css).toMatch(/\.detail-tabs\s*\{[^}]*overflow-x\s*:\s*auto\s*;/);
     expect(css).toMatch(/\.detail-tabs\s*\{[^}]*touch-action\s*:\s*pan-x\s+pan-y\s*;/);
     expect(css).toMatch(/\.detail-tab\s*\{[^}]*flex-shrink\s*:\s*0\s*;/);
+    expect(css).toMatch(/\.detail-tabs\.is-mouse-panning[\s\S]*?cursor\s*:\s*grabbing\s*!important\s*;/);
+    /*
+    FNXC:TabStripTextSelection 2026-09-15-14:23:
+    FN-423 replaced the previous assertion here (selection suppressed only while `is-mouse-panning`)
+    with the new truth: suppression is unconditional and owned by the global tab-strip primitive, so
+    a drag can never start a selection before the shared hook's 4px pan threshold is crossed. The pan
+    state now owns the cursor alone.
+    */
+    const panningBlock = getCssRuleBlock(css, ".detail-tabs.is-mouse-panning");
+    expect(panningBlock).not.toMatch(/user-select\s*:/);
+    expect(css).toMatch(/\[role="tablist"\][^{}]*\{[^}]*user-select\s*:\s*none\s*;/);
   });
 
-  /*
-  FNXC:TaskDetailPadding 2026-08-01-03:20:
-  FN-8634 moved the canonical tab inset from the scrolling `.detail-body` to its
-  `.detail-body-content` child so scrollbar tracks remain outside the content inset.
-  FN-7408 must assert that visual contract at the owning element while chat and
-  planner variants remain forbidden from introducing competing outer padding.
-  */
+  /* FNXC:TaskDetailPadding 2026-09-12-03:19: The active tab now renders directly in the single `.detail-body` scroller, which owns the canonical inset without a generic child wrapper. */
   it("FN-7408 keeps task-detail tab body padding canonical across Activity, planner Chat, and Plan surfaces", async () => {
     const css = await loadAllAppCssBaseOnly();
-    const detailBodyContentBlock = getCssRuleBlock(css, ".detail-body-content");
+    const detailBodyBlock = getCssRuleBlock(css, ".detail-body");
     const rawBodyBlock = getCssRuleBlock(css, ".detail-body--agent-log");
     const planBlock = getCssRuleBlock(css, ".detail-section--plan-prompt");
 
-    expect(detailBodyContentBlock).toContain("padding: calc(var(--space-lg) + var(--space-xs));");
+    expect(detailBodyBlock).toContain("padding: calc(var(--space-lg) + var(--space-xs));");
     expectNoOuterPaddingOverride(css, ".detail-body--chat");
     expectNoOuterPaddingOverride(css, ".detail-body--planner-chat");
     expectNoOuterPaddingOverride(css, ".task-detail-content--chat-expanded .detail-body--chat");
@@ -54,22 +101,22 @@ describe("TaskDetailModal CSS contract", () => {
   it("FN-8787 uses a reduced shared title inset while preserving task-detail side and bottom insets on desktop and mobile", async () => {
     const baseCss = await loadAllAppCssBaseOnly();
     const css = await loadAllAppCss();
-    const baseDetailBodyContentBlock = getCssRuleBlock(baseCss, ".detail-body-content");
+    const baseDetailBodyBlock = getCssRuleBlock(baseCss, ".detail-body");
     const taskDetailCss = css.slice(css.indexOf("/* === Detail Modal === */"));
     const mobileCss = taskDetailCss.slice(taskDetailCss.indexOf("@media (max-width: 768px)"));
-    const mobileDetailBodyContentBlock = getCssRuleBlock(mobileCss, ".detail-body-content");
+    const mobileDetailBodyBlock = getCssRuleBlock(mobileCss, ".detail-body");
     const basePadding = "padding: calc(var(--space-lg) + var(--space-xs));";
     const mobilePadding = "padding: calc(var(--space-md) + var(--space-xs) / 2);";
 
-    expect(baseDetailBodyContentBlock).toContain(basePadding);
-    expect(baseDetailBodyContentBlock).toContain("padding-block-start: var(--space-md);");
-    expect(baseDetailBodyContentBlock.indexOf(basePadding)).toBeLessThan(
-      baseDetailBodyContentBlock.indexOf("padding-block-start: var(--space-md);"),
+    expect(baseDetailBodyBlock).toContain(basePadding);
+    expect(baseDetailBodyBlock).toContain("padding-block-start: var(--space-md);");
+    expect(baseDetailBodyBlock.indexOf(basePadding)).toBeLessThan(
+      baseDetailBodyBlock.indexOf("padding-block-start: var(--space-md);"),
     );
-    expect(mobileDetailBodyContentBlock).toContain(mobilePadding);
-    expect(mobileDetailBodyContentBlock).toContain("padding-block-start: var(--space-sm);");
-    expect(mobileDetailBodyContentBlock.indexOf(mobilePadding)).toBeLessThan(
-      mobileDetailBodyContentBlock.indexOf("padding-block-start: var(--space-sm);"),
+    expect(mobileDetailBodyBlock).toContain(mobilePadding);
+    expect(mobileDetailBodyBlock).toContain("padding-block-start: var(--space-sm);");
+    expect(mobileDetailBodyBlock.indexOf(mobilePadding)).toBeLessThan(
+      mobileDetailBodyBlock.indexOf("padding-block-start: var(--space-sm);"),
     );
   });
 
@@ -123,5 +170,26 @@ describe("TaskDetailModal CSS contract", () => {
     expect(css).not.toContain(".activity-segment");
     expect(css).not.toContain(".log-subview-toggle");
     expect(css).not.toContain(".log-subview-btn");
+  });
+
+  it("FN-410 lays the Activity view options out as a vertical list on the menu element itself", async () => {
+    const css = await loadAllAppCssBaseOnly();
+    const fullCss = await loadAllAppCss();
+
+    // The column layout must live on the `[role="menu"]` element rendered by UiMenu, not only on the
+    // portaled frame: the frame's own column rule never reached the option buttons, which is why they
+    // rendered side by side.
+    expect(css).toMatch(/\.activity-view-menu-list\s*\{[^}]*display\s*:\s*flex\s*;/);
+    expect(css).toMatch(/\.activity-view-menu-list\s*\{[^}]*flex-direction\s*:\s*column\s*;/);
+
+    // No rule anywhere — base or any media query, including the mobile breakpoint — may put the list
+    // back into a row/inline flow.
+    expect(fullCss).not.toMatch(/\.activity-view-menu-list\s*\{[^}]*flex-direction\s*:\s*row/);
+    expect(fullCss).not.toMatch(/\.activity-view-menu-list\s*\{[^}]*display\s*:\s*(?:inline-flex|grid|block|inline)\s*;/);
+    expect(fullCss).not.toMatch(/\.activity-view-menu-list\s*\{[^}]*flex-flow\s*:\s*row/);
+
+    // Reused literals that earlier segmented-control designs owned must stay absent.
+    expect(css).not.toContain(".activity-segmented-control");
+    expect(css).not.toContain(".activity-segment");
   });
 });

@@ -1,6 +1,7 @@
 import "./WorkflowSwitcher.css";
+import { UiButton, UiListBox, UiListBoxItem, UiPopoverSurface } from "./ui";
 
-import { ChevronDown, Pencil, Plus } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -23,8 +24,6 @@ export interface WorkflowSwitcherProps {
   /** Fired each time the dropdown transitions from closed to open so consumers can refresh count data. */
   onOpen?: () => void;
   label?: string;
-  onEditWorkflow?: (workflowId: string) => void;
-  onCreateWorkflow?: () => void;
 }
 
 interface DropdownPosition {
@@ -34,7 +33,7 @@ interface DropdownPosition {
   maxHeight: number;
 }
 
-const ZERO_COUNTS: WorkflowStatusCounts = { todo: 0, inProgress: 0, done: 0, merging: 0 };
+const ZERO_COUNTS: WorkflowStatusCounts = { plan: 0, progress: 0, review: 0, merging: 0 };
 const DEFAULT_MENU_HORIZONTAL_PADDING = 16;
 const DEFAULT_MENU_MIN_WIDTH = 240;
 
@@ -42,9 +41,12 @@ const DEFAULT_MENU_MIN_WIDTH = 240;
  * FNXC:WorkflowSwitcher 2026-06-21-18:34:
  * The open listbox must expose full workflow names for comparison while the collapsed trigger remains intentionally narrow and ellipsized.
  * Size the menu from measured name content plus option decorations, then clamp to the viewport so the trigger width can prevent shrinking but cannot force long names to stay truncated.
- * OPTION_DECORATIONS_WIDTH budgets the option row padding/gaps, three count badges plus separators, an optional btn-icon edit affordance, and scrollbar allowance from the existing token-sized CSS.
+ * OPTION_DECORATIONS_WIDTH budgets the option row padding/gaps, three count badges plus separators, and scrollbar allowance from the existing token-sized CSS.
+ *
+ * FNXC:WorkflowSwitcher 2026-09-15-05:29:
+ * FN-407 removed the per-row edit affordance, so the decoration budget no longer reserves a btn-icon column.
  */
-export const OPTION_DECORATIONS_WIDTH = 200;
+export const OPTION_DECORATIONS_WIDTH = 164;
 
 export interface ComputeMenuWidthInput {
   longestNameWidth: number;
@@ -76,30 +78,30 @@ function getWorkflowIconValue(workflow: WorkflowSwitcherAggregateOption | BoardW
 
 /**
  * FNXC:WorkflowSwitcher 2026-06-20-00:09:
- * The board/list workflow switcher must be a fully rendered themed dropdown rather than a native select so each workflow option can include compact inline Todo, In Progress, and Done counts.
+ * The board/list workflow switcher must be a fully rendered themed dropdown rather than a native select so each workflow option can include compact inline Plan, Progress, and Review counts.
  * The component owns only presentation and accessible dropdown behavior; all status-bucket semantics stay in computeWorkflowStatusCounts so Board and ListView cannot drift.
  *
  * FNXC:WorkflowSwitcher 2026-06-20-00:31:
  * Counts are contextual detail, so the collapsed trigger must stay visually and accessibly scoped to the active workflow name plus chevron.
- * Render Todo, In Progress, and Done counts only while the dropdown is expanded; option rows keep their count text because the listbox is the comparison surface.
+ * Render Plan, Progress, and Review counts only while the dropdown is expanded; option rows keep their count text because the listbox is the comparison surface.
  *
- * FNXC:WorkflowSwitcher 2026-06-20-15:34:
- * Workflow edit and creation affordances moved into the shared dropdown so Board and ListView cannot leave separate toolbar icon shells behind.
- * Each option row owns a sibling edit button, and New workflow remains visible in a non-scrolling footer while long workflow lists scroll.
+ * FNXC:StandardizedViewActions 2026-09-15-05:29:
+ * FN-407 makes the quick switcher a pure selector: it carries NO mutation at all. The per-row "Edit workflow" rail and
+ * the persistent "New workflow" popover footer are removed, because a picker that also edits and creates presents two
+ * competing surfaces for the same resource. Workflow lifecycle now lives in exactly one place — the Workflows view —
+ * where creation is the header action `wf-new-workflow` and editing is selecting a workflow in that view.
  *
  * FNXC:WorkflowSwitcher 2026-06-21-00:00:
  * Opening the dropdown must refresh workflow count data because task-to-workflow assignments do not emit board-workflows invalidation events.
  * Fire onOpen only on closed-to-open transitions so consumers can refetch without close-time calls or render loops.
  */
-export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregateOption, onOpen, label: labelProp, onEditWorkflow, onCreateWorkflow }: WorkflowSwitcherProps) {
+export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregateOption, onOpen, label: labelProp }: WorkflowSwitcherProps) {
   const { t } = useTranslation("app");
   const label = labelProp ?? t("workflowSwitcher.label", "Workflow");
-  const todoLabel = t("workflowSwitcher.todo", "Todo");
-  const inProgressLabel = t("workflowSwitcher.inProgress", "In Progress");
-  const doneLabel = t("workflowSwitcher.done", "Done");
+  const planLabel = t("workflowSwitcher.plan", "Plan");
+  const progressLabel = t("workflowSwitcher.progress", "Progress");
+  const reviewLabel = t("workflowSwitcher.review", "Review");
   const mergingLabel = t("workflowSwitcher.merging", "Merging");
-  const editWorkflowLabel = t("workflowSwitcher.editWorkflow", "Edit workflow");
-  const newWorkflowLabel = t("workflowSwitcher.newWorkflow", "New workflow");
   const listboxId = useId();
 
   const [isOpen, setIsOpen] = useState(false);
@@ -116,9 +118,10 @@ export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregate
 
   const switcherOptions = useMemo(() => {
     /*
-    FNXC:WorkflowSwitcher 2026-06-29-16:00:
-    The Board can expose a dashboard-only "All workflows" filter before real workflows, but that sentinel is not a backend workflow id and must never receive workflow edit affordances.
-    Keep the aggregate option in this presentation layer so real workflow sorting, counts, create/edit actions, and durable selection semantics remain owned by the existing Board/useBoardWorkflows path.
+    FNXC:WorkflowSwitcher 2026-09-15-05:29:
+    The Board can expose a dashboard-only "All workflows" filter before real workflows, but that sentinel is not a backend workflow id.
+    Keep the aggregate option in this presentation layer so real workflow sorting, counts, and durable selection semantics remain owned by the existing Board/useBoardWorkflows path.
+    FN-407: the switcher no longer renders edit/create affordances, so the sentinel needs no special mutation guard — only selection semantics.
     */
     return aggregateOption ? [aggregateOption, ...workflows] : workflows;
   }, [aggregateOption, workflows]);
@@ -237,18 +240,6 @@ export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregate
     triggerRef.current?.focus();
   }, [onChange]);
 
-  const handleEditWorkflow = useCallback((workflowId: string) => {
-    if (!onEditWorkflow) return;
-    setIsOpen(false);
-    onEditWorkflow(workflowId);
-  }, [onEditWorkflow]);
-
-  const handleCreateWorkflow = useCallback(() => {
-    if (!onCreateWorkflow) return;
-    setIsOpen(false);
-    onCreateWorkflow();
-  }, [onCreateWorkflow]);
-
   const handleKeyDown = useCallback((event: KeyboardEvent) => {
     switch (event.key) {
       case "ArrowDown":
@@ -297,23 +288,23 @@ export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregate
           title={t("workflowSwitcher.mergingTitle", "{{count}} merging", { count: workflowCounts.merging })}
         />
       ) : null}
-      <span className="workflow-switcher-count workflow-switcher-count--todo" title={`${todoLabel}: ${workflowCounts.todo}`}>{workflowCounts.todo}</span>
+      <span className="workflow-switcher-count workflow-switcher-count--plan" title={`${planLabel}: ${workflowCounts.plan}`}>{workflowCounts.plan}</span>
       <span className="workflow-switcher-count-separator">·</span>
-      <span className="workflow-switcher-count workflow-switcher-count--in-progress" title={`${inProgressLabel}: ${workflowCounts.inProgress}`}>{workflowCounts.inProgress}</span>
+      <span className="workflow-switcher-count workflow-switcher-count--progress" title={`${progressLabel}: ${workflowCounts.progress}`}>{workflowCounts.progress}</span>
       <span className="workflow-switcher-count-separator">·</span>
-      <span className="workflow-switcher-count workflow-switcher-count--done" title={`${doneLabel}: ${workflowCounts.done}`}>{workflowCounts.done}</span>
+      <span className="workflow-switcher-count workflow-switcher-count--review" title={`${reviewLabel}: ${workflowCounts.review}`}>{workflowCounts.review}</span>
     </span>
   );
 
   const renderAccessibleCounts = (workflowCounts: WorkflowStatusCounts) => (
     <span className="visually-hidden">
-      {t("workflowSwitcher.countsAria", "{{todoLabel}}: {{todo}}, {{inProgressLabel}}: {{inProgress}}, {{doneLabel}}: {{done}}{{mergingSuffix}}", {
-        todoLabel,
-        todo: workflowCounts.todo,
-        inProgressLabel,
-        inProgress: workflowCounts.inProgress,
-        doneLabel,
-        done: workflowCounts.done,
+      {t("workflowSwitcher.countsAria", "{{planLabel}}: {{plan}}, {{progressLabel}}: {{progress}}, {{reviewLabel}}: {{review}}{{mergingSuffix}}", {
+        planLabel,
+        plan: workflowCounts.plan,
+        progressLabel,
+        progress: workflowCounts.progress,
+        reviewLabel,
+        review: workflowCounts.review,
         mergingSuffix: workflowCounts.merging > 0 ? `, ${mergingLabel}: ${workflowCounts.merging}` : "",
       })}
     </span>
@@ -321,12 +312,12 @@ export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregate
 
   const dropdown = isOpen && portalRoot && dropdownPosition
     ? createPortal(
-      <div
+      <UiPopoverSurface
         ref={dropdownRef}
+        triggerRef={triggerRef}
+        onClose={() => setIsOpen(false)}
         id={listboxId}
         className="workflow-switcher-menu"
-        role="listbox"
-        aria-label={label}
         style={{
           top: dropdownPosition.top,
           left: dropdownPosition.left,
@@ -334,67 +325,49 @@ export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregate
           maxHeight: dropdownPosition.maxHeight,
         }}
       >
-        <div ref={listRef} className="workflow-switcher-options">
-          {switcherOptions.map((workflow, index) => {
-            const workflowCounts = getCounts(counts, workflow.id);
-            const isSelected = workflow.id === selectedWorkflow.id;
-            const isHighlighted = index === highlightedIndex;
-            const isAggregateOption = aggregateOption?.id === workflow.id;
-            return (
-              <div
-                key={workflow.id}
-                className={`workflow-switcher-option-row${isSelected ? " workflow-switcher-option-row--selected" : ""}${isHighlighted ? " workflow-switcher-option-row--highlighted" : ""}`}
-                onMouseEnter={() => setHighlightedIndex(index)}
-              >
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  data-index={index}
-                  data-testid={`workflow-switcher-option-${workflow.id}`}
-                  className="workflow-switcher-option"
-                  onClick={() => selectWorkflow(workflow.id)}
-                >
-                  <span className="workflow-switcher-option-label">
-                    <WorkflowIcon workflowId={workflow.id} icon={getWorkflowIconValue(workflow)} decorative />
-                    <span className="workflow-switcher-option-name">{workflow.name}</span>
-                  </span>
-                  {renderCountBadges(workflowCounts, "option")}
-                  {renderAccessibleCounts(workflowCounts)}
-                </button>
-                {onEditWorkflow && !isAggregateOption ? (
-                  <button
-                    type="button"
-                    className="btn btn-icon btn-sm workflow-switcher-edit"
-                    data-testid={`workflow-switcher-edit-${workflow.id}`}
-                    aria-label={editWorkflowLabel}
-                    title={editWorkflowLabel}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      handleEditWorkflow(workflow.id);
-                    }}
+        {(
+          <div
+            ref={listRef}
+            className="workflow-switcher-options"
+            style={{ width: dropdownPosition.width, maxHeight: dropdownPosition.maxHeight }}
+          >
+            {/*
+            FNXC:NativeUiCollections 2026-09-15-05:29:
+            Every workflow is one option of a single native listbox so arrow navigation crosses rows.
+            FN-407 removed the sibling edit rail, so the popover now contains exactly one collection and
+            no interactive node other than the selectable options. Header, Board, Graph and List all get it.
+            */}
+            <UiListBox aria-label={label} className="workflow-switcher-option-collection">
+              {switcherOptions.map((workflow, index) => {
+                const workflowCounts = getCounts(counts, workflow.id);
+                const isSelected = workflow.id === selectedWorkflow.id;
+                const isHighlighted = index === highlightedIndex;
+                return (
+                  <UiListBoxItem
+                    key={workflow.id}
+                    legacyAs="button"
+                    id={workflow.id}
+                    textValue={workflow.name}
+                    aria-selected={isSelected}
+                    data-index={index}
+                    data-testid={`workflow-switcher-option-${workflow.id}`}
+                    className={`workflow-switcher-option workflow-switcher-option-row${isSelected ? " workflow-switcher-option-row--selected" : ""}${isHighlighted ? " workflow-switcher-option-row--highlighted" : ""}`}
+                    onMouseEnter={() => setHighlightedIndex(index)}
+                    onClick={() => selectWorkflow(workflow.id)}
                   >
-                    <Pencil aria-hidden="true" />
-                  </button>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-        {onCreateWorkflow ? (
-          <div className="workflow-switcher-footer">
-            <button
-              type="button"
-              className="btn workflow-switcher-create"
-              data-testid="workflow-switcher-create"
-              onClick={handleCreateWorkflow}
-            >
-              <Plus aria-hidden="true" />
-              <span>{newWorkflowLabel}</span>
-            </button>
+                    <span className="workflow-switcher-option-label">
+                      <WorkflowIcon workflowId={workflow.id} icon={getWorkflowIconValue(workflow)} decorative />
+                      <span className="workflow-switcher-option-name">{workflow.name}</span>
+                    </span>
+                    {renderCountBadges(workflowCounts, "option")}
+                    {renderAccessibleCounts(workflowCounts)}
+                  </UiListBoxItem>
+                );
+              })}
+            </UiListBox>
           </div>
-        ) : null}
-      </div>,
+        )}
+      </UiPopoverSurface>,
       portalRoot,
     )
     : null;
@@ -402,7 +375,7 @@ export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregate
   return (
     <div ref={containerRef} className="workflow-switcher">
       <span className="workflow-switcher-label">{label}</span>
-      <button
+      <UiButton
         ref={triggerRef}
         type="button"
         className="btn workflow-switcher-trigger"
@@ -423,7 +396,7 @@ export function WorkflowSwitcher({ workflows, value, onChange, counts, aggregate
           {isOpen ? renderAccessibleCounts(selectedCounts) : null}
         </span>
         <ChevronDown size={14} className="workflow-switcher-chevron" aria-hidden="true" />
-      </button>
+      </UiButton>
       {dropdown}
     </div>
   );

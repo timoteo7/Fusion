@@ -36,6 +36,10 @@ export const mockFetchPluginRuntimes = vi.fn<ApiModule["fetchPluginRuntimes"]>()
 export const mockFetchAgentLogsWithMeta = vi.fn<ApiModule["fetchAgentLogsWithMeta"]>();
 export const mockFetchAgentMailbox = vi.fn<ApiModule["fetchAgentMailbox"]>();
 export const mockMarkMessageRead = vi.fn<ApiModule["markMessageRead"]>();
+/* FNXC:MailboxRowActions 2026-09-17-03:18: FN-486 gives the agent Mail tab archive/restore/delete row commands. */
+export const mockArchiveMessage = vi.fn<ApiModule["archiveMessage"]>();
+export const mockUnarchiveMessage = vi.fn<ApiModule["unarchiveMessage"]>();
+export const mockDeleteMessage = vi.fn<ApiModule["deleteMessage"]>();
 export const mockStartAgentRun = vi.fn<ApiModule["startAgentRun"]>();
 export const mockUpgradeAgentHeartbeatProcedure = vi.fn<ApiModule["upgradeAgentHeartbeatProcedure"]>();
 export const mockUpdateGlobalSettings = vi.fn<ApiModule["updateGlobalSettings"]>();
@@ -62,6 +66,9 @@ vi.mock("../../api", () => ({
   fetchAgentLogsWithMeta: (...args: Parameters<ApiModule["fetchAgentLogsWithMeta"]>) => mockFetchAgentLogsWithMeta(...args),
   fetchAgentMailbox: (...args: Parameters<ApiModule["fetchAgentMailbox"]>) => mockFetchAgentMailbox(...args),
   markMessageRead: (...args: Parameters<ApiModule["markMessageRead"]>) => mockMarkMessageRead(...args),
+  archiveMessage: (...args: Parameters<ApiModule["archiveMessage"]>) => mockArchiveMessage(...args),
+  unarchiveMessage: (...args: Parameters<ApiModule["unarchiveMessage"]>) => mockUnarchiveMessage(...args),
+  deleteMessage: (...args: Parameters<ApiModule["deleteMessage"]>) => mockDeleteMessage(...args),
   fetchAgentRunLogs: (...args: Parameters<ApiModule["fetchAgentRunLogs"]>) => mockFetchAgentRunLogs(...args),
   fetchAgentChildren: (...args: Parameters<ApiModule["fetchAgentChildren"]>) => mockFetchAgentChildren(...args),
   fetchAgentRuns: (...args: Parameters<ApiModule["fetchAgentRuns"]>) => mockFetchAgentRuns(...args),
@@ -104,6 +111,12 @@ vi.mock("../AgentLogViewer", () => ({
     showMissingDetailHint?: boolean;
   }) => {
     const [expanded, setExpanded] = useState(false);
+    const [showStart, setShowStart] = useState(false);
+    const tailEntries = entries.slice(-60);
+    const reconnectMarker = entries.find((entry) => entry.text.includes("Log stream reconnected"));
+    const renderedEntries = entries.length > 60
+      ? (showStart ? entries.slice(0, 60) : reconnectMarker ? [reconnectMarker, ...tailEntries.slice(-59)] : tailEntries)
+      : entries;
     return createElement(
       "div",
       { "data-testid": "agent-log-viewer" },
@@ -115,11 +128,14 @@ vi.mock("../AgentLogViewer", () => ({
           "Some tool details are unavailable.",
         )
         : null,
-      ...entries.map((entry, index) => {
+      createElement(
+        "div",
+        { className: "agent-log-viewer-scroll", onScroll: (event: { currentTarget: { scrollTop: number } }) => { if (event.currentTarget.scrollTop === 0) setShowStart(true); } },
+        ...renderedEntries.map((entry, index) => {
         const exceedsPreview = Boolean(entry.detail && (entry.detail.length > 600 || entry.detail.split("\n").length > 6));
         return createElement(
           "div",
-          { key: index },
+          { key: index, className: "agent-log-text" },
           createElement("span", null, entry.text),
           entry.detail
             ? createElement(
@@ -147,6 +163,7 @@ vi.mock("../AgentLogViewer", () => ({
             : null,
         );
       }),
+      ),
     );
   },
 }));

@@ -1,17 +1,23 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LeftSidebarNav } from "../LeftSidebarNav";
 import { MobileNavBar } from "../MobileNavBar";
 import { Header } from "../Header";
+import { DesktopActionBar } from "../DesktopActionBar";
+import { buildDashboardNavigationEntries } from "../dashboardNavigationEntries";
 
-vi.mock("../../api", () => ({ fetchScripts: vi.fn().mockResolvedValue({}) }));
+vi.mock("../../api", async (importOriginal) => {
+  const { createDashboardApiMock } = await import("../../test/mockApi");
+  return createDashboardApiMock(() => importOriginal<typeof import("../../api")>(), {
+    fetchScripts: vi.fn().mockResolvedValue({}),
+  });
+});
 
 function mobileProps() {
   return {
     view: "board" as const,
     onChangeView: vi.fn(),
-    footerVisible: true,
-    modalOpen: false,
+    footerVisible: false,
     onOpenSettings: vi.fn(),
     onOpenActivityLog: vi.fn(),
     onOpenMailbox: vi.fn(),
@@ -31,17 +37,9 @@ function mobileProps() {
 }
 
 describe("Patchnode navigation surfaces", () => {
-  it("navigates from the desktop sidebar", () => {
-    const onChangeView = vi.fn();
-    render(<LeftSidebarNav view="board" onChangeView={onChangeView} onOpenSettings={vi.fn()} />);
-    expect(screen.getByTestId("sidebar-nav-patchnode")).toHaveTextContent("History");
-    fireEvent.click(screen.getByTestId("sidebar-nav-patchnode"));
-    expect(onChangeView).toHaveBeenCalledWith("patchnode");
-  });
-
-  it("renders in mobile More by default and as a promoted tab", () => {
+  it("keeps History out of official general navigation surfaces", () => {
     Object.defineProperty(window, "matchMedia", {
-      writable: true,
+      configurable: true,
       value: vi.fn().mockImplementation((query: string) => ({
         matches: query.includes("max-width: 768px"),
         media: query,
@@ -49,28 +47,47 @@ describe("Patchnode navigation surfaces", () => {
         removeEventListener: vi.fn(),
       })),
     });
-    const defaults = mobileProps();
-    const first = render(<MobileNavBar {...defaults} />);
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-patchnode")).toHaveTextContent("History");
-    fireEvent.click(screen.getByTestId("mobile-more-item-patchnode"));
-    expect(defaults.onChangeView).toHaveBeenCalledWith("patchnode");
-    first.unmount();
+    const mobile = render(<MobileNavBar {...mobileProps()} />);
+    expect(screen.queryByTestId("mobile-nav-tab-patchnode")).toBeNull();
+    expect(screen.queryByTestId("mobile-more-item-patchnode")).toBeNull();
+    mobile.unmount();
 
-    const promoted = mobileProps();
-    render(<MobileNavBar {...promoted} mobileNavPrimaryItems={["patchnode"]} />);
-    expect(screen.getByTestId("mobile-nav-tab-patchnode")).toHaveTextContent("History");
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-patchnode"));
-    expect(promoted.onChangeView).toHaveBeenCalledWith("patchnode");
+    const sidebar = render(<LeftSidebarNav view="board" onChangeView={vi.fn()} />);
+    expect(screen.queryByTestId("sidebar-nav-patchnode")).toBeNull();
+    sidebar.unmount();
+
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }),
+    });
+    const header = render(<Header onOpenSettings={vi.fn()} onOpenGitHubImport={vi.fn()} onChangeView={vi.fn()} showSkillsTab />);
+    expect(screen.queryByTestId("view-overflow-patchnode")).toBeNull();
+    header.unmount();
+
+    render(<DesktopActionBar entries={buildDashboardNavigationEntries({ view: "board", onChangeView: vi.fn() })} activeId="board" tasks={[]} />);
+    expect(screen.queryByTestId("desktop-nav-patchnode")).toBeNull();
   });
 
-  it("navigates from Header overflow and closes the menu", () => {
-    const onChangeView = vi.fn();
-    render(<Header onOpenSettings={vi.fn()} onOpenGitHubImport={vi.fn()} onChangeView={onChangeView} showSkillsTab />);
-    fireEvent.click(screen.getByTestId("view-toggle-overflow-trigger"));
-    expect(screen.getByTestId("view-overflow-patchnode")).toHaveTextContent("History");
-    fireEvent.click(screen.getByTestId("view-overflow-patchnode"));
-    expect(onChangeView).toHaveBeenCalledWith("patchnode");
-    expect(screen.queryByTestId("view-overflow-patchnode")).toBeNull();
+  /*
+  FNXC:HistoryModalSurface 2026-09-15-04:29:
+  FN-403: History is a modal surface, so a `patchnode` view value must leave the mobile navigation on its ordinary
+  destination instead of highlighting a History tab or leaving an empty active shell behind.
+  */
+  it("ne marque aucune destination mobile active pour une valeur de vue patchnode", () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes("max-width: 768px"),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    render(<MobileNavBar {...mobileProps()} view={"patchnode" as never} />);
+
+    expect(screen.queryByTestId("mobile-nav-tab-patchnode")).toBeNull();
+    expect(screen.queryByTestId("mobile-more-item-patchnode")).toBeNull();
+    expect(document.querySelectorAll(".mobile-nav-tab--active")).toHaveLength(0);
   });
 });

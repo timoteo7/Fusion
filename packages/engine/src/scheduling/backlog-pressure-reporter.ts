@@ -1,16 +1,9 @@
-import { computeInsightFingerprint, type Task, type TaskPriority, type TaskStore, resolveProjectColumnsForRoles} from "@fusion/core";
+import { compareTasksByQueueOrder, computeInsightFingerprint, type Task, type TaskStore, resolveProjectColumnsForRoles} from "@fusion/core";
 import { createLogger } from "../logger.js";
 
 const reporterLog = createLogger("backlog-pressure");
 const TOP_CANDIDATES = 5;
 const TITLE_PREFIX = "Backlog pressure detected";
-
-const PRIORITY_WEIGHT: Record<TaskPriority, number> = {
-  urgent: 0,
-  high: 1,
-  normal: 2,
-  low: 3,
-};
 
 type BacklogPressureLogger = {
   warn: (message: string, ...args: unknown[]) => void;
@@ -80,14 +73,15 @@ export class BacklogPressureReporter {
       alert names only dependency-free cards as the runnable ones. The operator is told the queue is
       blocked on nothing in particular.
 
-      MEMBERSHIP over complete ∪ archived, because a dependency that has been archived is finished too —
-      this reporter reads with `includeArchived: true` precisely so archived blockers resolve.
+      Membership is workflow Complete only. Store-open reintegration moves historical snapshots into
+      those live columns before scheduling, so this reporter never needs a second archive authority.
       */
-      const [holdColumns, wipColumns, dependencyFinishedColumns] = await Promise.all([
+      const [holdColumns, wipColumns, dependencyCompleteColumns] = await Promise.all([
         resolveProjectColumnsForRoles(this.store, ["hold"]),
         resolveProjectColumnsForRoles(this.store, ["countsTowardWip"]),
-        resolveProjectColumnsForRoles(this.store, ["complete", "archived"]),
+        resolveProjectColumnsForRoles(this.store, ["complete"]),
       ]);
+      const dependencyFinishedColumns = new Set(dependencyCompleteColumns);
       const listByColumns = async (columns: ReadonlySet<string>, slim: boolean): Promise<Task[]> => {
         const byId = new Map<string, Task>();
         for (const column of columns) {
@@ -109,17 +103,15 @@ export class BacklogPressureReporter {
 
       const [todoFull, allTasks] = await Promise.all([
         listByColumns(holdColumns, false),
-        this.store.listTasks({ slim: true, includeArchived: true }),
+        this.store.listTasks({ slim: true, includeArchived: false }),
       ]);
       const byId = new Map(allTasks.map((task) => [task.id, task]));
       const candidates = todoFull
         .filter((task) => this.isRunnableCandidate(task, byId, dependencyFinishedColumns))
-        .sort((a, b) => {
-          const pa = PRIORITY_WEIGHT[a.priority ?? "normal"];
-          const pb = PRIORITY_WEIGHT[b.priority ?? "normal"];
-          if (pa !== pb) return pa - pb;
-          return Date.parse(a.createdAt) - Date.parse(b.createdAt);
-        })
+        /* FNXC:TaskQueueOrder 2026-09-17-12:07: the advisory names the cards the engine would
+           actually start next, so it reads the SAME queue order admission does. It is a report:
+           it never writes a Boost or any other rank. */
+        .sort(compareTasksByQueueOrder)
         .slice(0, TOP_CANDIDATES);
 
       if (candidates.length < 3) {
@@ -139,7 +131,6 @@ export class BacklogPressureReporter {
         candidates: candidates.map((candidate) => ({
           id: candidate.id,
           title: candidate.title,
-          priority: candidate.priority,
         })),
       };
       const content = JSON.stringify(contentPayload);

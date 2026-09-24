@@ -49,20 +49,6 @@ export const generalSearchEntries: SettingsSearchEntry[] = [
     keywords: ["recommendations", "automatic", "completion", "required", "quality"],
   },
   {
-    /*
-    FNXC:SettingsSearch 2026-08-16-05:07:
-    FN-9021 (ea53cbd4ff) added the mailbox-notice toggle without an index entry;
-    same drift-guard gap as above.
-    */
-    sectionId: "general",
-    key: "recommendationMailboxNoticeEnabled",
-    labelKey: "settings.general.recommendationMailboxNoticeEnabled",
-    labelFallback: "Recommendation mailbox notices",
-    helpKey: "settings.general.recommendationMailboxNoticeEnabledHelp",
-    helpFallback: "Default: enabled. When a completed task captures recommendations, send a summary to your mailbox. Turning this off does not change whether recommendations are captured.",
-    keywords: ["notifications", "mail", "inbox", "suggestions"],
-  },
-  {
     sectionId: "general",
     key: "taskPrefix",
     labelKey: "settings.general.taskPrefix",
@@ -104,34 +90,20 @@ export const generalSearchEntries: SettingsSearchEntry[] = [
     sectionId: "general",
     key: "mobileNavPrimaryItems",
     labelKey: "settings.general.mobileNavPrimaryItems",
-    labelFallback: "Mobile footer quick actions",
+    labelFallback: "Navigation quick access",
     helpKey: "settings.general.mobileNavPrimaryItemsHint",
-    helpFallback: "Default: Dashboard, Tasks, Agents, Missions, Chat, Mailbox. Unselected destinations remain in More.",
-    keywords: ["mobile", "footer", "navigation", "planning", "more"],
+    helpFallback: "Five quick slots shared by desktop and mobile; the fifth sits at the far right of the bottom bar. Any slot you leave undefined is filled from the default order (Dashboard, Board, Planning, Missions, Chat), so define five destinations to keep Chat out of the bottom bar. Every destination you do not pick stays in More.",
+    keywords: ["mobile", "footer", "navigation", "quick access", "planning", "agents", "more", "chat"],
   },
+  /* FN-511 : nouvelle option projet mobile — tiroir gestuel du pied de page à la place du bouton hamburger. */
   {
     sectionId: "general",
-    key: "quickChatButtonMode",
-    labelKey: "settings.general.quickChatLauncher",
-    labelFallback: "Quick Chat launcher",
-    helpKey: "settings.general.quickChatLauncherHint",
-    helpFallback:
-      "Choose whether Quick Chat opens from the draggable floating button, a footer button beside Terminal, or stays hidden. Default: off (hidden).",
-    /*
-    FNXC:SettingsSearch 2026-07-15-17:35:
-    "FAB" is indexed as a keyword rather than left to the copy: the legacy stored key is `showQuickChatFAB`, so operators and older docs still call this the Quick Chat FAB even though the label never says it.
-    */
-    keywords: ["FAB", "floating action button"],
-  },
-  {
-    sectionId: "general",
-    key: "quickChatCloseOnOutsideClick",
-    labelKey: "settings.general.quickChatCloseOnOutsideClick",
-    labelFallback: "Close Quick Chat on outside click",
-    helpKey: "settings.general.quickChatCloseOnOutsideClickHint",
-    helpFallback:
-      "When enabled, clicking outside the Quick Chat window closes it. Disable to keep it open until you close it explicitly. Default: enabled.",
-    keywords: ["dismiss", "backdrop"],
+    key: "mobileNavMenuSwipeGesture",
+    labelKey: "settings.general.mobileNavMenuSwipeGesture",
+    labelFallback: "Open the mobile menu with a swipe",
+    helpKey: "settings.general.mobileNavMenuSwipeGestureHint",
+    helpFallback: "On mobile, hides the bottom-bar menu button and opens the destination list by swiping the bottom bar upwards, as a drawer as wide as the bar. No effect on desktop. Default: disabled.",
+    keywords: ["mobile", "geste", "gesture", "swipe", "drawer", "hamburger", "navigation", "menu"],
   },
   {
     sectionId: "general",

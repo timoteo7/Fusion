@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CustomModelDropdown } from "../CustomModelDropdown";
 import type { ModelInfo } from "../../api";
@@ -138,6 +138,49 @@ describe("CustomModelDropdown ProviderIcon Integration", () => {
     const kimiIcon = kimiIcons[0];
     expect(kimiIcon).toHaveAttribute("aria-label", "Kimi");
     expect(kimiIcon.querySelector("path")).toHaveAttribute("fill", "var(--provider-kimi)");
+  });
+
+  /*
+  FNXC:NativeUiCollections 2026-09-15-00:20:
+  Favourite actions are siblings of the row they affect (a model option, or its provider header), so the
+  visible label a control acts on is the one next to it. The rows are the listbox's own rows now, not a
+  duplicated action rail, so the alignment assertion targets the row wrapper rather than the removed rail.
+  */
+  it("keeps model selection and visibly aligned favorite actions as keyboard siblings", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const onToggleFavorite = vi.fn();
+    const onToggleModelFavorite = vi.fn();
+    render(<><><CustomModelDropdown {...defaultProps} onChange={onChange} onToggleFavorite={onToggleFavorite} onToggleModelFavorite={onToggleModelFavorite} /></></>);
+    await user.click(screen.getByLabelText("Test Model"));
+    const option = screen.getByRole("option", { name: /GPT-4o/ });
+    const favorite = screen.getByRole("button", { name: "Add GPT-4o to favorites" });
+    expect(screen.getByRole("option", { name: /GPT-4o/ })).not.toContainElement(favorite);
+    expect(favorite.closest(".model-combobox-option-row")).toHaveTextContent("GPT-4o");
+    const providerFavorite = screen.getByRole("button", { name: "Add openai to favorites" });
+    expect(providerFavorite.closest(".model-combobox-optgroup")).toHaveTextContent("openai");
+    await waitFor(() => expect(screen.getByPlaceholderText("Filter models…")).toHaveFocus());
+    const anthropicFavorite = screen.getByRole("button", { name: "Add anthropic to favorites" });
+    anthropicFavorite.focus();
+    expect(anthropicFavorite).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(onToggleFavorite).toHaveBeenCalledWith("anthropic");
+    expect(onToggleModelFavorite).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+
+    favorite.focus();
+    await user.keyboard("{Enter}");
+    expect(onToggleModelFavorite).toHaveBeenCalledWith("openai/gpt-4o");
+    expect(onToggleFavorite).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+
+    const collapse = screen.getByRole("button", { name: "Collapse openai" });
+    collapse.focus();
+    await user.keyboard("{Enter}");
+    expect(collapse).toHaveAttribute("aria-expanded", "false");
+    expect(onToggleFavorite).toHaveBeenCalledTimes(1);
+    expect(onToggleModelFavorite).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("uses explicit icon/text layout hooks for favorited model rows", async () => {

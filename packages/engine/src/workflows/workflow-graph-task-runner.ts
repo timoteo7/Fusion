@@ -98,6 +98,8 @@ export interface WorkflowGraphTaskRunnerDeps {
   ) => void | Promise<void>;
   /** Durable principal fence invoked before classified node handlers. */
   beforeNodeExecution?: WorkflowGraphExecutorDeps["beforeNodeExecution"];
+  /* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514's per-card delivery barrier, consulted only before delivery-effecting nodes. */
+  humanMergeDeliveryBarrier?: WorkflowGraphExecutorDeps["humanMergeDeliveryBarrier"];
   maxRetriesPerNode?: number;
   /** Optional diagnostics hook (audit/log emission). Never throws into the run. */
   onEvent?: (event: { type: "start" | "terminal" | "fallback"; taskId: string; detail: string }) => void;
@@ -325,7 +327,7 @@ export class WorkflowGraphTaskRunner {
         ? { stepReview: (t, c, cfg) => ((sideEffectsRan = true), invoked.push("step-review"), seams.stepReview!(t, c, cfg)) }
         : {}),
     };
-    const wrappedRunCustomNode: WorkflowCustomNodeRunner = (node, t, c) => {
+    const wrappedRunCustomNode: WorkflowCustomNodeRunner = (node, t, c, signal) => {
       if (!this.deps.primitives && isFastExecutionMode(t) && c["workflow:fast-lane-active"] === true) {
         /*
         FNXC:WorkflowFastMode 2026-07-01-00:00:
@@ -349,7 +351,19 @@ export class WorkflowGraphTaskRunner {
       }
       sideEffectsRan = true;
       invoked.push(node.id);
-      return this.deps.runCustomNode(node, t, c);
+      /*
+      FNXC:WorkflowStepTimeoutRetry 2026-09-13-15:57:
+      A split branch owns its local fail-fast signal while the task runner owns pause and hard-cancel
+      through the graph signal. Custom work inside a split must observe either cancellation source:
+      composing them prevents a retired review attempt from opening its one secondary session after
+      the graph is cancelled, without dropping sibling fail-fast cancellation.
+      */
+      const executionSignal = this.deps.signal && signal && this.deps.signal !== signal
+        ? AbortSignal.any([this.deps.signal, signal])
+        : signal ?? this.deps.signal;
+      return executionSignal
+        ? this.deps.runCustomNode(node, t, c, executionSignal)
+        : this.deps.runCustomNode(node, t, c);
     };
     const wrappedPrimitives = this.deps.primitives
       ? new Proxy(this.deps.primitives, {
@@ -393,6 +407,7 @@ export class WorkflowGraphTaskRunner {
         runCustomNode: wrappedRunCustomNode,
         prepareNodeExecution: this.deps.prepareNodeExecution,
         beforeNodeExecution: this.deps.beforeNodeExecution,
+        humanMergeDeliveryBarrier: this.deps.humanMergeDeliveryBarrier,
         maxRetriesPerNode: this.deps.maxRetriesPerNode,
         branchPersistence: this.deps.branchPersistence,
         branchSemaphore: this.deps.branchSemaphore,

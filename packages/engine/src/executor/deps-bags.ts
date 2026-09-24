@@ -156,9 +156,11 @@ export function buildExecuteWorkflowGraphDeps(host: any): any {
       "buildParseStepsDeps", "buildStepInstancePersistence", "createAuthoritativeWorkflowPrimitives",
       "createAuthoritativeWorkflowSeams", "finalizeMergeConfirmedWorkflowGraphTask", "handleGraphFailure",
       "isLiveSharedBranchGroupMember", "prepareGraphNodeExecution", "readTaskArtifact", "recoverMissingRequiredArtifacts",
-      "requestPreMergeOptionalStepFix", "runGraphCustomNode", "terminateAllChildren",
+      "requestPreMergeOptionalStepFix", "runGraphCustomNode", "executeWorkflowStep", "terminateAllChildren",
       // FNXC:PlanReviewNoOp 2026-08-09-22:10: CLOSE_NO_OP terminal route + hold (FN-8841).
       "completePlanReviewNoOp", "holdPlanReviewNoOpContinuation",
+      // FNXC:HumanMergeApproval 2026-09-17-22:32: FN-514 rejection corrections resume through the existing review → WIP bounce.
+      "scheduleWorkflowRerun",
     ]),
   };
 }
@@ -175,6 +177,7 @@ export function buildHandleGraphFailureDeps(host: any): any {
       "activeWorktrees", "completionFinalizedTaskIds", "graphExecuteSelfRequeued",
       "graphToolFailureRunCursors", "pausedAborted", "pausedAbortProvenance", "userCanceledTaskIds",
       "executing", "resumingUnpaused", "activeSessions", "activeStepExecutors",
+      "deferredTerminalParksInFlight",
       "activeWorkflowStepSessions", "activeCliTaskSessions", "activeWorkflowGraphAbortControllers",
     ]),
     ...facadeMethods(host, [
@@ -416,7 +419,7 @@ export function buildMarkStuckAbortedDeps(host: any): any {
     ]),
     ...facadeMethods(host, [
       "resolveResumeLanes", "getWorktreePath", "terminateAllChildren",
-      "awaitAbortInFlightTaskWork", "clearPausedAborted", "resetStepsIfWorkLost",
+      "prepareAbortInFlightTaskWork", "clearPausedAborted", "resetStepsIfWorkLost",
       "hasActiveWorktreeBinding",
     ]),
     ensureWorkspaceConfig: withWorkspaceResolver(host),
@@ -1080,6 +1083,10 @@ export function buildMarkPausedAbortedDeps(host: any): any {
 export function buildResumeOrphanedDeps(host: any): any {
   return {
     ...facadeFields(host, ["store", "executing", "recoveringCompleted"]),
+    // FNXC:MergeRetryReliability 2026-08-29-17:00 (CodeRabbit L1331): the
+    // deferred-park intent reader must resolve the same tasks dir fallback
+    // the handleGraphFailure writer uses when the store has no getTasksDir.
+    rootDir: host.rootDir,
     processWideGraphRouting: host.constructor.processWideGraphRouting as Set<string>,
     ...facadeMethods(host, [
       "listWipLaneTasks", "clearResumeFailureState", "recoverApprovedStepsOnResume",
@@ -1516,14 +1523,6 @@ export function buildDisposeStoreLifecycleDisposersDeps(host: any): any {
     clearTaskMoveDisposer: () => {
       host.unregisterTaskMoveDisposer?.();
       host.unregisterTaskMoveDisposer = undefined;
-    },
-    clearArchiveWorktreeDisposer: () => {
-      host.unregisterArchiveWorktreeDisposer?.();
-      host.unregisterArchiveWorktreeDisposer = undefined;
-    },
-    clearArchiveWorkspaceWorktreeDisposer: () => {
-      host.unregisterArchiveWorkspaceWorktreeDisposer?.();
-      host.unregisterArchiveWorkspaceWorktreeDisposer = undefined;
     },
   };
 }

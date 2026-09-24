@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertCircle, Gauge } from "lucide-react";
-import type { ActivityAnalytics, ColorTheme, SignalsAnalytics, ThemeMode, TokenAnalytics, ToolAnalytics, TaskVerificationRequest } from "@fusion/core";
+import type { ActivityAnalytics, ColorTheme, SignalsAnalytics, UiStyle, ThemeMode, TokenAnalytics, ToolAnalytics, TaskVerificationRequest } from "@fusion/core";
 import { api, fetchCodebaseMetrics, withProjectId, type CodebaseMetrics } from "../../api/legacy";
 import { formatBytes } from "../../utils/formatBytes";
 import { DateRangePicker, defaultPresets, rangeFromPreset, type DateRange } from "./DateRangePicker";
@@ -27,11 +27,15 @@ import { PluginManager } from "../PluginManager";
 import { MissionControlPanel, useLiveSnapshot } from "./MissionControlPanel";
 import { countLiveAgentsWorking, countLiveInProgressTasks } from "./liveSnapshotMetrics";
 import { CommandCenterControls } from "./CommandCenterControls";
+import { ViewHeader } from "../ViewHeader";
+import { ViewLayout, type ViewLayoutMobilePane } from "../ViewLayout";
+import { ViewSidebar } from "../ViewSidebar";
 import { ReliabilityView } from "../ReliabilityView";
 import { NodesView } from "../NodesView";
 import type { ToastType } from "../../hooks/useToast";
 import type { TaskView } from "../../hooks/useViewState";
 import { useVisibilityAwarePoll } from "../../hooks/visibilitySuspension";
+import { useViewportMode, type ViewportMode } from "../../hooks/useViewportMode";
 import { SdlcFunnel } from "./SdlcFunnel";
 import { inferProviderIconKey } from "../../utils/providerIconKey";
 import { Bar, type BarDatum } from "./charts/Bar";
@@ -64,6 +68,27 @@ type SubViewId =
 interface SubView {
   id: SubViewId;
   label: string;
+}
+
+/*
+FNXC:CommandCenter 2026-09-17-06:20:
+FN-492: l'ouverture téléphone du Dashboard atterrit sur le contenu d'Overview ; tablette et ordinateur restaurent la
+rubrique mémorisée par projet. Ces deux résolutions sont partagées par le montage et par le changement de projet pour
+qu'un seul endroit décrive la règle d'ouverture.
+*/
+function resolveOpeningTab(viewportMode: ViewportMode, projectId?: string): SubViewId {
+  if (viewportMode === "mobile") return "overview";
+  return (getCommandCenterState(projectId)?.activeTab as SubViewId | undefined) ?? "overview";
+}
+
+/*
+FNXC:CommandCenter 2026-09-17-11:22:
+FN-508 : sur téléphone, le Dashboard ne présente plus de panneau liste des rubriques. La présentation est donc dérivée
+directement du mode d'affichage — téléphone : `detail` en permanence ; tablette et ordinateur : `list` — et n'a plus
+d'état propre à posséder.
+*/
+function resolveMobilePane(viewportMode: ViewportMode): ViewLayoutMobilePane {
+  return viewportMode === "mobile" ? "detail" : "list";
 }
 
 /*
@@ -141,6 +166,9 @@ const OVERVIEW_TOKEN_REFRESH_MS = 15_000;
 interface CommandCenterProps {
   projectId?: string;
   colorTheme?: ColorTheme;
+  /* FNXC:UiStyleAxis 2026-09-15-00:20: second, independent appearance axis owned by the single useTheme instance in App. */
+  uiStyle?: UiStyle;
+  onUiStyleChange?: (style: UiStyle) => void;
   themeMode?: ThemeMode;
   shadcnCustomColors?: Record<string, string>;
   resolvedThemeMode?: "dark" | "light";
@@ -162,6 +190,8 @@ function OverviewTab({
   range,
   projectId,
   colorTheme = "default",
+  uiStyle,
+  onUiStyleChange,
   themeMode = "system",
   shadcnCustomColors = {},
   resolvedThemeMode = themeMode === "light" ? "light" : "dark",
@@ -377,6 +407,8 @@ function OverviewTab({
     <CommandCenterControls
       projectId={projectId}
       colorTheme={colorTheme}
+      uiStyle={uiStyle}
+      onUiStyleChange={onUiStyleChange}
       themeMode={themeMode}
       shadcnCustomColors={shadcnCustomColors}
       resolvedThemeMode={resolvedThemeMode}
@@ -580,6 +612,8 @@ function PlaceholderTab({ tabId }: { tabId: SubViewId }) {
 export function CommandCenter({
   projectId,
   colorTheme = "default",
+  uiStyle,
+  onUiStyleChange,
   themeMode = "system",
   shadcnCustomColors = {},
   resolvedThemeMode = themeMode === "light" ? "light" : "dark",
@@ -593,12 +627,30 @@ export function CommandCenter({
   onOpenTask,
 }: CommandCenterProps = {}) {
   const { t } = useTranslation("app");
+  const viewportMode = useViewportMode();
   const subViews = useSubViews(nodesEnabled);
   /*
   FNXC:CommandCenter 2026-07-22-13:40:
   FN remount-churn fix R12: this view unmounts on navigation by design (no keep-alive), so the active sub-tab and date range restore from per-project persisted state on remount. Persisting follows the getPlanningDescription/GitHub-import precedent in modalPersistence.ts; a stored tab that no longer exists (e.g. nodes disabled) falls back to overview via the guard effect below.
+
+  FNXC:CommandCenter 2026-09-17-06:20:
+  FN-492: le menu « Dashboard » du pied de page mobile ouvre cette vue, et il doit atterrir sur le contenu d'Overview.
+  Sur téléphone, l'OUVERTURE (montage, et changement de projet) résout donc `activeTab = "overview"` et
+  `mobilePane = "detail"` au lieu de restaurer la rubrique mémorisée sur la liste des rubriques ; tablette et
+  ordinateur conservent strictement la restauration persistée et `"list"`. La règle ne s'applique qu'à l'ouverture :
+  un simple changement de mode d'affichage (rotation, clavier virtuel, redimensionnement) ne réinitialise jamais la
+  rubrique en cours. La plage de dates persistée est restaurée partout, y compris sur téléphone, et le format stocké
+  reste inchangé.
+
+  FNXC:CommandCenter 2026-09-17-11:22:
+  FN-508 : sur téléphone, la navigation entre rubriques ne passe plus par un panneau liste atteint par une flèche de
+  retour. L'en-tête affiche toujours « Dashboard », aucun `backAction` n'est rendu, et la bande `tabs` de `ViewLayout`
+  porte la drop list pleine largeur des rubriques juste sous l'en-tête ; choisir une rubrique met simplement à jour
+  `activeTab` sans changer d'écran (`mobilePane` reste `detail`). Tablette et ordinateur conservent strictement la
+  colonne latérale `ViewSidebar` + rail et `mobilePane = "list"`.
   */
-  const [activeTab, setActiveTab] = useState<SubViewId>(() => (getCommandCenterState(projectId)?.activeTab as SubViewId | undefined) ?? "overview");
+  const isMobile = viewportMode === "mobile";
+  const [activeTab, setActiveTab] = useState<SubViewId>(() => resolveOpeningTab(viewportMode, projectId));
 
   const [range, setRange] = useState<DateRange>(() => getCommandCenterState(projectId)?.range ?? rangeFromPreset(defaultPresets((_k, f) => f)[1]));
 
@@ -607,9 +659,9 @@ export function CommandCenter({
     if (persistedProjectRef.current === projectId) return;
     persistedProjectRef.current = projectId;
     const stored = getCommandCenterState(projectId);
-    setActiveTab((stored?.activeTab as SubViewId | undefined) ?? "overview");
+    setActiveTab(resolveOpeningTab(viewportMode, projectId));
     setRange(stored?.range ?? rangeFromPreset(defaultPresets((_k, f) => f)[1]));
-  }, [projectId]);
+  }, [projectId, viewportMode]);
   useEffect(() => {
     if (persistedProjectRef.current !== projectId) return;
     saveCommandCenterState({ activeTab, range }, projectId);
@@ -627,6 +679,8 @@ export function CommandCenter({
             range={range}
             projectId={projectId}
             colorTheme={colorTheme}
+            uiStyle={uiStyle}
+            onUiStyleChange={onUiStyleChange}
             themeMode={themeMode}
             shadcnCustomColors={shadcnCustomColors}
             resolvedThemeMode={resolvedThemeMode}
@@ -698,31 +752,59 @@ export function CommandCenter({
     }
   }
 
-  return (
-    <section className="command-center" data-testid="command-center">
-      <header className="cc-header">
-        {/* FNXC:CommandCenter 2026-06-22-01:00: Icon size aligned to 20 to match the shared ViewHeader (cc-header is the model for ViewHeader; title is already 1.125rem with --space-lg padding). */}
-        <h2 className="cc-title">
-          <Gauge size={20} />
-          {t("commandCenter.heading", "Dashboard")}
-        </h2>
-        <CommandCenterSectionNav
-          sections={subViews}
-          activeId={activeTab}
-          onSelect={(id) => setActiveTab(id as SubViewId)}
-        />
-        <DateRangePicker value={range} onChange={setRange} />
-      </header>
+  const activeSectionLabel = subViews.find((view) => view.id === activeTab)?.label ?? activeTab;
 
+  return (
+    <ViewLayout
+      className="command-center"
+      data-testid="command-center"
+      contentOwnsScroll
+      mobilePane={resolveMobilePane(viewportMode)}
+      header={(
+        <ViewHeader
+          className="cc-header"
+          icon={Gauge}
+          title={t("commandCenter.heading", "Dashboard")}
+          actions={<DateRangePicker value={range} onChange={setRange} />}
+        />
+      )}
+      tabs={isMobile ? (
+        <div className="cc-section-strip">
+          <CommandCenterSectionNav
+            sections={subViews}
+            activeId={activeTab}
+            fullWidth
+            onSelect={(id) => setActiveTab(id as SubViewId)}
+          />
+        </div>
+      ) : undefined}
+      sidebar={isMobile ? undefined : (
+        <ViewSidebar
+          ariaLabel={t("commandCenter.tablistLabel", "Dashboard sections")}
+          resizeLabel={t("commandCenter.resizeSections", "Resize dashboard sections")}
+          hostIdentity="command-center"
+          mobile={false}
+          className="cc-sidebar"
+          panelClassName="cc-sidebar__panel"
+        >
+          <CommandCenterSectionNav
+            sections={subViews}
+            activeId={activeTab}
+            variant="rail"
+            onSelect={(id) => setActiveTab(id as SubViewId)}
+          />
+        </ViewSidebar>
+      )}
+    >
       <div
         role="region"
-        aria-label={subViews.find((view) => view.id === activeTab)?.label ?? activeTab}
+        aria-label={activeSectionLabel}
         tabIndex={0}
         className="cc-tabpanel"
         data-testid={`command-center-panel-${activeTab}`}
       >
         {renderActiveTab()}
       </div>
-    </section>
+    </ViewLayout>
   );
 }

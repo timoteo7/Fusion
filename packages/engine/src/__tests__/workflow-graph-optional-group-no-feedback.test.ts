@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TaskDetail, WorkflowIr } from "@fusion/core";
+import { getLatestFailedPreMergeReviewStep, type TaskDetail, type WorkflowIr } from "@fusion/core";
 
 import { WorkflowGraphExecutor, type WorkflowNodeHandler } from "../workflows/workflow-graph-executor.js";
+import { workflowStepMissingVerdictNotice } from "../executor/workflow-step-verdict.js";
+import {
+  graphFailureNodeErrorText,
+  MAX_VISIBLE_GRAPH_NODE_ERROR_LENGTH,
+} from "../executor/graph-failure-pure.js";
 
 /*
 FNXC:WorkflowStepResults 2026-07-07-00:00:
@@ -73,6 +78,137 @@ function nodeGateIr(): WorkflowIr {
 }
 
 describe("workflow-graph-executor: non-verdict failure diagnostic (Runfusion/Fusion#1946)", () => {
+  it("records a verdict-required success without a verdict as a visible failure", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const logTaskEntry = vi.fn();
+    const handler: WorkflowNodeHandler = async (node) => node.id === "review"
+      ? {
+          outcome: "success",
+          contextPatch: {
+            verdictRequired: true,
+            output: "The deliverables are absent.",
+          },
+        }
+      : { outcome: "success" };
+    const executor = new WorkflowGraphExecutor({
+      handlers: { prompt: handler },
+      logTaskEntry,
+      recordWorkflowStepResult: async (_taskId, result) => { records.push(result as unknown as Record<string, unknown>); },
+    });
+
+    await executor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+
+    const terminal = records.find((record) => record.workflowStepId === "code-review" && record.status !== "pending");
+    expect(terminal).toMatchObject({ status: "failed", verdictRequired: true });
+    expect(terminal).not.toHaveProperty("verdict");
+    expect(terminal?.output).toMatch(/JSON verdict object/i);
+    expect(logTaskEntry).not.toHaveBeenCalledWith(
+      "[pre-merge] Workflow step completed: Code Review",
+      expect.anything(),
+    );
+  });
+
+  it("makes a verdict-less advisory outcome terminally failed and bypass-selectable", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const handler: WorkflowNodeHandler = async (node) => node.id === "review"
+      ? {
+          outcome: "success",
+          value: "advisory_failure",
+          contextPatch: {
+            verdictRequired: true,
+            output: "The reviewer omitted the verdict envelope.",
+          },
+        }
+      : { outcome: "success" };
+    const executor = new WorkflowGraphExecutor({
+      handlers: { prompt: handler },
+      recordWorkflowStepResult: async (_taskId, result) => { records.push(result as unknown as Record<string, unknown>); },
+    });
+
+    await executor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+
+    const terminal = records.find((record) => record.workflowStepId === "code-review" && record.status !== "pending");
+    expect(terminal).toMatchObject({
+      status: "failed",
+      verdictRequired: true,
+      output: workflowStepMissingVerdictNotice("no-verdict"),
+    });
+    expect(getLatestFailedPreMergeReviewStep({ workflowStepResults: records as any }))
+      .toMatchObject({ workflowStepId: "code-review", status: "failed" });
+  });
+
+  it("keeps a genuine advisory REVISE mapped to advisory failure", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const handler: WorkflowNodeHandler = async (node) => node.id === "review"
+      ? { outcome: "success", value: "REVISE", contextPatch: { verdictRequired: true, output: "Fix the issue." } }
+      : { outcome: "success" };
+    const executor = new WorkflowGraphExecutor({
+      handlers: { prompt: handler },
+      recordWorkflowStepResult: async (_taskId, result) => { records.push(result as unknown as Record<string, unknown>); },
+    });
+
+    await executor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+
+    expect(records.find((record) => record.workflowStepId === "code-review" && record.status !== "pending"))
+      .toMatchObject({ status: "advisory_failure", verdict: "REVISE", verdictRequired: true });
+  });
+
+  it("records a structured approving verdict as passed when a verdict was required", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const handler: WorkflowNodeHandler = async (node) => node.id === "review"
+      ? {
+          outcome: "success",
+          value: "APPROVE",
+          contextPatch: { verdictRequired: true, output: "Reviewed." },
+        }
+      : { outcome: "success" };
+    const executor = new WorkflowGraphExecutor({
+      handlers: { prompt: handler },
+      recordWorkflowStepResult: async (_taskId, result) => { records.push(result as unknown as Record<string, unknown>); },
+    });
+
+    await executor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+
+    expect(records.find((record) => record.workflowStepId === "code-review" && record.status !== "pending"))
+      .toMatchObject({ status: "passed", verdict: "APPROVE", verdictRequired: true });
+  });
+
+  it("keeps verdict-free script-style outcomes status-only and passed", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const handler: WorkflowNodeHandler = async () => ({ outcome: "success", value: "passed" });
+    const executor = new WorkflowGraphExecutor({
+      handlers: { prompt: handler },
+      recordWorkflowStepResult: async (_taskId, result) => { records.push(result as unknown as Record<string, unknown>); },
+    });
+
+    await executor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+
+    const terminal = records.find((record) => record.workflowStepId === "code-review" && record.status !== "pending");
+    expect(terminal).toMatchObject({ status: "passed" });
+    expect(terminal).not.toHaveProperty("verdictRequired");
+  });
+
+  it("keeps a verdict-required not-run outcome terminally skipped", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const handler: WorkflowNodeHandler = async () => ({
+      outcome: "success",
+      value: "passed",
+      contextPatch: {
+        verdictRequired: true,
+        notRunReason: "not-configured",
+      },
+    });
+    const executor = new WorkflowGraphExecutor({
+      handlers: { prompt: handler },
+      recordWorkflowStepResult: async (_taskId, result) => { records.push(result as unknown as Record<string, unknown>); },
+    });
+
+    await executor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+
+    expect(records.find((record) => record.workflowStepId === "code-review" && record.status !== "pending"))
+      .toMatchObject({ status: "skipped", notRunReason: "not-configured", verdictRequired: true });
+  });
+
   it("SYMPTOM: a code-review dispatch exception records a non-empty diagnostic output, never (no feedback captured)", async () => {
     const records: Array<Record<string, unknown>> = [];
     const handler: WorkflowNodeHandler = async (node) => {
@@ -242,5 +378,45 @@ describe("workflow-graph-executor: non-verdict failure diagnostic (Runfusion/Fus
     expect(calls).not.toContain("after");
     const terminal = records.find((r) => r.workflowStepId === "code-review" && r.status === "failed");
     expect(terminal?.status).toBe("failed");
+  });
+});
+
+describe("failed-node diagnostic selection", () => {
+  it.each([
+    {
+      name: "direct parse node",
+      visitedNodeIds: ["earlier", "parse"],
+      context: { "node:earlier:error": "stale secret", "node:parse:error": " repair arm\n did not start " },
+      expected: "repair arm did not start",
+    },
+    {
+      name: "materialized optional group",
+      visitedNodeIds: ["code-review::review"],
+      context: { "node:other:error": "stale", "node:code-review:error": "group dispatch failed" },
+      expected: "group dispatch failed",
+    },
+    {
+      name: "materialized foreach",
+      visitedNodeIds: ["steps#2:step-execute"],
+      context: { "node:prior:error": "stale", "node:steps:error": "step executor crashed" },
+      expected: "step executor crashed",
+    },
+  ])("selects only the $name error", ({ visitedNodeIds, context, expected }) => {
+    expect(graphFailureNodeErrorText({ visitedNodeIds, context } as never)).toBe(expected);
+  });
+
+  it("keeps the generic fallback for empty text and bounds long diagnostics", () => {
+    expect(graphFailureNodeErrorText({
+      visitedNodeIds: ["parse"],
+      context: { "node:stale:error": "must not leak", "node:parse:error": "  \n " },
+    } as never)).toBeUndefined();
+
+    const visible = graphFailureNodeErrorText({
+      visitedNodeIds: ["parse"],
+      context: { "node:parse:error": `prefix-${"x".repeat(2_000)}-secret-tail` },
+    } as never);
+    expect(visible).toHaveLength(MAX_VISIBLE_GRAPH_NODE_ERROR_LENGTH);
+    expect(visible).toMatch(/^prefix-x+…$/);
+    expect(visible).not.toContain("secret-tail");
   });
 });

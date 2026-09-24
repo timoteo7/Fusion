@@ -10,6 +10,8 @@ import { emitBoundedRunAudit } from "../run-audit/emit-bounded-run-audit.js";
  */
 import {TaskStore} from "../store.js";
 import {resolveTaskLifecycleColumns, columnsWithFlag} from "../workflows/workflow-lifecycle-traits.js";
+import {applyPauseAccounting, LEGACY_WIP_COLUMN_FALLBACK} from "../tasks/task-pause-accounting.js";
+import { compareTasksByQueueOrder } from "../tasks/task-queue-order.js";
 import {resolveWorkflowIrForTask} from "../workflows/workflow-ir-resolver.js";
 import type {WorkflowIr} from "../workflows/workflow-ir-types.js";
 import type {Task, ColumnId, ArtifactType, ArtifactWithTask, InboxTask, TaskLogEntry, RunMutationContext, Agent} from "../types.js";
@@ -22,7 +24,7 @@ import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
 import {listArtifacts as listArtifactsAsync} from "./async/async-comments-attachments.js";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import * as schema from "../postgres/schema/index.js";
-import { resolveProjectColumnsForRoles } from "../project-lane-vocabulary.js";
+import { ARCHIVED_SENTINEL_LANES, resolveProjectColumnsForRoles } from "../project-lane-vocabulary.js";
 
 export async function saveWorkflowRunBranchImpl(store: TaskStore, state: { taskId: string; runId: string; branchId: string; currentNodeId: string; status: string; }): Promise<void> {
     /*
@@ -49,13 +51,13 @@ export async function clearNearDuplicateReferencesToImpl(store: TaskStore, canon
     FNXC:WorkflowResolvedColumns 2026-07-30-03:10:
     Resolve the CANONICAL's own column flags before asking whether it is inactive. Omitted, the
     predicate falls back to the legacy `done`/`archived` ids, so on a renamed board a canonical that
-    has just been completed or archived (`shipped`, `filed`) reads as still ACTIVE — this guard
+    has just been completed (`shipped`) reads as still ACTIVE — this guard
     early-returns and the duplicate markers pointing at it are NEVER cleared. The flagged tasks stay
     parked behind a user decision that can never arrive, which is the exact stranding the note on
     `isNearDuplicateCanonicalInactive` says it was written to prevent.
 
     Five of this predicate's six production call sites already resolved flags; this one did not, and
-    it is the one that runs on every archive/complete transition.
+    it is the one that runs on every completion or deletion transition.
 
     `undefined` on failure is deliberate and matches `moves.ts`: it degrades to the legacy id rather
     than to absent traits that match nothing.
@@ -90,8 +92,11 @@ export async function clearNearDuplicateReferencesToImpl(store: TaskStore, canon
 
     Additive and legacy-seeded: an unconverted board builds the same two `ne`s it built before.
     */
-    const liveCanonicalLanes = await resolveProjectColumnsForRoles(store, ["complete", "archived"])
+    const resolvedLiveCompleteLanes = await resolveProjectColumnsForRoles(store, ["complete"])
       .catch(() => undefined);
+    const liveCanonicalLanes = resolvedLiveCompleteLanes
+      ? new Set([...resolvedLiveCompleteLanes, ...ARCHIVED_SENTINEL_LANES])
+      : undefined;
     const finishedExclusions = liveCanonicalLanes && liveCanonicalLanes.size > 0
       ? [...liveCanonicalLanes].map((lane) => ne(table.column, lane))
       : [ne(table.column, "archived"), ne(table.column, "done")];
@@ -132,11 +137,17 @@ export async function selectNextTaskForAgentImpl(store: TaskStore, agentId: stri
     const tasksById = new Map(tasks.map((task) => [task.id, task]));
     const isCheckoutAware = "checkoutTask" in store && typeof (store as Record<string, unknown>).checkoutTask === "function";
 
-    const sortByOldestColumnMove = (a: Task, b: Task) => {
-      const aSortAt = a.columnMovedAt ?? a.createdAt;
-      const bSortAt = b.columnMovedAt ?? b.createdAt;
-      return aSortAt.localeCompare(bSortAt);
-    };
+    /*
+    FNXC:TaskQueueOrder 2026-09-17-12:07:
+    FN-509: the inbox offers work in the SAME queue order every other admission path uses, so an
+    agent asking "what next" and the board showing "what next" cannot disagree. Role compatibility
+    and assignment policy remain FILTERS above this; they decide WHETHER a card is offerable, never
+    that it may overtake an older admissible one.
+
+    The previous key was the column-move stamp, which re-aged a card every time it bounced back into
+    a lane. Arrival is creation now, so a card that has waited longest genuinely comes first.
+    */
+    const sortByQueueOrder = (a: Task, b: Task) => compareTasksByQueueOrder(a, b);
 
     /*
     FNXC:AgentRouting 2026-07-12-12:05 (merge port from main):
@@ -181,7 +192,7 @@ export async function selectNextTaskForAgentImpl(store: TaskStore, agentId: stri
 
     const inProgress = assignedTasks
       .filter((task) => isWipTask(task) && isBindCompatible(task))
-      .sort(sortByOldestColumnMove);
+      .sort(sortByQueueOrder);
     if (inProgress.length > 0) {
       return {
         task: inProgress[0],
@@ -201,9 +212,9 @@ export async function selectNextTaskForAgentImpl(store: TaskStore, agentId: stri
     workflow-specific complete lane stayed excluded from dispatch — unchanged from before the conversion.
 
     Resolved per dependency through a shared IR cache (dependencies can span workflows) and unioned with the
-    legacy ids, matching the answer settled in #2720 and used by the merge blocker.
+    built-in `done` fallback, matching the merge blocker.
     */
-    const satisfiedColumns = new Set<string>(["done", "archived"]);
+    const satisfiedColumns = new Set<string>(["done"]);
     /* FNXC:WorkflowResolvedColumns 2026-07-30-14:50 (#2739 review): reuses the dispatch cache above, so a
        task and its dependency in one workflow read that IR once between them. */
     /*
@@ -226,7 +237,6 @@ export async function selectNextTaskForAgentImpl(store: TaskStore, agentId: stri
       const ir = await resolveWorkflowIrForTask(store, dependencyId, lifecycleIrCache);
       if (!ir) continue;
       for (const columnId of columnsWithFlag(ir, "complete")) satisfiedColumns.add(columnId);
-      for (const columnId of columnsWithFlag(ir, "archived")) satisfiedColumns.add(columnId);
     }
     const isDoneLike = (task: Task | undefined) => task !== undefined && satisfiedColumns.has(task.column);
 
@@ -242,7 +252,7 @@ export async function selectNextTaskForAgentImpl(store: TaskStore, agentId: stri
         }
         return store.areAllDependenciesDone(task.dependencies, tasksById, satisfiedColumns);
       })
-      .sort(sortByOldestColumnMove);
+      .sort(sortByQueueOrder);
 
     if (readyTodo.length > 0) {
       return {
@@ -264,7 +274,7 @@ export async function selectNextTaskForAgentImpl(store: TaskStore, agentId: stri
 
         return task.dependencies.some((dependencyId) => isDoneLike(tasksById.get(dependencyId)));
       })
-      .sort(sortByOldestColumnMove);
+      .sort(sortByQueueOrder);
 
     if (actionableBlocked.length > 0) {
       return {
@@ -331,6 +341,13 @@ export async function pauseTaskImpl(store: TaskStore, id: string, paused: boolea
         task.status = paused ? "paused" : undefined;
       }
       const now = new Date().toISOString();
+      /*
+      FNXC:TaskPauseAccounting 2026-09-16-06:16:
+      FN-457 — explicit pause/unpause is the primary seam, so it opens and banks the pause segment
+      here. The WIP lane is already resolved just above for the status decision; reusing that
+      resolution keeps a renamed board honest instead of matching the `in-progress` literal.
+      */
+      applyPauseAccounting(task, paused, now, task.column === (pauseLifecycle?.wip ?? LEGACY_WIP_COLUMN_FALLBACK));
       task.updatedAt = now;
       const logEntry: TaskLogEntry = {
         timestamp: now,

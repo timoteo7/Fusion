@@ -1,8 +1,9 @@
-import { File, Hash } from "lucide-react";
+import { File, Hash, MessageSquare } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { FileSearchItem, TaskSearchItem } from "../hooks/useFileMention";
+import type { ConversationMentionItem, FileSearchItem, TaskSearchItem } from "../hooks/useFileMention";
 import { getDisplayDirname } from "../utils/pathDisplay";
 import "./FileMentionPopup.css";
+import { UiListBox, UiListBoxItem } from "./ui";
 
 import type { ReactNode } from "react";
 
@@ -10,9 +11,11 @@ export interface FileMentionPopupProps {
   visible: boolean;
   position: { top: number; left: number };
   tasks: TaskSearchItem[];
+  conversations?: ConversationMentionItem[];
   files: FileSearchItem[];
   selectedIndex: number;
   onSelectTask: (task: TaskSearchItem) => void;
+  onSelectConversation?: (conversation: ConversationMentionItem) => void;
   onSelectFile: (file: FileSearchItem) => void;
   loading: boolean;
 }
@@ -21,21 +24,27 @@ function getTaskRowIndex(taskIndex: number): number {
   return taskIndex;
 }
 
-function getFileRowIndex(taskCount: number, fileIndex: number): number {
-  return taskCount + fileIndex;
+function getConversationRowIndex(taskCount: number, conversationIndex: number): number {
+  return taskCount + conversationIndex;
+}
+
+function getFileRowIndex(taskCount: number, conversationCount: number, fileIndex: number): number {
+  return taskCount + conversationCount + fileIndex;
 }
 
 /**
  * Shared hash-mention popup for chat composers.
- * Renders grouped task and file matches for the active `#` query.
+ * Renders grouped task, conversation, and file matches for the active `#` query.
  */
 export function FileMentionPopup({
   visible,
   position,
   tasks,
+  conversations = [],
   files,
   selectedIndex,
   onSelectTask,
+  onSelectConversation,
   onSelectFile,
   loading,
 }: FileMentionPopupProps): ReactNode | null {
@@ -46,6 +55,7 @@ export function FileMentionPopup({
   }
 
   const hasTasks = tasks.length > 0;
+  const hasConversations = conversations.length > 0;
   const hasFiles = files.length > 0;
 
   return (
@@ -63,26 +73,28 @@ export function FileMentionPopup({
         </div>
       )}
 
-      {!loading && !hasTasks && !hasFiles && (
+      {!loading && !hasTasks && !hasConversations && !hasFiles && (
         <div className="file-mention-popup-empty" data-testid="file-mention-empty">
-          {t("fileMention.empty", "No tasks or files found")}
+          {t("fileMention.empty", "No tasks, conversations, or files found")}
         </div>
       )}
 
-      {!loading && (hasTasks || hasFiles) && (
+      {!loading && (hasTasks || hasConversations || hasFiles) && (
         <div className="file-mention-popup-groups">
           {hasTasks && (
             <div className="file-mention-popup-group">
               <div className="file-mention-popup-group-header">{t("fileMention.taskHeader", "Tasks")}</div>
-              <ul className="file-mention-popup-list" role="listbox" aria-label={t("fileMention.taskMatches", "Task matches")}>
+              <UiListBox legacyAs="ul" className="file-mention-popup-list" aria-label={t("fileMention.taskMatches", "Task matches")}>
                 {tasks.map((task, index) => {
                   const rowIndex = getTaskRowIndex(index);
                   return (
-                    <li
+                    <UiListBoxItem
+                      legacyAs="li"
                       key={task.id}
+                      id={task.id}
+                      textValue={`${task.id} ${task.title}`}
                       className={`file-mention-popup-item${rowIndex === selectedIndex ? " file-mention-popup-item--selected" : ""}`}
                       onClick={() => onSelectTask(task)}
-                      role="option"
                       aria-selected={rowIndex === selectedIndex}
                       data-testid={`task-mention-item-${rowIndex}`}
                     >
@@ -100,27 +112,62 @@ export function FileMentionPopup({
                         </div>
                         <span className="file-mention-popup-item-path">{task.title}</span>
                       </div>
-                    </li>
+                    </UiListBoxItem>
                   );
                 })}
-              </ul>
+              </UiListBox>
+            </div>
+          )}
+
+          {hasConversations && (
+            <div className="file-mention-popup-group">
+              <div className="file-mention-popup-group-header">{t("fileMention.conversationHeader", "Conversations")}</div>
+              <UiListBox legacyAs="ul" className="file-mention-popup-list" aria-label={t("fileMention.conversationMatches", "Conversation matches")}>
+                {conversations.map((conversation, index) => {
+                  const rowIndex = getConversationRowIndex(tasks.length, index);
+                  return (
+                    <UiListBoxItem
+                      legacyAs="li"
+                      key={conversation.id}
+                      id={conversation.id}
+                      textValue={conversation.title || conversation.id}
+                      className={`file-mention-popup-item${rowIndex === selectedIndex ? " file-mention-popup-item--selected" : ""}`}
+                      onClick={() => onSelectConversation?.(conversation)}
+                      aria-selected={rowIndex === selectedIndex}
+                      data-testid={`conversation-mention-item-${rowIndex}`}
+                    >
+                      <span className="file-mention-popup-icon">
+                        <MessageSquare />
+                      </span>
+                      <div className="file-mention-popup-info">
+                        <span className="file-mention-popup-item-name">{conversation.id}</span>
+                        <span className="file-mention-popup-item-path">
+                          {conversation.title || t("fileMention.untitledConversation", "Untitled conversation")}
+                        </span>
+                      </div>
+                    </UiListBoxItem>
+                  );
+                })}
+              </UiListBox>
             </div>
           )}
 
           {hasFiles && (
             <div className="file-mention-popup-group">
               <div className="file-mention-popup-group-header">{t("fileMention.fileHeader", "Files")}</div>
-              <ul className="file-mention-popup-list" role="listbox" aria-label={t("fileMention.fileMatches", "File matches")}>
+              <UiListBox legacyAs="ul" className="file-mention-popup-list" aria-label={t("fileMention.fileMatches", "File matches")}>
                 {files.map((file, index) => {
-                  const rowIndex = getFileRowIndex(tasks.length, index);
+                  const rowIndex = getFileRowIndex(tasks.length, conversations.length, index);
                   const dirPath = getDisplayDirname(file.path);
 
                   return (
-                    <li
+                    <UiListBoxItem
+                      legacyAs="li"
                       key={file.path}
+                      id={file.path}
+                      textValue={file.name}
                       className={`file-mention-popup-item${rowIndex === selectedIndex ? " file-mention-popup-item--selected" : ""}`}
                       onClick={() => onSelectFile(file)}
-                      role="option"
                       aria-selected={rowIndex === selectedIndex}
                       data-testid={`file-mention-item-${rowIndex}`}
                     >
@@ -133,10 +180,10 @@ export function FileMentionPopup({
                           <span className="file-mention-popup-item-path">{dirPath}</span>
                         )}
                       </div>
-                    </li>
+                    </UiListBoxItem>
                   );
                 })}
-              </ul>
+              </UiListBox>
             </div>
           )}
         </div>

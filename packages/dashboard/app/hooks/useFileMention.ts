@@ -1,5 +1,6 @@
-import { useState, useCallback, useEffect, useRef, type KeyboardEvent } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, type KeyboardEvent } from "react";
 import { fetchTasks, searchFiles } from "../api";
+import { getTaskTitleDisplayText } from "../utils/taskTitleDisplay";
 import type { Column } from "@fusion/core";
 
 export interface FileSearchItem {
@@ -13,18 +14,26 @@ export interface TaskSearchItem {
   column: string;
 }
 
+export interface ConversationMentionItem {
+  id: string;
+  title: string | null;
+}
+
 export type HashMentionItem =
   | { kind: "task"; task: TaskSearchItem }
+  | { kind: "conversation"; conversation: ConversationMentionItem }
   | { kind: "file"; file: FileSearchItem };
 
 export interface UseFileMentionOptions {
   projectId?: string;
   workspace?: string;
+  conversations?: ConversationMentionItem[];
 }
 
 export interface UseFileMentionReturn {
   mentionActive: boolean;
   tasks: TaskSearchItem[];
+  conversations: ConversationMentionItem[];
   files: FileSearchItem[];
   combinedItems: HashMentionItem[];
   loading: boolean;
@@ -33,6 +42,7 @@ export interface UseFileMentionReturn {
   setSelectedIndex: (index: number) => void;
   detectMention: (text: string, cursorPosition: number) => void;
   selectTask: (task: TaskSearchItem, currentText: string) => string;
+  selectConversation: (conversation: ConversationMentionItem, currentText: string) => string;
   selectFile: (file: FileSearchItem, currentText: string) => string;
   dismissMention: () => void;
   handleKeyDown: (event: KeyboardEvent<HTMLElement>, currentText: string) => boolean;
@@ -41,6 +51,7 @@ export interface UseFileMentionReturn {
 const DEBOUNCE_MS = 200;
 const MAX_TASK_RESULTS = 8;
 const MAX_FILE_RESULTS = 8;
+export const MAX_CONVERSATION_RESULTS = 5;
 
 function createAbortError(): DOMException {
   return new DOMException("The operation was aborted.", "AbortError");
@@ -80,11 +91,11 @@ function replaceCurrentMention(currentText: string, mentionStartIndex: number, r
 /**
  * Hook to manage `#` hash-mention state and interactions.
  *
- * Detects `#` triggers in text input and provides combined task + file search,
- * keyboard navigation, and selection support for the shared popup.
+ * Detects `#` triggers in text input and provides combined task, conversation,
+ * and file search, keyboard navigation, and selection support for the shared popup.
  */
 export function useFileMention(options: UseFileMentionOptions = {}): UseFileMentionReturn {
-  const { projectId, workspace = "project" } = options;
+  const { projectId, workspace = "project", conversations: conversationCandidates = [] } = options;
 
   const [mentionActive, setMentionActive] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
@@ -97,8 +108,24 @@ export function useFileMention(options: UseFileMentionOptions = {}): UseFileMent
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortController = useRef<AbortController | null>(null);
 
+  /*
+  FNXC:ChatMentions 2026-09-04-09:58:
+  Conversation suggestions reuse the already-loaded project session order and never issue a per-keystroke request. Keep tasks first, conversations second, and files last so existing task row indexes remain stable.
+  */
+  const conversations = useMemo(() => {
+    const query = mentionQuery.trim().toLocaleLowerCase();
+    if (!mentionActive || !query) return [];
+    return conversationCandidates
+      .filter((conversation) =>
+        conversation.id.toLocaleLowerCase().includes(query)
+        || conversation.title?.toLocaleLowerCase().includes(query),
+      )
+      .slice(0, MAX_CONVERSATION_RESULTS);
+  }, [conversationCandidates, mentionActive, mentionQuery]);
+
   const combinedItems: HashMentionItem[] = [
     ...tasks.map((task) => ({ kind: "task" as const, task })),
+    ...conversations.map((conversation) => ({ kind: "conversation" as const, conversation })),
     ...files.map((file) => ({ kind: "file" as const, file })),
   ];
 
@@ -189,9 +216,14 @@ export function useFileMention(options: UseFileMentionOptions = {}): UseFileMent
         }
 
         const nextTasks = taskResult.status === "fulfilled"
+          /*
+          FNXC:TaskTitleDisplay 2026-09-14-17:05:
+          FN-391: an untitled task used to mention as an empty label. Resolve it through the shared
+          projection so a mention row carries the same text the board card shows.
+          */
           ? taskResult.value.slice(0, MAX_TASK_RESULTS).map((task) => ({
               id: task.id,
-              title: task.title ?? "",
+              title: getTaskTitleDisplayText(task),
               column: task.column as Column,
             }))
           : [];
@@ -239,6 +271,17 @@ export function useFileMention(options: UseFileMentionOptions = {}): UseFileMent
       }
 
       return replaceCurrentMention(currentText, mentionStartIndex, `#${task.id}`);
+    },
+    [mentionActive, mentionStartIndex],
+  );
+
+  const selectConversation = useCallback(
+    (conversation: ConversationMentionItem, currentText: string): string => {
+      if (!mentionActive || mentionStartIndex < 0) {
+        return currentText;
+      }
+
+      return replaceCurrentMention(currentText, mentionStartIndex, `#${conversation.id}`);
     },
     [mentionActive, mentionStartIndex],
   );
@@ -294,6 +337,7 @@ export function useFileMention(options: UseFileMentionOptions = {}): UseFileMent
   return {
     mentionActive,
     tasks,
+    conversations,
     files,
     combinedItems,
     loading,
@@ -302,6 +346,7 @@ export function useFileMention(options: UseFileMentionOptions = {}): UseFileMent
     setSelectedIndex,
     detectMention,
     selectTask,
+    selectConversation,
     selectFile,
     dismissMention,
     handleKeyDown,

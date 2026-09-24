@@ -41,12 +41,118 @@
   gap: var(--space-sm);
 }
 
+/*
+FNXC:MailboxTwoTabs 2026-09-16-16:53:
+The inbox scope menu is anchored to its header trigger and reuses the shared menu primitive, so only
+placement and surface tokens live here — no forked button or popover variant.
+*/
+.mailbox-inbox-filter-host {
+  position: relative;
+  display: inline-flex;
+}
+
+.mailbox-inbox-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.mailbox-inbox-filter-menu {
+  position: absolute;
+  inset-block-start: calc(100% + var(--space-xs));
+  inset-inline-end: 0;
+  min-inline-size: calc(var(--space-xl) * 8);
+  max-inline-size: calc(100vw - (var(--space-lg) * 2));
+  padding: var(--space-3xs) 0;
+  background: var(--surface);
+  border: thin solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 50;
+}
+
+.mailbox-inbox-filter-option {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: start;
+  cursor: pointer;
+}
+
+.mailbox-inbox-filter-option:hover,
+.mailbox-inbox-filter-option:focus-visible {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  outline: none;
+}
+
+.mailbox-inbox-filter-option[aria-checked="true"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.mailbox-inbox-filter-option-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mailbox-inbox-filter-option-count {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-pill);
+  background: var(--color-error);
+  color: var(--fab-text);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+@media (max-width: 768px) {
+  .mailbox-inbox-filter-menu {
+    inset-inline-end: var(--space-xs);
+    min-inline-size: calc(var(--space-xl) * 7);
+  }
+}
+
 .mailbox-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-sm);
   padding: 0 var(--space-lg) var(--space-sm);
   border-bottom: var(--btn-border-width) solid var(--border);
+}
+
+/*
+FNXC:MailboxCollectionNavigation 2026-09-16-21:44:
+FN-476: inside the shared rail header the band already supplies the inset AND the rule that separates it from the list,
+so the tab row must not paint a second one — two stacked hairlines is exactly the doubled chrome this task removes.
+Only the paint is reset; wrapping, scrolling, and tab metrics are untouched.
+*/
+.view-sidebar__header > .mailbox-tabs {
+  flex: 1 1 auto;
+  padding: 0;
+  border-bottom: none;
+}
+
+/*
+FNXC:MailboxCollectionNavigation 2026-09-16-21:44:
+The single-pane floating host renders the same pair at the top of its message list instead of a full-width row under
+the window title, so it keeps its separating rule and only loses the top inset the old row inherited.
+*/
+.mailbox-tabs--collection {
+  padding-top: 0;
 }
 
 .mailbox-tab {
@@ -64,10 +170,18 @@ Mailbox tab and sub-tab icons and badges must retain their intrinsic size on mob
 `.mailbox-view--mobile .mailbox-tab` track uses `flex: 1 1 0` with `min-width: 0`, and the
 badged Inbox tab was the first overflowing tab to collapse its icon to a dot.
 */
+/*
+FNXC:MailboxTwoTabs 2026-09-16-16:53:
+The pending-approvals badge moved from the Approvals tab onto the header filter trigger, so the
+no-shrink protection must follow it out of `.mailbox-tab` — otherwise the mobile header flex track
+compresses the badge and its icon. The existing tab and agent sub-tab selectors stay untouched.
+*/
 .mailbox-tab > svg,
 .mailbox-agent-subtab > svg,
 .mailbox-tab .mailbox-tab-badge,
-.mailbox-agent-subtab .mailbox-tab-badge {
+.mailbox-agent-subtab .mailbox-tab-badge,
+.mailbox-inbox-filter .mailbox-inbox-filter-icon,
+.mailbox-inbox-filter .mailbox-tab-badge {
   flex-shrink: 0;
 }
 
@@ -194,6 +308,28 @@ badged Inbox tab was the first overflowing tab to collapse its icon to a dot.
   color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+/*
+FNXC:MailboxSubject 2026-09-15-04:40:
+Every mailbox row carries an author AND a subject. The subject is the prominent single line of the
+row (list) or the heading of an opened mail (detail); the body preview stays the muted secondary
+line below it. Shared by MailboxView, MailboxModal and the AgentDetailView Mail tab.
+*/
+.mailbox-item-subject {
+  font-size: 0.85rem;
+  font-weight: var(--font-weight-medium);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mailbox-message-subject {
+  margin: 0 0 var(--space-sm);
+  font-size: 1rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--text);
 }
 
 .mailbox-item-preview {
@@ -663,8 +799,15 @@ than overflow the message column. Theme tokens only — no hard-coded colors.
   flex-wrap: wrap;
 }
 
-.mailbox-compose-btn {
-  flex-shrink: 0;
+/*
+FNXC:StandardizedMailboxLayout 2026-09-14-03:31:
+The Agents scope cluster (agent picker + Inbox/Outbox scope tabs) is hosted by the shared ViewHeader, so it drops the
+rail-era divider and vertical inset that separated it from the message list. The duplicate .mailbox-compose-btn rule
+is gone with the second Compose button it styled; the header owns the single creation action.
+*/
+.view-header .mailbox-agent-subtabs {
+  padding: 0;
+  border-bottom: none;
 }
 
 .mailbox-agent-select {
@@ -961,13 +1104,22 @@ FN-8349 attempted this same change but finalized without landing it.
   margin-left: auto;
 }
 
-.mailbox-view--mobile .view-header__actions .btn {
+/*
+FNXC:StandardizedViewActions 2026-09-17-09:26:
+FN-502 : ces deux règles visaient tout `.btn` du bandeau et servaient à comprimer puis tronquer à l'ellipse les
+libellés des ACTIONS sur téléphone — exactement le symptôme signalé. Les actions (Filtrer, Composer, Tout marquer
+comme lu) passent désormais par `ViewActionButton` et se réduisent à leur icône ; à 0,3,0 ces sélecteurs auraient de
+plus battu la règle de boîte canonique (0,2,1) et réintroduit un padding dans le carré réduit. Ils sont donc
+re-scopés aux seuls contrôles EXEMPTÉS du canon — sous-onglets d'agent et filtres d'approbations (`.mailbox-agent-subtab`),
+qui sont des choix de collection et gardent leur libellé lisible — et le badge est exclu de la troncature.
+*/
+.mailbox-view--mobile .view-header__actions .mailbox-agent-subtab {
   min-width: 0;
   flex-shrink: 1;
   padding: var(--space-xs);
 }
 
-.mailbox-view--mobile .view-header__actions .btn span {
+.mailbox-view--mobile .view-header__actions .mailbox-agent-subtab > span:not(.mailbox-tab-badge) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1060,26 +1212,26 @@ separate approvals Back button outside this header or non-mobile mailbox layouts
     gap: var(--space-sm);
   }
 
+  /*
+  FNXC:ModalChrome 2026-09-13-14:21:
+  Mailbox enlarges every mobile header action through the same minimum target but leaves close-button padding, radius, border, and paint to ModalCloseButton. This preserves one canonical close appearance while keeping the existing touch geometry uniform with adjacent actions.
+  */
   .mailbox-modal .mailbox-header-actions .btn,
   .mailbox-modal .mailbox-header-actions .btn-icon,
   .mailbox-modal .mailbox-header-actions .modal-close,
   .mailbox-view .mailbox-header-actions .btn,
   .mailbox-view .mailbox-header-actions .btn-icon {
-    min-height: 2.25rem;
+    min-height: var(--icon-button-size-mobile);
   }
 
+  /* FNXC:IconOnlyButtonCanon 2026-09-16-19:05: FN-471 — même 36px, exprimés par le jeton d'icône canonique. */
   .mailbox-modal .mailbox-header-actions .btn-icon,
   .mailbox-modal .mailbox-header-actions .modal-close,
   .mailbox-view .mailbox-header-actions .btn-icon {
-    min-width: 2.25rem;
+    min-width: var(--icon-button-size-mobile);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-  }
-
-  .mailbox-modal .mailbox-header-actions .modal-close {
-    padding: 0;
-    border-radius: var(--radius-sm);
   }
 
   .mailbox-modal .mailbox-tabs {
@@ -1310,13 +1462,11 @@ separate approvals Back button outside this header or non-mobile mailbox layouts
   gap: var(--space-lg);
 }
 
-.message-composer-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-  font-size: 0.95rem;
-}
+/*
+FNXC:StandardizedMailboxLayout 2026-09-14-10:24:
+FN-379 remediation: the composer's local header row was removed, so its rule is deleted rather than left as an
+orphan selector. Its identity and abandon action are painted by the owning ViewHeader.
+*/
 
 .message-composer-body {
   display: flex;

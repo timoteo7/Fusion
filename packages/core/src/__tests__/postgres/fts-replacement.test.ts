@@ -160,6 +160,19 @@ pgDescribe("fts-replacement: tsvector/GIN full-text search (PostgreSQL)", () => 
     expect(resultIds(dataResults)).toEqual(["PREFIX-002"]);
   });
 
+  it("matches suffixes and preserves punctuation and SQL wildcard characters literally", async () => {
+    await insertTask(ctx.layer, "FN-352", { title: "Dans la barre de recherche" });
+    await insertTask(ctx.layer, "FN-901", { title: "retire de fichier txt" });
+    await insertTask(ctx.layer, "FN-902", { title: "Add the bonjour.txt file" });
+    await insertTask(ctx.layer, "FN-903", { title: "Keep 100%_literal coverage" });
+    await insertTask(ctx.layer, "FN-904", { title: "Keep 100XXliteral coverage" });
+
+    expect(resultIds(await searchTasksTsvector(ctx.layer.db, "52"))).toEqual(["FN-352"]);
+    expect(resultIds(await searchTasksTsvector(ctx.layer.db, ".TXT"))).toEqual(["FN-902"]);
+    expect(await countSearchTasksTsvector(ctx.layer.db, ".txt")).toBe(1);
+    expect(resultIds(await searchTasksTsvector(ctx.layer.db, "%_"))).toEqual(["FN-903"]);
+  });
+
   // ── VAL-SEARCH-002: tsvector sync-on-write (insert) ──
 
   it("newly inserted task is immediately searchable without explicit reindex (VAL-SEARCH-002)", async () => {
@@ -366,18 +379,5 @@ pgDescribe("fts-replacement: tsvector/GIN full-text search (PostgreSQL)", () => 
     expect(sanitizeSearchTokens('+must (group)')).toEqual(["must", "group"]);
     expect(sanitizeSearchTokens("")).toEqual([]);
     expect(sanitizeSearchTokens("   ")).toEqual([]);
-  });
-
-  it("includeArchived=false excludes archived tasks from search", async () => {
-    await insertTask(ctx.layer, "ARCH-001", { title: "archived filter target", column: "archived" });
-    await insertTask(ctx.layer, "LIVE-001", { title: "archived filter target", column: "todo" });
-
-    // Default includeArchived=true: both match.
-    const all = await searchTasksTsvector(ctx.layer.db, "filter");
-    expect(resultIds(all)).toEqual(["ARCH-001", "LIVE-001"]);
-
-    // includeArchived=false: only the live task.
-    const liveOnly = await searchTasksTsvector(ctx.layer.db, "filter", { includeArchived: false });
-    expect(resultIds(liveOnly)).toEqual(["LIVE-001"]);
   });
 });

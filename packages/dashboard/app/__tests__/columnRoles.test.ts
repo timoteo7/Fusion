@@ -21,12 +21,49 @@ LEGACY_….has(columnId)`) fails the "traits win" cases; making it ignore the id
 */
 import { describe, expect, it } from "vitest";
 import {
-  isArchivedColumnRole,
   isCompleteColumnRole,
   isReviewColumnRole,
   isWipColumnRole,
-isFieldEditableColumnRole, isIntakeColumnRole, isPreImplementationColumnRole
+isDescriptionEditableColumnRole, isFieldEditableColumnRole, isIntakeColumnRole, isPreImplementationColumnRole
 } from "../utils/columnRoles";
+
+/*
+FNXC:TaskDescriptionEditing 2026-09-14-18:55:
+FN-391 splits DESCRIPTION editing from generic field editing. The two rules must stay genuinely
+different: a released card keeps its settings editable while its description freezes. These cases
+pin both halves together so a future "simplification" that merges them fails here.
+*/
+describe("isDescriptionEditableColumnRole", () => {
+  it("grants editing only for a manual-intake column, not for an auto-triaging intake or a hold", () => {
+    expect(isDescriptionEditableColumnRole({ intake: true, manualIntake: true }, "backlog")).toBe(true);
+    expect(isDescriptionEditableColumnRole({ intake: true }, "backlog")).toBe(false);
+    expect(isDescriptionEditableColumnRole({ hold: true }, "waiting")).toBe(false);
+  });
+
+  it("lets any terminal, WIP or review trait veto a column that also declares manual intake", () => {
+    expect(isDescriptionEditableColumnRole({ manualIntake: true, complete: true }, "shipped")).toBe(false);
+    expect(isDescriptionEditableColumnRole({ manualIntake: true, countsTowardWip: true }, "building")).toBe(false);
+    expect(isDescriptionEditableColumnRole({ manualIntake: true, mergeBlocker: true }, "signoff")).toBe(false);
+    expect(isDescriptionEditableColumnRole({ manualIntake: true, humanReview: true }, "signoff")).toBe(false);
+  });
+
+  it("falls back to the legacy `ideas` id ONLY when no traits resolved", () => {
+    // First paint, and a card stranded in a column its workflow no longer declares.
+    expect(isDescriptionEditableColumnRole(undefined, "ideas")).toBe(true);
+    expect(isDescriptionEditableColumnRole(undefined, "todo")).toBe(false);
+    expect(isDescriptionEditableColumnRole(undefined, "triage")).toBe(false);
+    expect(isDescriptionEditableColumnRole(undefined, "backlog")).toBe(false);
+  });
+
+  it("is strictly narrower than generic field editing, which keeps the other settings reachable", () => {
+    // A released planning/hold lane: settings stay editable, the description does not.
+    expect(isFieldEditableColumnRole({ hold: true }, "waiting")).toBe(true);
+    expect(isDescriptionEditableColumnRole({ hold: true }, "waiting")).toBe(false);
+
+    expect(isFieldEditableColumnRole(undefined, "todo")).toBe(true);
+    expect(isDescriptionEditableColumnRole(undefined, "todo")).toBe(false);
+  });
+});
 
 describe("isIntakeColumnRole", () => {
   it("uses the intake TRAIT when the column resolved", () => {
@@ -99,7 +136,6 @@ describe("isFieldEditableColumnRole", () => {
     expect(isFieldEditableColumnRole({ intake: true, mergeBlocker: true }, "backlog")).toBe(false);
     expect(isFieldEditableColumnRole({ intake: true, humanReview: true }, "backlog")).toBe(false);
     expect(isFieldEditableColumnRole({ intake: true, complete: true }, "backlog")).toBe(false);
-    expect(isFieldEditableColumnRole({ intake: true, archived: true }, "backlog")).toBe(false);
   });
 
   it("refuses a resolved column with no pre-implementation trait", () => {
@@ -117,9 +153,7 @@ describe("isFieldEditableColumnRole", () => {
 
 /*
 FNXC:WorkflowResolvedColumns 2026-07-30-19:00 (fleet phase):
-The four roles the helper set was missing. 680 of the 722 backlog guards target these — `done` 195,
-`in-review` 200, `archived` 147, `in-progress` 138 — against 42 for the two roles that already had
-helpers, so every fleet worker needs them on their first file.
+Complete, review, and implementation roles use the same flags-first helper contract as intake and hold.
 
 Each case asserts BOTH directions, because a helper that returns false unconditionally would satisfy
 a one-sided test while converting every site to a dead guard.
@@ -139,27 +173,15 @@ describe("terminal and mid-flight column roles", () => {
   */
   it("lets a resolved FALSE trait beat a matching legacy id", () => {
     expect(isCompleteColumnRole({ complete: false }, "done")).toBe(false);
-    expect(isArchivedColumnRole({ archived: false }, "archived")).toBe(false);
     expect(isWipColumnRole({ countsTowardWip: false }, "in-progress")).toBe(false);
     expect(isReviewColumnRole({ mergeBlocker: false, humanReview: false }, "in-review")).toBe(false);
   });
 
-  it("isCompleteColumnRole reads the complete trait, and does NOT count archived", () => {
+  it("isCompleteColumnRole reads the complete trait and does not count the historical sentinel", () => {
     expect(isCompleteColumnRole({ complete: true }, "shipped")).toBe(true);
-    /*
-    The distinction the doc comment claims, asserted rather than asserted-in-prose: an archived card
-    is finished but not COMPLETED. Surfaces that count throughput would double-count it otherwise.
-    */
-    expect(isCompleteColumnRole({ archived: true }, "archived")).toBe(false);
+    expect(isCompleteColumnRole(undefined, "archived")).toBe(false);
     expect(isCompleteColumnRole(undefined, "done")).toBe(true);
     expect(isCompleteColumnRole(undefined, "shipped")).toBe(false);
-  });
-
-  it("isArchivedColumnRole reads the archived trait", () => {
-    expect(isArchivedColumnRole({ archived: true }, "cold-storage")).toBe(true);
-    expect(isArchivedColumnRole({ complete: true }, "done")).toBe(false);
-    expect(isArchivedColumnRole(undefined, "archived")).toBe(true);
-    expect(isArchivedColumnRole(undefined, "cold-storage")).toBe(false);
   });
 
   it("isWipColumnRole keys on countsTowardWip, the same flag capacity arithmetic uses", () => {

@@ -75,7 +75,7 @@ FNXC:ReviewGatedPlanning 2026-08-24-06:30:
 Setting `requireImplementationOnlySteps` on an ALREADY-BUILT plan-review node is inert: the prompt
 is assembled here, so a later `template.nodes[0].config.requireImplementationOnlySteps = true`
 changes a flag no engine code reads and leaves the reviewer prompt without its criterion. Both
-builtin:review-gated-coding and builtin:coding-ideas-v2 did exactly that. Derived workflows that
+builtin:review-gated-coding and builtin:coding-ideas did exactly that. Derived workflows that
 clone a base IR must call this instead so the prompt and the flag stay together.
 */
 export function applyImplementationOnlyStepReview(node: WorkflowIrNode): void {
@@ -131,8 +131,8 @@ export function planReviewOptionalGroupNode(
       reworkRegion: true,
       maxReworkCycles: 3,
       /*
-       * FNXC:WorkflowRevisionBudget 2026-06-30-19:49:
-       * Built-in Plan Review/spec remediation is unbounded by default; workflow setting value `planReviewMaxRevisions` is the operator cap for read-only built-ins, while authored `maxRevisions` still lets custom/duplicated workflows encode their own budget.
+       * FNXC:WorkflowRevisionBudget 2026-09-13-04:34:
+       * The authored `"unbounded"` sentinel delegates built-in Plan Review to the shared finite safety backstop. Workflow settings and custom authored numeric values may impose a stricter cap.
        */
       maxRevisions: options.maxRevisions ?? "unbounded",
       template: {

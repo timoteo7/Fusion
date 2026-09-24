@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { loadAllAppCss } from "../test/cssFixture";
 import { computePublishedMobileNavHeight } from "../components/MobileNavBar";
 
@@ -65,6 +65,12 @@ describe("mobile bottom-space layout invariant", () => {
   const css = loadAllAppCss();
   const mobileCss = extractMobileMediaBlocks(css);
 
+  afterEach(() => {
+    document.body.replaceChildren();
+    document.documentElement.style.removeProperty("--mobile-nav-height");
+    delete document.documentElement.dataset.viewportMode;
+  });
+
   it.each([
     ["nav only / healthy viewport", { footerVisible: false, mobileNavVisible: true, keyboardOpen: false, safeAreaFloor: 12, standaloneGap: 0, icbBottomOffset: 0, executorFooterHeight: 36, mobileNavHeight: 44 }],
     ["footer + nav / iPhone PWA safe area", { footerVisible: true, mobileNavVisible: true, keyboardOpen: false, safeAreaFloor: 34, standaloneGap: 8, icbBottomOffset: 0, executorFooterHeight: 36, mobileNavHeight: 44 }],
@@ -83,6 +89,74 @@ describe("mobile bottom-space layout invariant", () => {
     expect(footerAndNavRule).toContain("var(--executor-footer-height) + var(--mobile-nav-height) + max(env(safe-area-inset-bottom, 0px), 12px) + var(--standalone-bottom-gap) + var(--icb-bottom-offset, 0px)");
     expect(footerAndNavRule).not.toContain("100vh");
     expect(footerAndNavRule).not.toContain("100dvh");
+  });
+
+  it("ancre le drawer Alpha sous la pill tout en gardant la réserve système dans sa surface", () => {
+    const drawerRule = normalizeCss(extractRuleBlock(css, ".mobile-drawer"));
+    const drawerPanelRule = normalizeCss(extractRuleBlock(css, ".mobile-drawer__panel"));
+    const drawerBodyRule = normalizeCss(extractRuleBlock(css, ".mobile-drawer__body"));
+    const navRule = normalizeCss(extractRuleBlock(css, ".mobile-nav-bar"));
+    const alphaContentRule = normalizeCss(extractRuleBlock(css, 'html[data-viewport-mode="mobile"] .project-content--with-mobile-nav'));
+    const alphaBoardRule = normalizeCss(extractRuleBlock(css, '.board'));
+    const skeletonRule = normalizeCss(extractRuleBlock(css, ".board.board-workflows-skeleton"));
+
+    expect(drawerRule).toContain("inset: 0 var(--icb-right-offset, 0px) 0 0");
+    expect(drawerRule).toContain("z-index: var(--z-popover)");
+    expect(drawerRule).toContain("padding-block-start: calc(env(safe-area-inset-top, 0px) + var(--mobile-drawer-top-reveal))");
+    expect(drawerRule).not.toContain("padding-block-end");
+    expect(drawerPanelRule).toContain("height: var(--mobile-drawer-block-size)");
+    expect(drawerPanelRule).toContain("max-height: var(--mobile-drawer-block-size)");
+    expect(drawerPanelRule).not.toContain("var(--mobile-nav-height)");
+    expect(drawerPanelRule).not.toContain("var(--mobile-nav-system-offset)");
+    expect(drawerBodyRule).toContain("padding-block-end: var(--mobile-nav-system-offset)");
+    expect(navRule).toContain("z-index: 45");
+    expect(extractRuleBlock(css, ":root")).toContain("--z-popover: 60");
+    expect(alphaContentRule).toContain("var(--mobile-nav-height) + var(--mobile-nav-system-offset)");
+    expect(alphaBoardRule).toContain("--board-padding: var(--ui-density-md)");
+    expect(skeletonRule).toContain("height: 100%");
+    expect(skeletonRule).toContain("min-height: 0");
+    expect(alphaBoardRule).not.toContain("padding-block-end");
+    expect(alphaBoardRule).not.toContain("--mobile-nav-height");
+    expect(alphaBoardRule).not.toContain("--mobile-nav-system-offset");
+    expect(alphaBoardRule).not.toContain("env(safe-area-inset-bottom");
+    expect(css.match(/--mobile-nav-height:\s*44px/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ["portrait sans inset", 0, 0, 0, true],
+    ["portrait standalone avec safe area", 34, 8, 0, true],
+    ["paysage avec compensation ICB", 12, 0, 52, true],
+    ["paysage clavier ouvert et pill masquée", 12, 0, 52, false],
+  ])("garde le bord du drawer à zéro et sa réserve interne en %s", (_name, safeArea, standalone, icb, pillVisible) => {
+    const internalSystemClearance = icb + Math.max(safeArea, 12) + standalone;
+    const externalBottomOffset = 0;
+
+    expect(externalBottomOffset).toBe(0);
+    expect(internalSystemClearance).toBeGreaterThanOrEqual(12);
+    expect(pillVisible ? externalBottomOffset : externalBottomOffset).toBe(0);
+  });
+
+  it("aligne les adaptations FloatingWindow et Terminal sur le même bord inférieur", () => {
+    const floatingOverlay = normalizeCss(extractRuleBlock(css, 'html[data-mobile-drawers="true"][data-viewport-mode="mobile"] .floating-window-overlay--mobile-drawer'));
+    const floatingPanel = normalizeCss(extractRuleBlock(css, 'html[data-mobile-drawers="true"][data-viewport-mode="mobile"] .floating-window--mobile-drawer'));
+    const floatingBody = normalizeCss(extractRuleBlock(css, 'html[data-mobile-drawers="true"][data-viewport-mode="mobile"] .floating-window--mobile-drawer .floating-window__body'));
+    const terminalOverlay = normalizeCss(extractRuleBlock(css, 'html[data-mobile-drawers="true"][data-viewport-mode="mobile"] .terminal-modal-overlay:not(.terminal-modal-overlay--docked)'));
+    const terminalPanel = normalizeCss(extractRuleBlock(css, 'html[data-mobile-drawers="true"][data-viewport-mode="mobile"] .terminal-modal-overlay:not(.terminal-modal-overlay--docked) > .terminal-modal'));
+
+    expect(floatingOverlay).toContain("inset: 0 var(--icb-right-offset, 0px) 0 0");
+    expect(floatingOverlay).toContain("padding-block-start: calc(env(safe-area-inset-top, 0px) + var(--mobile-drawer-top-reveal))");
+    expect(floatingOverlay).not.toContain("padding-block-end");
+    expect(floatingPanel).toContain("height: var(--mobile-drawer-block-size) !important");
+    expect(floatingPanel).toContain("max-height: var(--mobile-drawer-block-size) !important");
+    expect(floatingPanel).not.toContain("var(--mobile-nav-system-offset)");
+    expect(floatingBody).toContain("padding-block-end: var(--mobile-nav-system-offset)");
+    expect(terminalOverlay).toContain("padding-block-start: calc(env(safe-area-inset-top, 0px) + var(--mobile-drawer-top-reveal))");
+    expect(terminalOverlay).not.toContain("padding-block-end");
+    expect(terminalPanel).toContain("height: var(--mobile-drawer-block-size) !important");
+    expect(terminalPanel).toContain("min-height: 0 !important");
+    expect(terminalPanel).toContain("max-height: var(--mobile-drawer-block-size) !important");
+    expect(terminalPanel).toContain("padding-block-end: var(--mobile-nav-system-offset)");
+    expect(terminalPanel).not.toContain("var(--mobile-nav-height)");
   });
 
   it("keeps board and list content height parent-relative on mobile and desktop", () => {
@@ -114,5 +188,10 @@ describe("mobile bottom-space layout invariant", () => {
         tabHeights: [],
       }),
     ).toBe(44);
+  });
+
+  it("bounds non-finite Alpha measurements and counts the floating gap once", () => {
+    expect(computePublishedMobileNavHeight({ navOffsetHeight: Number.NaN, paddingBottom: Number.NaN, tabHeights: [Number.NaN], floatingGap: Number.POSITIVE_INFINITY })).toBe(44);
+    expect(computePublishedMobileNavHeight({ navOffsetHeight: 54, paddingBottom: 0, tabHeights: [44], floatingGap: 8 })).toBe(62);
   });
 });

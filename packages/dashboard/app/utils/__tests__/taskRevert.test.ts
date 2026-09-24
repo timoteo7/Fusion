@@ -14,12 +14,36 @@ describe("isTaskReverted", () => {
   ] as const)("returns %s for revertedAt metadata", (sourceMetadata, expected) => {
     expect(isTaskReverted(sourceMetadata as Task["sourceMetadata"] | undefined)).toBe(expected);
   });
+
+  /*
+  FN-416 case (i): the revert marker is revocable by an additive `restoredAt`. The table is the
+  full cross-product of marker states, and every doubtful restore datum must keep the task
+  reverted (fail-safe) rather than silently erasing a Reverted badge.
+  */
+  const REVERTED_AT = "2026-08-01T00:00:00.000Z";
+  it.each([
+    ["absent restoredAt", { revertedAt: REVERTED_AT }, true],
+    ["blank restoredAt", { revertedAt: REVERTED_AT, restoredAt: "   " }, true],
+    ["non-string restoredAt", { revertedAt: REVERTED_AT, restoredAt: 1234 }, true],
+    ["boolean restoredAt", { revertedAt: REVERTED_AT, restoredAt: true }, true],
+    ["unparsable restoredAt", { revertedAt: REVERTED_AT, restoredAt: "not-a-date" }, true],
+    ["earlier restoredAt", { revertedAt: REVERTED_AT, restoredAt: "2026-07-01T00:00:00.000Z" }, true],
+    ["equal restoredAt", { revertedAt: REVERTED_AT, restoredAt: REVERTED_AT }, false],
+    ["later restoredAt", { revertedAt: REVERTED_AT, restoredAt: "2026-09-01T00:00:00.000Z" }, false],
+    ["unparsable revertedAt with valid restoredAt", { revertedAt: "whenever", restoredAt: "2026-09-01T00:00:00.000Z" }, true],
+    ["blank revertedAt with valid restoredAt", { revertedAt: "  ", restoredAt: "2026-09-01T00:00:00.000Z" }, false],
+    ["restoredAt with no revertedAt", { restoredAt: "2026-09-01T00:00:00.000Z" }, false],
+  ] as const)("revocable marker: %s", (_label, sourceMetadata, expected) => {
+    expect(isTaskReverted(sourceMetadata as Task["sourceMetadata"] | undefined)).toBe(expected);
+  });
 });
 
 describe("partitionRevertedTasks", () => {
-  const task = (id: string, revertedAt?: unknown): Task => ({
+  const task = (id: string, revertedAt?: unknown, restoredAt?: unknown): Task => ({
     id, column: "done", title: id, description: "", createdAt: "", updatedAt: "", dependencies: [], steps: [],
-    sourceMetadata: revertedAt === undefined ? {} : { revertedAt },
+    sourceMetadata: revertedAt === undefined
+      ? {}
+      : { revertedAt, ...(restoredAt === undefined ? {} : { restoredAt }) },
   } as unknown as Task);
 
   it("keeps invalid markers normal and returns valid markers once", () => {
@@ -28,15 +52,26 @@ describe("partitionRevertedTasks", () => {
     expect(result.normal.map(({ id }) => id)).toEqual(["KB-1", "KB-3"]);
     expect(result.reverted.map(({ id }) => id)).toEqual(["KB-2"]);
   });
+
+  // FN-416 case (i): partition follows the same revocable verdict as `isTaskReverted`.
+  it("treats a restored task as normal and a stale restore marker as still reverted", () => {
+    const result = partitionRevertedTasks([
+      task("KB-RESTORED", "2026-08-01T00:00:00.000Z", "2026-08-02T00:00:00.000Z"),
+      task("KB-STALE-RESTORE", "2026-08-01T00:00:00.000Z", "2026-07-01T00:00:00.000Z"),
+      task("KB-BAD-RESTORE", "2026-08-01T00:00:00.000Z", 42),
+    ]);
+    expect(result.normal.map(({ id }) => id)).toEqual(["KB-RESTORED"]);
+    expect(result.reverted.map(({ id }) => id)).toEqual(["KB-STALE-RESTORE", "KB-BAD-RESTORE"]);
+  });
 });
 
 /*
 FNXC:WorkflowResolvedColumns 2026-07-31-23:30:
 THE UNDO-TASK LOOKUP CLASSIFIED A NEIGHBOUR'S COLUMN BY ID.
 
-`findOpenUndoTaskForSource` skips candidates that are finished, so a done/archived prior undo attempt
-never renders as an active "Undo task" link. Keyed on `done`/`archived`, a board that renames those
-lanes matched neither: a FINISHED undo task kept rendering as an open one, which is the stale
+`findOpenUndoTaskForSource` skips candidates that are finished, so a prior undo attempt in Complete
+never renders as an active "Undo task" link. Keyed only on `done`, a board that renames Complete
+matched nothing: a FINISHED undo task kept rendering as an open one, which is the stale
 affordance the function's own header says it exists to prevent.
 
 The flags are PER-CANDIDATE, keyed by task id. That is what makes this correct and what two earlier

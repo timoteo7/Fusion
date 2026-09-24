@@ -506,6 +506,17 @@ export type DatabaseMutationType =
   /* FNXC:ExternalBlock 2026-08-28-04:08: external-block telemetry contains ids and fixed classifications only; raw obstacle prose stays on the task. */
   | "task:external-block-parked"
   | "task:external-block-cleared"
+  /** Metadata: { taskId, column, trigger, outcome, completedStepCount } */
+  | "task:step-session-abort-contained"
+  /** Metadata: { taskId, blockerTaskIds, episodeCount, commonFileCount, decision, freshness } — paths and prose stay in the transactional receipt. */
+  | "task:overlap-wait-released"
+  /*
+  FNXC:OverlapWaitSynchronization 2026-09-15-19:20:
+  FN-429. Metadata: { taskId, blockerTaskId, repository, fromSha, toSha, proof, episodeCount } — a delivered
+  predecessor commit rewritten by an integration-branch rebase was proven equivalent to a commit the execution
+  checkout does contain. Ids and fixed outcomes only: paths, diffs, and summaries stay in the receipt.
+  */
+  | "task:overlap-delivery-reconciled"
   /** Metadata: { taskId, artifactKeys, owner, source, action, attempt, maxAttempts, nodeId? } */
   | "task:required-artifact-missing"
   /*
@@ -517,6 +528,8 @@ export type DatabaseMutationType =
   | "task:review-convergence-escalation"
   /** FNXC:ReviewVerdictNotes 2026-08-28-22:45: Records ids and fixed note-repair outcomes only; reviewer prose never enters run-audit. */
   | "task:review-notes-repaired"
+  /** FNXC:ReviewVerdictAuthority 2026-09-03-05:40: Records ids, the fixed repair outcome, and an authored repaired verdict only; reviewer prose never enters run-audit. */
+  | "task:review-verdict-repaired"
   /** FNXC:ReviewEmptyContent 2026-08-28-13:14: Records the ids-only terminal close for a provably empty Code Review input. */
   | "task:review-empty-content-parked"
   | "task:review-arbitration"
@@ -581,6 +594,10 @@ export type DatabaseMutationType =
   /* FNXC:MissionAutoReconcile 2026-08-11-02:39: Periodic reconcile records only IDs, source enums, and bounded counters. */
   | "mission:reconcile-pass"
   | "task:auto-recover-branch-misbound"
+  /** Metadata: { taskId, source, branch, baseBranch, mergeSha, mergeStrategy, ownershipProof } — identifiers and fixed outcomes only. */
+  | "task:reconcile-absent-branch-landed"
+  /** Metadata: { taskId, source, branch, baseBranch, reason } — identifiers and fixed outcomes only. */
+  | "task:reconcile-absent-branch-unproven"
   | "task:auto-recover-misrouted-foreign-commit"
   | "task:auto-recover-foreign-only-contamination"
   | "task:auto-recover-foreign-only-contamination-skipped"
@@ -592,10 +609,13 @@ export type DatabaseMutationType =
   | "task:auto-recover-paused-abort-park"
   // FNXC:Lifecycle FNXC_LOG 2026-06-20-00:00: audit type for reaping a leaked worktree/lease/semaphore slot whose holder left in-progress.
   | "task:reap-leaked-concurrency-slot"
-  // task:auto-archived-ghost-bug metadata: { findings: Array<{ construct: { kind: string; raw: string; filePath?: string; line?: number }; matched: boolean; probeError?: string; output?: string }>; reason: string }
-  // task:auto-archived-duplicate metadata: { siblingTaskIds: string[]; scores: Record<string, number> }
+  // Historical compatibility metadata: { findings: Array<{ construct: { kind: string; raw: string; filePath?: string; line?: number }; matched: boolean; probeError?: string; output?: string }>; reason: string }
+  // FNXC:GhostBugPreflight 2026-09-07-17:01: Auto-delete visibility records IDs, counts, and fixed outcomes only: { taskId, reason, constructCount, definitiveCount, missingCount, controlOutcome }.
+  | "task:auto-deleted-ghost-bug"
   | "task:auto-archived-ghost-bug"
   | "task:auto-archived-duplicate"
+  /** Metadata: { taskId, source: "live-column" | "cold-storage", movedCount, restoredCount, outcome } */
+  | "task:reconcile-archived-into-done"
   /** Metadata: { taskId, attempts, maxAttempts, reason: "lineage-children" | "task-live" | "dependents" | "not-found" | "unknown" } */
   | "task:auto-archive-failure-budget-exhausted"
   | "task:auto-reconciled-self-defeating-dep"
@@ -658,7 +678,7 @@ export type DatabaseMutationType =
   | "task:reconcile-workspace-land-intent"
   /** Metadata: { taskId, reason: "auto-merge-off" | "user-paused" | "live-worktree", livePaths: string[] } */
   | "task:reconcile-workspace-partial-land-no-action"
-  /** Metadata: { taskId, path, kind: "workspace-repo-land", registeredAt, ageMs, staleBindingAgeFloorMs, ownerColumn, ownerTerminalReason: "missing" | "complete" | "archived" | "deleted" | "failed" } */
+  /** Metadata: { taskId, path, kind: "workspace-repo-land", registeredAt, ageMs, staleBindingAgeFloorMs, ownerColumn, ownerTerminalReason: "missing" | "complete" | "deleted" | "failed" } */
   | "task:reclaim-phantom-workspace-land-lease"
   /** Metadata: { taskId, path, kind: "workspace-repo-acquire", registeredAt, ageMs, staleBindingAgeFloorMs, ownerColumn, ownerTerminalReason }. */
   | "task:reclaim-phantom-workspace-acquire-lease"
@@ -725,6 +745,9 @@ export type DatabaseMutationType =
   | "task:completed-blocked-parked"
   /** Metadata: { taskId, priorColumn, priorStatus, source } */
   | "task:completed-blocked-advanced"
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: historical compatibility only. FN-509 retired the starved
+     refinement priority nudge with the priority system, so no live engine path emits this event;
+     the union member is kept so persisted rows remain readable. */
   | "task:auto-recover-starved-refinement"
   /** Metadata: { rawDiffFileCount: number; attributedFileCount: number; foreignCommitCount: number; foreignCommitShas: string[]; source: string } */
   | "task:worktree-contamination-detected"
@@ -912,7 +935,7 @@ export type DatabaseMutationType =
   | "task:empty-merge-finalize-blocked-no-landed-proof"
   | "task:integrity-reconcile-modified-files"
   | "task:integrity-warning"
-  /** FN-5092 watchdog: stale `status: "merging"` / `"merging-pr"` cleared on a done/archived task. Metadata: { previousColumn, previousStatus, ageMs, mergeConfirmed?: boolean } */
+  /** FN-5092 watchdog: stale `status: "merging"` / `"merging-pr"` cleared on a workflow Complete task. Metadata: { previousColumn, previousStatus, ageMs, mergeConfirmed?: boolean } */
   | "task:auto-recover-stale-merger-status"
   | "auto-recovery:classify-decision"
   | "auto-recovery:retry-issued"

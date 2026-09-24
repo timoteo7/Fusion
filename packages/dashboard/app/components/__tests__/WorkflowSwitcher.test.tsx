@@ -1,10 +1,11 @@
-import { readFileSync } from "node:fs";
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { Task } from "@fusion/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BoardWorkflowDefinition } from "../../api";
+import type { BoardWorkflowDefinition, BoardWorkflowsPayload } from "../../api";
 import { loadAllAppCssBaseOnly } from "../../test/cssFixture";
 import { computeMenuWidth, OPTION_DECORATIONS_WIDTH, WorkflowSwitcher } from "../WorkflowSwitcher";
-import type { WorkflowStatusCounts } from "../workflowStatusCounts";
+import { computeWorkflowStatusCounts, type WorkflowStatusCounts } from "../workflowStatusCounts";
 import { readAppFile } from "../../test/cssFixture";
 
 const workflows: BoardWorkflowDefinition[] = [
@@ -30,9 +31,15 @@ function cssRuleFor(css: string, selector: string) {
   return css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
 }
 
+/*
+FNXC:NativeUiCollections 2026-09-15-00:20:
+The single native switcher sizes its options CONTAINER, which holds the listbox and its sibling edit
+rail, so measuring the listbox element alone no longer reads the computed menu width.
+*/
 function menuWidth() {
   const menu = screen.getByRole("listbox", { name: "Workflow" });
-  return Number.parseFloat(menu.style.width);
+  const sized = menu.closest<HTMLElement>(".workflow-switcher-options") ?? menu;
+  return Number.parseFloat(sized.style.width);
 }
 
 beforeEach(() => {
@@ -70,15 +77,15 @@ describe("WorkflowSwitcher", () => {
         workflows={workflows}
         value="builtin:coding"
         onChange={vi.fn()}
-        counts={countMap([["builtin:coding", { todo: 3, inProgress: 1, done: 5, merging: 0 }]])}
+        counts={countMap([["builtin:coding", { plan: 3, progress: 1, review: 5, merging: 0 }]])}
       />,
     );
 
     const trigger = screen.getByTestId("workflow-switcher");
     expect(trigger).toHaveTextContent("Coding");
-    expect(within(trigger).queryByText("3", { selector: ".workflow-switcher-count--todo" })).not.toBeInTheDocument();
-    expect(within(trigger).queryByText("1", { selector: ".workflow-switcher-count--in-progress" })).not.toBeInTheDocument();
-    expect(within(trigger).queryByText("5", { selector: ".workflow-switcher-count--done" })).not.toBeInTheDocument();
+    expect(within(trigger).queryByText("3", { selector: ".workflow-switcher-count--plan" })).not.toBeInTheDocument();
+    expect(within(trigger).queryByText("1", { selector: ".workflow-switcher-count--progress" })).not.toBeInTheDocument();
+    expect(within(trigger).queryByText("5", { selector: ".workflow-switcher-count--review" })).not.toBeInTheDocument();
     expect(trigger.querySelector(".workflow-switcher-counts--trigger")).toBeNull();
     expect(trigger).toHaveAccessibleName("Select workflow. Current workflow: Coding");
   });
@@ -146,7 +153,7 @@ describe("WorkflowSwitcher", () => {
     expect(shortWidth).toBeGreaterThanOrEqual(240);
     expect(longWidth).toBeGreaterThan(shortWidth);
 
-    const css = loadAllAppCssBaseOnly();
+    const css = readAppFile("components/WorkflowSwitcher.css");
     const triggerRule = cssRuleFor(css, ".workflow-switcher-trigger");
     expect(triggerRule).toMatch(/max-width:\s*calc\(var\(--space-xl\) \* 12\)/);
     const currentNameRule = cssRuleFor(css, ".workflow-switcher-current-name,\n.workflow-switcher-option-name");
@@ -157,7 +164,7 @@ describe("WorkflowSwitcher", () => {
 
   it("matches the ProjectSelector trigger and menu chrome without reverting to the old styling", () => {
     /* Surface Enumeration: CSS parity covers the shared Board/ListView WorkflowSwitcher render seam, the header portal slot, desktop menu chrome, mobile max-width safety, selected/highlighted rows, count-badge preservation, and light-theme selected tint without changing behavior. */
-    const css = loadAllAppCssBaseOnly();
+    const css = readAppFile("components/WorkflowSwitcher.css");
 
     const triggerRule = cssRuleFor(css, ".workflow-switcher-trigger");
     expect(triggerRule).toMatch(/background:\s*transparent/);
@@ -267,15 +274,13 @@ describe("WorkflowSwitcher", () => {
 
   it("renders an accessible aggregate option before workflows without an edit shell", () => {
     const onChange = vi.fn();
-    const onEditWorkflow = vi.fn();
     render(
       <WorkflowSwitcher
         workflows={workflows}
         value="__all_workflows__"
         onChange={onChange}
-        counts={countMap([["__all_workflows__", { todo: 4, inProgress: 3, done: 2, merging: 1 }]])}
+        counts={countMap([["__all_workflows__", { plan: 4, progress: 3, review: 2, merging: 1 }]])}
         aggregateOption={{ id: "__all_workflows__", name: "All workflows" }}
-        onEditWorkflow={onEditWorkflow}
       />,
     );
 
@@ -286,13 +291,12 @@ describe("WorkflowSwitcher", () => {
     expect(options.map((option) => option.textContent)).toEqual(expect.arrayContaining([expect.stringContaining("All workflows")]));
     expect(options[0]).toHaveAttribute("data-testid", "workflow-switcher-option-__all_workflows__");
     expect(screen.getByTestId("workflow-switcher-option-__all_workflows__")).toHaveAttribute("aria-selected", "true");
-    expect(screen.queryByTestId("workflow-switcher-edit-__all_workflows__")).toBeNull();
-    expect(screen.getByTestId("workflow-switcher-edit-builtin:coding")).toBeInTheDocument();
+    // FN-407: the switcher is selection-only, so NO row — aggregate or real — carries an edit affordance.
+    expect(screen.queryAllByTestId(/^workflow-switcher-edit-/)).toHaveLength(0);
     expect(screen.getByTestId("workflow-switcher-option-__all_workflows__")).toHaveTextContent("4");
 
     fireEvent.click(screen.getByTestId("workflow-switcher-option-design"));
     expect(onChange).toHaveBeenCalledWith("design");
-    expect(onEditWorkflow).not.toHaveBeenCalled();
   });
 
   it("supports keyboard selection of the aggregate option", () => {
@@ -332,77 +336,88 @@ describe("WorkflowSwitcher", () => {
     expect(screen.queryByRole("listbox", { name: "Workflow" })).not.toBeInTheDocument();
   });
 
-  it("renders per-row edit buttons that close without selecting workflows", () => {
+  /*
+  FN-407: the cases that proved per-row "Edit workflow" buttons and a persistent "New workflow" popover
+  footer are DELETED — both affordances were removed from the quick switcher, so a test asserting them
+  guards nothing. They are replaced by the invariant cases below, which assert their absence across every
+  data shape the switcher can render.
+  */
+  it("renders no edit or create affordance for any list shape", () => {
+    const shapes: { name: string; props: Partial<Parameters<typeof WorkflowSwitcher>[0]> }[] = [
+      { name: "single workflow", props: { workflows: [workflows[0]], value: "builtin:coding" } },
+      { name: "populated list", props: { workflows, value: "builtin:coding" } },
+      {
+        name: "aggregate option",
+        props: {
+          workflows,
+          value: "__all_workflows__",
+          aggregateOption: { id: "__all_workflows__", name: "All workflows" },
+        },
+      },
+      {
+        name: "long list",
+        props: {
+          workflows: Array.from({ length: 8 }, (_, index) => ({ id: `workflow-${index}`, name: `Workflow ${index}`, columns: [] })),
+          value: "workflow-0",
+        },
+      },
+    ];
+
+    for (const shape of shapes) {
+      const view = render(
+        <WorkflowSwitcher
+          workflows={workflows}
+          value="builtin:coding"
+          onChange={vi.fn()}
+          counts={countMap()}
+          {...shape.props}
+        />,
+      );
+      fireEvent.click(screen.getByTestId("workflow-switcher"));
+
+      expect(screen.queryAllByTestId(/^workflow-switcher-edit-/), shape.name).toHaveLength(0);
+      expect(screen.queryByTestId("workflow-switcher-create"), shape.name).toBeNull();
+      expect(screen.getAllByRole("option").length, shape.name).toBeGreaterThan(0);
+      view.unmount();
+    }
+  });
+
+  it("leaves no residual edit rail, footer, or orphaned action label in the popover", () => {
+    render(
+      <WorkflowSwitcher
+        workflows={workflows}
+        value="builtin:coding"
+        onChange={vi.fn()}
+        counts={countMap()}
+        aggregateOption={{ id: "__all_workflows__", name: "All workflows" }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("workflow-switcher"));
+    const menu = document.body.querySelector(".workflow-switcher-menu") as HTMLElement;
+    expect(menu).not.toBeNull();
+
+    expect(menu.querySelector(".workflow-switcher-edit-rail")).toBeNull();
+    expect(menu.querySelector(".workflow-switcher-footer")).toBeNull();
+    expect(menu.querySelector(".workflow-switcher-edit")).toBeNull();
+    expect(menu.querySelector(".workflow-switcher-create")).toBeNull();
+    expect(screen.queryByLabelText(/Edit workflow/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /New workflow/i })).toBeNull();
+    // No empty button shells: every rendered control in the popover is a selectable option with content.
+    for (const button of Array.from(menu.querySelectorAll("button"))) {
+      expect(button.getAttribute("role")).toBe("option");
+      expect(button.textContent?.trim()).not.toBe("");
+    }
+  });
+
+  it("keeps Enter selection scoped to the highlighted workflow option", () => {
     const onChange = vi.fn();
-    const onEditWorkflow = vi.fn();
     render(
       <WorkflowSwitcher
         workflows={workflows}
         value="builtin:coding"
         onChange={onChange}
         counts={countMap()}
-        onEditWorkflow={onEditWorkflow}
-      />,
-    );
-
-    fireEvent.click(screen.getByTestId("workflow-switcher"));
-    fireEvent.click(screen.getByTestId("workflow-switcher-edit-design"));
-
-    expect(onEditWorkflow).toHaveBeenCalledWith("design");
-    expect(onChange).not.toHaveBeenCalled();
-    expect(screen.queryByRole("listbox", { name: "Workflow" })).not.toBeInTheDocument();
-  });
-
-  it("renders a persistent New workflow footer for single and many workflow lists", () => {
-    const onCreateWorkflow = vi.fn();
-    const { rerender } = render(
-      <WorkflowSwitcher
-        workflows={[workflows[0]]}
-        value="builtin:coding"
-        onChange={vi.fn()}
-        counts={countMap()}
-        onCreateWorkflow={onCreateWorkflow}
-      />,
-    );
-
-    fireEvent.click(screen.getByTestId("workflow-switcher"));
-    expect(screen.getByTestId("workflow-switcher-create")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("workflow-switcher-create"));
-    expect(onCreateWorkflow).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("listbox", { name: "Workflow" })).not.toBeInTheDocument();
-
-    const manyWorkflows = Array.from({ length: 8 }, (_, index) => ({
-      id: `workflow-${index}`,
-      name: `Workflow ${index}`,
-      columns: [],
-    }));
-    rerender(
-      <WorkflowSwitcher
-        workflows={manyWorkflows}
-        value="workflow-0"
-        onChange={vi.fn()}
-        counts={countMap()}
-        onCreateWorkflow={onCreateWorkflow}
-      />,
-    );
-
-    fireEvent.click(screen.getByTestId("workflow-switcher"));
-    expect(screen.getByTestId("workflow-switcher-create")).toBeInTheDocument();
-    expect(screen.getAllByRole("option")).toHaveLength(manyWorkflows.length);
-  });
-
-  it("keeps Enter selection scoped to highlighted workflow options when actions exist", () => {
-    const onChange = vi.fn();
-    const onEditWorkflow = vi.fn();
-    const onCreateWorkflow = vi.fn();
-    render(
-      <WorkflowSwitcher
-        workflows={workflows}
-        value="builtin:coding"
-        onChange={onChange}
-        counts={countMap()}
-        onEditWorkflow={onEditWorkflow}
-        onCreateWorkflow={onCreateWorkflow}
       />,
     );
 
@@ -412,8 +427,6 @@ describe("WorkflowSwitcher", () => {
     fireEvent.keyDown(trigger, { key: "Enter" });
 
     expect(onChange).toHaveBeenCalledWith("design");
-    expect(onEditWorkflow).not.toHaveBeenCalled();
-    expect(onCreateWorkflow).not.toHaveBeenCalled();
   });
 
   it("renders populated and zero counts only after the dropdown expands", () => {
@@ -422,7 +435,7 @@ describe("WorkflowSwitcher", () => {
         workflows={workflows}
         value="builtin:coding"
         onChange={vi.fn()}
-        counts={countMap([["builtin:coding", { todo: 3, inProgress: 1, done: 5, merging: 0 }]])}
+        counts={countMap([["builtin:coding", { plan: 3, progress: 1, review: 5, merging: 0 }]])}
       />,
     );
 
@@ -431,19 +444,94 @@ describe("WorkflowSwitcher", () => {
 
     fireEvent.click(trigger);
 
-    expect(within(trigger).getByText("3", { selector: ".workflow-switcher-count--todo" })).toBeInTheDocument();
-    expect(within(trigger).getByText("1", { selector: ".workflow-switcher-count--in-progress" })).toBeInTheDocument();
-    expect(within(trigger).getByText("5", { selector: ".workflow-switcher-count--done" })).toBeInTheDocument();
+    expect(within(trigger).getByText("3", { selector: ".workflow-switcher-count--plan" })).toBeInTheDocument();
+    expect(within(trigger).getByText("1", { selector: ".workflow-switcher-count--progress" })).toBeInTheDocument();
+    expect(within(trigger).getByText("5", { selector: ".workflow-switcher-count--review" })).toBeInTheDocument();
 
     const codingOption = screen.getByTestId("workflow-switcher-option-builtin:coding");
-    expect(within(codingOption).getByText("3", { selector: ".workflow-switcher-count--todo" })).toBeInTheDocument();
-    expect(within(codingOption).getByText("1", { selector: ".workflow-switcher-count--in-progress" })).toBeInTheDocument();
-    expect(within(codingOption).getByText("5", { selector: ".workflow-switcher-count--done" })).toBeInTheDocument();
+    expect(within(codingOption).getByText("3", { selector: ".workflow-switcher-count--plan" })).toBeInTheDocument();
+    expect(within(codingOption).getByText("1", { selector: ".workflow-switcher-count--progress" })).toBeInTheDocument();
+    expect(within(codingOption).getByText("5", { selector: ".workflow-switcher-count--review" })).toBeInTheDocument();
 
     const designOption = screen.getByTestId("workflow-switcher-option-design");
-    expect(within(designOption).getByText("0", { selector: ".workflow-switcher-count--todo" })).toBeInTheDocument();
-    expect(within(designOption).getByText("0", { selector: ".workflow-switcher-count--in-progress" })).toBeInTheDocument();
-    expect(within(designOption).getByText("0", { selector: ".workflow-switcher-count--done" })).toBeInTheDocument();
+    expect(within(designOption).getByText("0", { selector: ".workflow-switcher-count--plan" })).toBeInTheDocument();
+    expect(within(designOption).getByText("0", { selector: ".workflow-switcher-count--progress" })).toBeInTheDocument();
+    expect(within(designOption).getByText("0", { selector: ".workflow-switcher-count--review" })).toBeInTheDocument();
+
+    const badges = within(codingOption).getAllByTitle(/^(Plan|Progress|Review):/);
+    expect(badges.map((badge) => badge.getAttribute("title"))).toEqual([
+      "Plan: 3",
+      "Progress: 1",
+      "Review: 5",
+    ]);
+    expect(codingOption).toHaveAccessibleName(/Plan: 3, Progress: 1, Review: 5/);
+  });
+
+  it("shows Review instead of Done for the four-phase symptom fixture", () => {
+    const payload: BoardWorkflowsPayload = {
+      flagEnabled: true,
+      defaultWorkflowId: "symptom",
+      taskWorkflowIds: {},
+      workflows: [{
+        id: "symptom",
+        name: "Symptom workflow",
+        columns: [
+          { id: "plan", name: "Plan", flags: { intake: true } },
+          { id: "progress", name: "Progress", flags: { countsTowardWip: true } },
+          { id: "review", name: "Review", flags: { mergeBlocker: true } },
+          { id: "done", name: "Done", flags: { complete: true } },
+        ],
+      }],
+    };
+    const tasks = ["plan", "progress", "review", "done"].map((column, index) => ({
+      id: `FN-${index}`,
+      title: column,
+      description: column,
+      column,
+      dependencies: [],
+      steps: [],
+      currentStep: 0,
+    } as Task));
+    const counts = computeWorkflowStatusCounts(tasks, payload);
+
+    render(
+      <WorkflowSwitcher
+        workflows={payload.workflows}
+        value="symptom"
+        onChange={vi.fn()}
+        counts={counts}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("workflow-switcher"));
+
+    const option = screen.getByTestId("workflow-switcher-option-symptom");
+    expect(within(option).getByTitle("Plan: 1")).toHaveTextContent("1");
+    expect(within(option).getByTitle("Progress: 1")).toHaveTextContent("1");
+    expect(within(option).getByTitle("Review: 1")).toHaveTextContent("1");
+    expect(option.querySelectorAll(".workflow-switcher-count")).toHaveLength(3);
+    expect(option).not.toHaveTextContent("Done");
+  });
+
+  it("keeps counts scoped by workflow id when names are duplicated", () => {
+    const duplicateNames = [
+      { id: "first", name: "Duplicate", columns: [] },
+      { id: "second", name: "Duplicate", columns: [] },
+    ];
+    render(
+      <WorkflowSwitcher
+        workflows={duplicateNames}
+        value="first"
+        onChange={vi.fn()}
+        counts={countMap([
+          ["first", { plan: 1, progress: 2, review: 3, merging: 0 }],
+          ["second", { plan: 4, progress: 5, review: 6, merging: 0 }],
+        ])}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("workflow-switcher"));
+
+    expect(screen.getByTestId("workflow-switcher-option-first")).toHaveAccessibleName(/Plan: 1, Progress: 2, Review: 3/);
+    expect(screen.getByTestId("workflow-switcher-option-second")).toHaveAccessibleName(/Plan: 4, Progress: 5, Review: 6/);
   });
 
   it("shows a merging indicator only for workflows with merging tasks", () => {
@@ -453,8 +541,8 @@ describe("WorkflowSwitcher", () => {
         value="builtin:coding"
         onChange={vi.fn()}
         counts={countMap([
-          ["builtin:coding", { todo: 3, inProgress: 1, done: 5, merging: 1 }],
-          ["design", { todo: 0, inProgress: 2, done: 0, merging: 0 }],
+          ["builtin:coding", { plan: 3, progress: 1, review: 5, merging: 1 }],
+          ["design", { plan: 0, progress: 2, review: 0, merging: 0 }],
         ])}
       />,
     );
@@ -472,9 +560,9 @@ describe("WorkflowSwitcher", () => {
   it("colors status counts with board column color tokens", () => {
     const css = loadAllAppCssBaseOnly();
     const badgeRules = [
-      [".workflow-switcher-count--todo", "--todo"],
-      [".workflow-switcher-count--in-progress", "--in-progress"],
-      [".workflow-switcher-count--done", "--done"],
+      [".workflow-switcher-count--plan", "--todo"],
+      [".workflow-switcher-count--progress", "--in-progress"],
+      [".workflow-switcher-count--review", "--in-review"],
     ] as const;
 
     for (const [selector, token] of badgeRules) {
@@ -483,6 +571,24 @@ describe("WorkflowSwitcher", () => {
       expect(rule).not.toMatch(/var\(--(?:text-muted|color-warning|color-success)\)/);
       expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}|rgba?\(/);
     }
+  });
+
+  /*
+  FN-407: this case proved that row editing was a separate Tab-reachable action beside selection. Row editing
+  no longer exists in the switcher, so what remains to guard is that the listbox is the popover's only
+  interactive collection and arrow navigation still crosses rows.
+  */
+  it("keeps the listbox as the only navigable collection in the popover", async () => {
+    const onChange = vi.fn();
+    render(<WorkflowSwitcher workflows={workflows} value="builtin:coding" onChange={onChange} counts={countMap()} />);
+    fireEvent.click(screen.getByTestId("workflow-switcher"));
+    const firstOption = screen.getByTestId("workflow-switcher-option-builtin:coding");
+    const option = screen.getByTestId("workflow-switcher-option-design");
+    firstOption.focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(option).toHaveFocus();
+    await userEvent.click(option);
+    expect(onChange).toHaveBeenCalledWith("design");
   });
 
   it("styles the merging indicator with a flashing animation and reduced-motion fallback", () => {

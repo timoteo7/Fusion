@@ -1,9 +1,7 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { readAppFile } from "../../test/cssFixture";
 import { getMediaBlocks } from "./PlanningModeModal.test-helpers";
 
-const PLANNING_CSS_PATH = resolve(__dirname, "..", "PlanningModeModal.css");
 const TABLET_SUMMARY_ACTIONS_QUERY = "@media (min-width: 769px) and (max-width: 1024px)";
 const MOBILE_ACTIONS_QUERY = "@media (max-width: 768px)";
 const MOBILE_PLANNING_SHELL_QUERY = "@media (max-width: 768px), (max-height: 480px)";
@@ -11,7 +9,7 @@ const MOBILE_PLANNING_SHELL_QUERY = "@media (max-width: 768px), (max-height: 480
 const DESKTOP_PLANNING_WORKSPACE_QUERY = "@media (min-width: 769px)";
 
 function loadPlanningCss(): string {
-  return readFileSync(PLANNING_CSS_PATH, "utf-8");
+  return readAppFile("components/PlanningModeModal.css");
 }
 
 function findRule(css: string, selector: string): string | undefined {
@@ -98,6 +96,23 @@ describe("PlanningModeModal CSS responsive action contract", () => {
     expect(findRule(mobileCss, ".planning-plan-pane .planning-plan-document")).toMatch(/padding\s*:\s*var\(--space-lg\)\s*;/);
   });
 
+  it("keeps the session sidebar and detail together on tablet, desktop, and short non-phone shells", () => {
+    const css = loadPlanningCss();
+    const twoPaneCss = getMediaBlocks(css, DESKTOP_PLANNING_WORKSPACE_QUERY).join("\n");
+
+    /*
+    The shell is a ViewLayout: header on top, then a body that owns the rail/content row. Forcing a row on the shell
+    itself laid the header beside the body and left Planning with neither a full-width header nor a visible rail, so
+    the shell must NOT declare a row here.
+    */
+    expect(findRule(twoPaneCss, ".planning-modal-body--split")).toBeUndefined();
+    expect(findRule(twoPaneCss, ".planning-modal-body--show-detail .planning-sidebar,\n  .planning-modal-body--show-list .planning-sidebar")).toMatch(/display\s*:\s*flex\s*;/);
+    expect(findRule(twoPaneCss, ".planning-modal-body--show-list .planning-detail")).toMatch(/display\s*:\s*flex\s*;/);
+
+    const tabletCss = getMediaBlocks(css, TABLET_SUMMARY_ACTIONS_QUERY).join("\n");
+    expect(findRule(tabletCss, ".planning-modal-body--show-list .planning-detail")).toBeUndefined();
+  });
+
   it("keeps tablet and desktop planning content flush inside both panes with compact aligned action rows", () => {
     const css = loadPlanningCss();
     const twoPaneCss = getMediaBlocks(css, DESKTOP_PLANNING_WORKSPACE_QUERY).join("\n");
@@ -130,12 +145,15 @@ describe("PlanningModeModal CSS responsive action contract", () => {
 
   it("uses consistent full-width header controls without crowding the mobile session title", () => {
     const css = loadPlanningCss();
-    const backRule = findRule(css, ".planning-session-back");
+    /*
+    FNXC:ViewBackIconParity 2026-09-17-03:18:
+    FN-486 : Planning ne redeclare plus la boîte de son retour. La géométrie appartient au primitif partagé
+    `ViewBackButton`, de sorte que le retour et le « + » ne puissent plus diverger ; ce qui reste local ici,
+    c'est uniquement le comportement de mise en page de l'en-tête autour du titre.
+    */
+    expect(css).not.toMatch(/(^|\n)\.planning-session-back\s*\{/);
     expect(findRule(css, ".planning-header-controls")).toMatch(/gap\s*:\s*var\(--space-sm\)\s*;/);
     expect(findRule(css, ".planning-header-controls .btn")).toMatch(/min-height\s*:\s*calc\(var\(--space-2xl\) \+ var\(--space-sm\)\)\s*;/);
-    expect(backRule).toMatch(/display\s*:\s*inline-flex\s*;/);
-    expect(backRule).toMatch(/min-width\s*:\s*calc\(var\(--space-md\) \* 2\.25\)\s*;/);
-    expect(backRule).toMatch(/min-height\s*:\s*calc\(var\(--space-md\) \* 2\.25\)\s*;/);
 
     const mobileCss = getMediaBlocks(css, MOBILE_ACTIONS_QUERY).join("\n");
     expect(findRule(mobileCss, ".planning-modal--embedded .modal-header--embedded")).toMatch(/flex-wrap\s*:\s*wrap\s*;/);
@@ -213,7 +231,7 @@ describe("PlanningModeModal CSS responsive action contract", () => {
     expect(responsiveCss).not.toMatch(/\.planning-actions\s*>\s*\.planning-plan-actions/);
   });
 
-  it("keeps the mobile sessions list scrolling above the bottom-pinned New session footer", () => {
+  it("keeps the mobile sessions list scrolling with no bottom creation footer", () => {
     const css = loadPlanningCss();
     const mobileShellCss = getMediaBlocks(css, MOBILE_PLANNING_SHELL_QUERY).join("\n");
 
@@ -236,8 +254,28 @@ describe("PlanningModeModal CSS responsive action contract", () => {
     expect(sidebarListRule).toMatch(/min-height\s*:\s*0\s*;/);
     expect(sidebarListRule).toMatch(/overflow-y\s*:\s*auto\s*;/);
 
-    const footerRule = findRule(mobileShellCss, ".planning-modal-body--show-list .planning-sidebar-footer");
-    expect(footerRule).toBeTruthy();
-    expect(footerRule).toMatch(/flex-shrink\s*:\s*0\s*;/);
+    expect(css).not.toMatch(/\.planning-sidebar-footer/);
+    expect(css).not.toMatch(/\.planning-sidebar-resize-handle/);
+  });
+
+  /*
+  FNXC:PlanningSessionRowActions 2026-09-17-03:18:
+  FN-486 retire les commandes PERMANENTES de ligne (renommer/supprimer et leur conteneur) au profit du menu
+  contextuel partagé : leurs règles disparaissent complètement au lieu d'être masquées, sur bureau comme sur
+  téléphone. L'éditeur de renommage EN PLACE et l'absence d'éditeur de titre d'en-tête restent inchangés.
+  */
+  it("leaves no rule behind for the removed permanent row action controls", () => {
+    const css = loadPlanningCss();
+
+    expect(css).not.toMatch(/\.planning-sidebar-item-actions/);
+    expect(css).not.toMatch(/\.planning-sidebar-item-rename[^-]/);
+    expect(css).not.toMatch(/\.planning-sidebar-item-delete/);
+
+    const inlineInputRule = findRule(css, ".planning-sidebar-item-title-input");
+    expect(inlineInputRule).toBeTruthy();
+    expect(inlineInputRule).toMatch(/min-width\s*:\s*0\s*;/);
+    expect(inlineInputRule).not.toMatch(/\d+px/);
+
+    expect(css).not.toMatch(/\.planning-session-title-input/);
   });
 });

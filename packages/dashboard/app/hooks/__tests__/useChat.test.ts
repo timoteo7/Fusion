@@ -34,6 +34,9 @@ vi.mock("../../utils/projectStorage", () => ({
   getScopedItem: vi.fn(),
   setScopedItem: vi.fn(),
   removeScopedItem: vi.fn(),
+  getPersistedChatOpenSession: vi.fn(),
+  setPersistedChatOpenSession: vi.fn(),
+  clearPersistedChatOpenSession: vi.fn(),
 }));
 
 // Mock the SSE bus
@@ -47,6 +50,9 @@ import * as sseBusModule from "../../sse-bus";
 const mockGetScopedItem = vi.mocked(projectStorageModule.getScopedItem);
 const mockSetScopedItem = vi.mocked(projectStorageModule.setScopedItem);
 const mockRemoveScopedItem = vi.mocked(projectStorageModule.removeScopedItem);
+const mockGetPersistedChatOpenSession = vi.mocked(projectStorageModule.getPersistedChatOpenSession);
+const mockSetPersistedChatOpenSession = vi.mocked(projectStorageModule.setPersistedChatOpenSession);
+const mockClearPersistedChatOpenSession = vi.mocked(projectStorageModule.clearPersistedChatOpenSession);
 const mockSubscribeSse = vi.mocked(sseBusModule.subscribeSse);
 
 const mockFetchChatSessions = vi.mocked(apiModule.fetchChatSessions);
@@ -133,6 +139,9 @@ describe("useChat", () => {
     vi.clearAllMocks();
     localStorage.clear();
     mockGetScopedItem.mockReturnValue(undefined);
+    mockGetPersistedChatOpenSession.mockImplementation((projectId) => projectId ? (mockGetScopedItem("kb-chat-active-session", projectId) ?? null) : null);
+    mockSetPersistedChatOpenSession.mockImplementation((sessionId, projectId) => { if (projectId && sessionId) mockSetScopedItem("kb-chat-active-session", sessionId, projectId); });
+    mockClearPersistedChatOpenSession.mockImplementation((projectId) => { if (projectId) mockRemoveScopedItem("kb-chat-active-session", projectId); });
     mockFetchChatSessions.mockResolvedValue({ sessions: [] });
     mockFetchChatSession.mockResolvedValue({
       session: makeSession({ id: "session-001", agentId: "agent-001" }),
@@ -166,7 +175,7 @@ describe("useChat", () => {
     const { result } = renderHook(() => useChat("proj-123"));
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123", "active");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123", "active", { limit: 50 });
     });
 
     await waitFor(() => {
@@ -175,6 +184,58 @@ describe("useChat", () => {
 
     expect(result.current.sessions[0]?.id).toBe("session-001");
     expect(result.current.sessions[1]?.id).toBe("session-002");
+  });
+
+  it("resets tag pagination and rejects delayed A → B → A first pages", async () => {
+    const resolvers = new Map<string, Array<(value: { sessions: ChatSession[]; hasMore: boolean; nextCursor: string | null }) => void>>();
+    mockFetchChatSessions.mockImplementation((_projectId, _status, options) => {
+      const scope = options?.tagId ?? "all";
+      return new Promise((resolve) => {
+        const pending = resolvers.get(scope) ?? [];
+        pending.push(resolve);
+        resolvers.set(scope, pending);
+      });
+    });
+
+    const { result } = renderHook(() => useChat("proj-tags"));
+    await waitFor(() => expect(resolvers.get("all")).toHaveLength(1));
+    await act(async () => resolvers.get("all")?.shift()?.({ sessions: [], hasMore: false, nextCursor: null }));
+
+    act(() => result.current.setSelectedTagId("tag-a"));
+    await waitFor(() => expect(resolvers.get("tag-a")).toHaveLength(1));
+    act(() => result.current.setSelectedTagId("tag-b"));
+    await waitFor(() => expect(resolvers.get("tag-b")).toHaveLength(1));
+    act(() => result.current.setSelectedTagId("tag-a"));
+    await waitFor(() => expect(resolvers.get("tag-a")).toHaveLength(2));
+
+    await act(async () => resolvers.get("tag-a")?.pop()?.({
+      sessions: [makeSession({ id: "session-a-current" })],
+      hasMore: true,
+      nextCursor: "a-current-cursor",
+    }));
+    await act(async () => resolvers.get("tag-a")?.shift()?.({
+      sessions: [makeSession({ id: "session-a-stale" })],
+      hasMore: false,
+      nextCursor: null,
+    }));
+    await act(async () => resolvers.get("tag-b")?.shift()?.({
+      sessions: [makeSession({ id: "session-b-stale" })],
+      hasMore: false,
+      nextCursor: null,
+    }));
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(["session-a-current"]);
+    expect(result.current.hasMoreSessions).toBe(true);
+    expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-tags", "active", { limit: 50, tagId: "tag-a" });
+
+    void result.current.loadMoreSessions("active");
+    await waitFor(() => expect(resolvers.get("tag-a")).toHaveLength(1));
+    expect(mockFetchChatSessions).toHaveBeenLastCalledWith("proj-tags", "active", {
+      limit: 50,
+      cursor: "a-current-cursor",
+      tagId: "tag-a",
+    });
+    await act(async () => resolvers.get("tag-a")?.shift()?.({ sessions: [], hasMore: false, nextCursor: null }));
   });
 
   it("hydrates sessions from cache synchronously and skips initial loading state", async () => {
@@ -208,56 +269,139 @@ describe("useChat", () => {
     });
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith(projectId, "active");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith(projectId, "active", { limit: 50 });
     });
   });
 
-  it("does not hydrate cached task-planner sessions before server settings filtering returns", async () => {
-    const projectId = "proj-cache-task-planner";
-    localStorage.setItem(
-      chatSessionsCacheKey(projectId),
-      JSON.stringify({
-        savedAt: Date.now(),
-        data: [
-          makeSession({ id: "session-direct", agentId: "agent-001", updatedAt: "2026-04-08T00:00:00.000Z" }),
-          makeSession({ id: "session-planner", agentId: "task-planner:FN-7364", updatedAt: "2026-04-09T00:00:00.000Z" }),
-        ],
-      }),
-    );
+  /*
+  FNXC:ChatSidebarPerf 2026-09-16-02:15:
+  FN-440 replaced the previous "does not hydrate cached task-planner sessions before server settings
+  filtering returns" case, which asserted the removed behavior (cached task chats were always
+  discarded, so they only appeared after the network round trip). The snapshot is now
+  self-describing, so the invariant under test is: a permitted task chat paints on the FIRST render
+  while the sessions request is still pending, and a not-permitted, unknown-visibility (legacy
+  payload), empty, or archived row never does.
+  */
+  describe("cached task-planner session hydration", () => {
+    const plannerSession = (overrides: Partial<ChatSession> & Pick<ChatSession, "id" | "agentId">) =>
+      ({ ...makeSession(overrides), lastMessageAt: "2026-04-09T00:00:00.000Z", lastMessagePreview: "hello" }) as ChatSession;
 
-    let resolveFetch: ((value: { sessions: ChatSession[] }) => void) | undefined;
-    mockFetchChatSessions.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveFetch = resolve;
-        }),
-    );
+    const seedSnapshot = (projectId: string, data: unknown) =>
+      localStorage.setItem(chatSessionsCacheKey(projectId), JSON.stringify({ savedAt: Date.now(), data }));
 
-    const { result } = renderHook(() => useChat(projectId));
+    const pendingSessionsFetch = () => {
+      mockFetchChatSessions.mockImplementationOnce(() => new Promise(() => {}));
+    };
 
-    expect(result.current.sessions.map((session) => session.id)).toEqual(["session-direct"]);
-
-    await act(async () => {
-      resolveFetch?.({
+    it("paints permitted task chats on first render while the sessions request is still pending", () => {
+      const projectId = "proj-cache-task-planner-visible";
+      seedSnapshot(projectId, {
+        taskChatsVisibleInCommonFeed: true,
         sessions: [
-          makeSession({ id: "session-planner", agentId: "task-planner:FN-7364", updatedAt: "2026-04-09T00:00:00.000Z" }),
+          makeSession({ id: "session-direct", agentId: "agent-001", updatedAt: "2026-04-08T00:00:00.000Z" }),
+          plannerSession({ id: "session-planner", agentId: "task-planner:FN-7364", updatedAt: "2026-04-09T00:00:00.000Z" }),
         ],
       });
+      pendingSessionsFetch();
+
+      const { result } = renderHook(() => useChat(projectId));
+
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-planner", "session-direct"]);
+      expect(result.current.sessionsLoading).toBe(false);
     });
 
-    await waitFor(() => {
-      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-planner"]);
+    it("keeps task chats hidden when the snapshot persisted visibility false", () => {
+      const projectId = "proj-cache-task-planner-hidden";
+      seedSnapshot(projectId, {
+        taskChatsVisibleInCommonFeed: false,
+        sessions: [
+          makeSession({ id: "session-direct", agentId: "agent-001", updatedAt: "2026-04-08T00:00:00.000Z" }),
+          plannerSession({ id: "session-planner", agentId: "task-planner:FN-7364", updatedAt: "2026-04-09T00:00:00.000Z" }),
+        ],
+      });
+      pendingSessionsFetch();
+
+      const { result } = renderHook(() => useChat(projectId));
+
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-direct"]);
+    });
+
+    it("treats a legacy bare-array snapshot as unknown visibility and hides task chats", () => {
+      const projectId = "proj-cache-task-planner-legacy";
+      seedSnapshot(projectId, [
+        makeSession({ id: "session-direct", agentId: "agent-001", updatedAt: "2026-04-08T00:00:00.000Z" }),
+        plannerSession({ id: "session-planner", agentId: "task-planner:FN-7364", updatedAt: "2026-04-09T00:00:00.000Z" }),
+      ]);
+      pendingSessionsFetch();
+
+      const { result } = renderHook(() => useChat(projectId));
+
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-direct"]);
+    });
+
+    it("never rehydrates an empty task chat even when visibility is true", () => {
+      const projectId = "proj-cache-task-planner-empty";
+      seedSnapshot(projectId, {
+        taskChatsVisibleInCommonFeed: true,
+        sessions: [
+          makeSession({ id: "session-direct", agentId: "agent-001", updatedAt: "2026-04-08T00:00:00.000Z" }),
+          makeSession({ id: "session-planner-empty", agentId: "task-planner:FN-7365", updatedAt: "2026-04-09T00:00:00.000Z" }),
+        ],
+      });
+      pendingSessionsFetch();
+
+      const { result } = renderHook(() => useChat(projectId));
+
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-direct"]);
+    });
+
+    it("never rehydrates an archived task chat even when visibility is true", () => {
+      const projectId = "proj-cache-task-planner-archived";
+      seedSnapshot(projectId, {
+        taskChatsVisibleInCommonFeed: true,
+        sessions: [
+          makeSession({ id: "session-direct", agentId: "agent-001", updatedAt: "2026-04-08T00:00:00.000Z" }),
+          plannerSession({ id: "session-planner-archived", agentId: "task-planner:FN-7366", status: "archived", updatedAt: "2026-04-09T00:00:00.000Z" }),
+        ],
+      });
+      pendingSessionsFetch();
+
+      const { result } = renderHook(() => useChat(projectId));
+
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-direct"]);
+    });
+
+    it("leaves the cold-load state when the snapshot holds only permitted task chats", () => {
+      const projectId = "proj-cache-task-planner-only";
+      seedSnapshot(projectId, {
+        taskChatsVisibleInCommonFeed: true,
+        sessions: [
+          plannerSession({ id: "session-planner-a", agentId: "task-planner:FN-7367", updatedAt: "2026-04-09T00:00:00.000Z" }),
+          plannerSession({ id: "session-planner-b", agentId: "task-planner:FN-7368", updatedAt: "2026-04-08T00:00:00.000Z" }),
+        ],
+      });
+      pendingSessionsFetch();
+
+      const { result } = renderHook(() => useChat(projectId));
+
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["session-planner-a", "session-planner-b"]);
+      expect(result.current.sessionsLoading).toBe(false);
     });
   });
 
-  it("writes sorted sessions to cache after successful refresh", async () => {
-    const projectId = "proj-write-through";
+  it.each([
+    { label: "true", responseVisibility: true, expected: true },
+    { label: "false", responseVisibility: false, expected: false },
+    { label: "absent", responseVisibility: undefined, expected: false },
+  ])("writes sorted sessions and persisted task-chat visibility ($label) to cache after successful refresh", async ({ responseVisibility, expected }) => {
+    const projectId = `proj-write-through-${String(responseVisibility)}`;
     mockFetchChatSessions.mockResolvedValueOnce({
       sessions: [
         makeSession({ id: "session-001", agentId: "agent-001", updatedAt: "2026-04-08T00:00:00.000Z" }),
         makeSession({ id: "session-003", agentId: "agent-003", updatedAt: "2026-04-10T00:00:00.000Z" }),
         makeSession({ id: "session-002", agentId: "agent-002", updatedAt: "2026-04-09T00:00:00.000Z" }),
       ],
+      ...(responseVisibility === undefined ? {} : { taskChatsVisibleInCommonFeed: responseVisibility }),
     });
 
     renderHook(() => useChat(projectId));
@@ -265,8 +409,9 @@ describe("useChat", () => {
     await waitFor(() => {
       const raw = localStorage.getItem(chatSessionsCacheKey(projectId));
       expect(raw).toBeTruthy();
-      const parsed = JSON.parse(raw ?? "null") as { data: ChatSession[] };
-      expect(parsed.data.map((session) => session.id)).toEqual(["session-003", "session-002", "session-001"]);
+      const parsed = JSON.parse(raw ?? "null") as { data: { sessions: ChatSession[]; taskChatsVisibleInCommonFeed: boolean } };
+      expect(parsed.data.sessions.map((session) => session.id)).toEqual(["session-003", "session-002", "session-001"]);
+      expect(parsed.data.taskChatsVisibleInCommonFeed).toBe(expected);
     });
   });
 
@@ -388,13 +533,13 @@ describe("useChat", () => {
     });
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("p1", "active");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("p1", "active", { limit: 50 });
     });
 
     rerender({ projectId: "p2" });
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("p2", "active");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("p2", "active", { limit: 50 });
     });
     expect(mockFetchChatSessions).toHaveBeenCalledTimes(2);
   });
@@ -967,14 +1112,14 @@ describe("useChat", () => {
     const { result } = renderHook(() => useChat("proj-archive"));
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-archive", "active");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-archive", "active", { limit: 50 });
       expect(result.current.sessions.map((session) => session.id)).toEqual(["session-active"]);
     });
 
     await act(async () => {
       await result.current.refreshArchivedSessions();
     });
-    expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-archive", "archived");
+    expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-archive", "archived", { limit: 50 });
     expect(result.current.archivedSessions.map((session) => session.id)).toEqual(["session-archived"]);
 
     await act(async () => {
@@ -2482,6 +2627,337 @@ describe("useChat", () => {
     });
   });
 
+  it("queues text submitted while cancellation reconciliation is pending", async () => {
+    const session = makeSession({ id: "session-001", agentId: "agent-001" });
+    const cancellation = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValue(cancellation.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.selectSession("session-001"));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+    act(() => result.current.sendMessage("First"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+    act(() => { void result.current.stopStreaming(); });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+
+    act(() => result.current.sendMessage("Typed during cancellation"));
+
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+    expect(result.current.pendingMessages).toEqual(["Typed during cancellation"]);
+    expect(localStorage.getItem(getChatPendingMessageKey("session-001"))).toBe(
+      JSON.stringify(["Typed during cancellation"]),
+    );
+
+    cancellation.resolve({ success: true, interrupted: false });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(false));
+  });
+
+  it("keeps cancellation scoped to its session when another conversation sends", async () => {
+    const sessionA = makeSession({ id: "session-001", agentId: "agent-001" });
+    const sessionB = makeSession({ id: "session-002", agentId: "agent-002" });
+    const cancellation = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    const attachment = new File(["x"], "note.txt", { type: "text/plain" });
+    const onFailed = vi.fn();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [sessionA, sessionB] });
+    mockFetchChatSession.mockImplementation(async (sessionId) => ({
+      session: sessionId === sessionA.id ? sessionA : sessionB,
+    }));
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValue(cancellation.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+    act(() => result.current.selectSession(sessionA.id));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe(sessionA.id));
+    act(() => result.current.sendMessage("First in A"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+    let stopPromise!: Promise<void>;
+    act(() => {
+      stopPromise = result.current.stopStreaming();
+    });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+
+    act(() => result.current.selectSession(sessionB.id));
+    await waitFor(() => {
+      expect(result.current.activeSession?.id).toBe(sessionB.id);
+      expect(result.current.pendingQueueAction).toBe(false);
+    });
+    act(() => result.current.sendMessage("Send in B", [attachment], { onFailed }));
+
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(result.current.pendingMessages).toEqual([]);
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
+    expect(mockStreamChatResponse.mock.calls[1]?.[0]).toBe(sessionB.id);
+    expect(mockStreamChatResponse.mock.calls[1]?.[1]).toBe("Send in B");
+    expect(mockStreamChatResponse.mock.calls[1]?.[3]).toEqual([attachment]);
+
+    await act(async () => {
+      cancellation.resolve({ success: true, interrupted: false });
+      await stopPromise;
+    });
+
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
+    expect(result.current.isStreaming).toBe(true);
+  });
+
+  it("restores A's cancellation barrier after A to B to A and drains queued text once", async () => {
+    const sessionA = makeSession({ id: "session-001", agentId: "agent-001" });
+    const sessionB = makeSession({ id: "session-002", agentId: "agent-002" });
+    const cancellationA = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    const attachment = new File(["x"], "note.txt", { type: "text/plain" });
+    const onAttachmentFailed = vi.fn();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [sessionA, sessionB] });
+    mockFetchChatSession.mockImplementation(async (sessionId) => ({
+      session: sessionId === sessionA.id ? sessionA : sessionB,
+    }));
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValue(cancellationA.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+    act(() => result.current.selectSession(sessionA.id));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe(sessionA.id));
+    act(() => result.current.sendMessage("First in A"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+    let stopPromiseA!: Promise<void>;
+    act(() => {
+      stopPromiseA = result.current.stopStreaming();
+    });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+
+    act(() => result.current.selectSession(sessionB.id));
+    await waitFor(() => {
+      expect(result.current.activeSession?.id).toBe(sessionB.id);
+      expect(result.current.pendingQueueAction).toBe(false);
+    });
+    act(() => result.current.selectSession(sessionA.id));
+    await waitFor(() => {
+      expect(result.current.activeSession?.id).toBe(sessionA.id);
+      expect(result.current.pendingQueueAction).toBe(true);
+    });
+
+    act(() => result.current.sendMessage("Attachment stays staged", [attachment], { onFailed: onAttachmentFailed }));
+    expect(onAttachmentFailed).toHaveBeenCalledTimes(1);
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+    expect(result.current.pendingMessages).toEqual([]);
+
+    act(() => result.current.sendMessage("Queued after returning to A"));
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+    expect(result.current.pendingMessages).toEqual(["Queued after returning to A"]);
+
+    await act(async () => {
+      cancellationA.resolve({ success: true, interrupted: false });
+      await stopPromiseA;
+    });
+
+    await waitFor(() => {
+      expect(result.current.pendingQueueAction).toBe(false);
+      expect(result.current.pendingMessages).toEqual([]);
+      expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
+    });
+    expect(mockStreamChatResponse.mock.calls[1]?.[0]).toBe(sessionA.id);
+    expect(mockStreamChatResponse.mock.calls[1]?.[1]).toBe("Queued after returning to A");
+  });
+
+  it("keeps A's barrier while B's later cancellation resolves first", async () => {
+    const sessionA = makeSession({ id: "session-001", agentId: "agent-001" });
+    const sessionB = makeSession({ id: "session-002", agentId: "agent-002" });
+    const cancellationA = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    const cancellationB = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [sessionA, sessionB] });
+    mockFetchChatSession.mockImplementation(async (sessionId) => ({
+      session: sessionId === sessionA.id ? sessionA : sessionB,
+    }));
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockImplementation((sessionId) => (
+      sessionId === sessionA.id ? cancellationA.promise : cancellationB.promise
+    ));
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+    act(() => result.current.selectSession(sessionA.id));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe(sessionA.id));
+    act(() => result.current.sendMessage("First in A"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+    let stopPromiseA!: Promise<void>;
+    act(() => {
+      stopPromiseA = result.current.stopStreaming();
+    });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+
+    act(() => result.current.selectSession(sessionB.id));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe(sessionB.id));
+    act(() => result.current.sendMessage("First in B"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+    let stopPromiseB!: Promise<void>;
+    act(() => {
+      stopPromiseB = result.current.stopStreaming();
+    });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+
+    act(() => result.current.selectSession(sessionA.id));
+    await waitFor(() => {
+      expect(result.current.activeSession?.id).toBe(sessionA.id);
+      expect(result.current.pendingQueueAction).toBe(true);
+    });
+    act(() => result.current.sendMessage("A waits for A"));
+    expect(result.current.pendingMessages).toEqual(["A waits for A"]);
+
+    await act(async () => {
+      cancellationB.resolve({ success: true, interrupted: false });
+      await stopPromiseB;
+    });
+
+    expect(result.current.pendingQueueAction).toBe(true);
+    expect(result.current.pendingMessages).toEqual(["A waits for A"]);
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      cancellationA.resolve({ success: true, interrupted: false });
+      await stopPromiseA;
+    });
+
+    await waitFor(() => {
+      expect(result.current.pendingQueueAction).toBe(false);
+      expect(result.current.pendingMessages).toEqual([]);
+      expect(mockStreamChatResponse).toHaveBeenCalledTimes(3);
+    });
+    expect(mockStreamChatResponse.mock.calls[2]?.[0]).toBe(sessionA.id);
+    expect(mockStreamChatResponse.mock.calls[2]?.[1]).toBe("A waits for A");
+    expect(mockCancelChatResponse.mock.calls.map(([sessionId]) => sessionId)).toEqual([sessionA.id, sessionB.id]);
+  });
+
+  it("reuses one cancellation request when Stop is pressed twice during reconciliation", async () => {
+    const session = makeSession({ id: "session-001", agentId: "agent-001" });
+    const cancellation = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValue(cancellation.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.selectSession("session-001"));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+    act(() => result.current.sendMessage("First"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+    let firstCancellation!: Promise<void>;
+    let repeatedCancellation!: Promise<void>;
+    act(() => {
+      firstCancellation = result.current.stopStreaming();
+      repeatedCancellation = result.current.stopStreaming();
+    });
+
+    expect(repeatedCancellation).toBe(firstCancellation);
+    expect(mockCancelChatResponse).toHaveBeenCalledTimes(1);
+
+    cancellation.resolve({ success: true, interrupted: false });
+    await act(async () => {
+      await firstCancellation;
+    });
+  });
+
+  it("dispatches cancellation-barrier text exactly once after reconciliation", async () => {
+    const session = makeSession({ id: "session-001", agentId: "agent-001" });
+    const cancellation = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValue(cancellation.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.selectSession("session-001"));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+    act(() => result.current.sendMessage("First"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+    act(() => { void result.current.stopStreaming(); });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+    act(() => result.current.sendMessage("Dispatch me once"));
+
+    cancellation.resolve({ success: true, interrupted: false });
+
+    await waitFor(() => {
+      expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
+      expect(mockStreamChatResponse.mock.calls[1]?.[1]).toBe("Dispatch me once");
+      expect(result.current.pendingMessages).toEqual([]);
+      expect(result.current.pendingQueueAction).toBe(false);
+    });
+  });
+
+  it("retains queued text and releases the cancellation fence after reconciliation fails", async () => {
+    const session = makeSession({ id: "session-001", agentId: "agent-001" });
+    const cancellation = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValue(cancellation.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.selectSession("session-001"));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+    act(() => result.current.sendMessage("First"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+    act(() => { void result.current.stopStreaming(); });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+    act(() => result.current.sendMessage("Keep after failure"));
+
+    cancellation.reject(new Error("cancel failed"));
+    await waitFor(() => {
+      expect(result.current.pendingQueueAction).toBe(false);
+      expect(result.current.pendingMessages).toEqual(["Keep after failure"]);
+    });
+
+    act(() => result.current.sendMessage("New dispatch after failure"));
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
+    expect(mockStreamChatResponse.mock.calls[1]?.[1]).toBe("New dispatch after failure");
+    expect(result.current.pendingMessages).toEqual(["Keep after failure"]);
+  });
+
+  it("rejects attachments at the text-only cancellation queue boundary", async () => {
+    const session = makeSession({ id: "session-001", agentId: "agent-001" });
+    const cancellation = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    const onFailed = vi.fn();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValue(cancellation.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.selectSession("session-001"));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+    act(() => result.current.sendMessage("First"));
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+    act(() => { void result.current.stopStreaming(); });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+
+    act(() => {
+      result.current.sendMessage(
+        "Text with a file",
+        [new File(["x"], "note.txt", { type: "text/plain" })],
+        { onFailed },
+      );
+    });
+
+    expect(onFailed).toHaveBeenCalledTimes(1);
+    expect(result.current.pendingMessages).toEqual([]);
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+
+    act(() => result.current.sendMessage("Text without a file"));
+    expect(result.current.pendingMessages).toEqual(["Text without a file"]);
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+
+    cancellation.resolve({ success: true, interrupted: false });
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(false));
+  });
+
   it("keeps and reconciles a visible interrupted prefix after Stop", async () => {
     const session = makeSession({ id: "session-001", agentId: "agent-001" });
     const persistedAssistant = makeMessage({
@@ -2634,7 +3110,7 @@ describe("useChat", () => {
     });
   });
 
-  it("force-sends a selected direct queue entry only after cancellation reconciliation", async () => {
+  it("preserves selected force-send priority over text typed during cancellation", async () => {
     const session = makeSession({ id: "session-001", agentId: "agent-001" });
     const cancelDeferred = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
     const streamHandlers: StreamAppendHandlers[] = [];
@@ -2663,14 +3139,69 @@ describe("useChat", () => {
     expect(mockCancelChatResponse).toHaveBeenCalledWith("session-001", "proj-123");
     expect(result.current.pendingMessages).toEqual(["Keep first", "Force second"]);
 
+    act(() => result.current.sendMessage("Typed while Force reconciles"));
+    expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+    expect(result.current.pendingMessages).toEqual(["Keep first", "Force second", "Typed while Force reconciles"]);
+
     act(() => streamHandlers[0]?.onText(" stale callback"));
     cancelDeferred.resolve({ success: true, interrupted: true });
     await waitFor(() => {
       expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
       expect(mockStreamChatResponse.mock.calls[1]?.[1]).toBe("Force second");
-      expect(result.current.pendingMessages).toEqual(["Keep first"]);
+      expect(result.current.pendingMessages).toEqual(["Keep first", "Typed while Force reconciles"]);
     });
     expect(result.current.streamingText).toBe("");
+  });
+
+  it("preserves a force-send intent after A to B to A re-entry", async () => {
+    const sessionA = makeSession({ id: "session-001", agentId: "agent-001" });
+    const sessionB = makeSession({ id: "session-002", agentId: "agent-002" });
+    const cancelDeferred = createDeferredPromise<{ success: boolean; interrupted: boolean }>();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [sessionA, sessionB] });
+    mockFetchChatSession.mockImplementation(async (sessionId) => ({
+      session: sessionId === sessionA.id ? sessionA : sessionB,
+    }));
+    mockFetchChatMessages.mockResolvedValue({ messages: [] });
+    mockCancelChatResponse.mockReturnValueOnce(cancelDeferred.promise);
+
+    const { result } = renderHook(() => useChat("proj-123"));
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+    act(() => result.current.selectSession(sessionA.id));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe(sessionA.id));
+
+    act(() => {
+      result.current.sendMessage("First in A");
+      result.current.sendMessage("Keep first");
+      result.current.sendMessage("Force second");
+    });
+    await waitFor(() => expect(result.current.pendingMessages).toEqual(["Keep first", "Force second"]));
+
+    act(() => result.current.forceSendPendingMessage?.(1));
+    await waitFor(() => expect(result.current.pendingQueueAction).toBe(true));
+
+    act(() => result.current.selectSession(sessionB.id));
+    await waitFor(() => expect(result.current.activeSession?.id).toBe(sessionB.id));
+    act(() => result.current.selectSession(sessionA.id));
+    await waitFor(() => {
+      expect(result.current.activeSession?.id).toBe(sessionA.id);
+      expect(result.current.pendingQueueAction).toBe(true);
+      expect(result.current.pendingMessages).toEqual(["Keep first", "Force second"]);
+    });
+
+    act(() => result.current.sendMessage("Typed after returning to A"));
+    expect(result.current.pendingMessages).toEqual(["Keep first", "Force second", "Typed after returning to A"]);
+
+    await act(async () => {
+      cancelDeferred.resolve({ success: true, interrupted: true });
+      await cancelDeferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(mockStreamChatResponse).toHaveBeenCalledTimes(2);
+      expect(mockStreamChatResponse.mock.calls[1]?.[0]).toBe(sessionA.id);
+      expect(mockStreamChatResponse.mock.calls[1]?.[1]).toBe("Force second");
+      expect(result.current.pendingMessages).toEqual(["Keep first", "Typed after returning to A"]);
+    });
   });
 
   it("sending during streaming queues pendingMessages without warning toast", async () => {
@@ -3479,7 +4010,7 @@ describe("useChat", () => {
     const { result } = renderHook(() => useChat("proj-123"));
 
     await waitFor(() => {
-      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123", "active");
+      expect(mockFetchChatSessions).toHaveBeenCalledWith("proj-123", "active", { limit: 50 });
     });
 
     expect(() => {
@@ -3835,10 +4366,64 @@ describe("useChat", () => {
     expect(secondCall[0]).toBe("session-001");
     expect(secondCall[1]).toHaveProperty("limit");
     expect(secondCall[1]).toHaveProperty("before");
+    expect(secondCall[1]).toHaveProperty("beforeId", "msg-0");
 
     await waitFor(() => {
       expect(result.current.messages).toHaveLength(51);
     });
+  });
+
+  it("walks a 125-message equal-timestamp history once with tuple cursors", async () => {
+    const session = makeSession({ id: "session-ties", agentId: "agent-001" });
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+    const tied = Array.from({ length: 125 }, (_, index) => makeMessage({
+      id: `tie-${String(index).padStart(3, "0")}`,
+      sessionId: session.id,
+      role: "user",
+      content: `Message ${index}`,
+      createdAt: "2026-09-06T12:00:00.000Z",
+    }));
+    mockFetchChatMessages
+      .mockResolvedValueOnce({ messages: tied.slice(75).reverse() })
+      .mockResolvedValueOnce({ messages: tied.slice(25, 75).reverse() })
+      .mockResolvedValueOnce({ messages: tied.slice(0, 25).reverse() });
+
+    const { result } = renderHook(() => useChat());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.selectSession(session.id));
+    await waitFor(() => expect(result.current.messages).toHaveLength(50));
+    await act(async () => result.current.loadMoreMessages());
+    await act(async () => result.current.loadMoreMessages());
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(tied.map((message) => message.id));
+    expect(new Set(result.current.messages.map((message) => message.id)).size).toBe(125);
+    expect(mockFetchChatMessages.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ beforeId: "tie-075" }));
+    expect(mockFetchChatMessages.mock.calls[2]?.[1]).toEqual(expect.objectContaining({ beforeId: "tie-025" }));
+    expect(result.current.hasMoreMessages).toBe(false);
+  });
+
+  it("serializes concurrent pages and stops a duplicate-only defensive page", async () => {
+    const session = makeSession({ id: "session-serial", agentId: "agent-001" });
+    const initial = Array.from({ length: 50 }, (_, index) => makeMessage({ id: `serial-${String(index).padStart(3, "0")}`, sessionId: session.id, role: "user", content: "row" }));
+    const deferred = createDeferredPromise<{ messages: ChatMessage[] }>();
+    mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+    mockFetchChatMessages.mockResolvedValueOnce({ messages: initial.slice().reverse() }).mockReturnValueOnce(deferred.promise);
+    const { result } = renderHook(() => useChat());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.selectSession(session.id));
+    await waitFor(() => expect(result.current.messages).toHaveLength(50));
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.loadMoreMessages();
+      second = result.current.loadMoreMessages();
+    });
+    expect(mockFetchChatMessages).toHaveBeenCalledTimes(2);
+    deferred.resolve({ messages: initial.slice().reverse() });
+    await act(async () => Promise.all([first, second]));
+    expect(result.current.messages).toHaveLength(50);
+    expect(result.current.hasMoreMessages).toBe(false);
   });
 
   it("sets hasMoreMessages to false when fewer messages returned", async () => {
@@ -4178,6 +4763,34 @@ describe("useChat", () => {
 
       await waitFor(() => {
         expect(result.current.sessions[0]?.title).toBe("New Title");
+      });
+    });
+
+    /*
+    FNXC:ChatWindows 2026-09-14-23:48:
+    FN-396: a conversation open in two hosts converges through this event. The host that did not perform the rename
+    must see the new title on BOTH the active session and its list row, because detached windows derive their header
+    and accessible name from the live active session.
+    */
+    it("renames the active session and its list row on chat:session:updated", async () => {
+      const original = makeSession({ id: "session-001", agentId: "agent-001", title: "Ancien" });
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [original] });
+      mockFetchChatSession.mockResolvedValue({ session: original } as never);
+
+      const { result } = renderHook(() => useChat("proj-123"));
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+      await act(async () => { await result.current.selectSession("session-001"); });
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      act(() => {
+        subscribeHandler["chat:session:updated"]?.({
+          data: JSON.stringify(makeSession({ id: "session-001", agentId: "agent-001", title: "Nouveau" })),
+        } as MessageEvent);
+      });
+
+      await waitFor(() => {
+        expect(result.current.activeSession?.title).toBe("Nouveau");
+        expect(result.current.sessions[0]?.title).toBe("Nouveau");
       });
     });
 
@@ -5566,7 +6179,7 @@ describe("useChat", () => {
       // Simulate a saved session in localStorage
       mockGetScopedItem.mockReturnValue("session-001");
 
-      const { result } = renderHook(() => useChat());
+      const { result } = renderHook(() => useChat("proj-123"));
 
       await waitFor(() => {
         expect(result.current.sessions).toHaveLength(1);
@@ -5578,7 +6191,7 @@ describe("useChat", () => {
 
       // Verify messages were loaded
       await waitFor(() => {
-        expect(mockFetchChatMessages).toHaveBeenCalledWith("session-001", { limit: 50, order: "desc" }, undefined);
+        expect(mockFetchChatMessages).toHaveBeenCalledWith("session-001", { limit: 50, order: "desc" }, "proj-123");
       });
     });
 
@@ -5669,7 +6282,7 @@ describe("useChat", () => {
       });
     });
 
-    it("uses undefined projectId when not provided", async () => {
+    it("refuse de persister une session sans projectId", async () => {
       const session = makeSession({ id: "session-001", agentId: "agent-001" });
       mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
       mockFetchChatMessages.mockResolvedValue({ messages: [] });
@@ -5684,13 +6297,8 @@ describe("useChat", () => {
         result.current.selectSession("session-001");
       });
 
-      await waitFor(() => {
-        expect(mockSetScopedItem).toHaveBeenCalledWith(
-          "kb-chat-active-session",
-          "session-001",
-          undefined,
-        );
-      });
+      expect(mockSetPersistedChatOpenSession).toHaveBeenCalledWith("session-001", undefined);
+      expect(mockSetScopedItem).not.toHaveBeenCalled();
     });
   });
 

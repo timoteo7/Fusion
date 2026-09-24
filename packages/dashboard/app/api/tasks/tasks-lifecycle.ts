@@ -1,6 +1,6 @@
 /**
  * FNXC:CodeOrganization 2026-07-16-12:00:
- * Task lifecycle client API (promote/delete/merge/pause/archive/plan) peeled from legacy.ts.
+ * Task lifecycle client API (promote/delete/merge/pause/plan) peeled from legacy.ts.
  */
 import type {
   Task,
@@ -12,7 +12,7 @@ import type {
 } from "@fusion/core";
 import { api } from "../client/client.js";
 import { withProjectId } from "../client/health.js";
-import type { DeleteTaskOptions, ArchiveTaskOptions } from "./tasks.js";
+import type { DeleteTaskOptions } from "./tasks.js";
 
 /**
  * Manually promote a held card out of its hold column (U9).
@@ -36,7 +36,7 @@ export function promoteTask(id: string, projectId?: string): Promise<Task> {
  * `removeDependencyReferences` allows forced delete by first removing incoming dependency links.
  * `githubIssueAction` controls linked issue behavior (`close`, `delete`, or `leave`) during deletion.
  *
- * Hard removal is handled only by the archive-cleanup pipeline (after archival), not this endpoint.
+ * This endpoint never hard-removes the persisted row or task artifacts.
  */
 export function deleteTask(id: string, projectId?: string, options?: DeleteTaskOptions): Promise<Task> {
   const search = new URLSearchParams();
@@ -137,8 +137,28 @@ export type RecoverBranchBindingOutcome =
   | { taskId: string; result: "applied"; branch: string; aheadCount: number; integrationBase: string; previousBranch: string | null }
   | { taskId: string; result: "skipped"; reason: "binding-intact" | "no-live-branch" | "ambiguous-candidates" | "no-unique-work"; candidates?: Array<{ branch: string; aheadCount: number }> };
 
-export function retryTask(id: string, projectId?: string): Promise<Task> {
-  return api<Task>(withProjectId(`/tasks/${id}/retry`, projectId), { method: "POST" });
+export interface TaskRetryOptions {
+  preserveWork?: boolean;
+}
+
+/*
+FNXC:ColumnRestart 2026-09-17-09:16:
+FN-499: Retry accepts the operator's preserve-work choice using the same options-second,
+projectId-last contract as resetTask and duplicateTask. The JSON body and its Content-Type are sent
+ONLY when the operator opted in, so the historical bodyless POST — used by every existing caller and
+by external HTTP clients — stays byte-identical on the wire.
+*/
+export function retryTask(
+  id: string,
+  options?: TaskRetryOptions,
+  projectId?: string,
+): Promise<Task> {
+  return api<Task>(withProjectId(`/tasks/${id}/retry`, projectId), {
+    method: "POST",
+    ...(options?.preserveWork === true
+      ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preserveWork: true }) }
+      : {}),
+  });
 }
 
 /*
@@ -202,6 +222,30 @@ export function duplicateTask(
   });
 }
 
+/*
+FNXC:TaskQueueOrder 2026-09-17-12:07:
+FN-509's Boost client. The SERVER is the authority for the rank: this returns the canonical task row
+and the caller writes THAT into its cache, rather than optimistically reordering and hoping.
+
+`requestId` makes a retried network call idempotent — the same id re-reads the existing rank instead
+of minting a new sequence — while a genuinely new click must carry a new id, because a second click
+after another card was boosted is a real new intention to reclaim the head.
+
+The optional `expectedColumn`/`expectedColumnEntryAt` are the stale-click fence: a card that moved
+between render and click is refused with 409 rather than boosted in a lane the operator never saw.
+*/
+export function boostTask(
+  id: string,
+  input: { requestId: string; expectedColumn?: string; expectedColumnEntryAt?: string },
+  projectId?: string,
+): Promise<Task> {
+  return api<Task>(withProjectId(`/tasks/${id}/boost`, projectId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
 export function pauseTask(id: string, projectId?: string): Promise<Task> {
   return api<Task>(withProjectId(`/tasks/${id}/pause`, projectId), { method: "POST" });
 }
@@ -250,20 +294,6 @@ array when the task has no recorded interventions.
 */
 export function fetchPlannerInterventionTimeline(id: string, projectId?: string): Promise<{ entries: PlannerInterventionEntry[] }> {
   return api<{ entries: PlannerInterventionEntry[] }>(withProjectId(`/tasks/${id}/overseer/interventions`, projectId), { method: "GET" });
-}
-
-export function archiveTask(id: string, projectId?: string, options?: ArchiveTaskOptions): Promise<Task> {
-  const search = new URLSearchParams();
-  if (options?.removeLineageReferences) {
-    search.set("removeLineageReferences", "true");
-  }
-
-  const suffix = search.size > 0 ? `?${search.toString()}` : "";
-  return api<Task>(withProjectId(`/tasks/${id}/archive${suffix}`, projectId), { method: "POST" });
-}
-
-export function unarchiveTask(id: string, projectId?: string): Promise<Task> {
-  return api<Task>(withProjectId(`/tasks/${id}/unarchive`, projectId), { method: "POST" });
 }
 
 /*
@@ -317,28 +347,78 @@ export function revertTask(id: string, projectId?: string, body?: RevertTaskOpti
   });
 }
 
-export function archiveAllDone(projectId?: string): Promise<Task[]> {
-  /*
-  FNXC:ArchiveConfirmGate 2026-07-26-16:30:
-  The bulk archive route now requires an explicit `{ confirm: true }` body (400 without
-  it) so non-UI callers cannot silently sweep the Done column. The UI's own user-facing
-  confirmation happens before this client call; this body is the machine-level ack.
-  */
-  return api<{ archived: Task[] }>(withProjectId("/tasks/archive-all-done", projectId), {
+/*
+FNXC:TaskRevert 2026-09-15-10:00 (FN-416):
+Client contract for `POST /tasks/:id/revert/restore` — the context-menu "Restore revert" action
+that replaced the reverted card's Delete/Revise buttons. Like `revertTask` this is a discriminated
+union, NOT a `Task`: the route never moves the source task, it only stamps the additive
+`restoredAt` marker that makes the Reverted badge disappear.
+*/
+export interface RestoreTaskRevertGitResult {
+  mode: "git";
+  clean?: boolean;
+  restoreCommitSha?: string;
+  restoreCommitShas?: string[];
+  conflicts?: unknown;
+  alreadyRestored?: boolean;
+  unsupported?: boolean;
+  needsHuman?: boolean;
+  reason?: string;
+}
+
+export interface RestoreTaskRevertAiResult {
+  mode: "ai";
+  createdTaskId: string;
+  alreadyOpen?: boolean;
+}
+
+export type RestoreTaskRevertResult = RestoreTaskRevertGitResult | RestoreTaskRevertAiResult;
+
+export interface RestoreTaskRevertOptions {
+  mode?: "git" | "ai" | "auto";
+}
+
+export function restoreTaskRevert(
+  id: string,
+  projectId?: string,
+  body?: RestoreTaskRevertOptions,
+): Promise<RestoreTaskRevertResult> {
+  return api<RestoreTaskRevertResult>(withProjectId(`/tasks/${id}/revert/restore`, projectId), {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
+/*
+FNXC:HumanPlanApproval 2026-09-15-06:24:
+FN-408 — both decisions may carry an operator message: an approval note becomes implementation
+context, a rejection message becomes planner feedback. `expectedPlanFingerprint`/`expectedEpisodeId`
+make a decision opened in a stale tab fail loudly instead of validating a plan the operator never
+read, and `requestId` makes a double submit idempotent. All fields are optional so the historical
+two-argument call sites (ordinary plan-approval holds) keep working byte-identically.
+*/
+export interface PlanDecisionOptions {
+  message?: string;
+  requestId?: string;
+  expectedPlanFingerprint?: string;
+  expectedEpisodeId?: string;
+}
+
+function planDecisionInit(options?: PlanDecisionOptions): RequestInit {
+  if (!options || Object.keys(options).length === 0) return { method: "POST" };
+  return {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ confirm: true }),
-  }).then(
-    (response) => response.archived
-  );
+    body: JSON.stringify(options),
+  };
 }
 
-export function approvePlan(id: string, projectId?: string): Promise<Task> {
-  return api<Task>(withProjectId(`/tasks/${id}/approve-plan`, projectId), { method: "POST" });
+export function approvePlan(id: string, projectId?: string, options?: PlanDecisionOptions): Promise<Task> {
+  return api<Task>(withProjectId(`/tasks/${id}/approve-plan`, projectId), planDecisionInit(options));
 }
 
-export function rejectPlan(id: string, projectId?: string): Promise<Task> {
-  return api<Task>(withProjectId(`/tasks/${id}/reject-plan`, projectId), { method: "POST" });
+export function rejectPlan(id: string, projectId?: string, options?: PlanDecisionOptions): Promise<Task> {
+  return api<Task>(withProjectId(`/tasks/${id}/reject-plan`, projectId), planDecisionInit(options));
 }
 
 

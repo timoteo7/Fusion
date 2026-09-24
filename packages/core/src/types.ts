@@ -56,16 +56,16 @@ export type { IngestedCheckState, IngestedCheckStateValue, MergeablePrCheck } fr
 /*
  * FNXC:WorkflowDeprecation 2026-07-15-16:35:
  * Keep deprecated IDs browser-safe because Settings loads the management list
- * (including disabled built-ins) but must not re-offer retired workflows for new
- * selection. FN-7970 and FN-7969 preserve direct resolution for pre-existing
- * Brainstorming and Coding (Ideas) task selections while hiding them elsewhere.
+ * (including disabled built-ins) but must not re-offer deprecated workflows for new
+ * work. FN-7970 preserves direct resolution for pre-existing Brainstorming selections
+ * while hiding that definition from ordinary selection lists.
  */
 /*
 FNXC:WorkflowDeprecation 2026-08-25-14:40:
 builtin:review-gated-coding is DELETED, not deprecated. It shipped with a success path that could
 never complete: `code-review -> documentation-delivery` put a write-capable node after a passed
 review, which `execute-workflow-graph` refuses with `workspace-review-seal-required`, and its plan
-node declared a seam `resolveSeamName` throws on. builtin:coding-ideas-v2 replaces it.
+node declared a seam `resolveSeamName` throws on. builtin:coding-ideas replaces it.
 It was briefly kept as a deprecated id so an existing selection still resolved. That is no longer
 worth its cost: it SHARED the documentation-delivery node with V2, so changing that node for V2
 silently changed this workflow too — a second consumer nobody was maintaining. A task that selected
@@ -75,6 +75,11 @@ never reach.
 export const DEPRECATED_BUILTIN_WORKFLOW_IDS: ReadonlySet<string> = new Set([
   "builtin:brainstorming",
 ]);
+
+/*
+FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
+*/
 
 
 /*
@@ -89,20 +94,16 @@ import {
   DEFAULT_COLUMN,
   isColumn,
   normalizeColumnId,
-  TASK_PRIORITIES,
-  DEFAULT_TASK_PRIORITY,
 } from "./types/board/board.js";
-import type { ThinkingLevel, Column, ColumnId, TaskPriority } from "./types/board/board.js";
+import type { ThinkingLevel, Column, ColumnId } from "./types/board/board.js";
 export {
   THINKING_LEVELS,
   COLUMNS,
   DEFAULT_COLUMN,
   isColumn,
   normalizeColumnId,
-  TASK_PRIORITIES,
-  DEFAULT_TASK_PRIORITY,
 };
-export type { ThinkingLevel, Column, ColumnId, TaskPriority };
+export type { ThinkingLevel, Column, ColumnId };
 export type {
   PatchnodeEntryKind,
   PatchnodeEntry,
@@ -172,6 +173,9 @@ import {
   ANTHROPIC_AUTH_PREFERENCES,
   THEME_MODES,
   COLOR_THEMES,
+  UI_STYLES,
+  DEFAULT_UI_STYLE,
+  isUiStyle,
   SUPPORTED_LOCALES,
   DEFAULT_LOCALE,
   isLocale,
@@ -184,6 +188,7 @@ import type {
   AnthropicAuthPreference,
   ThemeMode,
   ColorTheme,
+  UiStyle,
   Locale,
 } from "./types/ui/execution-and-ui.js";
 export {
@@ -198,6 +203,9 @@ export {
   ANTHROPIC_AUTH_PREFERENCES,
   THEME_MODES,
   COLOR_THEMES,
+  UI_STYLES,
+  DEFAULT_UI_STYLE,
+  isUiStyle,
   SUPPORTED_LOCALES,
   DEFAULT_LOCALE,
   isLocale,
@@ -210,6 +218,7 @@ export type {
   AnthropicAuthPreference,
   ThemeMode,
   ColorTheme,
+  UiStyle,
   Locale,
 };
 
@@ -528,8 +537,6 @@ import type {
   TaskDocument,
   TaskDocumentRevision,
   TaskDocumentCreateInput,
-  ArchivedTaskDocumentAdditionInput,
-  ArchivedTaskDocumentAdditionResult,
   TaskDocumentWithTask,
   Artifact,
   ArtifactCreateInput,
@@ -551,8 +558,6 @@ export type {
   TaskDocument,
   TaskDocumentRevision,
   TaskDocumentCreateInput,
-  ArchivedTaskDocumentAdditionInput,
-  ArchivedTaskDocumentAdditionResult,
   TaskDocumentWithTask,
   Artifact,
   ArtifactCreateInput,
@@ -576,6 +581,8 @@ export {
   formatTaskExternalBlockReason,
 } from "./tasks/task-external-block.js";
 export type { TaskExternalBlock, TaskExternalBlockOrigin } from "./tasks/task-external-block.js";
+
+export type { OverlapWaitPhase, OverlapWaitDecision, OverlapWaitFreshness, OverlapWaitLandedPath, OverlapWaitDeliverySnapshot, OverlapWaitDeliveryProof, OverlapWaitReceipt, TaskOverlapWait, OverlapWaitClaim, OverlapWaitExecutionIdentity } from "./types/task/task-overlap-wait.js";
 
 // ── task-core ──────────────────────────────────────────────────────────
 // FNXC:CodeOrganization 2026-07-22-14:00: Peels live in types/task-core.ts
@@ -612,6 +619,17 @@ import type {
   TaskVerificationStatus,
   TaskVerificationProfile,
   MergeDetails,
+  HumanPlanApprovalState,
+  HumanPlanApprovalDecision,
+  HumanPlanApprovalDecisionKind,
+  HumanMergeApprovalState,
+  HumanMergeApprovalDecision,
+  HumanMergeCandidateIdentity,
+  HumanMergeDecisionAction,
+  HumanMergeDecisionReceipt,
+  HumanMergeDeliveryAction,
+  HumanMergeRejection,
+  HumanMergeRejectionState,
   CheckoutLease,
   CheckoutClaimContext,
   CheckoutClaimPrecondition,
@@ -639,6 +657,7 @@ import type {
   WorkspaceLandFailure,
   WorkspaceWorktreeEntry,
   TaskRepositoryScope,
+  TaskPlanningFailureState,
   Task,
   TaskReleaseGateVerdict,
   TaskVerificationResultSummary,
@@ -662,6 +681,17 @@ export type {
   TaskVerificationStatus,
   TaskVerificationProfile,
   MergeDetails,
+  HumanPlanApprovalState,
+  HumanPlanApprovalDecision,
+  HumanPlanApprovalDecisionKind,
+  HumanMergeApprovalState,
+  HumanMergeApprovalDecision,
+  HumanMergeCandidateIdentity,
+  HumanMergeDecisionAction,
+  HumanMergeDecisionReceipt,
+  HumanMergeDeliveryAction,
+  HumanMergeRejection,
+  HumanMergeRejectionState,
   CheckoutLease,
   CheckoutClaimContext,
   CheckoutClaimPrecondition,
@@ -689,6 +719,7 @@ export type {
   WorkspaceLandFailure,
   WorkspaceWorktreeEntry,
   TaskRepositoryScope,
+  TaskPlanningFailureState,
   Task,
   TaskReleaseGateVerdict,
   TaskVerificationResultSummary,
@@ -747,6 +778,13 @@ import {
   resolvePersistAgentThinkingLog,
   sanitizeCliAgentSettings,
   sanitizeCliAgentsSettings,
+  normalizeChatSnippetName,
+  normalizeChatSnippets,
+  readChatSnippets,
+  CHAT_SNIPPET_RESERVED_NAMES,
+  CHAT_SNIPPET_MAX_ENTRIES,
+  CHAT_SNIPPET_MAX_NAME_LENGTH,
+  CHAT_SNIPPET_MAX_PROMPT_LENGTH,
   sanitizeMcpServers,
   CLI_AGENT_ADAPTER_IDS,
   CLI_AGENT_AUTONOMY_MODES,
@@ -768,6 +806,13 @@ export {
   resolvePersistAgentThinkingLog,
   sanitizeCliAgentSettings,
   sanitizeCliAgentsSettings,
+  normalizeChatSnippetName,
+  normalizeChatSnippets,
+  readChatSnippets,
+  CHAT_SNIPPET_RESERVED_NAMES,
+  CHAT_SNIPPET_MAX_ENTRIES,
+  CHAT_SNIPPET_MAX_NAME_LENGTH,
+  CHAT_SNIPPET_MAX_PROMPT_LENGTH,
   sanitizeMcpServers,
   CLI_AGENT_ADAPTER_IDS,
   CLI_AGENT_AUTONOMY_MODES,
@@ -813,6 +858,7 @@ import type {
   DashboardKeyboardShortcuts,
   BackupSettingsMigrationCandidate,
   BackupSettingsMigrationConflict,
+  ChatSnippet,
   GlobalSettings,
   CliAgentSettings,
   RemoteAccessProvidersConfig,
@@ -864,6 +910,7 @@ export type {
   DashboardKeyboardShortcuts,
   BackupSettingsMigrationCandidate,
   BackupSettingsMigrationConflict,
+  ChatSnippet,
   GlobalSettings,
   CliAgentSettings,
   RemoteAccessProvidersConfig,
@@ -1446,11 +1493,24 @@ import {
   normalizeMessageParticipant,
   resolveEphemeralTaskCreationPolicy,
 } from "./types/messaging/messages.js";
+import {
+  ARTIFACT_NOTICE_METADATA_KEY,
+  DASHBOARD_INBOX_CATEGORIES,
+  TASK_RECOMMENDATION_NOTICE_KIND,
+  classifyDashboardInboxMessage,
+  isDashboardInboxCategory,
+} from "./messaging/inbox-categories.js";
 export {
   DASHBOARD_USER_ID,
   normalizeMessageParticipant,
   resolveEphemeralTaskCreationPolicy,
+  ARTIFACT_NOTICE_METADATA_KEY,
+  DASHBOARD_INBOX_CATEGORIES,
+  TASK_RECOMMENDATION_NOTICE_KIND,
+  classifyDashboardInboxMessage,
+  isDashboardInboxCategory,
 };
+import type { DashboardInboxCategory } from "./messaging/inbox-categories.js";
 import type {
   ParticipantType,
   MessageType,
@@ -1467,6 +1527,7 @@ import type {
   MessageFilter,
 } from "./types/messaging/messages.js";
 export type {
+  DashboardInboxCategory,
   ParticipantType,
   MessageType,
   MessageReplyReference,
@@ -1500,6 +1561,21 @@ export function validateMessageMetadata(metadata: MessageMetadata | undefined): 
 
   if (metadata.wakeRecipient !== undefined && typeof metadata.wakeRecipient !== "boolean") {
     throw new Error("metadata.wakeRecipient must be a boolean");
+  }
+
+  /*
+  FNXC:MailboxSubject 2026-09-15-04:40:
+  A declared subject must be a real subject: blank strings would render an empty mailbox subject
+  line, so they are rejected rather than silently stored. Absence stays valid for backward
+  compatibility — the dashboard derives a display subject for legacy rows and system notices.
+  */
+  if (metadata.subject !== undefined) {
+    if (typeof metadata.subject !== "string" || metadata.subject.trim().length === 0) {
+      throw new Error("metadata.subject must be a non-empty string");
+    }
+    if (metadata.subject.trim().length > 200) {
+      throw new Error("metadata.subject must be at most 200 characters");
+    }
   }
 
   /*
@@ -1562,7 +1638,6 @@ export function validateMessageMetadata(metadata: MessageMetadata | undefined): 
     const proposal = metadata.proposedTask;
     if (typeof proposal.title !== "string" || !proposal.title.trim() || typeof proposal.description !== "string" || !proposal.description.trim()) throw new Error("metadata.proposedTask requires non-empty title and description");
     if (proposal.dependencies !== undefined && (!Array.isArray(proposal.dependencies) || proposal.dependencies.some((id) => typeof id !== "string"))) throw new Error("metadata.proposedTask.dependencies must be string[]");
-    if (proposal.priority !== undefined && !["low", "normal", "high", "urgent"].includes(proposal.priority)) throw new Error("metadata.proposedTask.priority is invalid");
     if (metadata.proposalStatus !== undefined && !["pending", "creating", "created", "dismissed"].includes(metadata.proposalStatus)) throw new Error("metadata.proposalStatus is invalid");
     if (typeof metadata.proposalIdempotencyKey !== "string" || !metadata.proposalIdempotencyKey.trim()) throw new Error("task proposal requires proposalIdempotencyKey");
     if (metadata.claimStartedAt !== undefined && (typeof metadata.claimStartedAt !== "string" || Number.isNaN(Date.parse(metadata.claimStartedAt)))) throw new Error("metadata.claimStartedAt must be an ISO timestamp");
@@ -1595,8 +1670,19 @@ FNXC:ChatMemoryFocus 2026-08-24-04:21:
 Dashboard client imports resolve @fusion/core to this browser-safe leaf, so expose the pure
 experimental flag reader here. Its Settings dependency is type-only and introduces no browser runtime cycle.
 */
-export { isExperimentalFeatureEnabled, CHAT_FOCUS_FLAG } from "./config/experimental-features.js";
+export { isExperimentalFeatureEnabled, CHAT_FOCUS_FLAG, WHITEBOARD_VIEW_FLAG } from "./config/experimental-features.js";
+export { createEmptyWhiteboardDocument, validateWhiteboardDocument, validateWhiteboardTitle, WhiteboardValidationError, WhiteboardRevisionConflictError, WhiteboardNotFoundError } from "./whiteboards/whiteboard-types.js";
+export type { WhiteboardDocumentV1, WhiteboardDocument, WhiteboardFrame, WhiteboardText, WhiteboardRelation, WhiteboardRelationBranch, ProjectWhiteboard, ProjectWhiteboardSummary, WhiteboardRevision } from "./whiteboards/whiteboard-types.js";
+/*
+FNXC:ModelResolution 2026-09-15-08:46:
+FN-410: the dashboard client resolves `@fusion/core` to this browser-safe leaf
+(`packages/dashboard/vite.config.ts`), so the shared lane thinking-level precedence has to be
+re-exported here for Task Detail to display the effort a run actually used instead of re-deriving
+it. `./ai/model-resolution.js` is already imported by this module, so this adds no new browser
+module surface.
+*/
 export {
+  resolvePhaseThinkingLevel,
   resolveExecutionSettingsModel,
   resolvePlanningSettingsModel,
   resolveProjectDefaultModel,
@@ -1607,7 +1693,7 @@ export {
   resolveTitleSummarizerSettingsModel,
   resolveValidatorSettingsModel,
 } from "./ai/model-resolution.js";
-export type { ResolvedModelSelection } from "./ai/model-resolution.js";
+export type { ResolvedModelSelection, ModelThinkingPhase } from "./ai/model-resolution.js";
 export { resolveResearchSettings } from "./research/research-settings.js";
 export { resolveResearchFindingId } from "./research/research-types.js";
 export type { ResolvedResearchSettings } from "./research/research-settings.js";
@@ -1632,10 +1718,55 @@ export {
 FNXC:TaskDisplaySorting 2026-08-03-22:53:
 The dashboard's package-root core alias resolves to this browser-safe leaf. Re-export the canonical
 sorter here so Board, Lane, and ListView share core policy without importing a Node-heavy core barrel.
-The sorter and its transitive role/merge/priority helpers are browser-safe.
+The sorter and its transitive role/merge helpers are browser-safe.
+
+FNXC:TaskQueueOrder 2026-09-17-12:07:
+FN-509 moved the sorter to the queue-order module and deleted the per-column sort MODES with the
+column "..." menu. Board, Lane and ListView now share one non-configurable order.
 */
-export { sortTasksForDisplayColumn } from "./tasks/task-priority.js";
-export type { TaskColumnSortMode, ColumnSortMode, DoneColumnSortMode, DisplayColumnSortOptions } from "./tasks/task-priority.js";
+export {
+  sortTasksForDisplayColumn,
+  sortTasksByQueueOrder,
+  compareTasksByQueueOrder,
+  compareTasksByIntakeDisplayOrder,
+  compareTasksByCompleteArrival,
+  compareTaskIdNumeric,
+  resolveEffectiveQueueBoost,
+  resolveTaskColumnEntryAt,
+  resolveQueuePresence,
+} from "./tasks/task-queue-order.js";
+export type {
+  DisplayColumnOrderOptions,
+  TaskQueueBoost,
+  TaskQueueSortable,
+  QueuePresenceInput,
+  QueuePresenceVerdict,
+  QueueUnavailableReason,
+} from "./tasks/task-queue-order.js";
+
+/*
+FNXC:TaskFollowUp 2026-09-17-15:55:
+FN-513's follow-up sub-type test and eligibility rule are ONE definition shared by the context menu,
+the store mode, the HTTP route, and the planner. The module is pure (types + browser-safe column-role
+predicates only), so it is safe in this browser leaf and the dashboard cannot fork the rule.
+*/
+export {
+  FOLLOW_UP_METADATA_KEY,
+  FOLLOW_UP_METADATA_VERSION,
+  buildFollowUpSourceMetadata,
+  evaluateFollowUpEligibility,
+  isFollowUpEligible,
+  isFollowUpTask,
+} from "./tasks/task-follow-up.js";
+export type {
+  FollowUpColumnFlags,
+  FollowUpEligibility,
+  FollowUpEligibilityInput,
+  FollowUpIneligibleReason,
+  FollowUpProvenanceInput,
+  FollowUpReviewResultInput,
+  FollowUpSourceMarker,
+} from "./tasks/task-follow-up.js";
 
 /*
 FNXC:MissionValidationRepair 2026-08-11-00:10:

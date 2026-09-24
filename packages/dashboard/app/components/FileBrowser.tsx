@@ -1,7 +1,7 @@
 import "./FileBrowser.css";
-import { useState, useCallback, useEffect, useId, useRef } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { Folder, File, ChevronRight, Loader2, Copy, Move, Trash2, Pencil, Download, Archive, FilePlus2, FolderPlus, Plus, ChevronDown, Search } from "lucide-react";
+import { Folder, File, ChevronRight, Loader2, Copy, Move, Trash2, Pencil, Download, Archive, FilePlus2, FolderPlus, Plus, ChevronDown, Search, ArrowUp, ArrowDown } from "lucide-react";
 import type { FileNode } from "../api";
 import { copyFile, createWorkspaceDirectory, createWorkspaceFile, moveFile, deleteFile, renameFile, downloadFileUrl, downloadZipUrl, searchFiles } from "../api";
 import { appendTokenQuery } from "../auth";
@@ -37,6 +37,68 @@ function formatTime(mtime?: string): string {
   if (!mtime) return "";
   const date = new Date(mtime);
   return date.toLocaleDateString();
+}
+
+export type FileSortCriterion = "name" | "mtime" | "size";
+export type FileSortDirection = "ascending" | "descending";
+
+const FILE_NAME_COLLATOR = new Intl.Collator(undefined, {
+  sensitivity: "base",
+  numeric: true,
+});
+const FILE_NAME_TIE_BREAKER = new Intl.Collator(undefined, {
+  sensitivity: "variant",
+  numeric: true,
+});
+
+function compareNames(left: FileNode, right: FileNode): number {
+  return FILE_NAME_COLLATOR.compare(left.name, right.name)
+    || FILE_NAME_TIE_BREAKER.compare(left.name, right.name);
+}
+
+function sortableMetadata(entry: FileNode, criterion: Exclude<FileSortCriterion, "name">): number | undefined {
+  if (criterion === "size") {
+    return typeof entry.size === "number" && Number.isFinite(entry.size) ? entry.size : undefined;
+  }
+  if (!entry.mtime) return undefined;
+  const timestamp = Date.parse(entry.mtime);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+/*
+FNXC:FileBrowser 2026-09-09-21:10:
+Folder listings sort only a copied display projection. Directories always precede files, unknown or invalid metadata stays after known values in either direction, and deterministic name ordering breaks metadata ties without inventing sizes or dates.
+*/
+export function compareFileNodes(
+  left: FileNode,
+  right: FileNode,
+  criterion: FileSortCriterion,
+  direction: FileSortDirection,
+): number {
+  if (left.type !== right.type) {
+    return left.type === "directory" ? -1 : 1;
+  }
+
+  if (criterion === "name") {
+    const nameOrder = compareNames(left, right);
+    return direction === "ascending" ? nameOrder : -nameOrder;
+  }
+  if (criterion === "size" && left.type === "directory") {
+    return compareNames(left, right);
+  }
+
+  const leftValue = sortableMetadata(left, criterion);
+  const rightValue = sortableMetadata(right, criterion);
+  if (leftValue === undefined || rightValue === undefined) {
+    if (leftValue === undefined && rightValue === undefined) return compareNames(left, right);
+    return leftValue === undefined ? 1 : -1;
+  }
+
+  if (leftValue !== rightValue) {
+    const metadataOrder = leftValue - rightValue;
+    return direction === "ascending" ? metadataOrder : -metadataOrder;
+  }
+  return compareNames(left, right);
 }
 
 /** Build the full relative path for a file/directory entry */
@@ -356,12 +418,20 @@ export function FileBrowser({
   const [searchResults, setSearchResults] = useState<Array<{ path: string; name: string }>>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [sortCriterion, setSortCriterion] = useState<FileSortCriterion>("name");
+  const [sortDirection, setSortDirection] = useState<FileSortDirection>("ascending");
+
+  const sortedEntries = useMemo(
+    () => [...entries].sort((left, right) => compareFileNodes(left, right, sortCriterion, sortDirection)),
+    [entries, sortCriterion, sortDirection],
+  );
 
   const longPressTimerRef = useRef<number | null>(null);
   const longPressFeedbackTimerRef = useRef<number | null>(null);
   const touchStartRef = useRef<TouchPoint | null>(null);
   const touchOpenHandledRef = useRef(false);
   const newMenuRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const searchRequestIdRef = useRef(0);
 
   const clearLongPressTimers = useCallback(() => {
@@ -411,6 +481,11 @@ export function FileBrowser({
 
   const trimmedSearchQuery = searchQuery.trim();
   const isSearching = showProjectFileControls && Boolean(workspace) && trimmedSearchQuery.length > 0;
+  const sortCriterionLabel = sortCriterion === "name"
+    ? t("fileBrowser.sortName", "Name")
+    : sortCriterion === "mtime"
+      ? t("fileBrowser.sortModified", "Date modified")
+      : t("fileBrowser.sortSize", "Size");
 
   const runSearch = useCallback((query: string) => {
     if (!showProjectFileControls || !workspace) {
@@ -508,10 +583,17 @@ export function FileBrowser({
     cancelLongPress();
   }, [cancelLongPress]);
 
-  // Close context menu on scroll within the file browser
+  /*
+  FNXC:FileBrowser 2026-09-16-22:33:
+  Fermeture du menu contextuel au défilement DE CETTE instance. La souscription passait par
+  `document.querySelector(".file-browser-list")`, c'est-à-dire la PREMIÈRE liste du document : avec deux navigateurs
+  montés (dock + fenêtre, ou deux docks), le menu du second ne se fermait jamais sur son propre défilement et se
+  fermait à tort sur celui du premier. La référence locale lie l'écouteur à la liste de l'instance propriétaire ; la
+  liste peut être remplacée par un cycle chargement/erreur, donc la souscription est réévaluée à chaque ouverture.
+  */
   useEffect(() => {
     if (!contextMenu.visible) return;
-    const browserList = document.querySelector(".file-browser-list");
+    const browserList = listRef.current;
     const handleClose = () => {
       touchOpenHandledRef.current = false;
       cancelLongPress();
@@ -708,31 +790,80 @@ export function FileBrowser({
           </div>
         )}
         <div className="file-browser-header-actions">
+          <div className="file-browser-sort-controls">
+            <span id={`${searchInputId}-sort-search-note`} className="visually-hidden">
+              {t("fileBrowser.sortUnavailableDuringSearch", "Sorting applies to folder listings and is unavailable during search")}
+            </span>
+            <label className="file-browser-sort-label" htmlFor={`${searchInputId}-sort`}>
+              {t("fileBrowser.sortBy", "Sort by")}
+            </label>
+            <select
+              id={`${searchInputId}-sort`}
+              className="input file-browser-sort-select"
+              value={sortCriterion}
+              onChange={(event) => setSortCriterion(event.target.value as FileSortCriterion)}
+              disabled={isSearching}
+              aria-describedby={isSearching ? `${searchInputId}-sort-search-note` : undefined}
+              title={isSearching
+                ? t("fileBrowser.sortUnavailableDuringSearch", "Sorting applies to folder listings and is unavailable during search")
+                : `${t("fileBrowser.sortBy", "Sort by")}: ${sortCriterionLabel}`}
+            >
+              <option value="name">{t("fileBrowser.sortName", "Name")}</option>
+              <option value="mtime">{t("fileBrowser.sortModified", "Date modified")}</option>
+              <option value="size">{t("fileBrowser.sortSize", "Size")}</option>
+            </select>
+            <button
+              type="button"
+              className="btn btn-icon btn-sm file-browser-sort-direction"
+              onClick={() => setSortDirection((current) => current === "ascending" ? "descending" : "ascending")}
+              disabled={isSearching}
+              aria-describedby={isSearching ? `${searchInputId}-sort-search-note` : undefined}
+              aria-label={sortDirection === "ascending"
+                ? t("fileBrowser.sortDirectionAscending", "Sort direction: ascending")
+                : t("fileBrowser.sortDirectionDescending", "Sort direction: descending")}
+              title={isSearching
+                ? t("fileBrowser.sortUnavailableDuringSearch", "Sorting applies to folder listings and is unavailable during search")
+                : sortDirection === "ascending"
+                  ? t("fileBrowser.sortDirectionAscending", "Sort direction: ascending")
+                  : t("fileBrowser.sortDirectionDescending", "Sort direction: descending")}
+            >
+              {sortDirection === "ascending" ? <ArrowUp size={14} aria-hidden="true" /> : <ArrowDown size={14} aria-hidden="true" />}
+            </button>
+          </div>
           {showProjectFileControls ? (
             <>
               {/**
                * FNXC:FileBrowser 2026-07-02-00:00:
                * Files — Project needs visible create-file and create-folder targets plus recursive search, while embedded settings pickers keep the compact New menu to avoid misleading picker chrome.
                */}
+              {/**
+               * FNXC:FileBrowser 2026-09-16-15:58:
+               * FN-462: on a phone the two create buttons collapse to icon-only targets so the header stays within three
+               * touch rows and the list keeps real height. The label text is kept in the DOM (visually hidden in CSS, not
+               * `display: none`) and each button carries an explicit `aria-label` from the SAME existing i18n key, so the
+               * compact form never leaves an unnamed button behind.
+               */}
               <button
                 type="button"
                 className="btn btn-sm file-browser-create-button"
                 onClick={() => openCreateDialog("create-file")}
                 disabled={!workspace}
+                aria-label={t("fileBrowser.createNewFile", "Create new file")}
                 title={t("fileBrowser.createNewFile", "Create new file")}
               >
                 <FilePlus2 size={14} />
-                {t("fileBrowser.createNewFile", "Create new file")}
+                <span className="file-browser-create-button__label">{t("fileBrowser.createNewFile", "Create new file")}</span>
               </button>
               <button
                 type="button"
                 className="btn btn-sm file-browser-create-button"
                 onClick={() => openCreateDialog("create-folder")}
                 disabled={!workspace}
+                aria-label={t("fileBrowser.createNewFolder", "Create new folder")}
                 title={t("fileBrowser.createNewFolder", "Create new folder")}
               >
                 <FolderPlus size={14} />
-                {t("fileBrowser.createNewFolder", "Create new folder")}
+                <span className="file-browser-create-button__label">{t("fileBrowser.createNewFolder", "Create new folder")}</span>
               </button>
             </>
           ) : (
@@ -786,7 +917,7 @@ export function FileBrowser({
         </div>
       </div>
 
-      <div className="file-browser-list">
+      <div className="file-browser-list" ref={listRef}>
         {isSearching ? (
           <div className="file-browser-search-results" aria-live="polite">
             {searchLoading ? (
@@ -821,10 +952,10 @@ export function FileBrowser({
               ))
             )}
           </div>
-        ) : entries.length === 0 ? (
+        ) : sortedEntries.length === 0 ? (
           <div className="file-browser-empty">{t("fileBrowser.emptyDirectory", "(empty directory)")}</div>
         ) : (
-          entries.map((entry) => {
+          sortedEntries.map((entry) => {
             const fullPath = entryPath(currentPath, entry.name);
             const isLongPressTarget = isLongPressing && longPressTargetPath === fullPath;
 

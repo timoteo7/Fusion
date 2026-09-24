@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { loadAllAppCss } from "../test/cssFixture";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { computePublishedMobileNavHeight } from "../components/MobileNavBar";
 
+/*
+ * Anchors the selector at a rule boundary. A bare substring search matches a compound selector that merely
+ * CONTAINS the requested one (for example `.project-content--with-footer.project-content--with-mobile-nav`
+ * precedes `.project-content--with-mobile-nav` in the concatenated stylesheet), which returns a different
+ * declaration block than the one under test.
+ */
 function extractRuleBlock(css: string, selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = css.match(new RegExp(`${escapedSelector}\\s*\\{([\\s\\S]*?)\\}`));
+  const match = css.match(new RegExp(`(?:^|[\\n,{}])\\s*${escapedSelector}\\s*\\{([\\s\\S]*?)\\}`));
   return match?.[1] ?? "";
 }
 
@@ -72,12 +77,48 @@ describe("mobile-nav-bar.css", () => {
     );
   });
 
-  it("defines bottom sheet animation", () => {
+  it("keeps bottom-sheet animation for standard mode and anchors the bounded popover above the pill", () => {
     expect(cssContent).toContain("@keyframes mobile-more-sheet-in");
+    const popoverBlock = extractRuleBlock(cssContent, ".mobile-navigation-popover");
+    expect(popoverBlock).toContain("bottom: var(--mobile-nav-popover-bottom)");
+    expect(popoverBlock).toContain("max-height: calc(100dvh");
+    expect(popoverBlock).toContain("var(--mobile-nav-viewport-offset-top)");
+    expect(popoverBlock).toContain("env(safe-area-inset-top, 0px)");
+    expect(popoverBlock).toContain("overflow-y: auto");
+    expect(popoverBlock).not.toContain("animation:");
+    expect(popoverBlock).not.toContain("top:");
   });
 
   it("uses safe-area inset for bottom spacing", () => {
     expect(cssContent).toContain("env(safe-area-inset-bottom");
+  });
+
+  it("keeps the Alpha pill overlaid while reserving its measured mobile footprint", () => {
+    const alphaBlock = extractRuleBlock(cssContent, ".mobile-nav-bar--native");
+    const alphaContentBlock = extractRuleBlock(cssContent, ".project-content--with-mobile-nav");
+    const mobileAlphaContentBlock = extractRuleBlock(cssContent, 'html[data-viewport-mode="mobile"] .project-content--with-mobile-nav');
+    const tabletAlphaContentBlock = extractRuleBlock(cssContent, 'html:is([data-viewport-mode="tablet"], [data-viewport-mode="desktop"]) .project-content--with-mobile-nav:not(.project-content--with-footer)');
+    expect(alphaBlock).toContain("--mobile-nav-floating-gap: var(--space-sm)");
+    expect(alphaBlock).toContain("bottom: var(--mobile-nav-pill-bottom)");
+    expect(cssContent).toContain("--mobile-nav-viewport-offset-top: 0px");
+    expect(cssContent).toContain("--mobile-nav-pill-bottom: calc(var(--mobile-nav-system-offset) + var(--mobile-nav-floating-gap))");
+    expect(cssContent).toContain("--mobile-nav-popover-bottom: calc(var(--mobile-nav-pill-bottom) + var(--mobile-nav-pill-height) + var(--space-xs))");
+    expect(alphaContentBlock).toContain("padding-bottom: calc(var(--mobile-nav-height) + var(--mobile-nav-system-offset))");
+    expect(mobileAlphaContentBlock).toContain("padding-bottom: calc(var(--mobile-nav-height) + var(--mobile-nav-system-offset))");
+    expect(tabletAlphaContentBlock).toContain("padding-bottom: 0");
+    const headerBlock = extractRuleBlock(cssContent, ".header");
+    expect(alphaBlock).toContain("background: var(--surface)");
+    expect(headerBlock).toContain("background: var(--surface)");
+    expect(alphaBlock).not.toContain("color-mix");
+    expect(alphaBlock).not.toContain("backdrop-filter");
+
+    const publishedNavHeight = computePublishedMobileNavHeight({
+      navOffsetHeight: 54,
+      paddingBottom: 4,
+      tabHeights: [44, 44, 44, 44, 44],
+      floatingGap: 8,
+    });
+    expect(publishedNavHeight).toBe(62);
   });
 
   it("tab bar keeps symmetric tokenized side spacing while preserving ICB compensation", () => {

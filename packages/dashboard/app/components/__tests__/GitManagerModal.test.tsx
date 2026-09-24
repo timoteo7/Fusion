@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GitManagerModal } from "../GitManagerModal";
+import { KeyboardViewportOwnerProvider } from "../../hooks/useKeyboardViewportSurface";
 import { assertModalGeometryRecoveryAndSheetContracts, assertRenderedModalTouchGeometry } from "./floatingWindowMigration.test-helpers";
 import type { Task } from "@fusion/core";
 import { loadAllAppCss } from "../../test/cssFixture";
@@ -163,6 +164,11 @@ function getRuleBlocks(css: string, selector: string): string[] {
     .map((match) => match[1]);
 }
 
+/*
+ * FN-426: Pull Requests became a Git Manager SECTION rather than a standalone destination, so it belongs to this
+ * roster. Git already owns branches, remotes, and worktrees; a pull request sits beside them instead of needing a
+ * navigation entry (and, before this change, a right-dock-only host) of its own.
+ */
 const gitManagerSectionLabels = [
   "Status",
   "Changes",
@@ -172,6 +178,7 @@ const gitManagerSectionLabels = [
   "Stashes",
   "Recovery",
   "Remotes",
+  "Pull Requests",
 ];
 
 const mockAddToast = vi.fn();
@@ -393,6 +400,28 @@ describe("GitManagerModal", () => {
     expect(baseElement.querySelector(".floating-window--git-manager")).toBeTruthy();
   });
 
+  /*
+  FNXC:StandardizedViewLayout 2026-09-13-22:40:
+  FN-379 classifies Git Manager as a shared-chrome destination: on the desktop window and on the phone sheet it
+  must build exactly one canonical header owning the single exit, with its sections bounded by the content zone.
+  */
+  it.each(["desktop", "mobile"] as const)("keeps Git Manager on one canonical header with a bounded body (%s)", async (mode) => {
+    mockUseViewportMode.mockReturnValue(mode);
+    render(<GitManagerModal isOpen={true} onClose={vi.fn()} tasks={mockTasks} addToast={mockAddToast} />);
+    await waitFor(() => expect(screen.getByText("Git Manager")).toBeInTheDocument());
+
+    const panel = screen.getByTestId("floating-window-git-manager");
+    const headers = panel.querySelectorAll(".view-header");
+    expect(headers).toHaveLength(1);
+    const closes = panel.querySelectorAll(".modal-close");
+    expect(closes).toHaveLength(1);
+    expect(headers[0].contains(closes[0])).toBe(true);
+
+    const content = panel.querySelector<HTMLElement>('.gm-layout[data-view-layout-zone="content"]');
+    expect(content).toBeTruthy();
+    expect(headers[0].contains(content as HTMLElement)).toBe(false);
+  });
+
   it("keeps the sidebar-launched Git Manager overlay transparent and click-through like Files", () => {
     const css = loadAllAppCss();
     const overlayRule = css.match(/\.modal-overlay\.git-manager-modal-overlay\.git-manager-modal-overlay\s*\{([^}]*)\}/)?.[1] ?? "";
@@ -425,6 +454,37 @@ describe("GitManagerModal", () => {
     expect(modal.style.getPropertyValue("--keyboard-overlap")).toBe("240px");
     expect(modal.style.getPropertyValue("--vv-height")).toBe("620px");
     expect(modal.style.getPropertyValue("--vv-offset-top")).toBe("18px");
+  });
+
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-15:32:
+  FN-512: on a phone this modal is hosted inside a container (mobile drawer / drawer-presented
+  FloatingWindow) that already pulled its own bottom edge to the visible bound. Publishing these
+  variables there would translate and shrink the panel a SECOND time — the competing-adjustment defect
+  this task removes. One owner per container.
+  */
+  it("publishes no keyboard variables when a host container already owns the adaptation", async () => {
+    mockUseViewportMode.mockReturnValue("mobile");
+    mockUseMobileKeyboard.mockReturnValue({
+      keyboardOverlap: 240,
+      viewportHeight: 620,
+      viewportOffsetTop: 18,
+      keyboardOpen: true,
+    });
+
+    const { baseElement } = render(
+      <KeyboardViewportOwnerProvider value={{ owned: true }}>
+        <GitManagerModal isOpen={true} onClose={vi.fn()} tasks={mockTasks} addToast={mockAddToast} />
+      </KeyboardViewportOwnerProvider>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Git Manager")).toBeInTheDocument();
+    });
+
+    const modal = baseElement.querySelector(".modal.gm-modal") as HTMLElement;
+    expect(modal.style.getPropertyValue("--keyboard-overlap")).toBe("");
+    expect(modal.style.getPropertyValue("--vv-offset-top")).toBe("");
+    expect(modal.style.getPropertyValue("--vv-height")).toBe("");
   });
 
   it("renders all navigation sections plus Refresh without a workspace selector by default", async () => {

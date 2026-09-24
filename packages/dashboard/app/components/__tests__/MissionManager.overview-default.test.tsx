@@ -50,7 +50,7 @@ function setViewport(width: number) {
     Object.defineProperty(window, "matchMedia", { value: vi.fn(), configurable: true, writable: true });
   }
   vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
-    matches: query.includes("max-width: 768px") ? width <= 768 : query.includes("min-width: 769px") && query.includes("max-width: 1024px") ? width >= 769 && width <= 1024 : false,
+    matches: query.includes("max-width: 768px") ? width <= 768 : query.includes("min-width: 769px") && query.includes("max-width: 1023.98px") ? width >= 769 && width <= 1023.98 : false,
     media: query,
     onchange: null,
     addListener: vi.fn(),
@@ -150,7 +150,8 @@ describe("MissionManager overview default", () => {
 
     renderMissionManager();
     expect(await screen.findByText("First Mission")).toBeInTheDocument();
-    expect(screen.queryByTestId("mission-empty-detail")).not.toBeInTheDocument();
+    expect(screen.getByTestId("mission-empty-detail")).toBeInTheDocument();
+    expect(screen.getByTestId("mission-empty-detail").closest(".view-layout")).toHaveAttribute("data-mobile-pane", "list");
     await waitFor(() => expect(mockFetchMission).not.toHaveBeenCalled());
   });
 

@@ -31,6 +31,9 @@ vi.mock("lucide-react", () => ({
   Flag: () => <svg />,
   TriangleAlert: () => null,
   Zap: () => <svg />,
+  /* FN-408: the New Task dialog renders the per-card human plan approval toggle beside Fast. */
+  UserCheck: () => <svg />,
+  Lock: () => <svg />,
   ShieldCheck: () => null,
   Brain: () => null,
   Server: () => null,
@@ -158,16 +161,17 @@ describe("NewTaskModal", () => {
     });
   });
 
-  it.each(["mobile", "desktop"] as const)("keeps the priority quick action accessible in the %s action row", (viewportMode) => {
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 removed the inline priority quick action. What
+     must hold now is that its removal left no empty button shell in the action row at either
+     breakpoint — the classic residue of deleting an icon-only control. */
+  it.each(["mobile", "desktop"] as const)("leaves no priority quick action or empty shell in the %s action row", (viewportMode) => {
     mockViewportMode = viewportMode;
     renderNewTaskModal();
 
     const actions = screen.getByTestId("task-form-description-actions");
-    const priority = screen.getByTestId("task-form-inline-priority");
-    expect(actions).toContainElement(priority);
-    expect(priority).toHaveAttribute("aria-label", expect.stringMatching(/^Priority:/));
-    expect(priority).toHaveAttribute("title", expect.stringMatching(/^Priority:/));
+    expect(screen.queryByTestId("task-form-inline-priority")).toBeNull();
     expect(actions.querySelector("button:empty")).toBeNull();
+    expect(actions.querySelector("[aria-label^='Priority:']")).toBeNull();
   });
 
   it("restores desktop body density only for the 768px tablet resize class", () => {
@@ -212,7 +216,7 @@ describe("NewTaskModal", () => {
     // Without AI-handoff callbacks there is no Plan/Subtask button…
     expect(screen.queryByTestId("task-form-plan-button")).toBeNull();
     expect(screen.queryByTestId("task-form-subtask-button")).toBeNull();
-    // …but FNXC:NewTask 2026-06-23-00:10: the inline quick-add action row still renders in create mode to host Attach/Fast/Priority.
+    // …but FNXC:NewTask 2026-06-23-00:10: the inline quick-add action row still renders in create mode to host Attach/Fast.
     expect(screen.getByTestId("task-form-description-actions")).toBeInTheDocument();
 
     // Dependencies and agent are in quick-fields — visible by default (no toggle needed)
@@ -227,7 +231,6 @@ describe("NewTaskModal", () => {
     expect(screen.getByTestId("task-form-inline-workflow")).toBeVisible();
     expect(screen.getByTestId("task-form-inline-models")).toBeVisible();
     expect(screen.getByTestId("task-form-inline-node")).toBeVisible();
-    expect(screen.getByTestId("task-form-inline-priority")).toBeVisible();
 
     // FNXC:NewTask 2026-06-23-00:10: The DEEP/advanced options now sit behind the collapsed "Advanced" disclosure. Model Configuration / Attachments are NOT shown until the toggle is expanded.
     const advancedToggle = screen.getByTestId("task-form-more-options-toggle");
@@ -461,8 +464,7 @@ describe("NewTaskModal", () => {
       expect(screen.getByTestId("task-form-inline-github")).toBeVisible();
       expect(screen.getByTestId("task-form-inline-models")).toBeVisible();
       expect(screen.getByTestId("task-form-inline-node")).toBeVisible();
-      expect(screen.getByTestId("task-form-inline-priority")).toBeVisible();
-      expect(screen.getByRole("button", { name: "Create Task" })).toBeVisible();
+        expect(screen.getByRole("button", { name: "Create Task" })).toBeVisible();
 
       fireEvent.click(screen.getByTestId("dep-trigger"));
       expect(screen.getByPlaceholderText("Search tasks…")).toBeVisible();
@@ -554,12 +556,10 @@ describe("NewTaskModal", () => {
     expect(screen.getByTestId("task-form-inline-workflow")).toBeVisible();
     expect(screen.getByTestId("task-form-inline-models")).toBeVisible();
     expect(screen.getByTestId("task-form-inline-node")).toBeVisible();
-    expect(screen.getByTestId("task-form-inline-priority")).toBeVisible();
 
     // Detailed editors remain present only inside Advanced, not duplicated as visible siblings.
     expect(advancedSection).toContainElement(screen.getByTestId("task-form-execution-mode-select"));
     expect(advancedSection).toContainElement(screen.getByTestId("task-form-github-tracking"));
-    expect(advancedSection).toContainElement(screen.getByTestId("task-priority-select"));
     expect(advancedSection).toContainElement(screen.getByTestId("task-node-select"));
     expect(advancedSection).toHaveAttribute("hidden");
   });
@@ -573,6 +573,29 @@ describe("NewTaskModal", () => {
     expect(advancedSection).toHaveAttribute("hidden");
     expect(select).toHaveValue("standard");
     expect(Array.from(select.options).map((option) => option.value)).toEqual(["standard", "fast"]);
+  });
+
+  /*
+  FNXC:TaskTitleDisplay 2026-09-14-17:45:
+  FN-391: New Task submits a DESCRIPTION, never an implicit title — whether the operator typed five
+  words or 400 characters. The stored title comes only from the create-time automatic policy, so a
+  title sent from here would silently defeat that single writer.
+  */
+  it.each([
+    { label: "a five-word description", value: "Corriger le bouton de partage" },
+    { label: "a 400-character description", value: "x".repeat(400) },
+  ])("submits $label with no title field", async ({ value }) => {
+    const onCreateTask = vi.fn().mockResolvedValue(makeTask("FN-391"));
+    renderNewTaskModal({ onCreateTask, projectId: "project-1" });
+
+    fireEvent.change(screen.getByPlaceholderText("What needs to be done?"), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Task" }));
+
+    await waitFor(() => expect(onCreateTask).toHaveBeenCalledTimes(1));
+    const payload = onCreateTask.mock.calls[0]?.[0];
+    expect(payload.description).toBe(value);
+    expect(payload.title).toBeUndefined();
+    expect(screen.queryByTestId("task-form-title")).toBeNull();
   });
 
   it("omits plan approval across successive submissions while Fast still toggles", async () => {
@@ -595,6 +618,166 @@ describe("NewTaskModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create Task" }));
     await waitFor(() => expect(onCreateTask).toHaveBeenCalledTimes(2));
     expect(onCreateTask.mock.calls[1]?.[0]).not.toHaveProperty("requirePlanApproval");
+  });
+
+  /*
+  FNXC:HumanPlanApproval 2026-09-15-07:30:
+  FN-408 remediation — Fast and the per-card human plan approval are mutually exclusive: Fast skips
+  planning and Plan Review, so an armed fast card could never reach a decision. The dialog clears one
+  when the other is armed, and the create payload can never carry both.
+  */
+  it("keeps Fast and human plan approval mutually exclusive in the create payload", async () => {
+    const { props } = renderNewTaskModal();
+
+    const fastToggle = screen.getByTestId("task-form-inline-fast");
+    const humanToggle = screen.getByTestId("task-form-inline-human-plan-approval");
+
+    fireEvent.click(fastToggle);
+    expect(fastToggle).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(humanToggle);
+    expect(humanToggle).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("task-form-inline-fast")).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.change(screen.getByPlaceholderText("What needs to be done?"), { target: { value: "Needs my approval" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Task" }));
+
+    await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(props.onCreateTask).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload).toMatchObject({ humanPlanApproval: true });
+    expect(payload).not.toHaveProperty("executionMode");
+
+    // Re-arming Fast clears the human requirement in the other direction.
+    fireEvent.click(screen.getByTestId("task-form-inline-human-plan-approval"));
+    fireEvent.click(screen.getByTestId("task-form-inline-fast"));
+    expect(screen.getByTestId("task-form-inline-human-plan-approval")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  /*
+  FNXC:HumanMergeApproval 2026-09-17-22:32:
+  FN-514 P1 remediation — the DELIVERY lock had no creation-payload coverage on any composer, so a
+  control the operator can arm could have been dropped silently before reaching the server. It is
+  independent of the plan lock and of Fast: a fast card still gets delivered, so nothing about Fast
+  makes a delivery decision impossible.
+  */
+  describe("FN-514 delivery lock at creation", () => {
+    const typeRequest = (value: string) => {
+      fireEvent.change(screen.getByPlaceholderText("What needs to be done?"), { target: { value } });
+    };
+    const submit = () => fireEvent.click(screen.getByRole("button", { name: "Create Task" }));
+
+    it("sends humanMergeApproval when armed after the request text", async () => {
+      const { props } = renderNewTaskModal();
+
+      typeRequest("Needs my delivery decision");
+      fireEvent.click(screen.getByTestId("task-form-inline-human-merge-approval"));
+      expect(screen.getByTestId("task-form-inline-human-merge-approval")).toHaveAttribute("aria-pressed", "true");
+      submit();
+
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(props.onCreateTask).mock.calls[0]?.[0]).toMatchObject({
+        description: "Needs my delivery decision",
+        humanMergeApproval: true,
+      });
+    });
+
+    it("omits it when armed then disarmed — the default is automatic delivery", async () => {
+      const { props } = renderNewTaskModal();
+
+      typeRequest("Changed my mind");
+      fireEvent.click(screen.getByTestId("task-form-inline-human-merge-approval"));
+      fireEvent.click(screen.getByTestId("task-form-inline-human-merge-approval"));
+      expect(screen.getByTestId("task-form-inline-human-merge-approval")).toHaveAttribute("aria-pressed", "false");
+      submit();
+
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(props.onCreateTask).mock.calls[0]?.[0]).not.toHaveProperty("humanMergeApproval");
+    });
+
+    it("stays independent of Fast and of the plan lock", async () => {
+      const { props } = renderNewTaskModal();
+
+      typeRequest("Fast but still my call at delivery");
+      fireEvent.click(screen.getByTestId("task-form-inline-fast"));
+      fireEvent.click(screen.getByTestId("task-form-inline-human-merge-approval"));
+      // Fast skips planning, so the PLAN lock is cleared by Fast — the DELIVERY lock is not.
+      expect(screen.getByTestId("task-form-inline-fast")).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByTestId("task-form-inline-human-merge-approval")).toHaveAttribute("aria-pressed", "true");
+      submit();
+
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+      const payload = vi.mocked(props.onCreateTask).mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(payload).toMatchObject({ executionMode: "fast", humanMergeApproval: true });
+      expect(payload).not.toHaveProperty("humanPlanApproval");
+    });
+
+    it("never carries a decision, destination or approval object from the composer", async () => {
+      const { props } = renderNewTaskModal();
+
+      typeRequest("Arming only");
+      fireEvent.click(screen.getByTestId("task-form-inline-human-merge-approval"));
+      submit();
+
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+      const payload = vi.mocked(props.onCreateTask).mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(payload.humanMergeApproval).toBe(true);
+      expect(payload).not.toHaveProperty("deliveryAction");
+      expect(payload).not.toHaveProperty("candidateToken");
+      expect(payload).not.toHaveProperty("decidedBy");
+    });
+  });
+
+  /*
+  FNXC:HumanPlanApproval 2026-09-15-23:08:
+  FN-443 — the New task window already rebuilds its create payload from live state, but Quick Add's
+  identical control lost the operator's choice whenever it was armed after the request text. These
+  cases pin the SECOND creation surface against that same regression: every gesture order must reach
+  the same payload, and only the last visible choice may ever count.
+  */
+  describe("FN-443 human plan approval survives every toggle order", () => {
+    const typeRequest = (value: string) => {
+      fireEvent.change(screen.getByPlaceholderText("What needs to be done?"), { target: { value } });
+    };
+    const submit = () => fireEvent.click(screen.getByRole("button", { name: "Create Task" }));
+    const armApproval = () => fireEvent.click(screen.getByTestId("task-form-inline-human-plan-approval"));
+
+    it("sends humanPlanApproval when armed AFTER the request text is typed", async () => {
+      const { props } = renderNewTaskModal();
+
+      typeRequest("Armed last");
+      armApproval();
+      submit();
+
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(props.onCreateTask).mock.calls[0]?.[0]).toMatchObject({
+        description: "Armed last",
+        humanPlanApproval: true,
+      });
+    });
+
+    it("omits humanPlanApproval when armed then disarmed after typing", async () => {
+      const { props } = renderNewTaskModal();
+
+      typeRequest("Changed my mind");
+      armApproval();
+      armApproval();
+      expect(screen.getByTestId("task-form-inline-human-plan-approval")).toHaveAttribute("aria-pressed", "false");
+      submit();
+
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(props.onCreateTask).mock.calls[0]?.[0]).not.toHaveProperty("humanPlanApproval");
+    });
+
+    it("keeps the historical arm-then-type order working", async () => {
+      const { props } = renderNewTaskModal();
+
+      armApproval();
+      typeRequest("Armed first");
+      submit();
+
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(props.onCreateTask).mock.calls[0]?.[0]).toMatchObject({ humanPlanApproval: true });
+    });
   });
 
   it("includes executionMode fast in the create payload when Fast is selected", async () => {
@@ -745,7 +928,7 @@ describe("NewTaskModal", () => {
     expect(screen.getByTestId("task-form-execution-mode-select")).toHaveValue("standard");
   });
 
-  // FNXC:NewTask 2026-06-23-00:10: The New Task dialog NO LONGER force-opens TaskForm's advanced controls. The DEEP/advanced options (model selectors, workflow picker, etc.) are collapsed behind a disclosure relabeled "Advanced"; the common quick-add buttons (Attach/Fast/Priority) are surfaced inline next to Plan and are always visible.
+  // FNXC:NewTask 2026-06-23-00:10: The New Task dialog NO LONGER force-opens TaskForm's advanced controls. The DEEP/advanced options (model selectors, workflow picker, etc.) are collapsed behind a disclosure relabeled "Advanced"; the common quick-add buttons (Attach/Fast) are surfaced inline next to Plan and are always visible.
   it("keeps deep options behind a collapsed 'Advanced' disclosure while surfacing inline quick-add buttons", () => {
     renderNewTaskModal();
 
@@ -759,10 +942,9 @@ describe("NewTaskModal", () => {
     expect(advancedSection).toContainElement(screen.getByText(/Model Configuration/i));
     expect(advancedSection).toContainElement(screen.getByText("Workflow"));
 
-    // Inline quick-add buttons (Attach/Fast/Priority) ARE visible without expanding (outside the hidden section).
+    // Inline quick-add buttons (Attach/Fast) ARE visible without expanding (outside the hidden section).
     expect(screen.getByTestId("task-form-inline-attach")).toBeInTheDocument();
     expect(screen.getByTestId("task-form-inline-fast")).toBeInTheDocument();
-    expect(screen.getByTestId("task-form-inline-priority")).toBeInTheDocument();
     expect(screen.getByTestId("dep-trigger")).toBeInTheDocument();
 
     // Expanding the disclosure reveals the deep options.
@@ -1850,13 +2032,13 @@ describe("NewTaskModal", () => {
     card parked in Ideas).
     */
     it("atomically creates a duplicated Ideas workflow's Start in its own Planning lane", async () => {
-      await mockStartWorkflows("WF-014", "Coding ideas V2");
+      await mockStartWorkflows("WF-014", "Coding ideas copy");
       vi.mocked(fetchBoardWorkflows).mockResolvedValueOnce({
         flagEnabled: true,
         defaultWorkflowId: "builtin:coding",
         workflows: [{
           id: "WF-014",
-          name: "Coding ideas V2",
+          name: "Coding ideas copy",
           columns: [
             { id: "ideas", name: "Ideas", flags: { intake: true, manualIntake: true } },
             { id: "todo", name: "Planning", flags: { hold: true } },
@@ -2304,57 +2486,18 @@ describe("NewTaskModal", () => {
     });
   });
 
-  describe("priority selection payload", () => {
-    it("includes default normal priority in create payload", async () => {
+  describe("priority is retired from the create payload (FN-509)", () => {
+    it("submits no level and offers no control that could set one", async () => {
       const { props } = renderNewTaskModal();
 
-      fireEvent.change(screen.getByPlaceholderText("What needs to be done?"), { target: { value: "Task with default priority" } });
+      expect(screen.queryByTestId("task-priority-select")).toBeNull();
+      expect(screen.queryByTestId("task-form-inline-priority")).toBeNull();
+
+      fireEvent.change(screen.getByPlaceholderText("What needs to be done?"), { target: { value: "Ordinary arrival-ordered task" } });
       fireEvent.click(screen.getByRole("button", { name: "Create Task" }));
 
-      await waitFor(() => {
-        expect(props.onCreateTask).toHaveBeenCalledWith(
-          expect.objectContaining({
-            priority: "normal",
-          }),
-        );
-      });
-    });
-
-    it("includes selected priority and resets back to normal after submit", async () => {
-      const { props } = renderNewTaskModal();
-
-      fireEvent.change(screen.getByTestId("task-priority-select"), { target: { value: "urgent" } });
-      fireEvent.change(screen.getByPlaceholderText("What needs to be done?"), { target: { value: "Task with urgent priority" } });
-      fireEvent.click(screen.getByRole("button", { name: "Create Task" }));
-
-      await waitFor(() => {
-        expect(props.onCreateTask).toHaveBeenCalledWith(
-          expect.objectContaining({
-            priority: "urgent",
-          }),
-        );
-      });
-
-      await waitFor(() => {
-        expect(screen.getByTestId("task-priority-select")).toHaveValue("normal");
-      });
-    });
-
-    it("treats non-default priority as dirty state on cancel", async () => {
-      renderNewTaskModal();
-
-      fireEvent.change(screen.getByTestId("task-priority-select"), { target: { value: "high" } });
-      mockConfirm.mockResolvedValueOnce(false);
-
-      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-      await waitFor(() => {
-        expect(mockConfirm).toHaveBeenCalledWith({
-          title: "Discard Changes",
-          message: "You have unsaved changes. Discard them?",
-          danger: true,
-        });
-      });
+      await waitFor(() => expect(props.onCreateTask).toHaveBeenCalled());
+      expect((props.onCreateTask as { mock: { calls: unknown[][] } }).mock.calls[0][0]).not.toHaveProperty("priority");
     });
   });
 

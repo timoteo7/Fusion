@@ -1,13 +1,10 @@
 // @vitest-environment node
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import path from "node:path";
-
-const repoRoot = path.resolve(__dirname, "../../../../");
+import { readAppFile } from "../../app/test/cssFixture";
 
 function readDashboardGuide(): string {
-  return readFileSync(path.join(repoRoot, "docs/dashboard-guide.md"), "utf8");
+  return readAppFile("../../../docs/dashboard-guide.md");
 }
 
 function getSectionBody(doc: string, heading: string): string {
@@ -52,5 +49,117 @@ describe("dashboard guide coverage for lazy-loaded views", () => {
 
     expect(pluginBody).toContain("Settings → Plugins → Fusion Plugins");
     expect(piBody).toContain("Settings → Plugins → Pi Extensions");
+  });
+
+  it("documents completed-column arrival anchoring separately from history pagination", () => {
+    const guide = readDashboardGuide();
+    const completedColumnsBody = getSectionBody(guide, "Board completed columns");
+
+    expect(completedColumnsBody).toContain("the column stays at the top and shows that task immediately");
+    expect(completedColumnsBody).toContain("Fusion preserves your reading position");
+    expect(completedColumnsBody).toContain("separate from automatic history pagination");
+  });
+
+  it("documents the responsive official Header and Quick Entry hold contract", () => {
+    const guide = readDashboardGuide();
+
+    /*
+     * FN-437 restored a permanent Header New Task action on desktop, so the guide states that it is absent from the
+     * FOOTER only. This assertion still pinned the superseded "absent from both" wording and could never pass again.
+     */
+    expect(guide).toContain("New Task** is absent from the desktop footer but present in the Header");
+    expect(guide).toContain("tablet and mobile keep the rightmost compact Header action");
+    expect(guide).toContain("one non-wrapping row; long workflow names truncate before the Search icon moves");
+    expect(guide).toContain("icon-only Save button");
+    expect(guide).toContain("continuous 500 ms hold");
+    expect(guide).toContain("a single click or tap saves the task exactly once");
+    expect(guide).toContain("Releasing before the threshold performs the ordinary save");
+    expect(guide).toContain("leaving or cancelling the gesture creates nothing");
+    expect(guide).toContain("every visible icon-only action in the primary row uses the same token-sized square");
+    expect(guide).toContain("text option controls retain their content-sized width");
+    expect(guide).toContain("Historical alphaUpdates values never select another layout");
+  });
+
+  it("documents the shared tablet/desktop footer without broadening desktop-only behavior", () => {
+    const guide = readDashboardGuide();
+
+    /*
+     * Assertion périmée réparée ici : FN-468 a restreint le pied de page large à 1024 px et plus — sous ce seuil, la
+     * pill possède la navigation primaire, tablette comprise. Le guide décrit désormais cette règle ; le garde suit la
+     * documentation en vigueur au lieu d'exiger une formulation « tablette et ordinateur » qui n'est plus vraie.
+     */
+    expect(guide).toContain("official desktop design (1024 pixels and wider) uses one full-width navigation footer instead of ExecutorStatusBar");
+    /*
+     * FN-469 moved Settings out of the far-right group: it is now an icon-only action beside the capacity counter and
+     * the last entry of the More menu, so Terminal is the last right-hand action instead of Settings' left neighbour.
+     */
+    expect(guide).toContain("**Terminal** as the last action at the far right");
+    expect(guide).toContain("icon-only **Settings** action sits immediately to its right");
+    expect(guide).toContain("last entry of the **More** menu");
+    expect(guide).toContain("Tablet retains its sidebar, compact Header, standard right dock, ordinary page routing, and no Alpha desktop windows or guards");
+    expect(guide).toContain("continues to use More on mobile");
+  });
+
+  it("documents direct file windows without removing the full Files browser", () => {
+    const guide = readDashboardGuide();
+
+    expect(guide).toContain("A window opened for that specific file shows only its editor, preview, loading state, or error");
+    expect(guide).toContain("it does not repeat the file list, sidebar resize separator, or narrow-layout **Back to file list** action");
+    expect(guide).toContain("Opening Files without selecting a file still opens the complete browser");
+  });
+
+  it("documents the ascending single-column desktop More menu", () => {
+    const guide = readDashboardGuide();
+
+    expect(guide).toContain("More** opens centered above its trigger as a compact single vertical column");
+    expect(guide).toContain("one destination per row and vertical scrolling when the list grows beyond the viewport");
+    expect(guide).toContain("leaving the combined region still closes it");
+  });
+
+  it("documents official bottom-entering mobile drawers and Task Detail close ownership", () => {
+    const guide = readDashboardGuide();
+
+    expect(guide).toContain("every mobile drawer rises vertically from below with no lateral movement");
+    expect(guide).toContain("when reduced motion is requested, it appears without that transition");
+    expect(guide).toContain("The drawer omits the redundant **Back to board** action");
+    expect(guide).toContain("Desktop Board panels retain **Back to board**");
+  });
+
+  it("documents Alpha Updates retirement separately from Whiteboard Alpha", () => {
+    const guide = readDashboardGuide();
+
+    expect(guide).toContain("The removed `experimentalFeatures.alphaUpdates` setting is tolerated only as inert historical data");
+    expect(guide).toContain("Enable **Settings → Experimental → Whiteboard Alpha** (`experimentalFeatures.whiteboardView`)");
+    expect(guide).not.toContain("With **Alpha Updates**");
+  });
+
+  it("documents canonical Task Detail tabs with mouse drag-to-scroll and native touch", () => {
+    const guide = readDashboardGuide();
+
+    expect(guide).toContain("drag it horizontally with the left mouse button to scroll without using the wheel");
+    expect(guide).toContain("a stationary click still selects its tab or opens the Activity menu");
+    expect(guide).toContain("Tab order always remains canonical");
+    expect(guide).toContain("Touch and pen input keep the browser's native horizontal pan and tap behavior");
+    expect(guide).not.toContain("drag a tab with the mouse to reorder it");
+    expect(guide).not.toContain("Alt+ArrowLeft");
+  });
+
+  it("documents permanent Planning sessions off phone and compact phone navigation", () => {
+    const guide = readDashboardGuide();
+    const planningBody = getSectionBody(guide, "Planning Mode");
+
+    expect(planningBody).toContain("saved-session sidebar remains visible and resizable");
+    expect(planningBody).toContain("Phone layouts continue to use compact list/detail navigation");
+    expect(planningBody).toContain("Back** returns to it");
+  });
+
+  it("documents the selectable Liquid Glass web contract without claiming native parity", () => {
+    const guide = readDashboardGuide();
+
+    expect(guide).toContain("94 color themes");
+    expect(guide).toContain("Liquid Glass is an independent preset");
+    expect(guide).toContain("Board columns and cards deliberately remain more opaque");
+    expect(guide).toContain("reduced-motion, reduced-transparency, increased-contrast, and forced-color");
+    expect(guide).toContain("Apple’s publicly documented material principles for web-applicable interfaces");
   });
 });

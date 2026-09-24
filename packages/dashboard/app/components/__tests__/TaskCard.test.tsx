@@ -117,6 +117,8 @@ vi.mock("../../api", () => ({
   fetchAgents: vi.fn(),
   rebuildTaskSpec: vi.fn(),
   refreshPrStatus: vi.fn(),
+  /* FNXC:TaskRefine 2026-09-14-22:23: FN-400 — the card now hosts the standalone Refine composer, which submits through this export. */
+  refineTask: vi.fn(),
   fetchBoardWorkflows: vi.fn().mockResolvedValue({ flagEnabled: true, defaultWorkflowId: "wf-a", workflows: [], taskWorkflowIds: {} }),
   // FNXC:PlannerOversight 2026-07-04-13:00: tests that pass a `workflowBadge`
   // prop trigger the FN-7516 workflow-effective-oversight fetch effect; mock
@@ -128,8 +130,10 @@ vi.mock("../../api", () => ({
 const mockConfirm = vi.fn<(options: ConfirmOptions) => Promise<boolean>>();
 const mockConfirmWithChoice = vi.fn<(options: ConfirmOptions) => Promise<"primary" | "tertiary" | "cancel">>();
 const mockConfirmWithSelect = vi.fn();
+// FN-499: the WIP Retry confirmation resolves the operator's preserve-work choice through this seam.
+const mockConfirmWithCheckbox = vi.fn<(options: ConfirmOptions) => Promise<{ choice: "primary" | "tertiary" | "cancel"; checkboxValue: boolean }>>();
 vi.mock("../../hooks/useConfirm", () => ({
-  useConfirm: () => ({ confirm: mockConfirm, confirmWithChoice: mockConfirmWithChoice, confirmWithSelect: mockConfirmWithSelect }),
+  useConfirm: () => ({ confirm: mockConfirm, confirmWithChoice: mockConfirmWithChoice, confirmWithCheckbox: mockConfirmWithCheckbox, confirmWithSelect: mockConfirmWithSelect }),
 }));
 
 import { addressPrFeedback, uploadAttachment, fetchMission, fetchAgent, fetchAgents, fetchBoardWorkflows, refreshPrStatus } from "../../api";
@@ -147,6 +151,28 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     description: "",
     ...overrides,
   } as Task;
+}
+
+function ResettableTaskCardHarness({
+  initialTask,
+  requestReset,
+}: {
+  initialTask: Task;
+  requestReset: () => Promise<Task>;
+}) {
+  const [task, setTask] = React.useState(initialTask);
+  return (
+    <TaskCard
+      task={task}
+      onOpenDetail={noop}
+      addToast={noop}
+      onResetTask={async () => {
+        const confirmed = await requestReset();
+        setTask(confirmed);
+        return confirmed;
+      }}
+    />
+  );
 }
 
 const noop = () => {};
@@ -295,7 +321,7 @@ afterEach(() => {
 describe("TaskCard", () => {
   it("renders creation on all cards and terminal completion from canonical lifecycle timestamps", () => {
     const createdAt = new Date().toISOString();
-    const archivedAt = "2026-07-20T09:00:00.000Z";
+    const executionCompletedAt = "2026-07-20T09:00:00.000Z";
     const { rerender } = render(
       <TaskCard task={makeTask({ createdAt })} onOpenDetail={noop} addToast={noop} />,
     );
@@ -304,7 +330,7 @@ describe("TaskCard", () => {
     expect(screen.queryByText(/Completed/)).not.toBeInTheDocument();
 
     rerender(
-      <TaskCard task={makeTask({ column: "archived", createdAt, archivedAt, columnMovedAt: "2026-07-19T09:00:00.000Z" })} onOpenDetail={noop} addToast={noop} />,
+      <TaskCard task={makeTask({ column: "done", createdAt, executionCompletedAt, columnMovedAt: "2026-07-19T09:00:00.000Z" })} onOpenDetail={noop} addToast={noop} />,
     );
     expect(screen.getByTestId("card-lifecycle-dates")).toHaveTextContent("Completed");
     expect(screen.getByTestId("card-lifecycle-dates").querySelectorAll("time")).toHaveLength(2);
@@ -575,11 +601,28 @@ describe("TaskCard", () => {
     }
   });
 
-  it("opens editable Reset without consulting confirmation settings", async () => {
+  it("replaces the populated board card with the confirmed unplanned Reset row", async () => {
     const cleanupGeometry = mockBoardContextMenuGeometry();
-    const onResetTask = vi.fn(async () => makeTask());
+    let resolveReset!: (task: Task) => void;
+    const requestReset = vi.fn(() => new Promise<Task>((resolve) => { resolveReset = resolve; }));
+    const initialTask = makeTask({
+      column: "in-progress",
+      description: "Original request",
+      status: "executing",
+      error: "old failure",
+      steps: [{ id: "old-step", title: "Old work", status: "done" } as Task["steps"][number]],
+      workflowStepResults: [{ stepId: "code-review", status: "failed" } as Task["workflowStepResults"][number]],
+    });
+    const { status: _status, error: _error, ...confirmedJson } = makeTask({
+      column: "todo",
+      description: "Corrected board request",
+      steps: [],
+      workflowStepResults: [],
+      awaitingPlanning: true,
+    });
     try {
-      render(<TaskCard task={makeTask({ column: "in-progress", description: "Original request" })} onOpenDetail={noop} onResetTask={onResetTask} addToast={noop} />);
+      render(<ResettableTaskCardHarness initialTask={initialTask} requestReset={requestReset} />);
+      expect(document.body).toHaveTextContent(/executing/i);
       fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
       await waitFor(() => expectBoardContextMenuPortaled());
       fireEvent.click(screen.getByRole("menuitem", { name: "Reset" }));
@@ -589,10 +632,19 @@ describe("TaskCard", () => {
       expect(screen.getByTestId("task-reset-description")).toHaveValue("Original request");
       fireEvent.change(screen.getByTestId("task-reset-description"), { target: { value: "Corrected board request" } });
       fireEvent.click(screen.getByTestId("task-reset-submit"));
-      await waitFor(() => expect(onResetTask).toHaveBeenCalledWith(
-        "FN-001",
-        { description: "Corrected board request" },
-      ));
+      expect(screen.getByTestId("task-reset-submit")).toHaveTextContent("Resetting…");
+
+      await act(async () => {
+        resolveReset(confirmedJson as Task);
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(screen.queryByTestId("task-reset-dialog")).not.toBeInTheDocument());
+      expect(requestReset).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("card-queued-to-plan-FN-001")).toHaveTextContent("Queued to plan");
+      expect(document.body).not.toHaveTextContent(/executing/i);
+      expect(document.body).not.toHaveTextContent("old failure");
+      expect(document.body).not.toHaveTextContent("undefined");
     } finally {
       cleanupGeometry();
     }
@@ -743,101 +795,14 @@ describe("TaskCard", () => {
     }
   });
 
-  it("opens Planning Mode from eligible pre-execution card menus only when wired", async () => {
-    const cleanupGeometry = mockBoardContextMenuGeometry();
-    const onPlanningMode = vi.fn();
-    try {
-      const { rerender } = render(
-        <TaskCard
-          task={makeTask({ column: "triage", description: "Plan from description", title: "Fallback title" })}
-          onOpenDetail={noop}
-          onPlanningMode={onPlanningMode}
-          planningWorkflowId="WF-intake"
-          addToast={noop}
-        />,
-      );
-
-      fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
-      await waitFor(() => expectBoardContextMenuPortaled());
-      fireEvent.click(screen.getByRole("menuitem", { name: "Plan" }));
-      expect(onPlanningMode).toHaveBeenCalledWith("Plan from description", "WF-intake");
-      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-
-      rerender(
-        <TaskCard
-          task={makeTask({ column: "ideas" as any, description: "", title: "Custom intake title" })}
-          taskColumnFlags={{ intake: true }}
-          onOpenDetail={noop}
-          onPlanningMode={onPlanningMode}
-          planningWorkflowId="WF-custom"
-          addToast={noop}
-        />,
-      );
-      fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
-      await waitFor(() => expectBoardContextMenuPortaled());
-      fireEvent.click(screen.getByRole("menuitem", { name: "Plan" }));
-      expect(onPlanningMode).toHaveBeenLastCalledWith("Custom intake title", "WF-custom");
-      await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
-
-      rerender(
-        <TaskCard
-          task={makeTask({ column: "in-progress" })}
-          taskColumnFlags={{ wip: true }}
-          onOpenDetail={noop}
-          onPlanningMode={onPlanningMode}
-          addToast={noop}
-        />,
-      );
-      expect(screen.queryByTestId("card-menu-btn-FN-001")).toBeNull();
-      expect(screen.queryByRole("menuitem", { name: "Plan" })).not.toBeInTheDocument();
-
-      rerender(
-        <TaskCard
-          task={makeTask({ column: "triage" })}
-          onOpenDetail={noop}
-          addToast={noop}
-          onDeleteTask={vi.fn()}
-        />,
-      );
-      fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
-      expect(screen.queryByRole("menuitem", { name: "Plan" })).not.toBeInTheDocument();
-    } finally {
-      cleanupGeometry();
-    }
-  });
-
-  it("opens Planning Mode from the mobile/touch long-press menu for custom hold cards", async () => {
-    vi.useFakeTimers();
-    const cleanupGeometry = mockBoardContextMenuGeometry();
-    const onPlanningMode = vi.fn();
-    try {
-      render(
-        <TaskCard
-          task={makeTask({ column: "waiting" as any, description: "Touch plan seed" })}
-          taskColumnFlags={{ hold: true }}
-          onOpenDetail={noop}
-          onPlanningMode={onPlanningMode}
-          planningWorkflowId="WF-hold"
-          addToast={noop}
-        />,
-      );
-
-      const card = document.querySelector(".card") as HTMLElement;
-      fireEvent.pointerDown(card, { pointerType: "touch", pointerId: 1, clientX: 32, clientY: 36 });
-      act(() => vi.advanceTimersByTime(550));
-
-      expectBoardContextMenuPortaled();
-      fireEvent.pointerUp(screen.getByRole("menuitem", { name: "Plan" }), { pointerType: "touch", pointerId: 2 });
-      await act(async () => {
-        await Promise.resolve();
-      });
-      expect(onPlanningMode).toHaveBeenCalledWith("Touch plan seed", "WF-hold");
-      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    } finally {
-      cleanupGeometry();
-    }
-  });
-
+  /*
+  FNXC:TaskCardPlanning 2026-09-15-10:40:
+  FN-417 deleted "opens Planning Mode from eligible pre-execution card menus only when wired" and
+  "opens Planning Mode from the mobile/touch long-press menu for custom hold cards". Their subject,
+  the card menu Plan entry and the `onPlanningMode` prop that fed it, no longer exists because the
+  engine plans automatically. Absence across hosts and breakpoints is now proven by
+  `task-menu-merge-plan-removed.test.tsx`.
+  */
   it("enables GitHub tracking from the board card context menu and hides the action after refresh", async () => {
     const cleanupGeometry = mockBoardContextMenuGeometry();
     const onOpenDetail = vi.fn();
@@ -879,67 +844,9 @@ describe("TaskCard", () => {
     }
   });
 
-  /*
-  FNXC:WorkflowResolvedColumns 2026-07-31-01:35 (fleet phase — evidence for the 39 converted guards):
-  TaskCard asked "is this card terminal / mid-flight / in review?" by comparing `task.column` to a
-  literal THIRTY-NINE times, while `taskColumnFlags` was already threaded in and already consumed by
-  `canEdit` and `isTaskAgentActive`. The failure mode is a card rendering as live work by one question
-  and terminal by the next on the same board.
-
-  These two cases pin the property in BOTH directions, because only one of them can be reached by
-  renaming alone:
-    - traits say mid-flight, column NAMED `done`  -> must NOT offer Archive (the old code did)
-    - traits say complete, column named `shipped` -> MUST offer Archive (the old code did not)
-
-  Archive is the assertion target because `isCompleteColumn` gates it directly and it is a real
-  operator affordance rather than a style detail.
-
-  REVERT CHECK, measured. Restoring `task.column === "done"` on the archive-action guard makes the
-  first case fail (Archive appears on a mid-flight card) and the second fail (Archive missing on the
-  renamed complete lane). Both were run.
-  */
-  it("does not offer Archive on a card whose traits say mid-flight, however its column is spelled", () => {
-    const cleanupGeometry = mockBoardContextMenuGeometry();
-    try {
-      render(
-        <TaskCard
-          task={makeTask({ column: "done" as any })}
-          taskColumnFlags={{ countsTowardWip: true } as any}
-          onOpenDetail={noop}
-          addToast={noop}
-          onArchiveTask={vi.fn()}
-        />,
-      );
-      fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
-      expect(screen.queryByRole("menuitem", { name: "Archive" })).not.toBeInTheDocument();
-    } finally {
-      cleanupGeometry();
-    }
-  });
-
-  it("offers Archive on a RENAMED complete column, which the id comparison could not see", () => {
-    const cleanupGeometry = mockBoardContextMenuGeometry();
-    try {
-      render(
-        <TaskCard
-          task={makeTask({ column: "shipped" as any })}
-          taskColumnFlags={{ complete: true } as any}
-          onOpenDetail={noop}
-          addToast={noop}
-          onArchiveTask={vi.fn()}
-        />,
-      );
-      fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
-      expect(screen.getByRole("menuitem", { name: "Archive" })).toBeInTheDocument();
-    } finally {
-      cleanupGeometry();
-    }
-  });
-
   it("opens the board card context menu from keyboard as a viewport portal, selects an action, and closes", async () => {
     const cleanupGeometry = mockBoardContextMenuGeometry();
     const onOpenDetail = vi.fn();
-    const onArchiveTask = vi.fn(async () => makeTask({ column: "archived" }));
     try {
       render(
         <div className="column" style={{ overflow: "hidden" }}>
@@ -948,7 +855,6 @@ describe("TaskCard", () => {
               task={makeTask({ column: "done", status: "done" as any })}
               onOpenDetail={onOpenDetail}
               addToast={noop}
-              onArchiveTask={onArchiveTask}
             />
           </div>
         </div>,
@@ -959,10 +865,10 @@ describe("TaskCard", () => {
       fireEvent.keyDown(card, { key: "F10", shiftKey: true });
 
       expectBoardContextMenuPortaled();
-      fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Refine" }));
 
-      await waitFor(() => expect(onArchiveTask).toHaveBeenCalledWith("FN-001"));
-      expect(onArchiveTask).toHaveBeenCalledTimes(1);
+      /* FNXC:TaskRefine 2026-09-14-22:23: FN-400 — Refine opens the card's own composer, never the task record. */
+      expect(screen.getByTestId("task-refine-dialog")).toBeInTheDocument();
       expect(screen.queryByRole("menu")).not.toBeInTheDocument();
       expect(onOpenDetail).not.toHaveBeenCalled();
     } finally {
@@ -970,14 +876,12 @@ describe("TaskCard", () => {
     }
   });
 
-  it("shows refine for a done card context menu and routes to the refinement opener", () => {
+  it("shows refine for a done card context menu and opens the standalone composer", () => {
     const onOpenDetail = vi.fn();
-    const onOpenRefine = vi.fn();
     render(
       <TaskCard
         task={makeTask({ column: "done", status: "done" as any })}
         onOpenDetail={onOpenDetail}
-        onOpenRefine={onOpenRefine}
         addToast={noop}
         onDeleteTask={vi.fn()}
       />,
@@ -986,20 +890,18 @@ describe("TaskCard", () => {
     fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
     fireEvent.click(screen.getByRole("menuitem", { name: "Refine" }));
 
-    expect(onOpenRefine).toHaveBeenCalledWith(expect.objectContaining({ id: "FN-001" }));
+    expect(screen.getByTestId("task-refine-dialog")).toBeInTheDocument();
     expect(onOpenDetail).not.toHaveBeenCalled();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("shows refine for custom complete cards on touch long-press", () => {
     vi.useFakeTimers();
-    const onOpenRefine = vi.fn();
     render(
       <TaskCard
         task={makeTask({ column: "complete" as any, status: "done" as any })}
         taskColumnFlags={{ complete: true }}
         onOpenDetail={noop}
-        onOpenRefine={onOpenRefine}
         addToast={noop}
         onDeleteTask={vi.fn()}
       />,
@@ -1010,10 +912,15 @@ describe("TaskCard", () => {
     act(() => vi.advanceTimersByTime(550));
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Refine" }));
-    expect(onOpenRefine).toHaveBeenCalledWith(expect.objectContaining({ id: "FN-001" }));
+    expect(screen.getByTestId("task-refine-dialog")).toBeInTheDocument();
   });
 
-   it("omits refine without a real modal callback and offers PR status actions from the board context menu", async () => {
+   /*
+   FNXC:TaskRefine 2026-09-14-22:23:
+   FN-400 replaced this case's subject: Refine no longer depends on a caller-supplied opener, because the card owns the
+   composer. A review card therefore always offers Refine, alongside its PR status actions.
+   */
+   it("offers refine and PR status actions on a review card from the board context menu", async () => {
     const onOpenDetail = vi.fn();
     vi.mocked(refreshPrStatus).mockResolvedValueOnce({} as any);
     render(
@@ -1031,8 +938,9 @@ describe("TaskCard", () => {
     );
 
     fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
-    expect(screen.queryByRole("menuitem", { name: "Refine" })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Refine" })).toBeInTheDocument();
     expect(onOpenDetail).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
 
     fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
     fireEvent.click(screen.getByRole("menuitem", { name: "Check PR Status" }));
@@ -1643,9 +1551,8 @@ describe("TaskCard", () => {
     });
   });
 
-  it("hides delete button for done tasks while keeping archive in the three-dot menu", async () => {
+  it("hides delete and action-menu shells for a done task without a terminal action", () => {
     const onDeleteTask = vi.fn(async () => makeTask());
-    const onArchiveTask = vi.fn(async () => makeTask({ column: "archived" }));
 
     render(
       <TaskCard
@@ -1653,61 +1560,21 @@ describe("TaskCard", () => {
         onOpenDetail={noop}
         addToast={noop}
         onDeleteTask={onDeleteTask}
-        onArchiveTask={onArchiveTask}
       />,
     );
 
     expect(screen.queryByLabelText("Delete task")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
-    fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
-    expect(await screen.findByRole("menuitem", { name: "Archive" })).toBeDefined();
   });
 
-  it.each(["triage", "todo", "in-progress", "in-review"] as const)(
-    "hides archive action for %s tasks",
-    (column) => {
-      render(
-        <TaskCard
-          task={makeTask({ column })}
-          onOpenDetail={noop}
-          addToast={noop}
-          onArchiveTask={vi.fn(async () => makeTask({ column: "archived" }))}
-        />,
-      );
-
-      expect(screen.queryByLabelText("Archive task")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
-    },
-  );
-
-  it("renders archive action for done tasks inside the three-dot menu", async () => {
-    const onArchiveTask = vi.fn(async () => makeTask({ column: "archived" }));
-
-    render(
-      <TaskCard
-        task={makeTask({ column: "done" })}
-        onOpenDetail={noop}
-        addToast={noop}
-        onArchiveTask={onArchiveTask}
-      />,
-    );
-
-    expect(screen.queryByLabelText("Archive task")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
-    fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
-
-    const menu = await screen.findByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeDefined();
-
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Archive" }));
-
-    await waitFor(() => expect(onArchiveTask).toHaveBeenCalledWith("FN-001"));
-  });
-
-  it("renders no action-menu shell when neither done action is available", () => {
+  /*
+  FNXC:TaskRefine 2026-09-14-22:23:
+  FN-400 narrowed this case's subject: a complete card now always offers Refine because it hosts that composer itself,
+  so the empty-shell contract only holds for a card with no available action at all.
+  */
+  it("renders no action-menu shell when no action is available", () => {
     const { container } = render(
       <TaskCard
-        task={makeTask({ column: "done", mergeDetails: undefined })}
+        task={makeTask({ column: "in-progress", mergeDetails: undefined })}
         onOpenDetail={noop}
         addToast={noop}
       />,
@@ -1718,36 +1585,31 @@ describe("TaskCard", () => {
     expect(screen.queryByTestId("card-menu-btn-FN-001")).toBeNull();
   });
 
-  it("does not render archive action for archived tasks", () => {
+  it("still offers Refine on a handler-free complete card because the card owns that dialog", () => {
     render(
       <TaskCard
-        task={makeTask({ column: "archived" })}
+        task={makeTask({ column: "done", status: "done" as any, mergeDetails: undefined })}
         onOpenDetail={noop}
         addToast={noop}
-        onArchiveTask={vi.fn(async () => makeTask({ column: "archived" }))}
-        onUnarchiveTask={vi.fn(async () => makeTask({ column: "done" }))}
       />,
     );
 
-    expect(screen.queryByLabelText("Archive task")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
-    expect(screen.getByLabelText("Unarchive task")).toBeDefined();
+    fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Refine" }));
+    expect(screen.getByTestId("task-refine-dialog")).toBeInTheDocument();
   });
 
   /*
   FNXC:TaskRevert 2026-07-15-00:00 (FN-8035):
-  Coverage for the Revert affordance across done + archived cards. Done-card
-  actions are available only through the three-dot context menu; archived cards
-  retain their inline row. The no-commit guard remains disabled in the menu.
+  Done-card actions are available through the three-dot context menu. The no-commit guard remains disabled in the menu.
   */
   describe("Revert affordance", () => {
-    it("renders Archive and Revert in the done card three-dot menu when both are available", async () => {
+    it("renders Revert in the done card three-dot menu when available", async () => {
       const { container } = render(
         <TaskCard
           task={makeTask({ column: "done", mergeDetails: { commitSha: "abc123def456" } as any })}
           onOpenDetail={noop}
           addToast={noop}
-          onArchiveTask={vi.fn(async () => makeTask({ column: "archived" }))}
           onRevertTask={vi.fn(async () => ({ mode: "git", clean: true, revertCommitSha: "deadbeef" }) as any)}
         />,
       );
@@ -1756,21 +1618,7 @@ describe("TaskCard", () => {
       expect(container.querySelector(".card-done-actions")).toBeNull();
       fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
       const menu = await screen.findByRole("menu");
-      expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeDefined();
       expect(within(menu).getByRole("menuitem", { name: "Revert" })).toBeDefined();
-    });
-
-    it("renders the inline Revert button for an archived card with a landed commit", () => {
-      render(
-        <TaskCard
-          task={makeTask({ column: "archived", mergeDetails: { commitSha: "abc123def456" } as any })}
-          onOpenDetail={noop}
-          addToast={noop}
-          onRevertTask={vi.fn(async () => ({ mode: "git", clean: true, revertCommitSha: "deadbeef" }) as any)}
-        />,
-      );
-
-      expect(screen.getByLabelText("Revert this task's changes")).toBeDefined();
     });
 
     it("omits the Revert button when onRevertTask is not provided", () => {
@@ -1785,13 +1633,12 @@ describe("TaskCard", () => {
       expect(screen.queryByLabelText("Revert this task's changes")).toBeNull();
     });
 
-    it("renders Archive and disabled Revert in the done three-dot menu without a landed commit", async () => {
+    it("renders disabled Revert in the done three-dot menu without a landed commit", async () => {
       const { container } = render(
         <TaskCard
           task={makeTask({ column: "done", mergeDetails: undefined })}
           onOpenDetail={noop}
           addToast={noop}
-          onArchiveTask={vi.fn(async () => makeTask({ column: "archived" }))}
           onRevertTask={vi.fn(async () => ({ mode: "git", clean: true, revertCommitSha: "deadbeef" }) as any)}
         />,
       );
@@ -1799,11 +1646,10 @@ describe("TaskCard", () => {
       expect(container.querySelector(".card-revert-btn")).toBeNull();
       fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
       const menu = await screen.findByRole("menu");
-      expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeDefined();
       expect(within(menu).getByRole("menuitem", { name: "Revert" })).toBeDisabled();
     });
 
-    it("renders only Revert in the done three-dot menu when archive is unavailable", async () => {
+    it("renders only Revert in the done three-dot menu", async () => {
       render(
         <TaskCard
           task={makeTask({ column: "done", mergeDetails: { commitSha: "abc123def456" } as any })}
@@ -1834,7 +1680,7 @@ describe("TaskCard", () => {
       expect(menuItem).toBeDisabled();
     });
 
-    it("shows the Revert context-menu entry for done and archived cards", () => {
+    it("shows the Revert context-menu entry for done cards", () => {
       render(
         <TaskCard
           task={makeTask({ column: "done", mergeDetails: { commitSha: "abc123def456" } as any })}
@@ -2432,6 +2278,44 @@ describe("TaskCard", () => {
 
     expect(subscribeToBadgeMock).toHaveBeenCalledWith("FN-001");
     expect(screen.getByRole("link", { name: "#77" })).toBeDefined();
+  });
+
+  it("accepts only newer timestamped GitHub badge updates for the current project and task", () => {
+    const task = makeTask({
+      column: "in-review",
+      updatedAt: "2026-05-13T12:00:00.000Z",
+      prInfo: {
+        url: "https://github.com/owner/repo/pull/50",
+        number: 50,
+        status: "open",
+        title: "Snapshot PR",
+        headBranch: "feature/snapshot",
+        baseBranch: "main",
+        commentCount: 0,
+        lastCheckedAt: "2026-05-13T12:00:00.000Z",
+      } as Task["prInfo"],
+    });
+    badgeUpdatesMock.set("project-a:FN-001", {
+      prInfo: { ...task.prInfo, number: 49, url: "https://github.com/owner/repo/pull/49" },
+      timestamp: "2026-05-13T11:59:00.000Z",
+    });
+    badgeUpdatesMock.set("project-b:FN-001", {
+      prInfo: { ...task.prInfo, number: 99, url: "https://github.com/owner/repo/pull/99" },
+      timestamp: "2026-05-13T12:02:00.000Z",
+    });
+
+    const view = render(<TaskCard task={task} projectId="project-a" onOpenDetail={noop} addToast={noop} />);
+    expect(screen.getByRole("link", { name: "#50" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "#49" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "#99" })).toBeNull();
+
+    badgeUpdatesMock.set("project-a:FN-001", {
+      prInfo: { ...task.prInfo, number: 51, url: "https://github.com/owner/repo/pull/51" },
+      timestamp: "2026-05-13T12:01:00.000Z",
+    });
+    view.rerender(<TaskCard task={{ ...task, title: "Test task refreshed" }} projectId="project-a" onOpenDetail={noop} addToast={noop} />);
+    expect(screen.getByRole("link", { name: "#51" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "#50" })).toBeNull();
   });
 
   it("clicking issue badge text does not open the task detail modal", () => {
@@ -3196,10 +3080,13 @@ describe("TaskCard", () => {
   /*
    * FNXC:ReleaseAuthorizationGate 2026-07-09-00:00: the triage release-authorization
    * gate was removed. A legacy release-authorization hold now renders the generic
-   * "Awaiting Approval" badge like any manual plan-approval hold — no distinct
-   * release-authorization label or badge class.
+   * plan-approval badge like any manual hold — no distinct release-authorization label
+   * or badge class.
+   *
+   * FNXC:TaskStatusBadge 2026-09-16-05:01: FN-448 renamed that generic badge from the
+   * passive "Awaiting Approval" to the operator-facing "Needs you".
    */
-  it("renders the generic Awaiting Approval badge for a legacy release-authorization hold", () => {
+  it("renders the generic Needs you badge for a legacy release-authorization hold", () => {
     const { container: releaseContainer } = render(
       <TaskCard
         task={makeTask({ column: "triage", status: "awaiting-approval", awaitingApprovalReason: "release-authorization" } as any)}
@@ -3207,7 +3094,8 @@ describe("TaskCard", () => {
         addToast={noop}
       />,
     );
-    expect(within(releaseContainer).getByText("Awaiting Approval")).toBeDefined();
+    expect(within(releaseContainer).getByText("Needs you")).toBeDefined();
+    expect(within(releaseContainer).queryByText("Awaiting Approval")).toBeNull();
     expect(within(releaseContainer).queryByText("Awaiting Release Authorization")).toBeNull();
     const releaseBadge = releaseContainer.querySelector(".card-status-badge") as HTMLElement;
     expect(releaseBadge.className).not.toContain("awaiting-release-authorization");
@@ -3218,7 +3106,7 @@ describe("TaskCard", () => {
    * When Plan Review exhausts automatic REVISE replans, the card must not look like a
    * generic require-all hold — badge text + title explain the non-convergence reason.
    */
-  it("keeps the generic Awaiting Approval badge for an ordinary manual hold", () => {
+  it("keeps the generic Needs you badge for an ordinary manual hold", () => {
     const { container } = render(
       <TaskCard
         task={makeTask({ column: "triage", status: "awaiting-approval" } as any)}
@@ -3227,7 +3115,8 @@ describe("TaskCard", () => {
       />,
     );
 
-    expect(within(container).getByText("Awaiting Approval")).toBeDefined();
+    expect(within(container).getByText("Needs you")).toBeDefined();
+    expect(within(container).queryByText("Awaiting Approval")).toBeNull();
     expect(container.querySelector(".awaiting-approval--plan-review-replan-cap")).toBeNull();
   });
 
@@ -3245,6 +3134,7 @@ describe("TaskCard", () => {
     );
     expect(within(container).getByText("Review budget exhausted")).toBeDefined();
     expect(within(container).queryByText("Awaiting Approval")).toBeNull();
+    expect(within(container).queryByText("Needs you")).toBeNull();
     const badge = container.querySelector(".card-status-badge") as HTMLElement;
     expect(badge.className).toContain("awaiting-approval--plan-review-replan-cap");
     expect(badge.getAttribute("data-awaiting-approval-reason")).toBe("plan-review-replan-cap");
@@ -4176,7 +4066,7 @@ describe("TaskCard", () => {
 
     it("confirms the stage-specific retry before calling onRetryTask", async () => {
       const onRetryTask = vi.fn(async () => ({}) as Task);
-      mockConfirm.mockResolvedValueOnce(true);
+      mockConfirmWithCheckbox.mockResolvedValueOnce({ choice: "primary", checkboxValue: false });
       render(
         <TaskCard
           task={makeTask({ column: "todo", status: "failed", error: "Executor crashed" })}
@@ -4188,13 +4078,75 @@ describe("TaskCard", () => {
       );
 
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-      await waitFor(() => expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({
+      await waitFor(() => expect(mockConfirmWithCheckbox).toHaveBeenCalledWith(expect.objectContaining({
         title: "Retry this stage?",
         message: "Discard the in-flight work and start it again on the approved plan. This card stays in its current column.",
         confirmLabel: "Retry",
         danger: true,
       })));
-      await waitFor(() => expect(onRetryTask).toHaveBeenCalledWith("FN-001"));
+      await waitFor(() => expect(onRetryTask).toHaveBeenCalledWith("FN-001", { preserveWork: false }));
+    });
+
+    /*
+    FNXC:ColumnRestart 2026-09-17-09:16:
+    FN-499: the WIP Retry confirmation offers an unchecked "keep the work" checkbox; planning and
+    review confirmations must keep their plain boolean dialog. The error-banner Retry delegates to
+    the same handler, so it inherits the choice without a second code path.
+    */
+    describe("preserve-work choice", () => {
+      function renderRetryCard(flags: Record<string, boolean> | undefined, onRetryTask: ReturnType<typeof vi.fn>) {
+        return render(
+          <TaskCard
+            task={makeTask({ column: "todo", status: "failed", error: "Executor crashed" })}
+            onOpenDetail={noop}
+            addToast={noop}
+            onRetryTask={onRetryTask}
+            taskColumnFlags={flags as never}
+          />,
+        );
+      }
+
+      it("passes preserveWork true when the operator checks the box", async () => {
+        const onRetryTask = vi.fn(async () => ({}) as Task);
+        mockConfirmWithCheckbox.mockResolvedValueOnce({ choice: "primary", checkboxValue: true });
+        renderRetryCard({ countsTowardWip: true }, onRetryTask);
+
+        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+        await waitFor(() => expect(mockConfirmWithCheckbox).toHaveBeenCalledWith(expect.objectContaining({
+          checkbox: expect.objectContaining({ defaultChecked: false }),
+        })));
+        expect(mockConfirmWithCheckbox.mock.calls[0]?.[0]?.alwaysAsk).toBeUndefined();
+        await waitFor(() => expect(onRetryTask).toHaveBeenCalledWith("FN-001", { preserveWork: true }));
+      });
+
+      it("does not call onRetryTask when the checkbox confirmation is cancelled", async () => {
+        const onRetryTask = vi.fn(async () => ({}) as Task);
+        mockConfirmWithCheckbox.mockResolvedValueOnce({ choice: "cancel", checkboxValue: true });
+        renderRetryCard({ countsTowardWip: true }, onRetryTask);
+
+        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+        await waitFor(() => expect(mockConfirmWithCheckbox).toHaveBeenCalled());
+        expect(onRetryTask).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ["planning", { hold: true }],
+        ["review", { mergeBlocker: true }],
+      ] as const)("offers no checkbox in the %s stage", async (_name, flags) => {
+        const onRetryTask = vi.fn(async () => ({}) as Task);
+        mockConfirm.mockClear();
+        mockConfirmWithCheckbox.mockClear();
+        mockConfirm.mockResolvedValueOnce(true);
+        renderRetryCard(flags as never, onRetryTask);
+
+        fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+        await waitFor(() => expect(onRetryTask).toHaveBeenCalledWith("FN-001", { preserveWork: false }));
+        expect(mockConfirm).toHaveBeenCalled();
+        expect(mockConfirmWithCheckbox).not.toHaveBeenCalled();
+      });
     });
 
     it("shows loading and disabled state while retry is in progress", async () => {
@@ -4837,7 +4789,7 @@ describe("TaskCard", () => {
   it("renders edit button inside card-header-actions for editable columns", () => {
     const { container } = render(
       <TaskCard
-        task={makeTask({ column: "todo", size: "S" })}
+        task={makeTask({ column: "ideas" as any, size: "S" })}
         onOpenDetail={noop}
         addToast={noop}
         onUpdateTask={async () => makeTask()}
@@ -4854,17 +4806,16 @@ describe("TaskCard", () => {
   it("renders the done-card three-dot menu inside card-header-actions", () => {
     const { container } = render(
       <TaskCard
-        task={makeTask({ column: "done", size: "L" })}
+        task={makeTask({ column: "done", size: "L", mergeDetails: { commitSha: "abc123def456" } as any })}
         onOpenDetail={noop}
         addToast={noop}
-        onArchiveTask={async () => makeTask()}
+        onRevertTask={vi.fn(async () => ({ mode: "git", clean: true, revertCommitSha: "deadbeef" }) as any)}
       />,
     );
     const actionsContainer = container.querySelector(".card-header-actions");
     const menuButton = screen.getByTestId("card-menu-btn-FN-001");
 
     expect(actionsContainer).not.toBeNull();
-    expect(container.querySelector(".card-archive-btn")).toBeNull();
     expect(container.querySelector(".card-done-actions")).toBeNull();
     expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
     expect(actionsContainer?.contains(menuButton)).toBe(true);
@@ -5213,7 +5164,16 @@ describe("TaskCard", () => {
     const css = loadAllAppCssBaseOnly();
 
     expect(css).toMatch(/\.card-time-indicator\s*,\s*\.card-cost-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*display:\s*inline-flex;[^}]*font-family:\s*var\(--font-mono\);[^}]*\}/);
-    expect(css).toContain(".card-github-tracking-chip:hover");
+    /*
+    FNXC:TaskCardTouchHover 2026-09-16-22:27 (FN-482):
+    Le survol du chip existe toujours, mais il est désormais gardé par capacité pour qu'un pan
+    tactile du board ne l'allume pas. Il n'apparaît donc plus dans le CSS privé d'at-rules :
+    l'assertion se déplace sur le CSS complet et exige explicitement la garde `hover: hover`.
+    */
+    expect(css).not.toContain(".card-github-tracking-chip:hover");
+    expect(loadAllAppCss()).toMatch(
+      /@media\s*\(hover:\s*hover\)\s*\{[\s\S]*?\.card-github-tracking-chip:hover\s*\{[^}]*background:\s*var\(--card-hover\);[^}]*\}/,
+    );
     expect(css).toMatch(/\.card-github-tracking-chip:focus-visible\s*\{[^}]*--focus-ring-strong/);
     expect(css).toMatch(/\.card-time-indicator\s*,\s*\.card-cost-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*padding:\s*var\(--space-xs\)\s+var\(--space-sm\);[^}]*height:\s*var\(--card-chip-height\);[^}]*border-radius:\s*var\(--radius-pill\);[^}]*font-size:\s*0\.6875rem;[^}]*line-height:\s*1;[^}]*\}/);
     expect(css).toMatch(/\.card-github-tracking-chip\s+\.provider-icon\s+svg\s*\{[^}]*width:\s*12px;[^}]*height:\s*12px;[^}]*\}/);
@@ -6256,22 +6216,22 @@ describe("TaskCard", () => {
       expectedLabel: "2 files changed",
     },
     {
-      name: "uses mergeDetails as transient placeholder while loading",
+      name: "uses mergeDetails as the stable first-paint count while loading",
       diff: { stats: null, loading: true },
       mergeDetails: { filesChanged: 108 },
       expectedLabel: "108 files changed",
     },
     {
-      name: "hides badge when fetch resolved null and no execution fallback exists",
+      name: "retains the snapshot badge when the diff resolves null",
       diff: { stats: null, loading: false },
       mergeDetails: { filesChanged: 108 },
-      expectedLabel: null,
+      expectedLabel: "108 files changed",
     },
     {
-      name: "hides badge when live diff resolves zero",
+      name: "retains the snapshot badge when the same-snapshot diff resolves zero",
       diff: { stats: { filesChanged: 0, additions: 0, deletions: 0 }, loading: false },
       mergeDetails: { filesChanged: 108 },
-      expectedLabel: null,
+      expectedLabel: "108 files changed",
     },
     {
       name: "clamps live diff count when landed files are attribution-restricted",
@@ -6286,10 +6246,10 @@ describe("TaskCard", () => {
       expectedLabel: "5 files changed",
     },
     {
-      name: "uses singular grammar for one live file",
+      name: "does not add a region from a live diff without snapshot delivery evidence",
       diff: { stats: { filesChanged: 1, additions: 1, deletions: 0 }, loading: false },
       mergeDetails: undefined,
-      expectedLabel: "1 file changed",
+      expectedLabel: null,
     },
   ])("FN-4527 done-task files changed contract: $name", ({ diff, mergeDetails, expectedLabel }) => {
     useTaskDiffStatsMock.mockReturnValue(diff);
@@ -6324,7 +6284,7 @@ describe("TaskCard", () => {
     expect(filesChangedButton).toBeNull();
   });
 
-  it("backfills done-card files-changed chip when mergeDetails enrichment arrives without remount", () => {
+  it("adds the done-card files chip only when a new task snapshot carries merge evidence", () => {
     useTaskDiffStatsMock.mockImplementation((...args: any[]) => {
       const options = args[4] as { mergeSignature?: string } | undefined;
       if (options?.mergeSignature === "3:3") {
@@ -6432,7 +6392,7 @@ describe("TaskCard", () => {
     expect(container.querySelector(".card-session-files")).toBeNull();
   });
 
-  it("prefers lineage files-changed stats over stale execution-touched modifiedFiles for done tasks", () => {
+  it("does not let lineage enrichment add a files region when done delivery evidence is absent", () => {
     useTaskDiffStatsMock.mockReturnValue({
       stats: { filesChanged: 4, additions: 12, deletions: 3 },
       loading: false,
@@ -6461,7 +6421,7 @@ describe("TaskCard", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "4 files changed" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /files changed/i })).toBeNull();
     expect(screen.queryByText(/touched during execution/i)).toBeNull();
     expect(screen.queryByText(/in merged commit/i)).toBeNull();
   });
@@ -6639,14 +6599,16 @@ describe("TaskCard", () => {
     const timer = container.querySelector(".card-time-indicator");
     expectTimerInFooterRight(container);
     expect(timer?.textContent).toContain("30m");
-    expect(timer?.getAttribute("title")).toBe("Execution time 30m");
+    /* FN-457: the tooltip is now the header followed by the Planning / Execution / Verification
+       detail lines, so the header is the FIRST line rather than the whole string. */
+    expect(timer?.getAttribute("title")?.split("\n")[0]).toBe("Execution time 30m");
 
     act(() => {
       vi.advanceTimersByTime(5 * 60_000);
     });
 
     expect(container.querySelector(".card-time-indicator")?.textContent).toContain("35m");
-    expect(container.querySelector(".card-time-indicator")?.getAttribute("title")).toBe("Execution time 35m");
+    expect(container.querySelector(".card-time-indicator")?.getAttribute("title")?.split("\n")[0]).toBe("Execution time 35m");
   });
 
   it("shows cumulative runtime across a user reopen", () => {
@@ -6671,7 +6633,7 @@ describe("TaskCard", () => {
     const timer = container.querySelector(".card-time-indicator");
     expectTimerInFooterRight(container);
     expect(timer?.textContent).toContain("6m");
-    expect(timer?.getAttribute("title")).toBe("Execution time 6m");
+    expect(timer?.getAttribute("title")?.split("\n")[0]).toBe("Execution time 6m");
   });
 
   it("renders planning-only active duration when execution timing is absent", () => {
@@ -6891,7 +6853,7 @@ describe("TaskCard", () => {
       const timer = container.querySelector(".card-time-indicator");
       expectTimerInFooterRight(container);
       expect(timer?.textContent).toContain("45m");
-      expect(timer?.getAttribute("title")).toBe("Execution time 45m. Merge phase <1m");
+      expect(timer?.getAttribute("title")?.split("\n")[0]).toBe("Execution time 45m. Merge phase <1m");
     } finally {
       vi.useRealTimers();
     }
@@ -6914,7 +6876,7 @@ describe("TaskCard", () => {
     expect(container.querySelector(".card-time-indicator")).toBeNull();
   });
 
-  it.each(["triage", "todo", "archived"] as const)(
+  it.each(["triage", "todo"] as const)(
     "does not render timer chip for %s cards",
     (column) => {
       const { container } = render(
@@ -7265,19 +7227,8 @@ describe("TaskCard near-duplicate chip", () => {
     expect(screen.getByText("Duplicate of FN-1234")).toBeInTheDocument();
   });
 
-  it("hides duplicate chip in archived and done columns", () => {
-    const { rerender } = render(
-      <TaskCard
-        task={makeTask({ column: "archived", sourceMetadata: { nearDuplicateOf: "FN-1234" } })}
-        onOpenDetail={noop}
-        addToast={noop}
-        onUpdateTask={vi.fn()}
-      />,
-    );
-
-    expect(screen.queryByText("Duplicate of FN-1234")).toBeNull();
-
-    rerender(
+  it("hides duplicate chip in the done column", () => {
+    render(
       <TaskCard
         task={makeTask({ column: "done", sourceMetadata: { nearDuplicateOf: "FN-1234" } })}
         onOpenDetail={noop}
@@ -7420,11 +7371,12 @@ describe("TaskCard undo-of chip", () => {
  * FNXC:TaskRevert 2026-07-16-00:00:
  * FN-8066 regression coverage locks the completed-source invariant at TaskCard,
  * the shared board/list card component: only persisted, non-blank revert markers
- * render the compact chip in done or archived columns, while other provenance
+ * render the compact chip in done, while other provenance
  * chips can coexist in the same footer cluster.
  */
 describe("TaskCard reverted chip", () => {
-  it.each(["done", "archived"] as const)("renders for reverted %s cards", (column) => {
+  it("renders for reverted done cards", () => {
+    const column = "done" as const;
     render(
       <TaskCard
         task={makeTask({ column, sourceMetadata: { revertedAt: "2026-07-16T00:00:00.000Z" } })}
@@ -7436,17 +7388,21 @@ describe("TaskCard reverted chip", () => {
     expect(screen.getByLabelText("This task's changes were reverted")).toBeInTheDocument();
   });
 
-  it("renders Delete and Revise resolution actions when handlers are supplied", () => {
-    const onReviseTask = vi.fn();
+  /*
+  FN-416 removed the card's Delete/Revise resolution strip: a reverted card carries only its badge,
+  and restoring the revert is a context-menu action. Full coverage of the replacement affordance
+  lives in TaskCard.revert-restore.test.tsx; this case keeps the old contract from creeping back.
+  */
+  it("renders no Delete or Revise resolution actions on a reverted card", () => {
     const task = makeTask({ column: "done", sourceMetadata: { revertedAt: "2026-07-16T00:00:00.000Z" } });
     render(
-      <TaskCard task={task} onOpenDetail={noop} onDeleteTask={vi.fn()} onReviseTask={onReviseTask} addToast={noop} />,
+      <TaskCard task={task} onOpenDetail={noop} onDeleteTask={vi.fn()} addToast={noop} />,
     );
 
-    const actions = document.querySelector(".card-reverted-actions") as HTMLElement;
-    expect(within(actions).getByRole("button", { name: "Delete" })).toBeInTheDocument();
-    fireEvent.click(within(actions).getByRole("button", { name: "Revise" }));
-    expect(onReviseTask).toHaveBeenCalledWith(task);
+    expect(document.querySelector(".card-reverted-actions")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Revise" })).toBeNull();
+    expect(screen.getByLabelText("This task's changes were reverted")).toBeInTheDocument();
   });
 
   it("does not render for missing, blank, or non-completed revert markers", () => {
@@ -7457,7 +7413,7 @@ describe("TaskCard reverted chip", () => {
 
     rerender(
       <TaskCard
-        task={makeTask({ column: "archived", sourceMetadata: { revertedAt: "  " } })}
+        task={makeTask({ column: "done", sourceMetadata: { revertedAt: "  " } })}
         onOpenDetail={noop}
         addToast={noop}
       />,
@@ -8187,7 +8143,7 @@ describe("TaskCard custom field badges (U13/KTD-14)", () => {
 
 /*
 FNXC:CodingIdeasWorkflow 2026-07-05-00:00:
-FN-7596 regression-tests the TaskCard "Start" affordance that promotes a Coding (Ideas) manual-intake card. `showStartAction` requires taskColumnFlags.intake and a non-"triage" column; `startTargetColumn` derives the destination from `taskMoveColumns` (first non-intake/non-archived/non-hiddenFromBoard column) rather than a hard-coded "todo" string, per the FNXC comment at its call site.
+FN-7596 regression-tests the TaskCard "Start" affordance that promotes a Coding (Ideas) manual-intake card. `showStartAction` requires taskColumnFlags.intake and a non-"triage" column; `startTargetColumn` derives the destination from `taskMoveColumns` (first non-intake/non-hiddenFromBoard column) rather than a hard-coded "todo" string, per the FNXC comment at its call site.
 */
 describe("TaskCard Start affordance (FN-7596)", () => {
   it("renders the Start button for a manual-intake column with onMoveTask provided", () => {
@@ -8437,6 +8393,23 @@ describe("TaskCard trailing-row layout (FN-8631)", () => {
     window.matchMedia = originalMatchMedia;
   });
 
+  /*
+  FNXC:OverlapWaitRelease 2026-09-17-06:38:
+  Reconciled task:updated snapshots remove stale waiting indicators on the shared desktop/mobile card.
+  The removed metadata must leave neither a scope chip, queued-reason icon nor an empty row behind.
+  */
+  it.each([1280, 390])("removes recovered dependency indicators without empty shells at %ipx", (width) => {
+    setCardBreakpoint(width);
+    const waiting = makeTask({ column: "todo", status: "queued", blockedBy: "FN-PREV", overlapBlockedBy: "FN-PREV" });
+    const { container, rerender } = render(<TaskCard task={waiting} onOpenDetail={noop} addToast={noop} />);
+    expect(container.querySelector(".card-scope-badge")).not.toBeNull();
+    rerender(<TaskCard task={{ ...waiting, status: undefined, blockedBy: undefined, overlapBlockedBy: undefined }} onOpenDetail={noop} addToast={noop} />);
+    expect(container.querySelector(".card-scope-badge")).toBeNull();
+    expect(container.querySelector(".card-meta")).toBeNull();
+    expect(container.querySelector('[data-testid^="card-queued-overlap-icon"], [data-testid^="card-queued-dependency-icon"]')).toBeNull();
+    expectContentBackedTrailingRows(container);
+  });
+
   it.each([1280, 390])("keeps every trailing-card variant content-backed at %ipx", (width) => {
     setCardBreakpoint(width);
     const cleanupCss = mountCssForBadgeTests();
@@ -8447,6 +8420,7 @@ describe("TaskCard trailing-row layout (FN-8631)", () => {
         status: "executing" as any,
         steps: [{ name: "Implementation", status: "in-progress" }],
       });
+      const restoredOpenChanges = vi.fn();
       const variants = [
         {
           name: "collapsed progress",
@@ -8477,6 +8451,45 @@ describe("TaskCard trailing-row layout (FN-8631)", () => {
             expect(container.querySelector(".card-workflow-badge-row")).not.toBeNull();
           },
         },
+        {
+          name: "restored completed history",
+          renderCard: () => {
+            useTaskDiffStatsMock.mockReturnValue({ stats: { filesChanged: 3, additions: 8, deletions: 2 }, loading: false });
+            return render(
+              <CostBadgeProvider value={{ enabled: true }}>
+                <TaskCard
+                  task={makeTask({
+                    id: `FN-restored-${width}`,
+                    column: "done",
+                    cumulativeActiveMs: 30 * 60_000,
+                    tokenUsage: {
+                      inputTokens: 1_000_000,
+                      outputTokens: 0,
+                      cachedTokens: 0,
+                      cacheWriteTokens: 0,
+                      totalTokens: 1_000_000,
+                      firstUsedAt: "2026-01-01T00:00:00Z",
+                      lastUsedAt: "2026-01-01T00:30:00Z",
+                      modelProvider: "openai",
+                      modelId: "gpt-5-mini",
+                    },
+                    mergeDetails: { commitSha: "restored-sha", filesChanged: 99 },
+                  })}
+                  onOpenDetail={noop}
+                  onOpenDetailWithTab={restoredOpenChanges}
+                  addToast={noop}
+                />
+              </CostBadgeProvider>,
+            );
+          },
+          assert: (container: HTMLElement) => {
+            expect(container.querySelector(".card-time-indicator")).toHaveTextContent("30m");
+            expect(container.querySelector(".card-cost-indicator")).toHaveTextContent("$0.25");
+            const files = screen.getByRole("button", { name: "3 files changed" });
+            fireEvent.click(files);
+            expect(restoredOpenChanges).toHaveBeenCalledWith(expect.objectContaining({ id: `FN-restored-${width}` }), "changes");
+          },
+        },
       ];
 
       for (const variant of variants) {
@@ -8493,7 +8506,8 @@ describe("TaskCard trailing-row layout (FN-8631)", () => {
       expanded.unmount();
 
       const editing = render(
-        <TaskCard task={makeTask({ id: `FN-editing-${width}`, column: "todo" })} onOpenDetail={noop} addToast={noop} onUpdateTask={noop} />,
+        // FNXC:TaskDescriptionEditing 2026-09-14-18:50: FN-391 — the inline editor lives in the manual-intake lane, so this layout probe renders the card there.
+        <TaskCard task={makeTask({ id: `FN-editing-${width}`, column: "ideas" as any })} onOpenDetail={noop} addToast={noop} onUpdateTask={noop} />,
       );
       // Editing returns early with only edit content, so none of the normal trailing rows can leave an empty shell.
       fireEvent.click(editing.container.querySelector(".card-edit-btn") as HTMLButtonElement);
@@ -8514,21 +8528,54 @@ describe("TaskCard trailing-row layout (FN-8631)", () => {
   });
 });
 
-describe("TaskCard field editability resolves column traits (U12 — R8)", () => {
+/*
+FNXC:TaskDescriptionEditing 2026-09-14-18:50:
+FN-391 narrows this card's inline editor — which writes the DESCRIPTION and nothing else — from the
+generic pre-implementation rule to manual intake. The U12/R8 trait-resolution contract is preserved
+(a RENAMED board keeps the affordance, mid-flight and review traits still veto); what changed is
+which trait grants it, so the granting cases are inverted rather than relaxed.
+*/
+describe("TaskCard description editability resolves column traits (FN-391)", () => {
   const EDIT_LABEL = { name: "Edit task" };
 
-  it("renders the edit button for a RENAMED pre-implementation column", () => {
+  it("renders the edit button for a RENAMED manual-intake column", () => {
     render(
       <TaskCard
         task={makeTask({ column: "backlog" as any })}
-        taskColumnFlags={{ intake: true, hold: true }}
+        taskColumnFlags={{ intake: true, manualIntake: true }}
         onUpdateTask={noop}
         onOpenDetail={noop}
         addToast={noop}
       />,
     );
-    // Fails with the hardcoded id set: `backlog` is not in it.
+    // Fails with a hardcoded id set: `backlog` is not in it.
     expect(screen.getByRole("button", EDIT_LABEL)).toBeInTheDocument();
+  });
+
+  it("does NOT render it for an AUTO-triaging intake or hold column", () => {
+    // The narrowing FN-391 adds: once a card is released, planning owns the text it derived from.
+    const auto = render(
+      <TaskCard
+        task={makeTask({ column: "backlog" as any })}
+        taskColumnFlags={{ intake: true }}
+        onUpdateTask={noop}
+        onOpenDetail={noop}
+        addToast={noop}
+      />,
+    );
+    expect(screen.queryByRole("button", EDIT_LABEL)).not.toBeInTheDocument();
+    auto.unmount();
+
+    render(
+      <TaskCard
+        task={makeTask({ column: "waiting" as any })}
+        taskColumnFlags={{ hold: true }}
+        onUpdateTask={noop}
+        onOpenDetail={noop}
+        addToast={noop}
+      />,
+    );
+    expect(screen.queryByRole("button", EDIT_LABEL)).not.toBeInTheDocument();
   });
 
   it("does NOT render it for a resolved mid-flight column", () => {
@@ -8546,12 +8593,12 @@ describe("TaskCard field editability resolves column traits (U12 — R8)", () =>
     expect(screen.queryByRole("button", EDIT_LABEL)).not.toBeInTheDocument();
   });
 
-  it("vetoes editing when a hold column ALSO carries a review trait", () => {
-    // A legal shape a plain `intake || hold` check gets wrong.
+  it("vetoes editing when a manual-intake column ALSO carries a review trait", () => {
+    // A legal shape a plain `manualIntake` check gets wrong.
     render(
       <TaskCard
         task={makeTask({ column: "backlog" as any })}
-        taskColumnFlags={{ hold: true, mergeBlocker: true }}
+        taskColumnFlags={{ manualIntake: true, mergeBlocker: true }}
         onUpdateTask={noop}
         onOpenDetail={noop}
         addToast={noop}
@@ -8560,34 +8607,62 @@ describe("TaskCard field editability resolves column traits (U12 — R8)", () =>
     expect(screen.queryByRole("button", EDIT_LABEL)).not.toBeInTheDocument();
   });
 
-  it("still renders it for a legacy `todo` card with no flags resolved", () => {
-    // The pre-load window, and what every board did before the conversion.
-    render(<TaskCard task={makeTask({ column: "todo" as any })} onUpdateTask={noop} onOpenDetail={noop} addToast={noop} />);
+  it("still renders it for a legacy `ideas` card with no flags resolved", () => {
+    // The pre-load window, and a card stranded in a column its workflow no longer declares.
+    render(<TaskCard task={makeTask({ column: "ideas" as any })} onUpdateTask={noop} onOpenDetail={noop} addToast={noop} />);
     expect(screen.getByRole("button", EDIT_LABEL)).toBeInTheDocument();
+  });
+
+  it("does not render it for a legacy `todo` card with no flags resolved", () => {
+    // `todo` is the merged PLANNING lane: a plan is being written from the description there.
+    render(<TaskCard task={makeTask({ column: "todo" as any })} onUpdateTask={noop} onOpenDetail={noop} addToast={noop} />);
+    expect(screen.queryByRole("button", EDIT_LABEL)).not.toBeInTheDocument();
   });
 });
 
-describe("TaskCard titleless display fallback (FN-044)", () => {
-  const description200 = "d".repeat(200);
-  const description201 = "e".repeat(201);
+/*
+FNXC:TaskTitleDisplay 2026-09-14-17:30:
+FN-391 replaces the FN-044 200-characters-with-ellipsis fallback with an EXACT 220-character
+description prefix. The assertions below are inverted rather than relaxed: the old suffix contract
+is now asserted absent, because a suffix made the rendered label a different string from the
+description prefix it claims to show.
+*/
+describe("TaskCard titleless display fallback (FN-391)", () => {
+  const description220 = "d".repeat(220);
+  const description221 = "e".repeat(221);
+  const description400 = "f".repeat(400);
 
   function cardTitle(container: HTMLElement): HTMLDivElement {
     return container.querySelector(".card-title") as HTMLDivElement;
   }
 
-  it("keeps titleless descriptions through 200 characters unchanged", () => {
-    const { container } = render(<TaskCard task={makeTask({ title: undefined, description: description200 })} onOpenDetail={noop} addToast={noop} />);
-    expect(cardTitle(container)).toHaveTextContent(description200);
+  it("keeps titleless descriptions through 220 characters unchanged", () => {
+    const { container } = render(<TaskCard task={makeTask({ title: undefined, description: description220 })} onOpenDetail={noop} addToast={noop} />);
+    expect(cardTitle(container)).toHaveTextContent(description220);
     expect(cardTitle(container)).not.toHaveClass("card-title--bounded-description");
   });
 
-  it("bounds a 201-character titleless description with literal dots while retaining its full tooltip", () => {
-    const { container } = render(<TaskCard task={makeTask({ title: undefined, description: description201 })} onOpenDetail={noop} addToast={noop} />);
+  it.each([
+    { label: "221 characters", description: description221 },
+    { label: "400 characters", description: description400 },
+  ])("bounds a titleless description of $label to its exact 220-character prefix", ({ description }) => {
+    const { container } = render(<TaskCard task={makeTask({ title: undefined, description })} onOpenDetail={noop} addToast={noop} />);
     const title = cardTitle(container);
-    expect(title).toHaveTextContent(description201.slice(0, 197) + "...");
-    expect(title.textContent).toHaveLength(200);
+    expect(title.textContent).toBe(description.slice(0, 220));
+    expect(title.textContent).toHaveLength(220);
+    expect(title.textContent).not.toContain("...");
+    expect(title.textContent).not.toContain("\u2026");
     expect(title).toHaveClass("card-title--bounded-description");
-    expect(title).toHaveAttribute("title", description201);
+    expect(title).toHaveAttribute("title", description);
+  });
+
+  it("renders distinct IDs when two tasks share one blank description", () => {
+    const first = render(<TaskCard task={makeTask({ id: "FN-dup-a", title: undefined, description: "  " })} onOpenDetail={noop} addToast={noop} />);
+    expect(cardTitle(first.container)).toHaveTextContent("FN-dup-a");
+    first.unmount();
+
+    const second = render(<TaskCard task={makeTask({ id: "FN-dup-b", title: undefined, description: "  " })} onOpenDetail={noop} addToast={noop} />);
+    expect(cardTitle(second.container)).toHaveTextContent("FN-dup-b");
   });
 
   it("uses description or task ID for whitespace-only titles and blank descriptions", () => {
@@ -8601,7 +8676,7 @@ describe("TaskCard titleless display fallback (FN-044)", () => {
 
   it("preserves explicit titles and their existing TaskCard truncation", () => {
     const explicitTitle = "t".repeat(201);
-    const { container } = render(<TaskCard task={makeTask({ title: explicitTitle, description: description201 })} onOpenDetail={noop} addToast={noop} />);
+    const { container } = render(<TaskCard task={makeTask({ title: explicitTitle, description: description221 })} onOpenDetail={noop} addToast={noop} />);
     const title = cardTitle(container);
     expect(title).toHaveTextContent(explicitTitle.slice(0, 140) + "…");
     expect(title).toHaveAttribute("title", explicitTitle);

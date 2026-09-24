@@ -208,6 +208,44 @@ describe("SettingsModal", () => {
     localStorage.setItem("fusion:settings:show-advanced", "true");
   });
 
+  it.each([
+    ["absente", undefined],
+    ["fausse", false],
+    ["vraie", true],
+  ] as const)("masque Alpha Updates avec une valeur historique %s et conserve Whiteboard", async (_label, alphaUpdates) => {
+    const mobileNavPrimaryItems = ["settings", "planning"];
+    const experimentalFeatures = {
+      leftSidebarNav: true,
+      ...(alphaUpdates === undefined ? {} : { alphaUpdates }),
+    };
+    const settings = { ...defaultSettings, mobileNavPrimaryItems, experimentalFeatures };
+    mockFetchSettings.mockResolvedValue(settings);
+    mockFetchSettingsByScope.mockResolvedValue({ global: settings, project: settings });
+    mockUpdateGlobalSettings.mockImplementation(async (nextSettings) => nextSettings);
+
+    renderModal({ initialSection: "experimental" });
+    await waitForSettingsModalReady();
+
+    expect(screen.queryByRole("checkbox", { name: "Alpha Updates" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Alpha Updates")).not.toBeInTheDocument();
+    expect(document.getElementById("experimental-alphaUpdates")).toBeNull();
+    const whiteboardToggle = screen.getByRole("checkbox", { name: "Whiteboard Alpha" });
+    expect(whiteboardToggle).not.toBeChecked();
+
+    const projectSaveCount = mockUpdateSettings.mock.calls.length;
+    vi.useFakeTimers();
+    fireEvent.click(whiteboardToggle);
+    await flushSettingsAutoSave();
+    expect(mockUpdateGlobalSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      experimentalFeatures: expect.objectContaining({
+        ...(alphaUpdates === undefined ? {} : { alphaUpdates }),
+        whiteboardView: true,
+      }),
+    }));
+    expect(mockUpdateSettings.mock.calls.slice(projectSaveCount).every(([patch]) => !("mobileNavPrimaryItems" in patch))).toBe(true);
+    vi.useRealTimers();
+  });
+
   /*
   FNXC:SettingsModalTests 2026-08-17-00:20:
   Scheduling-tab tests open `initialSection: "scheduling"` instead of remounting Authentication

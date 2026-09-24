@@ -21,7 +21,6 @@ import type { ProjectInfo } from "../../api";
 import { scopedKey } from "../../utils/projectStorage";
 
 const DEFAULT_PROJECT_ID = "proj-1";
-let mobileTaskPopupEnabled = false;
 
 const defaultSettings: Settings = {
   maxConcurrent: 2,
@@ -45,7 +44,7 @@ vi.mock("../../api", async (importOriginal) => {
   return createDashboardApiMock(() => importOriginal<typeof import("../../api")>(), {
     fetchTasks: vi.fn(() => Promise.resolve([])),
     fetchConfig: vi.fn(() => Promise.resolve({ maxConcurrent: 2, rootDir: "/workspace/project" })),
-    fetchSettings: vi.fn(() => Promise.resolve({ ...defaultSettings, openMobileTasksInPopup: mobileTaskPopupEnabled })),
+    fetchSettings: vi.fn(() => Promise.resolve({ ...defaultSettings })),
     updateSettings: vi.fn(() => Promise.resolve({ ...defaultSettings })),
     fetchGlobalSettings: vi.fn(() => Promise.resolve({})),
     fetchAuthStatus: vi.fn(() => Promise.resolve({ providers: [] })),
@@ -77,9 +76,6 @@ const mockUseTasks = vi.fn(() => ({
   retryTask: vi.fn(),
   updateTask: vi.fn(),
   duplicateTask: vi.fn(),
-  archiveTask: vi.fn(),
-  unarchiveTask: vi.fn(),
-  archiveAllDone: vi.fn(),
   refreshTasks: vi.fn(),
 }));
 /*
@@ -169,17 +165,22 @@ vi.mock("../../components/Board", () => ({
   ),
 }));
 
+/*
+FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+FN-442 deleted the `openMobileTasksInPopup` opt-in, so the stub mirrors the shipped rule: an ordinary List open uses the
+host's pop-out seam whenever one is provided, EXCEPT in the single-pane phone presentation, where the task keeps going to
+the host's detail owner with its `list-mobile` origin — that owner carries the back header and the dismissible history
+entry these swipe-back cases are about.
+*/
 vi.mock("../../components/ListView", () => ({
   ListView: ({
     tasks,
     onOpenDetail,
     onPopOut,
-    openMobileTasksInPopup,
   }: {
     tasks: Task[];
     onOpenDetail: (task: Task, options?: { origin?: "list-mobile" }) => void;
     onPopOut?: (task: Task) => void;
-    openMobileTasksInPopup?: boolean;
   }) => (
     <div data-testid="list-view">
       {tasks.map((task) => (
@@ -188,10 +189,10 @@ vi.mock("../../components/ListView", () => ({
           type="button"
           data-testid={`list-open-${task.id}`}
           onClick={() => {
-            if (openMobileTasksInPopup && onPopOut) {
-              onPopOut(task);
-            } else if (mockUseViewportMode() === "mobile") {
+            if (mockUseViewportMode() === "mobile") {
               onOpenDetail(task, { origin: "list-mobile" });
+            } else if (onPopOut) {
+              onPopOut(task);
             }
           }}
         >
@@ -262,7 +263,6 @@ vi.mock("../../components/PlanningModeModal", () => ({ PlanningModeModal: () => 
 vi.mock("../../components/AgentsView", () => ({ AgentsView: () => <div data-testid="agents-view">Agents</div> }));
 vi.mock("../../components/ResearchView", () => ({ ResearchView: () => <div data-testid="research-view">Research</div> }));
 vi.mock("../../components/EvalsView", () => ({ EvalsView: () => <div data-testid="evals-view">Evals</div> }));
-vi.mock("../../components/QuickChatFAB", () => ({ QuickChatFAB: () => null }));
 vi.mock("../../components/ScriptsModal", () => ({ ScriptsModal: () => null }));
 vi.mock("../../components/TerminalModal", () => ({ TerminalModal: () => null }));
 vi.mock("../../components/FileBrowser", () => ({ FileBrowserModal: () => null }));
@@ -396,13 +396,9 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     mockUseViewportMode.mockReturnValue("mobile");
-    mobileTaskPopupEnabled = false;
     mockUseMobileKeyboard.mockReturnValue({
       keyboardOverlap: 0, viewportHeight: null, viewportOffsetTop: 0, keyboardOpen: false,
     });
@@ -429,9 +425,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -464,9 +457,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -503,9 +493,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -535,9 +522,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -563,7 +547,6 @@ describe("Task detail mobile swipe-back", () => {
   });
 
   it("dismisses a mobile board task popup on browser popstate while keeping the board visible", async () => {
-    mobileTaskPopupEnabled = true;
     const task = makeTask("FN-1", "Popup Board Detail");
     mockUseTasks.mockImplementation(() => ({
       tasks: [task],
@@ -574,9 +557,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
 
@@ -597,15 +577,13 @@ describe("Task detail mobile swipe-back", () => {
     expect(dispatchNativeAndroidBack()).toBe(false);
   });
 
-  it("dismisses a mobile list task popup on native Android Back while keeping the list visible", async () => {
-    mobileTaskPopupEnabled = true;
+  /* FNXC:TaskDetailDefaultTab 2026-09-16-02:53: FN-442 — the phone List keeps its single detail owner, so this case now covers that owner rather than a popup. */
+  it("dismisses a mobile list task detail on native Android Back while keeping the list visible", async () => {
     const task = makeTask("FN-1", "Popup List Detail");
     mockUseTasks.mockImplementation(() => ({
       tasks: [task],
       createTask: mockCreateTask,
       moveTask: vi.fn(), deleteTask: vi.fn(), mergeTask: vi.fn(), retryTask: vi.fn(),
-      updateTask: vi.fn(), duplicateTask: vi.fn(), archiveTask: vi.fn(), unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(), refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
     localStorage.setItem(scopedKey("kb-dashboard-task-view", DEFAULT_PROJECT_ID), "list");
@@ -645,9 +623,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -673,9 +648,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -708,9 +680,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -761,9 +730,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -800,9 +766,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -846,9 +809,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -885,9 +845,6 @@ describe("Task detail mobile swipe-back", () => {
       retryTask: vi.fn(),
       updateTask: vi.fn(),
       duplicateTask: vi.fn(),
-      archiveTask: vi.fn(),
-      unarchiveTask: vi.fn(),
-      archiveAllDone: vi.fn(),
       refreshTasks: vi.fn(),
     }));
     localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -927,9 +884,6 @@ describe("Task detail mobile swipe-back", () => {
         retryTask: vi.fn(),
         updateTask: vi.fn(),
         duplicateTask: vi.fn(),
-        archiveTask: vi.fn(),
-        unarchiveTask: vi.fn(),
-        archiveAllDone: vi.fn(),
         refreshTasks: vi.fn(),
       }));
 
@@ -959,9 +913,6 @@ describe("Task detail mobile swipe-back", () => {
         retryTask: vi.fn(),
         updateTask: vi.fn(),
         duplicateTask: vi.fn(),
-        archiveTask: vi.fn(),
-        unarchiveTask: vi.fn(),
-        archiveAllDone: vi.fn(),
         refreshTasks: vi.fn(),
       }));
       localStorage.setItem("kb-dashboard-view-mode", "project");
@@ -993,9 +944,6 @@ describe("Task detail mobile swipe-back", () => {
         retryTask: vi.fn(),
         updateTask: vi.fn(),
         duplicateTask: vi.fn(),
-        archiveTask: vi.fn(),
-        unarchiveTask: vi.fn(),
-        archiveAllDone: vi.fn(),
         refreshTasks: vi.fn(),
       }));
       localStorage.setItem("kb-dashboard-view-mode", "project");

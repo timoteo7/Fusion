@@ -1,10 +1,19 @@
+import { ModalCloseButton } from "./ModalCloseButton";
+import { HideInDrawer } from "./ViewDrawer";
+import { ViewHeader } from "./ViewHeader";
+import { MailboxCollectionTabs } from "./MailboxCollectionTabs";
+import { ViewActionButton } from "./ViewActionButton";
+import { ViewLayout } from "./ViewLayout";
 import "./MailboxModal.css";
 import { FloatingWindow } from "./FloatingWindow";
-import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useConfirm } from "../hooks/useConfirm";
+import { useListItemContextMenu } from "../hooks/useListItemContextMenu";
+import { ListItemContextMenu } from "./ListItemContextMenu";
+import { buildMailboxMessageActions, mailboxRowMenuKey, mailboxRowMenuMessageId } from "./mailboxMessageActions";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import {
-  X,
   Mail,
   Send,
   Inbox as InboxIcon,
@@ -13,8 +22,8 @@ import {
   Archive,
   CheckCheck,
   Loader2,
-  RefreshCw,
   MessageSquare,
+  Filter,
   User,
   ChevronRight,
   ChevronDown,
@@ -38,17 +47,21 @@ import {
   type AgentMailboxResponse,
   type AllAgentsMailboxResponse,
 } from "../api";
+import { UiMenu, UiMenuItem } from "./ui";
 import { MessageComposer, type NativeStructureCandidate } from "./MessageComposer";
+import { resolveMailboxMessageSubject } from "./mailboxSubject";
 import { MailboxMessageContent } from "./MailboxMessageContent";
 import { MailboxArtifactAttachment } from "./MailboxArtifactAttachment";
 import { MailboxRelatedWorkLink, hasRelatedTaskLink } from "./MailboxRelatedWorkLink";
 import { MailboxNativeStructureEmbeds } from "./MailboxNativeStructureEmbeds";
 import { MailboxTaskProposal } from "./MailboxTaskProposal";
+import { MailboxTaskCompletion, isTaskCompletionNotice } from "./MailboxTaskCompletion";
 import { MailboxTaskRecommendations } from "./MailboxTaskRecommendations";
 import { MailboxKindBadge, MailboxStructuralItem, isStructuralMail } from "./MailboxStructuralItem";
 import type { Agent } from "../api";
 import { useMobileScrollLock } from "../hooks/useMobileScrollLock";
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
+import { useKeyboardViewportOwnedByAncestor } from "../hooks/useKeyboardViewportSurface";
 import { useViewportMode } from "./Header";
 import { subscribeSse } from "../sse-bus";
 import { readCache, SWR_CACHE_KEYS, writeCache } from "../utils/swrCache";
@@ -56,19 +69,28 @@ import { getRelativeTimeBucket } from "../utils/relativeTimeAgo";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-type MailboxTab = "inbox" | "outbox" | "archived" | "agents";
+type MailboxTab = "inbox" | "outbox";
 
 /*
-FNXC:LifecycleColumnCensus 2026-08-13-21:58:
-DELIBERATE-LITERAL — mailbox folder tab, not a board column.
+FNXC:MailboxTwoTabs 2026-09-16-16:53:
+The floating mailbox is a second full implementation of the same destination, so it carries the same
+two-tab contract: Inbox and Outbox only. Completions, Archived and Agents became SCOPES of the inbox,
+selected from the single header filter button, and `resolveMailboxCollection` maps the (tab, scope)
+pair back to the collection every loader and list pane already reasons about.
 
-FN-9014 named a folder `archived`. The tab comparison is that folder switch. Converting it to
-resolveLifecycleColumns would ask a workflow which lane a mailbox folder is in. Keep the
-comparison inside this helper so a real board guard that happens to use the name `activeTab`
-still counts in the census.
+FNXC:LifecycleColumnCensus 2026-08-13-21:58:
+DELIBERATE-LITERAL — mailbox folder scope, not a board column. FN-9014 named a folder `archived`; the
+scope switch below is that folder selection, not a lifecycle-column guard.
 */
-function isMailboxArchivedTab(tab: MailboxTab): boolean {
-  return tab === "archived";
+type MailboxInboxScope = "all" | "structural" | "completions" | "archived" | "agents";
+
+type MailboxCollection = "inbox" | "outbox" | "completions" | "archived" | "agents";
+
+const MAILBOX_INBOX_SCOPES: MailboxInboxScope[] = ["all", "structural", "completions", "archived", "agents"];
+
+function resolveMailboxCollection(tab: MailboxTab, scope: MailboxInboxScope): MailboxCollection {
+  if (tab === "outbox") return "outbox";
+  return scope === "all" || scope === "structural" ? "inbox" : scope;
 }
 
 const ALL_AGENTS_MAILBOX_ID = "__all_agents__";
@@ -306,6 +328,7 @@ export function MailboxModal({
   agents = [],
 }: MailboxModalProps) {
   const { t } = useTranslation("app");
+  const { confirm } = useConfirm();
   const cacheSuffix = projectId ?? "";
   const inboxCacheKey = `${SWR_CACHE_KEYS.MAILBOX_INBOX_PREFIX}${cacheSuffix}`;
   const outboxCacheKey = `${SWR_CACHE_KEYS.MAILBOX_OUTBOX_PREFIX}${cacheSuffix}`;
@@ -317,7 +340,8 @@ export function MailboxModal({
   useMobileScrollLock(isOpen);
   const [activeTab, setActiveTab] = useState<MailboxTab>("inbox");
   const [inbox, setInbox] = useState<InboxResponse | null>(() => initialInbox ?? null);
-  const [structuralFilter, setStructuralFilter] = useState<"all" | "structural">("all");
+  const [inboxScope, setInboxScope] = useState<MailboxInboxScope>("all");
+  const [inboxFilterOpen, setInboxFilterOpen] = useState(false);
   const [outbox, setOutbox] = useState<OutboxResponse | null>(() => initialOutbox ?? null);
   const [archivedInbox, setArchivedInbox] = useState<InboxResponse | null>(null);
   const [unreadCount, setUnreadCount] = useState(initialUnreadCount ?? 0);
@@ -338,6 +362,17 @@ export function MailboxModal({
   const [replyContextCache, setReplyContextCache] = useState<Map<string, Message>>(new Map());
   const consumedDeepLinkedMessageIdRef = useRef<string | null>(null);
   const highlightedDeepLinkedMessageIdRef = useRef<string | null>(null);
+  const renderedProjectIdRef = useRef(projectId);
+  const inboxRequestGenerationRef = useRef(0);
+  const inboxFilterRootRef = useRef<HTMLDivElement | null>(null);
+  const inboxFilterTriggerRef = useRef<HTMLButtonElement | null>(null);
+  renderedProjectIdRef.current = projectId;
+  const activeCollection = resolveMailboxCollection(activeTab, inboxScope);
+
+  /*
+  FNXC:MailboxProjectIsolation 2026-09-09-20:58:
+  The floating Mailbox shares the project-isolation contract of MailboxView. Only the latest Inbox request for the currently rendered project may publish rows, unread state, or project-keyed cache entries.
+  */
 
   /*
    * FNXC:MailboxMobile 2026-06-23-10:55:
@@ -367,8 +402,10 @@ export function MailboxModal({
   const viewportMode = useViewportMode();
   const isMobile = viewportMode === "mobile";
   const { keyboardOverlap, viewportHeight, viewportOffsetTop, keyboardOpen } = useMobileKeyboard({ enabled: isMobile });
+  // FNXC:MobileKeyboardViewport 2026-09-17-15:32: FN-512 single-owner rule — a drawer/window host that already adapted its bottom edge must not be compensated again from inside.
+  const keyboardOwnedByAncestor = useKeyboardViewportOwnedByAncestor();
   const containerKeyboardStyle = useMemo<CSSProperties | undefined>(() => {
-    if (!keyboardOpen) {
+    if (!keyboardOpen || keyboardOwnedByAncestor) {
       return undefined;
     }
 
@@ -377,18 +414,29 @@ export function MailboxModal({
       "--vv-offset-top": `${viewportOffsetTop}px`,
       ...(viewportHeight != null ? { "--vv-height": `${viewportHeight}px` } : {}),
     } as CSSProperties;
-  }, [keyboardOpen, keyboardOverlap, viewportHeight, viewportOffsetTop]);
+  }, [keyboardOpen, keyboardOwnedByAncestor, keyboardOverlap, viewportHeight, viewportOffsetTop]);
 
   // ── Data fetching ─────────────────────────────────────────────────────
 
+  /*
+  FNXC:InboxCategories 2026-09-09-20:02:
+  The legacy floating mailbox inherits the main MailboxView's complete-notification contract. Its active Inbox and read-all action therefore operate across every category while archived history keeps its existing combined-source restore behavior.
+  */
   const loadInbox = useCallback(async () => {
+    const requestProjectId = projectId;
+    const requestGeneration = ++inboxRequestGenerationRef.current;
+    const isCurrentRequest = () => (
+      renderedProjectIdRef.current === requestProjectId
+      && inboxRequestGenerationRef.current === requestGeneration
+    );
     const shouldSkipOpenSpinner = skipOpenSpinnerInboxRef.current;
     if (!shouldSkipOpenSpinner) {
       setIsLoading(true);
     }
     skipOpenSpinnerInboxRef.current = false;
     try {
-      const data = await fetchInbox({ limit: 50 }, projectId);
+      const data = await fetchInbox({ limit: 50 }, requestProjectId);
+      if (!isCurrentRequest()) return;
       setInbox(data);
       setUnreadCount(data.unreadCount);
       writeCache(
@@ -400,7 +448,9 @@ export function MailboxModal({
     } catch {
       // Silently fail — empty state will show
     } finally {
-      setIsLoading(false);
+      if (isCurrentRequest()) {
+        setIsLoading(false);
+      }
     }
   }, [inboxCacheKey, projectId, unreadCountCacheKey]);
 
@@ -471,8 +521,9 @@ export function MailboxModal({
   const refreshUnreadCount = useCallback(async () => {
     try {
       const data = await fetchUnreadCount(projectId);
-      setUnreadCount(data.unreadCount);
-      writeCache(unreadCountCacheKey, data.unreadCount, { maxBytes: 500_000 });
+      const messageUnreadCount = data.categoryUnreadCounts?.message ?? data.unreadCount;
+      setUnreadCount(messageUnreadCount);
+      writeCache(unreadCountCacheKey, messageUnreadCount, { maxBytes: 500_000 });
     } catch {
       // Silently fail
     }
@@ -500,10 +551,10 @@ export function MailboxModal({
   // Load data on tab change
   useEffect(() => {
     if (!isOpen) return;
-    if (activeTab === "inbox") loadInbox();
-    else if (activeTab === "outbox") loadOutbox();
-    else if (isMailboxArchivedTab(activeTab)) loadArchivedInbox();
-  }, [isOpen, activeTab, loadInbox, loadOutbox, loadArchivedInbox]);
+    if (activeCollection === "inbox" || activeCollection === "completions") loadInbox();
+    else if (activeCollection === "outbox") loadOutbox();
+    else if (activeCollection === "archived") loadArchivedInbox();
+  }, [isOpen, activeCollection, loadInbox, loadOutbox, loadArchivedInbox]);
 
   // Load agent mailbox when selected
   useEffect(() => {
@@ -528,12 +579,19 @@ export function MailboxModal({
 
     const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 
+    /*
+    FNXC:MailboxTwoTabs 2026-09-16-16:53:
+    Mailbox is real time and has no manual refresh control, so an incoming event reloads the collection
+    actually on screen, including the archived scope that previously stayed frozen until a manual refresh.
+    */
     const onMailboxUpdate = () => {
       void refreshUnreadCount();
-      if (activeTab === "inbox") {
+      if (activeCollection === "inbox" || activeCollection === "completions") {
         void loadInbox();
-      } else if (activeTab === "outbox") {
+      } else if (activeCollection === "outbox") {
         void loadOutbox();
+      } else if (activeCollection === "archived") {
+        void loadArchivedInbox();
       }
 
       if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) {
@@ -544,9 +602,10 @@ export function MailboxModal({
     };
 
     /*
-    FNXC:MailboxModal 2026-07-26-16:20:
-    Resync contract (see SseSubscription in sse-bus.ts). The modal's message lists and unread count are
-    mutated ONLY by these events, and the stream is lossy: an error/heartbeat reconnect or the >=60s
+    FNXC:MailboxModal 2026-09-16-16:53:
+    Resync contract (see SseSubscription in sse-bus.ts). With the manual refresh control gone, EVERY list
+    — inbox, completions, outbox, archived and agent mailboxes — and the unread count are mutated ONLY by
+    these events, and the stream is lossy: an error/heartbeat reconnect or the >=60s
     hidden-tab suspend drops the socket and /api/events keeps no replay buffer. Without onReconnect a
     message sent while the phone was backgrounded never appears and the unread badge under-counts until
     the operator manually switches tabs. `onMailboxUpdate` is the same authoritative reload the events
@@ -562,7 +621,7 @@ export function MailboxModal({
         "message:updated": onMailboxUpdate,
       },
     });
-  }, [isOpen, projectId, activeTab, selectedAgentId, refreshUnreadCount, loadInbox, loadOutbox, loadAgentMailbox, loadAllAgentsMailbox]);
+  }, [isOpen, projectId, activeCollection, selectedAgentId, refreshUnreadCount, loadInbox, loadOutbox, loadArchivedInbox, loadAgentMailbox, loadAllAgentsMailbox]);
 
   // ── Actions ───────────────────────────────────────────────────────────
 
@@ -575,8 +634,8 @@ export function MailboxModal({
     Deep links read the full inbox, so an ordinary target clears the structural segment rather than
     leaving the selected detail disconnected from an empty filtered list.
     */
-    if (source === "deep-link" && activeTab === "inbox" && !isStructuralMail(message.metadata)) {
-      setStructuralFilter("all");
+    if (source === "deep-link" && activeCollection === "inbox" && !isStructuralMail(message.metadata)) {
+      setInboxScope("all");
     }
     setSelectedMessage(message);
     setReplyContextExpanded({});
@@ -585,7 +644,7 @@ export function MailboxModal({
     // Only auto-mark as read when viewing the dashboard user's own inbox.
     // Browsing another agent's mailbox must not consume their unread messages
     // out from under them — the agent's heartbeat is the one that reads + acks.
-    if (!message.read && activeTab === "inbox") {
+    if (!message.read && activeCollection === "inbox") {
       try {
         const updated = await markMessageRead(message.id, projectId);
         // Update inbox state
@@ -618,7 +677,7 @@ export function MailboxModal({
     } catch {
       setConversationMessages([message]);
     }
-  }, [activeTab, inboxCacheKey, projectId, unreadCountCacheKey, consumeCurrentDeepLink]);
+  }, [activeCollection, inboxCacheKey, projectId, unreadCountCacheKey, consumeCurrentDeepLink]);
 
   // Deep-link: open and highlight a specific message from URL params.
   useEffect(() => {
@@ -684,6 +743,19 @@ export function MailboxModal({
     setReplyContextErrors({});
   }, [consumeCurrentDeepLink]);
 
+  /*
+  FNXC:MailboxRowActions 2026-09-17-03:18:
+  FN-486 : même fence d'identité que la destination Mailbox. Une mutation déclenchée depuis une ligne non
+  sélectionnée ne ferme pas le détail ouvert et ne consomme pas son lien profond ; l'identité courante est
+  relue après l'attente réseau.
+  */
+  const selectedMessageRef = useRef<Message | null>(null);
+  selectedMessageRef.current = selectedMessage;
+  const closeMessageIfTarget = useCallback((id: string) => {
+    if (selectedMessageRef.current?.id !== id) return;
+    handleCloseMessage();
+  }, [handleCloseMessage]);
+
   const handleMarkAllRead = useCallback(async () => {
     try {
       const result = await markAllMessagesRead(projectId);
@@ -712,38 +784,37 @@ export function MailboxModal({
   const handleArchiveMessage = useCallback(async (id: string) => {
     try {
       await archiveMessage(id, projectId);
-      handleCloseMessage();
-      if (activeTab === "inbox") loadInbox();
-      else if (activeTab === "outbox") loadOutbox();
-      else if (isMailboxArchivedTab(activeTab)) loadArchivedInbox();
+      closeMessageIfTarget(id);
+      if (activeCollection === "inbox" || activeCollection === "completions") loadInbox();
+      else if (activeCollection === "outbox") loadOutbox();
+      else if (activeCollection === "archived") loadArchivedInbox();
       else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
       else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
       void refreshUnreadCount();
       addToast?.("Message archived", "success");
     } catch { addToast?.("Failed to archive message", "error"); }
-  }, [projectId, activeTab, selectedAgentId, loadInbox, loadOutbox, loadArchivedInbox, loadAgentMailbox, loadAllAgentsMailbox, refreshUnreadCount, addToast, handleCloseMessage]);
+  }, [projectId, activeCollection, selectedAgentId, loadInbox, loadOutbox, loadArchivedInbox, loadAgentMailbox, loadAllAgentsMailbox, refreshUnreadCount, addToast, closeMessageIfTarget]);
   const handleUnarchiveMessage = useCallback(async (id: string) => {
-    try { await unarchiveMessage(id, projectId); handleCloseMessage(); loadArchivedInbox(); void refreshUnreadCount(); addToast?.("Message restored", "success"); }
+    try { await unarchiveMessage(id, projectId); closeMessageIfTarget(id); loadArchivedInbox(); void refreshUnreadCount(); addToast?.("Message restored", "success"); }
     catch { addToast?.("Failed to restore message", "error"); }
-  }, [projectId, loadArchivedInbox, refreshUnreadCount, addToast, handleCloseMessage]);
+  }, [projectId, loadArchivedInbox, refreshUnreadCount, addToast, closeMessageIfTarget]);
 
   const handleDeleteMessage = useCallback(async (id: string) => {
-    consumeCurrentDeepLink();
     setPendingDeleteMessageId(null);
     try {
       await deleteMessage(id, projectId);
-      setSelectedMessage(null);
-      setConversationMessages([]);
+      closeMessageIfTarget(id);
       // Refresh current tab
-      if (activeTab === "inbox") loadInbox();
-      else if (activeTab === "outbox") loadOutbox();
+      if (activeCollection === "inbox" || activeCollection === "completions") loadInbox();
+      else if (activeCollection === "outbox") loadOutbox();
+      else if (activeCollection === "archived") loadArchivedInbox();
       else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
       else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
       addToast?.(t("mailbox.messageDeleted", "Message deleted"), "success");
     } catch {
       addToast?.(t("mailbox.deleteFailed", "Failed to delete message"), "error");
     }
-  }, [projectId, activeTab, selectedAgentId, loadInbox, loadOutbox, loadAgentMailbox, loadAllAgentsMailbox, addToast, t, consumeCurrentDeepLink]);
+  }, [projectId, activeCollection, selectedAgentId, loadInbox, loadOutbox, loadArchivedInbox, loadAgentMailbox, loadAllAgentsMailbox, addToast, t, closeMessageIfTarget]);
 
   const handleReply = useCallback((message: Message) => {
     consumeCurrentDeepLink();
@@ -761,28 +832,66 @@ export function MailboxModal({
     setComposeReplyContext(null);
     addToast?.(t("mailbox.messageSent", "Message sent"), "success");
     // Refresh current tab
-    if (activeTab === "outbox") loadOutbox();
-    else if (activeTab === "agents" && selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
-    else if (activeTab === "agents" && selectedAgentId) loadAgentMailbox(selectedAgentId);
-  }, [activeTab, loadOutbox, selectedAgentId, loadAgentMailbox, loadAllAgentsMailbox, addToast, t]);
+    if (activeCollection === "outbox") loadOutbox();
+    else if (activeCollection === "agents" && selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
+    else if (activeCollection === "agents" && selectedAgentId) loadAgentMailbox(selectedAgentId);
+  }, [activeCollection, loadOutbox, selectedAgentId, loadAgentMailbox, loadAllAgentsMailbox, addToast, t]);
 
   const handleOpenCompose = useCallback(() => {
     consumeCurrentDeepLink();
     // Pre-fill recipient from selected agent if available
-    if (activeTab === "agents" && selectedAgentId && selectedAgentId !== ALL_AGENTS_MAILBOX_ID) {
+    /*
+    FNXC:MailboxTwoTabs 2026-09-16-16:53:
+    Compose now lives on the Outbox tab, so the recipient prefill keys on the retained agents SCOPE rather
+    than the visible collection: picking an agent then composing still preselects that agent.
+    */
+    if (inboxScope === "agents" && selectedAgentId && selectedAgentId !== ALL_AGENTS_MAILBOX_ID) {
       setComposeRecipient({ id: selectedAgentId, type: "agent" });
     } else {
       setComposeRecipient(null);
     }
     setComposeReplyContext(null);
     setShowComposer(true);
-  }, [activeTab, selectedAgentId, consumeCurrentDeepLink]);
+  }, [inboxScope, selectedAgentId, consumeCurrentDeepLink]);
 
   const handleComposeCancel = useCallback(() => {
     consumeCurrentDeepLink();
     setShowComposer(false);
     setComposeRecipient(null);
     setComposeReplyContext(null);
+  }, [consumeCurrentDeepLink]);
+
+  const handleSelectTab = useCallback((tab: MailboxTab) => {
+    consumeCurrentDeepLink();
+    setActiveTab(tab);
+    setSelectedMessage(null);
+  }, [consumeCurrentDeepLink]);
+
+  /*
+  FNXC:MailboxTwoTabs 2026-09-16-16:53:
+  Selecting an inbox scope performs the same navigation the retired tabs performed: it consumes the
+  current deep link, drops the open detail and returns the agent sub-scope to its default.
+  */
+  const closeInboxFilter = useCallback((restoreFocus = false) => {
+    setInboxFilterOpen(false);
+    if (restoreFocus) inboxFilterTriggerRef.current?.focus();
+  }, []);
+
+  const inboxScopeLabel = useCallback((scope: MailboxInboxScope) => {
+    switch (scope) {
+      case "all": return t("mailbox.all", "All");
+      case "structural": return t("mailbox.reportsApprovals", "Reports & approvals");
+      case "completions": return t("mailbox.completions", "Completions");
+      case "archived": return t("mailbox.archived", "Archived");
+      case "agents": return t("mailbox.agentsTab", "Agents");
+    }
+  }, [t]);
+
+  const handleSelectInboxScope = useCallback((scope: MailboxInboxScope) => {
+    consumeCurrentDeepLink();
+    setSelectedMessage(null);
+    setAgentSubTab("inbox");
+    setInboxScope(scope);
   }, [consumeCurrentDeepLink]);
 
   const threadMessages = selectedMessage ? buildReplyThread(conversationMessages, selectedMessage) : [];
@@ -834,101 +943,280 @@ export function MailboxModal({
     t,
   };
 
-  const filteredInboxMessages = useMemo(() => structuralFilter === "structural" ? (inbox?.messages.filter((message) => isStructuralMail(message.metadata)) ?? []) : (inbox?.messages ?? []), [inbox, structuralFilter]);
+  // FNXC:MailboxTwoTabs 2026-09-16-16:53: The scope menu closes on an outside press, mirroring every other shared menu trigger.
+  useEffect(() => {
+    if (!inboxFilterOpen) return;
+    const handleOutsidePress = (event: PointerEvent | TouchEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !inboxFilterRootRef.current?.contains(target)) setInboxFilterOpen(false);
+    };
+    document.addEventListener("pointerdown", handleOutsidePress);
+    document.addEventListener("touchstart", handleOutsidePress);
+    return () => {
+      document.removeEventListener("pointerdown", handleOutsidePress);
+      document.removeEventListener("touchstart", handleOutsidePress);
+    };
+  }, [inboxFilterOpen]);
+
+  const filteredInboxMessages = useMemo(() => inboxScope === "structural" ? (inbox?.messages.filter((message) => isStructuralMail(message.metadata)) ?? []) : (inbox?.messages ?? []), [inbox, inboxScope]);
+
+  /*
+  FNXC:MailboxRowActions 2026-09-17-03:18:
+  FN-486 : toutes les variantes de ligne de message de cette fenêtre — y compris la branche `completions` —
+  partagent la même fabrique de props et le même modèle de commandes que la destination Mailbox.
+  */
+  const rowMenu = useListItemContextMenu({ enabled: isOpen, contextId: `${projectId ?? ""}:${activeCollection}:${selectedAgentId}:${agentSubTab}` });
+  const messageRowProps = useCallback((msg: Message) => {
+    const menuProps = rowMenu.getRowProps(mailboxRowMenuKey(msg.id));
+    return {
+      ...menuProps,
+      role: "button",
+      tabIndex: 0,
+      onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => {
+        menuProps.onKeyDown(event);
+        if (event.defaultPrevented || event.currentTarget !== event.target) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        void handleOpenMessage(msg);
+      },
+    };
+  }, [handleOpenMessage, rowMenu]);
+
+  const rowMenuMessage = useMemo(() => {
+    const id = mailboxRowMenuMessageId(rowMenu.anchor?.key);
+    if (!id) return null;
+    const pools = [inbox?.messages, outbox?.messages, archivedInbox?.messages, allAgentsMailbox?.messages, agentMailbox?.inbox, agentMailbox?.outbox];
+    for (const pool of pools) {
+      const found = pool?.find((candidate) => candidate.id === id);
+      if (found) return found;
+    }
+    return null;
+  }, [agentMailbox, allAgentsMailbox, archivedInbox, inbox, outbox, rowMenu.anchor?.key]);
+  useEffect(() => {
+    if (rowMenu.anchor && !rowMenuMessage) rowMenu.close();
+  }, [rowMenu, rowMenuMessage]);
+
+  const rowMenuActions = rowMenuMessage
+    ? buildMailboxMessageActions(rowMenuMessage, t, {
+      onArchive: (message) => void handleArchiveMessage(message.id),
+      onRestore: (message) => void handleUnarchiveMessage(message.id),
+      onDelete: (message) => void (async () => {
+        if (!await confirm({
+          title: t("mailbox.deleteTitle", "Delete message?"),
+          message: t("mailbox.deleteBody", "This action cannot be undone."),
+          confirmLabel: t("mailbox.delete", "Delete"),
+          danger: true,
+        })) return;
+        await handleDeleteMessage(message.id);
+      })(),
+      onReply: (message) => handleReply(message),
+    })
+    : [];
 
   // ── Render ────────────────────────────────────────────────────────────
 
+  /*
+  FNXC:MailboxSubject 2026-09-15-04:40:
+  Operator requirement: a mailbox row shows an AUTHOR and a SUBJECT, never the raw head of the body.
+  Shared with MailboxView through resolveMailboxMessageSubject so the floating mailbox cannot drift;
+  the preview element is skipped entirely when nothing remains after the subject line.
+  */
+  const renderSubjectAndPreview = (msg: Message) => {
+    const { subject, bodyPreview } = resolveMailboxMessageSubject(msg, t);
+    return (
+      <>
+        <div className="mailbox-item-subject" data-testid={`mailbox-item-subject-${msg.id}`}>{subject}</div>
+        {bodyPreview ? <div className="mailbox-item-preview">{bodyPreview}</div> : null}
+      </>
+    );
+  };
+
   return (
-    <FloatingWindow windowKey="mailbox" title={t("mailbox.title", "Mailbox")} ariaLabel={t("mailbox.title", "Mailbox")} onClose={onClose} hideHeader dragHandleSelector=".mailbox-modal .modal-header" className="floating-window--mailbox" defaultSize={{ width: 860, height: 680 }} minSize={{ width: 480, height: 360 }} persistGeometryKey="floating-window:mailbox" suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport closeOnOutsidePointerDown modal testId="mailbox-modal-overlay">
+    <FloatingWindow windowKey="mailbox" title={t("mailbox.title", "Mailbox")} ariaLabel={t("mailbox.title", "Mailbox")} onClose={onClose} hideHeader dragHandleSelector=".mailbox-modal .modal-header" className="floating-window--mailbox" defaultSize={{ width: 860, height: 680 }} minSize={{ width: 480, height: 360 }} suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport closeOnOutsidePointerDown modal testId="mailbox-modal-overlay">
       {/* FNXC:ModalTouchGeometry 2026-07-26-16:22: Mailbox is a long-lived workspace; preserve outside dismissal and keep keyboard positioning inside the hosted panel. */}
-      <div className="modal modal-lg mailbox-modal" style={containerKeyboardStyle} data-testid="mailbox-modal">
-        {/* Header */}
-        <div className="modal-header mailbox-header">
-          <div className="mailbox-title">
+      <ViewLayout className="modal modal-lg mailbox-modal" style={containerKeyboardStyle} data-testid="mailbox-modal" contentOwnsScroll header={<>
+        <ListItemContextMenu
+          anchor={rowMenu.anchor}
+          ariaLabel={t("mailbox.messageActionsAria", "Message actions")}
+          actions={rowMenuActions}
+          onClose={rowMenu.close}
+          data-testid="mailbox-row-context-menu"
+        />
+        {/* FNXC:StandardizedMailboxLayout 2026-09-13-16:55: The floating mailbox shares the same header action and detail-return primitives as the full destination; its long-lived controller and compose draft remain mounted in this host. */}
+        <ViewHeader
+          className="modal-header mailbox-header"
+          backAction={showComposer
+            ? { label: t("actions.cancel", "Cancel"), onClick: handleComposeCancel, "data-testid": "mailbox-back-to-list" }
+            : selectedMessage
+              ? { label: t("mailbox.backButton", "Back"), onClick: handleCloseMessage, "data-testid": "mailbox-back-to-list" }
+              : undefined}
+          /*
+          FNXC:StandardizedMailboxLayout 2026-09-14-10:24:
+          FN-379 remediation: the floating mailbox hosts the same composer, so its identity and abandon action are
+          carried by this single header instead of a second header row inside the composer body.
+          */
+          title={<div className="mailbox-title">
             <Mail size={18} />
-            <span>{t("mailbox.title", "Mailbox")}</span>
-            {unreadCount > 0 && (
+            <span>{showComposer
+              ? (composeReplyContext ? t("composer.replyTitle", "Reply") : t("composer.newMessageTitle", "New Message"))
+              : t("mailbox.title", "Mailbox")}</span>
+            {/*
+            FNXC:Navigation 2026-09-17-10:37:
+            FN-506: the floating mailbox is a second full implementation of the same destination, so it carries the same
+            badge scope rule as MailboxView — the unread count is inbox information and renders only while the Inbox tab
+            is active and the composer does not own the header. It must never appear on the Outbox tab.
+            */}
+            {!showComposer && activeTab === "inbox" && unreadCount > 0 && (
               <span className="mailbox-unread-badge" data-testid="mailbox-unread-badge">
                 {unreadCount}
               </span>
             )}
-          </div>
-          <div className="mailbox-header-actions">
-            <button
-              className="btn btn-sm btn-primary"
-              onClick={handleOpenCompose}
-              title={t("mailbox.composeTitle", "Compose message")}
-              data-testid="mailbox-header-compose"
-            >
-              <MessageSquare size={14} />
-              <span>{t("mailbox.composeButton", "Compose")}</span>
-            </button>
-            {activeTab === "inbox" && unreadCount > 0 && (
-              <button
-                className="btn btn-sm btn-secondary"
+          </div>}
+          actions={<div className="mailbox-header-actions">
+            {/*
+            FNXC:StandardizedMailboxLayout 2026-09-14-03:31:
+            The floating mailbox is a second full implementation of the same destination, so it carries the same
+            contract: scope controls belong to the header, the rail shows only the resulting collection. The inbox
+            scope filter and the Agents scope picker / Inbox-Outbox tabs move here, and the Agents pane's duplicate
+            Compose button is deleted — this header already owns the single creation action.
+            */}
+            {/*
+            FNXC:MailboxTwoTabs 2026-09-16-16:53:
+            One filter button owns every inbox scope in this host too. The floating mailbox renders no pending
+            approvals badge (it has no approvals collection), so the trigger carries the scope menu alone.
+            */}
+            {!showComposer && activeTab === "inbox" && (
+              <div className="mailbox-inbox-filter-host" ref={inboxFilterRootRef}>
+                {/*
+                FNXC:StandardizedViewActions 2026-09-17-09:26:
+                FN-502 : même canon icône-seule téléphone que la destination plein écran. Cet hôte ne rend aucun badge
+                d'approbations (il n'a pas de collection Approbations), donc le déclencheur porte le menu seul.
+                */}
+                <ViewActionButton
+                  ref={inboxFilterTriggerRef}
+                  icon={Filter}
+                  iconClassName="mailbox-inbox-filter-icon"
+                  label={t("mailbox.filter", "Filter")}
+                  className="mailbox-inbox-filter"
+                  aria-haspopup="menu"
+                  aria-expanded={inboxFilterOpen}
+                  aria-label={t("mailbox.filterTitle", "Filter inbox")}
+                  title={t("mailbox.filterTitle", "Filter inbox")}
+                  data-testid="mailbox-inbox-filter"
+                  onClick={() => setInboxFilterOpen((open) => !open)}
+                />
+                {inboxFilterOpen && (
+                  <UiMenu
+                    className="mailbox-inbox-filter-menu"
+                    aria-label={t("mailbox.filterMenuLabel", "Inbox scope")}
+                    data-testid="mailbox-inbox-filter-menu"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        closeInboxFilter(true);
+                      } else if (event.key === "Tab") {
+                        closeInboxFilter();
+                      }
+                    }}
+                  >
+                    {MAILBOX_INBOX_SCOPES.map((scope) => (
+                      <UiMenuItem
+                        key={scope}
+                        role="menuitemradio"
+                        aria-checked={inboxScope === scope}
+                        className="mailbox-inbox-filter-option"
+                        data-testid={`mailbox-inbox-filter-option-${scope}`}
+                        onClick={() => {
+                          closeInboxFilter();
+                          handleSelectInboxScope(scope);
+                        }}
+                      >
+                        <span className="mailbox-inbox-filter-option-label">{inboxScopeLabel(scope)}</span>
+                      </UiMenuItem>
+                    ))}
+                  </UiMenu>
+                )}
+              </div>
+            )}
+            {!showComposer && activeCollection === "agents" && agents.length > 0 && (
+              <div className="mailbox-agents-header" data-testid="mailbox-agent-scope">
+                <div className="mailbox-agents-dropdown">
+                  <select
+                    className="message-composer-select mailbox-agent-select"
+                    value={selectedAgentId}
+                    onChange={(e) => { consumeCurrentDeepLink(); setSelectedAgentId(e.target.value); setAgentSubTab("inbox"); setSelectedMessage(null); }}
+                    data-testid="mailbox-agent-select"
+                  >
+                    <option value={ALL_AGENTS_MAILBOX_ID}>{t("mailbox.allAgentsOption", "All agents")}</option>
+                    {agents.map((agent) => (
+                      <option key={agent.id} value={agent.id}>
+                        {agent.name || agent.id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {selectedAgentId && selectedAgentId !== ALL_AGENTS_MAILBOX_ID && (
+                  <div className="mailbox-agent-subtabs" data-testid="mailbox-agent-subtabs">
+                    <button
+                      className={`btn btn-sm btn-secondary mailbox-agent-subtab ${agentSubTab === "inbox" ? "active" : ""}`}
+                      onClick={() => { consumeCurrentDeepLink(); setAgentSubTab("inbox"); setSelectedMessage(null); }}
+                      data-testid="mailbox-agent-subtab-inbox"
+                    >
+                      <InboxIcon size={12} />
+                      <span>{t("mailbox.inboxTab", "Inbox")}</span>
+                      {agentMailbox && agentMailbox.unreadCount > 0 && (
+                        <span className="mailbox-tab-badge">{agentMailbox.unreadCount}</span>
+                      )}
+                    </button>
+                    <button
+                      className={`btn btn-sm btn-secondary mailbox-agent-subtab ${agentSubTab === "outbox" ? "active" : ""}`}
+                      onClick={() => { consumeCurrentDeepLink(); setAgentSubTab("outbox"); setSelectedMessage(null); }}
+                      data-testid="mailbox-agent-subtab-outbox"
+                    >
+                      <Send size={12} />
+                      <span>{t("mailbox.outboxTab", "Outbox")}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            {!showComposer && activeTab === "outbox" && (
+              <ViewActionButton
+                kind="create"
+                icon={MessageSquare}
+                label={t("mailbox.composeButton", "Compose")}
+                onClick={handleOpenCompose}
+                title={t("mailbox.composeTitle", "Compose message")}
+                data-testid="mailbox-header-compose"
+              />
+            )}
+            {!showComposer && activeTab === "inbox" && (
+              <ViewActionButton
+                icon={CheckCheck}
+                label={t("mailbox.markAllReadButton", "Mark all read")}
                 onClick={handleMarkAllRead}
+                disabled={unreadCount === 0}
                 title={t("mailbox.markAllReadTitle", "Mark all as read")}
                 data-testid="mailbox-mark-all-read"
-              >
-                <CheckCheck size={14} />
-                <span>{t("mailbox.markAllReadButton", "Mark all read")}</span>
-              </button>
+              />
             )}
-            <button
-              className="btn-icon"
-              onClick={() => {
-                if (activeTab === "inbox") loadInbox();
-                else if (activeTab === "outbox") loadOutbox();
-                else if (selectedAgentId === ALL_AGENTS_MAILBOX_ID) loadAllAgentsMailbox();
-                else if (selectedAgentId) loadAgentMailbox(selectedAgentId);
-              }}
-              disabled={isLoading}
-              title={t("mailbox.refreshTitle", "Refresh")}
-              data-testid="mailbox-refresh"
-            >
-              {isLoading ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
-            </button>
-            <button
-              className="modal-close"
-              onClick={onClose}
-              aria-label={t("mailbox.closeAriaLabel", "Close")}
-              title={t("mailbox.closeTitle", "Close")}
-              data-testid="mailbox-close"
-            >
-              <X size={16} />
-            </button>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div className="mailbox-tabs" data-testid="mailbox-tabs">
-          <button
-            className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "inbox" ? "active" : ""}`}
-            onClick={() => { consumeCurrentDeepLink(); setActiveTab("inbox"); setSelectedMessage(null); }}
-            data-testid="mailbox-tab-inbox"
-          >
-            <InboxIcon size={14} />
-            <span>{t("mailbox.inboxTab", "Inbox")}</span>
-            {unreadCount > 0 && <span className="mailbox-tab-badge">{unreadCount}</span>}
-          </button>
-          <button
-            className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "outbox" ? "active" : ""}`}
-            onClick={() => { consumeCurrentDeepLink(); setActiveTab("outbox"); setSelectedMessage(null); }}
-            data-testid="mailbox-tab-outbox"
-          >
-            <Send size={14} />
-            <span>{t("mailbox.outboxTab", "Outbox")}</span>
-          </button>
-          <button className={`btn btn-sm btn-secondary mailbox-tab ${isMailboxArchivedTab(activeTab) ? "active" : ""}`} onClick={() => { consumeCurrentDeepLink(); setActiveTab("archived"); setSelectedMessage(null); }} data-testid="mailbox-tab-archived"><Archive size={14} /><span>{t("mailbox.archived", "Archived")}</span></button>
-          <button
-            className={`btn btn-sm btn-secondary mailbox-tab ${activeTab === "agents" ? "active" : ""}`}
-            onClick={() => { consumeCurrentDeepLink(); setActiveTab("agents"); setSelectedMessage(null); }}
-            data-testid="mailbox-tab-agents"
-          >
-            <Bot size={14} />
-            <span>{t("mailbox.agentsTab", "Agents")}</span>
-          </button>
-        </div>
+            {/*
+            FNXC:StandardizedDrawers 2026-09-15-04:56:
+            FN-406: a phone drawer dismisses through its shared handle, scrim, or Escape, so the canonical close is
+            removed from the accessibility tree there. HideInDrawer is false on every other surface.
+            */}
+            <HideInDrawer>
+              <ModalCloseButton
+                onClick={onClose}
+                aria-label={t("mailbox.closeAriaLabel", "Close")}
+                title={t("mailbox.closeTitle", "Close")}
+                data-testid="mailbox-close"
+              />
+            </HideInDrawer>
+          </div>}
+        />
+      </>}
+      >
 
         {/* Content */}
         <div className="mailbox-content" data-testid="mailbox-content">
@@ -936,13 +1224,6 @@ export function MailboxModal({
           {selectedMessage && !showComposer && (
             <div className="mailbox-message-detail" data-testid="mailbox-message-detail" id={`message-${selectedMessage.id}`}>
               <div className="mailbox-message-detail-header">
-                <button
-                  className="btn btn-sm btn-secondary"
-                  onClick={handleCloseMessage}
-                  data-testid="mailbox-back-to-list"
-                >
-                  {t("mailbox.backButton", "← Back")}
-                </button>
                 <div className="mailbox-message-detail-meta">
                   <span className="mailbox-message-type">{messageTypeLabel(selectedMessage.type, t)}</span>
                 <MailboxKindBadge metadata={selectedMessage.metadata} />
@@ -971,6 +1252,10 @@ export function MailboxModal({
                   )}
                 </div>
               </div>
+              {/* FNXC:MailboxSubject 2026-09-15-04:40: The detail view states the subject above the participants so an opened mail always shows author AND subject. */}
+              <h3 className="mailbox-message-subject" data-testid="mailbox-message-detail-subject">
+                {resolveMailboxMessageSubject(selectedMessage, t).subject}
+              </h3>
               <div className="mailbox-message-participants">
                 <div className="mailbox-participant">
                   <span className="mailbox-participant-label">{t("mailbox.fromLabel", "From:")}
@@ -1018,17 +1303,21 @@ export function MailboxModal({
                             env={replyContextEnv}
                           />
                         )}
-                        <MailboxMessageContent
-                          content={msg.content}
-                          className="mailbox-conversation-msg-body"
-                          onOpenTask={onOpenTask}
-                        />
+                        {isTaskCompletionNotice(msg.metadata) ? (
+                          <MailboxTaskCompletion content={msg.content} metadata={msg.metadata} projectId={projectId} onOpenTask={onOpenTask} />
+                        ) : (
+                          <MailboxMessageContent
+                            content={msg.content}
+                            className="mailbox-conversation-msg-body"
+                            onOpenTask={onOpenTask}
+                          />
+                        )}
                         <MailboxStructuralItem metadata={msg.metadata} projectId={projectId} onOpenTask={onOpenTask} addToast={addToast} onDecided={() => { void loadInbox(); }} />
-                        <MailboxRelatedWorkLink
+                        {!isTaskCompletionNotice(msg.metadata) && <MailboxRelatedWorkLink
                           metadata={msg.metadata}
                           onOpenTask={onOpenTask}
                           onOpenPlanningSession={onOpenPlanningSession}
-                        />
+                        />}
                         <MailboxArtifactAttachment
                           artifactId={msg.metadata?.artifactId}
                           artifactType={msg.metadata?.artifactType}
@@ -1041,7 +1330,7 @@ export function MailboxModal({
                         />
                         <MailboxNativeStructureEmbeds message={msg} projectId={projectId} onOpen={onOpenNativeStructure} />
                         <MailboxTaskProposal messageId={msg.id} metadata={msg.metadata} projectId={projectId} onOpenTask={onOpenTask} />
-                        <MailboxTaskRecommendations metadata={msg.metadata} projectId={projectId} onOpenTask={onOpenTask} />
+                        {!isTaskCompletionNotice(msg.metadata) && <MailboxTaskRecommendations metadata={msg.metadata} projectId={projectId} onOpenTask={onOpenTask} />}
                       </div>
                     );
                   })}
@@ -1060,18 +1349,22 @@ export function MailboxModal({
                       env={replyContextEnv}
                     />
                   )}
-                  <MailboxMessageContent
-                    content={selectedMessage.content}
-                    className="mailbox-message-body"
-                    testId="mailbox-message-body"
-                    onOpenTask={onOpenTask}
-                  />
+                  {isTaskCompletionNotice(selectedMessage.metadata) ? (
+                    <MailboxTaskCompletion content={selectedMessage.content} metadata={selectedMessage.metadata} projectId={projectId} onOpenTask={onOpenTask} />
+                  ) : (
+                    <MailboxMessageContent
+                      content={selectedMessage.content}
+                      className="mailbox-message-body"
+                      testId="mailbox-message-body"
+                      onOpenTask={onOpenTask}
+                    />
+                  )}
                   <MailboxStructuralItem metadata={selectedMessage.metadata} projectId={projectId} onOpenTask={onOpenTask} addToast={addToast} onDecided={() => { void loadInbox(); }} />
-                  <MailboxRelatedWorkLink
+                  {!isTaskCompletionNotice(selectedMessage.metadata) && <MailboxRelatedWorkLink
                     metadata={selectedMessage.metadata}
                     onOpenTask={onOpenTask}
                     onOpenPlanningSession={onOpenPlanningSession}
-                  />
+                  />}
                   <MailboxArtifactAttachment
                     artifactId={selectedMessage.metadata?.artifactId}
                     artifactType={selectedMessage.metadata?.artifactType}
@@ -1084,7 +1377,7 @@ export function MailboxModal({
                   />
                   <MailboxNativeStructureEmbeds message={selectedMessage} projectId={projectId} onOpen={onOpenNativeStructure} />
                   <MailboxTaskProposal messageId={selectedMessage.id} metadata={selectedMessage.metadata} projectId={projectId} onOpenTask={onOpenTask} />
-                  <MailboxTaskRecommendations metadata={selectedMessage.metadata} projectId={projectId} onOpenTask={onOpenTask} />
+                  {!isTaskCompletionNotice(selectedMessage.metadata) && <MailboxTaskRecommendations metadata={selectedMessage.metadata} projectId={projectId} onOpenTask={onOpenTask} />}
                 </>
               )}
             </div>
@@ -1107,19 +1400,59 @@ export function MailboxModal({
           {/* Tab Content — message lists */}
           {!selectedMessage && !showComposer && (
             <>
+              {/*
+              FNXC:MailboxCollectionNavigation 2026-09-16-21:44:
+              FN-476: this window is single-pane, so its collection area IS the message list. The Inbox/Outbox pair
+              therefore sits at the top of THIS block rather than as a full-width row under the window title — the same
+              rule the full destination follows with its rail header, without inventing a second two-pane layout here.
+              While a message or the composer occupies the pane the block is not rendered, so Back returns to the list
+              together with its navigation. The window keeps its own close control.
+              */}
+              <MailboxCollectionTabs
+                activeTab={activeTab === "outbox" ? "outbox" : "inbox"}
+                unreadCount={unreadCount}
+                onSelectTab={handleSelectTab}
+                inboxLabel={t("mailbox.inboxTab", "Inbox")}
+                outboxLabel={t("mailbox.outboxTab", "Outbox")}
+                className="mailbox-tabs--collection"
+              />
               {/* Inbox Tab */}
-              {isMailboxArchivedTab(activeTab) && (
+              {activeCollection === "archived" && (
                 <div className="mailbox-list" data-testid="mailbox-archived-list">
                   {archivedInbox?.messages.length === 0 && <div className="mailbox-empty" data-testid="mailbox-archived-empty">{t("mailbox.noArchivedMessages", "No archived messages")}</div>}
-                  {archivedInbox?.messages.map((message) => <button type="button" className="mailbox-item" key={message.id} onClick={() => void handleOpenMessage(message)} data-testid={`mailbox-item-${message.id}`}>{message.content}</button>)}
+                  {archivedInbox?.messages.map((message) => (
+                    <button type="button" className="mailbox-item" key={message.id} {...rowMenu.getRowProps(mailboxRowMenuKey(message.id))} onClick={() => void handleOpenMessage(message)} data-testid={`mailbox-item-${message.id}`}>
+                      <div className="mailbox-item-avatar">{message.fromType === "agent" ? <Bot size={16} /> : <User size={16} />}</div>
+                      <div className="mailbox-item-content">
+                        <div className="mailbox-item-header">
+                          <span className="mailbox-item-from">{participantLabel(message.fromId, message.fromType, agentNamesById, t)}</span>
+                          <span className="mailbox-item-time">{formatTimestamp(message.createdAt, t)}</span>
+                        </div>
+                        {renderSubjectAndPreview(message)}
+                      </div>
+                    </button>
+                  ))}
                 </div>
               )}
-              {activeTab === "inbox" && (
+              {activeCollection === "completions" && (
+                <div className="mailbox-list" data-testid="mailbox-completions-list">
+                  {inbox?.messages.filter((message) => message.metadata?.kind === "task-completion-notice").map((message) => (
+                    <button type="button" className={`mailbox-item ${!message.read ? "unread" : ""}`} key={message.id} {...rowMenu.getRowProps(mailboxRowMenuKey(message.id))} onClick={() => void handleOpenMessage(message)} data-testid={`mailbox-item-${message.id}`}>
+                      <div className="mailbox-item-avatar">{message.fromType === "agent" ? <Bot size={16} /> : <User size={16} />}</div>
+                      <div className="mailbox-item-content">
+                        <div className="mailbox-item-header">
+                          <span className="mailbox-item-from">{participantLabel(message.fromId, message.fromType, agentNamesById, t)}</span>
+                          <span className="mailbox-item-time">{formatTimestamp(message.createdAt, t)}</span>
+                        </div>
+                        {renderSubjectAndPreview(message)}
+                      </div>
+                    </button>
+                  ))}
+                  {inbox && !inbox.messages.some((message) => message.metadata?.kind === "task-completion-notice") && <div className="mailbox-empty" data-testid="mailbox-completions-empty">{t("mailbox.noCompletions", "No task completions yet")}</div>}
+                </div>
+              )}
+              {activeCollection === "inbox" && (
                 <div className="mailbox-list" data-testid="mailbox-inbox-list">
-          <div className="mailbox-structural-filter" role="group" aria-label={t("mailbox.inboxFilter", "Inbox filter")}>
-            <button type="button" className="btn btn-sm btn-secondary" aria-pressed={structuralFilter === "all"} data-testid="mailbox-structural-filter-all" onClick={() => setStructuralFilter("all")}>{t("mailbox.all", "All")}</button>
-            <button type="button" className="btn btn-sm btn-secondary" aria-pressed={structuralFilter === "structural"} data-testid="mailbox-structural-filter-structural" onClick={() => setStructuralFilter("structural")}>{t("mailbox.reportsApprovals", "Reports & approvals")}</button>
-          </div>
                   {isLoading && !inbox && <MailboxSkeleton />}
                   {inbox && inbox.messages.length === 0 && (
                     <div className="mailbox-empty" data-testid="mailbox-inbox-empty">
@@ -1138,6 +1471,7 @@ export function MailboxModal({
                       key={msg.id}
                       id={`message-${msg.id}`}
                       className={`mailbox-item ${!msg.read ? "unread" : ""}`}
+                      {...messageRowProps(msg)}
                       onClick={() => handleOpenMessage(msg)}
                       data-testid={`mailbox-item-${msg.id}`}
                     >
@@ -1152,7 +1486,7 @@ export function MailboxModal({
                           <MailboxKindBadge metadata={msg.metadata} />
                           <span className="mailbox-item-time">{formatTimestamp(msg.createdAt, t)}</span>
                         </div>
-                        <div className="mailbox-item-preview">{msg.content.slice(0, 80)}{msg.content.length > 80 ? "…" : ""}</div>
+                        {renderSubjectAndPreview(msg)}
                       </div>
                       {!msg.read && <div className="mailbox-item-unread-dot" data-testid={`mailbox-unread-dot-${msg.id}`} />}
                     </div>
@@ -1161,7 +1495,7 @@ export function MailboxModal({
               )}
 
               {/* Outbox Tab */}
-              {activeTab === "outbox" && (
+              {activeCollection === "outbox" && (
                 <div className="mailbox-list" data-testid="mailbox-outbox-list">
                   {isLoading && !outbox && <MailboxSkeleton />}
                   {outbox && outbox.messages.length === 0 && (
@@ -1175,6 +1509,7 @@ export function MailboxModal({
                       key={msg.id}
                       id={`message-${msg.id}`}
                       className="mailbox-item"
+                      {...messageRowProps(msg)}
                       onClick={() => handleOpenMessage(msg)}
                       data-testid={`mailbox-item-${msg.id}`}
                     >
@@ -1188,7 +1523,7 @@ export function MailboxModal({
                           </span>
                           <span className="mailbox-item-time">{formatTimestamp(msg.createdAt, t)}</span>
                         </div>
-                        <div className="mailbox-item-preview">{msg.content.slice(0, 80)}{msg.content.length > 80 ? "…" : ""}</div>
+                        {renderSubjectAndPreview(msg)}
                       </div>
                     </div>
                   ))}
@@ -1196,7 +1531,7 @@ export function MailboxModal({
               )}
 
               {/* Agent Mailboxes Tab */}
-              {activeTab === "agents" && (
+              {activeCollection === "agents" && (
                 <div className="mailbox-agents" data-testid="mailbox-agents">
                   {agents.length === 0 ? (
                     <div className="mailbox-empty">
@@ -1205,56 +1540,11 @@ export function MailboxModal({
                     </div>
                   ) : (
                     <>
-                      <div className="mailbox-agents-header">
-                        <div className="mailbox-agents-dropdown">
-                          <select
-                            className="message-composer-select mailbox-agent-select"
-                            value={selectedAgentId}
-                            onChange={(e) => { consumeCurrentDeepLink(); setSelectedAgentId(e.target.value); setAgentSubTab("inbox"); setSelectedMessage(null); }}
-                            data-testid="mailbox-agent-select"
-                          >
-                            <option value={ALL_AGENTS_MAILBOX_ID}>{t("mailbox.allAgentsOption", "All agents")}</option>
-                            {agents.map((agent) => (
-                              <option key={agent.id} value={agent.id}>
-                                {agent.name || agent.id}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <button
-                          className="btn btn-sm btn-secondary mailbox-compose-btn"
-                          onClick={handleOpenCompose}
-                          data-testid="mailbox-compose-btn"
-                        >
-                          <MessageSquare size={14} />
-                          <span>{t("mailbox.composeButton", "Compose")}</span>
-                        </button>
-                      </div>
-
-                      {/* Agent Sub-Tabs (Inbox/Outbox) */}
-                      {selectedAgentId && selectedAgentId !== ALL_AGENTS_MAILBOX_ID && (
-                        <div className="mailbox-agent-subtabs" data-testid="mailbox-agent-subtabs">
-                          <button
-                            className={`btn btn-sm btn-secondary mailbox-agent-subtab ${agentSubTab === "inbox" ? "active" : ""}`}
-                            onClick={() => { consumeCurrentDeepLink(); setAgentSubTab("inbox"); setSelectedMessage(null); }}
-                            data-testid="mailbox-agent-subtab-inbox"
-                          >
-                            <InboxIcon size={12} />
-                            <span>{t("mailbox.inboxTab", "Inbox")}</span>
-                            {agentMailbox && agentMailbox.unreadCount > 0 && (
-                              <span className="mailbox-tab-badge">{agentMailbox.unreadCount}</span>
-                            )}
-                          </button>
-                          <button
-                            className={`btn btn-sm btn-secondary mailbox-agent-subtab ${agentSubTab === "outbox" ? "active" : ""}`}
-                            onClick={() => { consumeCurrentDeepLink(); setAgentSubTab("outbox"); setSelectedMessage(null); }}
-                            data-testid="mailbox-agent-subtab-outbox"
-                          >
-                            <Send size={12} />
-                            <span>{t("mailbox.outboxTab", "Outbox")}</span>
-                          </button>
-                        </div>
-                      )}
+                      {/*
+                      FNXC:StandardizedMailboxLayout 2026-09-14-03:31:
+                      The agent scope picker, the Inbox/Outbox scope tabs and the duplicate Compose button used to sit
+                      here, inside the collection. They are header-owned now: this pane renders the message list only.
+                      */}
                       <div className="mailbox-agents-content">
                         {selectedAgentId === ALL_AGENTS_MAILBOX_ID && isLoading && !allAgentsMailbox && <MailboxSkeleton />}
                         {selectedAgentId === ALL_AGENTS_MAILBOX_ID && allAgentsMailbox && allAgentsMailbox.messages.length === 0 && (
@@ -1268,6 +1558,7 @@ export function MailboxModal({
                             key={msg.id}
                             id={`message-${msg.id}`}
                             className={`mailbox-item ${!msg.read ? "unread" : ""}`}
+                            {...messageRowProps(msg)}
                             onClick={() => handleOpenMessage(msg)}
                             data-testid={`mailbox-item-${msg.id}`}
                           >
@@ -1285,7 +1576,7 @@ export function MailboxModal({
                                 <span>{t("mailbox.fromPrefix", "From: {{participant}}", { participant: participantLabel(msg.fromId, msg.fromType, agentNamesById, t) })}</span>
                                 <span>{t("mailbox.toPrefix", "To: {{recipient}}", { recipient: participantLabel(msg.toId, msg.toType, agentNamesById, t) })}</span>
                               </div>
-                              <div className="mailbox-item-preview">{msg.content.slice(0, 80)}{msg.content.length > 80 ? "…" : ""}</div>
+                              {renderSubjectAndPreview(msg)}
                             </div>
                             {!msg.read && <div className="mailbox-item-unread-dot" data-testid={`mailbox-unread-dot-${msg.id}`} />}
                           </div>
@@ -1308,6 +1599,7 @@ export function MailboxModal({
                             key={msg.id}
                             id={`message-${msg.id}`}
                             className={`mailbox-item ${!msg.read ? "unread" : ""}`}
+                            {...messageRowProps(msg)}
                             onClick={() => handleOpenMessage(msg)}
                             data-testid={`mailbox-item-${msg.id}`}
                           >
@@ -1321,7 +1613,7 @@ export function MailboxModal({
                                 </span>
                                 <span className="mailbox-item-time">{formatTimestamp(msg.createdAt, t)}</span>
                               </div>
-                              <div className="mailbox-item-preview">{msg.content.slice(0, 80)}{msg.content.length > 80 ? "…" : ""}</div>
+                              {renderSubjectAndPreview(msg)}
                             </div>
                           </div>
                         ))}
@@ -1330,6 +1622,7 @@ export function MailboxModal({
                             key={msg.id}
                             id={`message-${msg.id}`}
                             className="mailbox-item"
+                            {...messageRowProps(msg)}
                             onClick={() => handleOpenMessage(msg)}
                             data-testid={`mailbox-item-${msg.id}`}
                           >
@@ -1343,7 +1636,7 @@ export function MailboxModal({
                                 </span>
                                 <span className="mailbox-item-time">{formatTimestamp(msg.createdAt, t)}</span>
                               </div>
-                              <div className="mailbox-item-preview">{msg.content.slice(0, 80)}{msg.content.length > 80 ? "…" : ""}</div>
+                              {renderSubjectAndPreview(msg)}
                             </div>
                           </div>
                         ))}
@@ -1356,7 +1649,7 @@ export function MailboxModal({
           )}
         </div>
 
-      </div>
+      </ViewLayout>
     </FloatingWindow>
   );
 }

@@ -26,12 +26,12 @@ function getFallback(name: string): AnyFn {
 
 export const dashboardApiMocks: Record<string, AnyFn> = {
   fetchTasks: vi.fn(async () => []),
-  // FNXC:ArchivePagination 2026-07-08-00:00: FN-7659 paged archived-tasks read.
-  fetchArchivedTasks: vi.fn(async () => ({ tasks: [], total: 0, hasMore: false })),
+  fetchCompletedTasks: vi.fn(async () => ({ tasks: [], total: 0, hasMore: false })),
   fetchSettings: vi.fn(async () => ({})),
   fetchTaskEffectiveSettings: vi.fn().mockRejectedValue(new Error("fetchTaskEffectiveSettings: use fetchSettings mock")),
   updateSettings: vi.fn(async () => ({})),
   fetchGlobalSettings: vi.fn(async () => ({})),
+  updateGlobalSettings: vi.fn(async () => ({})),
   fetchAuthStatus: vi.fn(async () => ({ providers: [] })),
   fetchModels: vi.fn(async () => ({ models: [], favoriteProviders: [], favoriteModels: [] })),
   fetchTaskDetail: vi.fn(),
@@ -68,11 +68,12 @@ export async function createDashboardApiMock(
 export function resetDashboardApiMockState(): void {
   Object.values(dashboardApiMocks).forEach((fn) => fn.mockReset());
   dashboardApiMocks.fetchTasks.mockResolvedValue([]);
-  dashboardApiMocks.fetchArchivedTasks.mockResolvedValue({ tasks: [], total: 0, hasMore: false });
+  dashboardApiMocks.fetchCompletedTasks.mockResolvedValue({ tasks: [], total: 0, hasMore: false });
   dashboardApiMocks.fetchSettings.mockResolvedValue({});
   dashboardApiMocks.fetchTaskEffectiveSettings.mockRejectedValue(new Error("fetchTaskEffectiveSettings: use fetchSettings mock"));
   dashboardApiMocks.updateSettings.mockResolvedValue({});
   dashboardApiMocks.fetchGlobalSettings.mockResolvedValue({});
+  dashboardApiMocks.updateGlobalSettings.mockResolvedValue({});
   dashboardApiMocks.fetchAuthStatus.mockResolvedValue({ providers: [] });
   dashboardApiMocks.fetchModels.mockResolvedValue({ models: [], favoriteProviders: [], favoriteModels: [] });
   dashboardApiMocks.fetchUnreadCount.mockResolvedValue({ unreadCount: 0 });

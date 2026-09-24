@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { AiSessionSummary } from "../../../api";
 import type { ModalManager } from "../../../hooks/useModalManager";
-import { AuthTokenRecoveryDialog } from "../../AuthTokenRecoveryDialog";
+import { AuthTokenRecoveryPage } from "../../AuthTokenRecoveryPage";
 import type { DashboardBannersProps } from "../types";
 
 vi.mock("../../TestModeBanner", () => ({ TestModeBanner: () => null }));
@@ -27,7 +27,11 @@ vi.mock("../../OAuthReloginBanner", () => ({ OAuthReloginBanner: () => null }));
 vi.mock("../../CliBinaryInstallBanner", () => ({ CliBinaryInstallBanner: () => null }));
 vi.mock("../../OnboardingResumeCard", () => ({ OnboardingResumeCard: () => null }));
 vi.mock("../../PostOnboardingRecommendations", () => ({ PostOnboardingRecommendations: () => null }));
-vi.mock("../../UpdateAvailableBanner", () => ({ UpdateAvailableBanner: () => null }));
+vi.mock("../../UpdateAvailableBanner", () => ({
+  UpdateAvailableBanner: ({ latestVersion }: { latestVersion: string }) => (
+    <section data-testid="update-available-banner">Update available: {latestVersion}</section>
+  ),
+}));
 vi.mock("../../MergeAdvanceNotice", () => ({ default: () => null }));
 vi.mock("../../TaskIdIntegrityBanner", () => ({ TaskIdIntegrityBanner: () => null }));
 vi.mock("../../DbCorruptionBanner", () => ({
@@ -75,6 +79,36 @@ describe("isMigrationStatusBannerActive", () => {
     expect(isMigrationStatusBannerActive({ status: "degraded", migration: { active: false, durableStatus: "running" } } as any)).toBe(true);
     expect(isMigrationStatusBannerActive({ status: "ok", migration: { active: false } } as any)).toBe(false);
     expect(isMigrationStatusBannerActive(undefined)).toBe(false);
+  });
+});
+
+describe("DashboardBanners update banner visibility", () => {
+  it("renders the single update banner gate only when its version is not dismissed", () => {
+    const { rerender } = render(
+      <DashboardBanners
+        {...buildProps({
+          updateAvailable: true,
+          latestVersion: "0.7.0",
+          currentVersion: "0.6.0",
+          updateBannerDismissed: false,
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("update-available-banner")).toHaveTextContent("0.7.0");
+
+    rerender(
+      <DashboardBanners
+        {...buildProps({
+          updateAvailable: true,
+          latestVersion: "0.7.0",
+          currentVersion: "0.6.0",
+          updateBannerDismissed: true,
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("update-available-banner")).not.toBeInTheDocument();
   });
 });
 
@@ -146,10 +180,8 @@ function buildModalManager(overrides: Partial<ModalManager> = {}): ModalManager 
     fileBrowserInitialFile: null,
     activityLogOpen: false,
     gitManagerOpen: false,
-    workflowEditorOpen: false,
-    workflowEditorInitialPanel: undefined,
-    workflowEditorInitialAction: undefined,
-    workflowEditorInitialWorkflowId: undefined,
+    workflowViewPanel: undefined,
+    workflowViewWorkflowId: undefined,
     agentsOpen: false,
     scriptsOpen: false,
     setupWizardOpen: false,
@@ -189,8 +221,8 @@ function buildModalManager(overrides: Partial<ModalManager> = {}): ModalManager 
     closeActivityLog: noop,
     openGitManager: noop,
     closeGitManager: noop,
-    openWorkflowEditor: noop,
-    closeWorkflowEditor: noop,
+    setWorkflowViewParams: noop,
+    clearWorkflowViewParams: noop,
     openAgents: noop,
     closeAgents: noop,
     openScripts: noop,
@@ -286,7 +318,7 @@ function AuthRecoveryBannerShell({
           sessionsNeedingInput: [],
         })}
       />
-      <AuthTokenRecoveryDialog open={open} />
+      <AuthTokenRecoveryPage open={open} />
     </>
   );
 }
@@ -307,7 +339,7 @@ describe("DashboardBanners engine remediation visibility", () => {
   FNXC:AuthRecovery 2026-06-29-00:00:
   FN-7243 surface enumeration: DashboardBanners is the app-shell project banner stack that mounts EngineStatusBanner and EngineUnavailableBanner. Auth token recovery must suppress both engine-remediation components while preserving the existing project/currentProject guard, so unauthorized daemon-token recovery does not leave empty aria-live regions, start buttons, or banner shells behind.
   */
-  it("shows only the auth-token recovery dialog when unauthorized recovery opens over visible engine remediation", () => {
+  it("shows only the auth-token recovery page when unauthorized recovery opens over visible engine remediation", () => {
     const { rerender } = render(<AuthRecoveryBannerShell open={false} />);
 
     expect(screen.getByTestId("engine-status-banner")).toBeInTheDocument();
@@ -316,9 +348,9 @@ describe("DashboardBanners engine remediation visibility", () => {
 
     rerender(<AuthRecoveryBannerShell open={true} />);
 
-    const dialog = screen.getByRole("dialog", { name: "Authentication token required" });
+    const page = screen.getByRole("main", { name: "Authentication token required" });
     const tokenInput = screen.getByLabelText("Replacement token");
-    expect(dialog).toBeInTheDocument();
+    expect(page).toBeInTheDocument();
     expect(tokenInput).toBeInTheDocument();
     expect(document.activeElement).toBe(tokenInput);
     expectNoEngineRemediationShell();
@@ -333,7 +365,7 @@ describe("DashboardBanners engine remediation visibility", () => {
       />,
     );
 
-    expect(screen.getAllByRole("dialog", { name: "Authentication token required" })).toHaveLength(1);
+    expect(screen.getAllByRole("main", { name: "Authentication token required" })).toHaveLength(1);
     expect(screen.getByLabelText("Replacement token")).toBe(document.activeElement);
     expectNoEngineRemediationShell();
   });

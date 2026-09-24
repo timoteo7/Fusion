@@ -1,13 +1,61 @@
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { Header, resolveReportContextRefs } from "../Header";
 
 // Mock fetchScripts for overflow submenu
 const mockFetchScripts = vi.fn();
 
+/*
+FNXC:TaskSearch 2026-09-17-09:41:
+FN-477 made the header search own a real paginated collection and render real task cards, so this
+file's API boundary is no longer just `fetchScripts`. Only the HTTP/session seams are doubled; the
+Header, the field, the controller hook, and the cards are all production code here.
+*/
+const mockFetchTaskPage = vi.hoisted(() => vi.fn(async () => ({ tasks: [], total: 0, hasMore: false, nextCursor: null })));
+const mockAiSearchTasks = vi.hoisted(() => vi.fn(async () => ({ query: "", tasks: [] })));
+
 vi.mock("../../api", () => ({
   fetchScripts: (...args: unknown[]) => mockFetchScripts(...args),
+  fetchTaskPage: mockFetchTaskPage,
+  addressPrFeedback: vi.fn(),
+  fetchTaskDetail: vi.fn(),
+  uploadAttachment: vi.fn(),
+  fetchMission: vi.fn(),
+  fetchAgent: vi.fn(),
+  fetchAgents: vi.fn(async () => []),
+  rebuildTaskSpec: vi.fn(),
+  refreshPrStatus: vi.fn(),
+  refineTask: vi.fn(),
+  fetchBoardWorkflows: vi.fn().mockResolvedValue({ flagEnabled: true, defaultWorkflowId: "wf-a", workflows: [], taskWorkflowIds: {} }),
+  fetchWorkflowSettingValues: vi.fn().mockResolvedValue({ stored: {}, effective: {}, orphaned: [] }),
 }));
+vi.mock("../../api/tasks/tasks-search", () => ({ aiSearchTasks: mockAiSearchTasks }));
+vi.mock("../../hooks/useToast", () => ({
+  useOptionalToast: () => null,
+  useToast: () => ({ addToast: vi.fn(), removeToast: vi.fn(), toasts: [] }),
+}));
+vi.mock("../../hooks/useConfirm", () => ({
+  useConfirm: () => ({ confirmWithCheckbox: async (options?: { checkbox?: { defaultChecked?: boolean } }) => ({ choice: "cancel" as const, checkboxValue: options?.checkbox?.defaultChecked ?? false }), confirm: vi.fn(), confirmWithChoice: vi.fn(), confirmWithSelect: vi.fn() }),
+}));
+vi.mock("../../hooks/useBatchBadgeFetch", () => ({ getFreshBatchData: vi.fn(() => null) }));
+vi.mock("../../hooks/useTaskDiffStats", () => ({ useTaskDiffStats: () => ({ stats: null, loading: false }) }));
+
+function searchPage(tasks: { id: string; title?: string; description?: string }[]) {
+  return {
+    tasks: tasks.map((task) => ({
+      column: "todo",
+      steps: [],
+      dependencies: [],
+      description: "",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      ...task,
+    })),
+    total: tasks.length,
+    hasMore: false,
+    nextCursor: null,
+  };
+}
 
 const noop = () => {};
 
@@ -21,7 +69,16 @@ function mockMatchMedia(tier: ViewportTier) {
       let matches = false;
       if (tier === "mobile" && query.includes("max-width: 768px")) {
         matches = true;
-      } else if (tier === "tablet" && query.includes("769px") && query.includes("1024px")) {
+      } else if (tier === "tablet" && query.includes("769px")) {
+        /*
+        FNXC:TaskSearch 2026-09-17-09:41:
+        Matched on the tablet LOWER bound only. FN-468 moved the upper bound from `1024px` to
+        `1023.98px`, so the previous `includes("1024px")` clause silently stopped matching and every
+        tablet-tier render in this file fell through to desktop — which is why 19 cases here were
+        already red before FN-477 touched the file. The shared fixture is fixed once rather than
+        per test, and it must not pin an exact query string again: the next boundary change would
+        reintroduce exactly this silent drift.
+        */
         matches = true;
       }
       // desktop: neither mobile nor tablet query matches
@@ -37,7 +94,7 @@ function mockMatchMedia(tier: ViewportTier) {
   });
 }
 
-function renderHeader(props = {}, tier: ViewportTier = "desktop") {
+function renderHeader(props = {}, tier: ViewportTier = "tablet") {
   mockMatchMedia(tier);
   return render(
     <Header
@@ -48,7 +105,54 @@ function renderHeader(props = {}, tier: ViewportTier = "desktop") {
   );
 }
 
+function SearchHeaderHarness({
+  tier: _tier,
+  onQueryChange,
+  onSelectSearchTask,
+}: {
+  tier: ViewportTier;
+  onQueryChange?: (query: string) => void;
+  onSelectSearchTask?: (task: { id: string }) => void;
+}) {
+  const [query, setQuery] = useState("");
+  return (
+    <Header
+      onOpenSettings={noop}
+      onOpenGitHubImport={noop}
+      view="board"
+      projectId="project-a"
+      searchQuery={query}
+      onSearchChange={(next: string) => { onQueryChange?.(next); setQuery(next); }}
+      {...(onSelectSearchTask ? { onSelectSearchTask: onSelectSearchTask as never } : {})}
+    />
+  );
+}
+
+function renderSearchHeader(
+  tier: ViewportTier,
+  options: {
+    onQueryChange?: (query: string) => void;
+    onSelectSearchTask?: (task: { id: string }) => void;
+  } = {},
+) {
+  mockMatchMedia(tier);
+  return render(<SearchHeaderHarness tier={tier} {...options} />);
+}
+
 describe("Header", () => {
+  it("garde Whiteboard hors du menu tant que son flag Alpha est désactivé", () => {
+    const onChangeView = vi.fn();
+    const disabled = renderHeader({ view: "board", onChangeView, experimentalFeatures: {} });
+    fireEvent.click(screen.getByTitle("More views"));
+    expect(screen.queryByTestId("view-overflow-whiteboard")).toBeNull();
+    disabled.unmount();
+    renderHeader({ view: "board", onChangeView, experimentalFeatures: { whiteboardView: true } });
+    fireEvent.click(screen.getByTitle("More views"));
+    const item = screen.getByTestId("view-overflow-whiteboard");
+    expect(within(item).getByText("Alpha")).toBeInTheDocument();
+    fireEvent.click(item);
+    expect(onChangeView).toHaveBeenCalledWith("whiteboard");
+  });
   it("derives report context from task hash routes and legacy query parameters", () => {
     expect(resolveReportContextRefs({ hash: "#/tasks/FN-8277", search: "?agentId=agent-1" })).toEqual({ taskId: "FN-8277", agentId: "agent-1" });
     expect(resolveReportContextRefs({ hash: "", search: "?taskId=FN-8277" })).toEqual({ taskId: "FN-8277", agentId: undefined });
@@ -63,6 +167,119 @@ describe("Header", () => {
   it("renders the logo and brand", () => {
     renderHeader();
     expect(screen.getByText("Fusion")).toBeDefined();
+  });
+
+  it("hides only the Fusion wordmark in the official mobile shell", () => {
+    const mobile = renderHeader({ mobileNavEnabled: true }, "mobile");
+    expect(screen.queryByText("Fusion")).toBeNull();
+    expect(mobile.container.querySelector(".header-logo")).toBeInTheDocument();
+    mobile.unmount();
+
+    renderHeader({}, "tablet");
+    expect(screen.getByText("Fusion")).toBeInTheDocument();
+  });
+
+  it("remplace la loupe Alpha desktop au même emplacement après le workflow", () => {
+    const { container } = renderHeader({
+      view: "board",
+      leftSidebarNavActive: true,
+      onChangeView: vi.fn(),
+      searchQuery: "",
+      onSearchChange: vi.fn(),
+    }, "desktop");
+
+    const actions = container.querySelector(".header-actions");
+    const slot = screen.getByTestId("header-workflow-slot");
+    const trigger = screen.getByTestId("desktop-inline-header-search-btn");
+    const triggerIndex = Array.from(actions?.children ?? []).indexOf(trigger);
+    expect(slot.parentElement).toBe(actions);
+    expect(triggerIndex).toBeGreaterThan(Array.from(actions?.children ?? []).indexOf(slot));
+
+    fireEvent.click(trigger);
+    const inlineSearch = screen.getByTestId("desktop-header-search-input");
+    expect(inlineSearch.parentElement).toBe(actions);
+    expect(Array.from(actions?.children ?? []).indexOf(inlineSearch)).toBe(triggerIndex);
+    expect(inlineSearch).toHaveClass("header-search--inline");
+    expect(screen.getByRole("combobox", { name: "Search tasks..." })).toHaveFocus();
+    expect(screen.queryByTestId("desktop-inline-header-search-btn")).toBeNull();
+    expect(screen.queryByTestId("alpha-task-search-overlay")).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Search tasks..." })).toBeNull();
+  });
+
+  /*
+  FNXC:TaskSearch 2026-09-17-09:41:
+  FN-477 rewrote this case. It used to prove an OPTION inside a LISTBOX, sourced from the collection
+  the board had already loaded, could be clicked. Both halves are gone: results are cards fetched by
+  the field itself, so the interesting property is now that a task the board never loaded reaches the
+  host — which is exactly what the old collection lookup made impossible.
+  */
+  it.each(["board", "list"] as const)("ouvre le panneau Alpha desktop sur %s sans modifier le filtre", async (view) => {
+    mockFetchTaskPage.mockResolvedValue(searchPage([{ id: "FN-353", title: "Alpha shell" }]) as never);
+    const onSearchChange = vi.fn();
+    const onSelectSearchTask = vi.fn();
+    renderHeader({ view, projectId: "project-a", searchQuery: "alpha", onSearchChange, onSelectSearchTask }, "desktop");
+    expect(screen.queryByTestId("desktop-header-search-btn")).toBeNull();
+    fireEvent.click(screen.getByTestId("desktop-inline-header-search-btn"));
+    const input = screen.getByRole("combobox", { name: "Search tasks..." });
+    fireEvent.change(input, { target: { value: "353" } });
+
+    await waitFor(() => expect(screen.getByText("FN-353")).toBeInTheDocument());
+    // Cards, not options.
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    fireEvent.click(screen.getByText("FN-353"));
+
+    expect(onSelectSearchTask).toHaveBeenCalledTimes(1);
+    expect(onSelectSearchTask.mock.calls[0][0].id).toBe("FN-353");
+    // The desktop host's transient query never touches the Board/List filter.
+    expect(onSearchChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("combobox", { name: "Search tasks..." })).toBeNull();
+    expect(screen.queryByTestId("alpha-task-search-overlay")).toBeNull();
+    expect(document.querySelector(".task-search-results")).toBeNull();
+    /*
+    FNXC:TaskSearch 2026-09-17-07:43:
+    FN-494 — (c1). L'ancienne assertion exigeait que le déclencheur reprenne le focus après une
+    SÉLECTION. Elle encodait précisément le défaut : la fiche de tâche vient de s'ouvrir et se faisait
+    voler le focus une frame plus tard. Close et Escape restaurent toujours le focus (cas suivant).
+    */
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(document.activeElement).not.toBe(screen.getByTestId("desktop-inline-header-search-btn"));
+  });
+
+  it.each([
+    { name: "vide", tasks: [] as { id: string; title: string }[] },
+    { name: "sans correspondance", tasks: [] as { id: string; title: string }[] },
+  ])("garde le combobox Alpha utilisable avec une réponse $name", async ({ tasks }) => {
+    mockFetchTaskPage.mockResolvedValue(searchPage(tasks) as never);
+    renderHeader({ view: "board", projectId: "project-a", onSearchChange: vi.fn() }, "desktop");
+    fireEvent.click(screen.getByTestId("desktop-inline-header-search-btn"));
+    const input = screen.getByRole("combobox", { name: "Search tasks..." });
+    fireEvent.change(input, { target: { value: "353" } });
+
+    // An empty answer shows the panel's empty state; it never resurrects a listbox.
+    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
+    expect(screen.queryByTestId("alpha-task-search-overlay")).toBeNull();
+    expect(input).toBeEnabled();
+  });
+
+  it("ferme et réinitialise le champ Alpha desktop par la croix et Escape", async () => {
+    renderHeader({ view: "board", projectId: "project-a", onSearchChange: vi.fn() }, "desktop");
+
+    fireEvent.click(screen.getByTestId("desktop-inline-header-search-btn"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Search tasks..." }), { target: { value: "353" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close search" }));
+    await waitFor(() => expect(screen.getByTestId("desktop-inline-header-search-btn")).toHaveFocus());
+
+    fireEvent.click(screen.getByTestId("desktop-inline-header-search-btn"));
+    expect(screen.getByRole("combobox", { name: "Search tasks..." })).toHaveValue("");
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search tasks..." }), { key: "Escape" });
+    await waitFor(() => expect(screen.getByTestId("desktop-inline-header-search-btn")).toHaveFocus());
+    expect(screen.queryByTestId("alpha-task-search-overlay")).toBeNull();
+  });
+
+  it.each(["desktop", "tablet", "mobile"] as const)("ne rend jamais le hamburger Alpha dans le Header sur %s", (tier) => {
+    renderHeader({ mobileNavEnabled: true }, tier);
+    expect(screen.queryByTestId("mobile-menu-trigger")).toBeNull();
   });
 
   it.each(["desktop", "tablet", "mobile"] as const)("does not render the relocated Report affordance in the %s header", (tier) => {
@@ -86,10 +303,10 @@ describe("Header", () => {
     expect(container.querySelector(".shell-connection-status")).toBeNull();
   });
 
-  it("renders desktop non-tool action buttons without toolbar tools", () => {
-    renderHeader();
+  it("keeps moved desktop actions out of the official Header", () => {
+    renderHeader({ leftSidebarNavActive: true }, "desktop");
     expect(screen.queryByTitle("Import from GitHub")).toBeNull();
-    expect(screen.getByTitle("Settings")).toBeDefined();
+    expect(screen.queryByTitle("Settings")).toBeNull();
   });
 
   describe("workflows button", () => {
@@ -122,11 +339,30 @@ describe("Header", () => {
     expect(screen.getByText("Import from GitHub")).toBeDefined();
   });
 
-  it("calls onOpenSettings when settings button is clicked", () => {
+  it("calls onOpenSettings from the compact overflow", () => {
     const onOpenSettings = vi.fn();
-    renderHeader({ onOpenSettings });
-    fireEvent.click(screen.getByTitle("Settings"));
+    renderHeader({ onOpenSettings }, "mobile");
+    fireEvent.click(screen.getByTitle("More header actions"));
+    fireEvent.click(screen.getByText("Settings"));
     expect(onOpenSettings).toHaveBeenCalled();
+  });
+
+  /*
+  FNXC:Navigation 2026-09-14-19:51:
+  Exemption marker for FN-397. The Header's mobile overflow menu is not affected by the popover scroll reset because it
+  emits no opening focus at all; freeze that so a future auto-focus cannot silently reintroduce a scroll-resetting
+  focus() on a menu surface.
+  */
+  it("emits no focus call when the mobile overflow menu opens", () => {
+    const focusSpy = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      renderHeader({ onOpenSettings: noop }, "mobile");
+      fireEvent.click(screen.getByTitle("More header actions"));
+      expect(screen.getByText("Settings")).toBeDefined();
+      expect(focusSpy).not.toHaveBeenCalled();
+    } finally {
+      focusSpy.mockRestore();
+    }
   });
 
   it("does not render the desktop files button", () => {
@@ -153,30 +389,320 @@ describe("Header", () => {
   });
 
   describe("view toggle", () => {
+    /*
+     * FN-426 moved Activity and Notes out of the right dock into header panels; FN-437 narrows their Header producer to
+     * tablet/desktop, because on phone the footer navigation menu already owns both destinations. The Header still owns
+     * the triggers, their anchor rect, and their accessible expanded/controls relationship on those two tiers.
+     */
+    it.each(["tablet", "desktop"] as const)("renders the Activity and Notes panel triggers on %s", (mode) => {
+      const onOpenActivityPanel = vi.fn();
+      const onOpenNotesPanel = vi.fn();
+      renderHeader({ onChangeView: noop, onOpenActivityPanel, onOpenNotesPanel, activityPanelId: "a", notesPanelId: "n" }, mode);
+
+      const activity = screen.getByTestId("header-activity-panel-btn");
+      const notes = screen.getByTestId("header-notes-panel-btn");
+      expect(activity).toHaveAttribute("aria-expanded", "false");
+      expect(activity).not.toHaveAttribute("aria-controls");
+      activity.click();
+      notes.click();
+      expect(onOpenActivityPanel).toHaveBeenCalledTimes(1);
+      expect(onOpenActivityPanel.mock.calls[0][0]).toBeTruthy();
+      expect(onOpenNotesPanel).toHaveBeenCalledTimes(1);
+    });
+
+    /*
+     * FN-437 cas (c) : sur téléphone, le menu du pied de page est le propriétaire UNIQUE d'Activité et de Notes, donc le
+     * Header n'en rend aucun déclencheur — ni nœud, ni coquille de bouton vide, ni `aria-controls` orphelin.
+     */
+    it("ne rend aucun déclencheur Activity/Notes sur téléphone et ne laisse pas de coquille vide", () => {
+      const onOpenActivityPanel = vi.fn();
+      const onOpenNotesPanel = vi.fn();
+      const { container } = renderHeader(
+        {
+          onChangeView: noop,
+          onOpenActivityPanel,
+          onOpenNotesPanel,
+          activityPanelId: "dashboard-activity-panel",
+          notesPanelId: "dashboard-notes-panel",
+          activityPanelOpen: true,
+        },
+        "mobile",
+      );
+
+      expect(screen.queryByTestId("header-activity-panel-btn")).toBeNull();
+      expect(screen.queryByTestId("header-notes-panel-btn")).toBeNull();
+      expect(container.querySelector('[aria-controls="dashboard-activity-panel"]')).toBeNull();
+      expect(container.querySelector('[aria-controls="dashboard-notes-panel"]')).toBeNull();
+      expect(onOpenActivityPanel).not.toHaveBeenCalled();
+      expect(onOpenNotesPanel).not.toHaveBeenCalled();
+
+      // Aucun bouton résiduel sans icône ni libellé ne doit subsister dans la rangée d'actions.
+      const actions = container.querySelector(".header-actions");
+      for (const button of Array.from(actions?.querySelectorAll("button") ?? [])) {
+        const hasIcon = button.querySelector("svg") !== null;
+        const hasLabel = (button.textContent ?? "").trim().length > 0;
+        expect(hasIcon || hasLabel).toBe(true);
+      }
+    });
+
+    it("advertises the open panel through aria-expanded and aria-controls", () => {
+      renderHeader({ onChangeView: noop, onOpenActivityPanel: vi.fn(), activityPanelOpen: true, activityPanelId: "dashboard-activity-panel" });
+      const activity = screen.getByTestId("header-activity-panel-btn");
+      expect(activity).toHaveAttribute("aria-expanded", "true");
+      expect(activity).toHaveAttribute("aria-controls", "dashboard-activity-panel");
+    });
+
+    it("renders no panel trigger shell when its opener is absent", () => {
+      renderHeader({ onChangeView: noop });
+      expect(screen.queryByTestId("header-activity-panel-btn")).toBeNull();
+      expect(screen.queryByTestId("header-notes-panel-btn")).toBeNull();
+    });
+
     it("does not render view toggle when onChangeView is not provided", () => {
       renderHeader();
       expect(screen.queryByTitle("Board view")).toBeNull();
       expect(screen.queryByTitle("List view")).toBeNull();
     });
 
-    it("renders view toggle when onChangeView is provided", () => {
+    /*
+    FN-426 supersedes FN-382's dock-only List: the right dock is optional, so the header offers Board AND List on
+    every breakpoint. Otherwise an operator who leaves the dock off would have no way to browse tasks as a list.
+    */
+    it("renders both Board and List toggles when onChangeView is provided", () => {
       renderHeader({ onChangeView: noop });
       expect(screen.getByTitle("Board view")).toBeDefined();
       expect(screen.getByTitle("List view")).toBeDefined();
     });
 
-    it("renders the workflow portal slot instead of the view toggle on desktop sidebar nav", () => {
-      renderHeader({ onChangeView: noop, leftSidebarNavActive: true }, "desktop");
-      expect(screen.getByTestId("header-workflow-slot")).toBeInTheDocument();
-      expect(screen.queryByTitle("Board view")).toBeNull();
+    /*
+     * FN-437 cas (a) : le groupe `view-toggle` reste rendu sur téléphone (Board et ses autres destinations), mais son
+     * bouton List disparaît parce que l'entrée `mobile-more-item-list` du menu du pied de page en est désormais le
+     * propriétaire unique. Remplaçant du test FN-426 « keeps the List toggle on the phone host ».
+     */
+    it("retire le bouton List du groupe view-toggle sur téléphone en gardant Board", () => {
+      renderHeader({ onChangeView: noop }, "mobile");
+      expect(screen.getByTitle("Board view")).toBeDefined();
       expect(screen.queryByTitle("List view")).toBeNull();
+      expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
     });
 
-    it("renders the workflow portal slot instead of the view toggle on tablet sidebar nav", () => {
-      renderHeader({ onChangeView: noop, leftSidebarNavActive: true }, "tablet");
-      expect(screen.getByTestId("header-workflow-slot")).toBeInTheDocument();
-      expect(screen.queryByTitle("Board view")).toBeNull();
-      expect(screen.queryByTitle("List view")).toBeNull();
+    /*
+     * FN-437 cas (b) : l'invariant « aucun `header-list-view-btn` quand `isMobile` » est inconditionnel — il tient aussi
+     * quand le pied de page ou la barre latérale supprime le groupe et que seul le producteur autonome resterait.
+     */
+    it("ne rend aucun bouton List sur téléphone même quand une surface large supprime le groupe", () => {
+      renderHeader({ onChangeView: noop, mobileNavEnabled: true, leftSidebarNavActive: true }, "mobile");
+      expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
+    });
+
+    /*
+     * FN-439 cas (d) : sur tablette et ordinateur, la navigation large possède désormais List (menu **More** du pied
+     * de page, ou barre latérale). Le Header n'en est plus le producteur : le bouton autonome de `header-actions` a
+     * disparu. Remplace le contrat FN-426 « garde exactement un bouton List sur %s ».
+     */
+    it.each(["tablet", "desktop"] as const)("ne rend aucun bouton List sur %s quand une surface large possède la navigation", (mode) => {
+      const rendered = renderHeader({ onChangeView: noop, leftSidebarNavActive: true, view: "board" }, mode);
+      expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
+
+      rendered.unmount();
+      renderHeader({ onChangeView: noop, leftSidebarNavActive: true, view: "list" }, mode);
+      expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
+    });
+
+    /*
+     * FN-439 cas (e) : après le retrait, `.header-actions` ne doit garder ni coquille de bouton vide ni nœud de slot
+     * workflow orphelin sur une vue qui n'est ni Board ni List.
+     */
+    it.each(["tablet", "desktop"] as const)("ne laisse ni bouton vide ni slot workflow résiduel sur %s", (mode) => {
+      const { container } = renderHeader({ onChangeView: noop, leftSidebarNavActive: true, view: "missions" }, mode);
+      const actions = container.querySelector(".header-actions")!;
+      for (const button of actions.querySelectorAll("button")) {
+        const hasIcon = button.querySelector("svg") !== null;
+        const hasLabel = (button.textContent ?? "").trim().length > 0;
+        expect(hasIcon || hasLabel).toBe(true);
+      }
+      expect(document.querySelector(".header-workflow-slot")).toBeNull();
+      expect(screen.queryByTestId("header-workflow-slot")).toBeNull();
+    });
+
+    /* FN-426: the List button is a toggle — it returns to the Board when the List route is already on screen. */
+    it("toggles between Board and List through onChangeView", async () => {
+      const onChangeView = vi.fn();
+      renderHeader({ onChangeView, view: "board" });
+      screen.getByTestId("header-list-view-btn").click();
+      expect(onChangeView).toHaveBeenLastCalledWith("list");
+
+      cleanup();
+      renderHeader({ onChangeView, view: "list" });
+      screen.getByTestId("header-list-view-btn").click();
+      expect(onChangeView).toHaveBeenLastCalledWith("board");
+    });
+
+    /*
+     * FN-426: the view-toggle GROUP stays suppressed while a wide navigation surface owns routing, but Board/List
+     * keeps exactly one standalone header producer there — otherwise FN-382's removal of List from that navigation
+     * would leave the destination unreachable for operators who turn the optional right sidebar off.
+     */
+    it.each(["desktop", "tablet"] as const)(
+      "renders the workflow portal slot and no List producer at all on %s sidebar nav",
+      (mode) => {
+        renderHeader({ onChangeView: noop, leftSidebarNavActive: true, view: "board" }, mode);
+        expect(screen.getByTestId("header-workflow-slot")).toBeInTheDocument();
+        expect(screen.queryByTitle("Board view")).toBeNull();
+        expect(screen.queryByTestId("view-toggle-command-center")).toBeNull();
+        expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
+      },
+    );
+
+    /*
+     * FN-439 cas (a) : le slot workflow n'appartient qu'à Board et List. Sur toute autre destination le nœud disparaît
+     * complètement (aucun conteneur, aucune classe résiduelle), ce qui suffit à masquer le sélecteur puisque les quatre
+     * consommateurs du portail retournent `null` sans slot.
+     */
+    it.each(["tablet", "desktop"] as const)("ne rend le slot workflow que sur board et list en %s", (mode) => {
+      for (const view of ["board", "list"] as const) {
+        const rendered = renderHeader({ onChangeView: noop, leftSidebarNavActive: true, view }, mode);
+        expect(screen.getByTestId("header-workflow-slot")).toBeInTheDocument();
+        rendered.unmount();
+      }
+
+      for (const view of ["missions", "planning", "command-center"] as const) {
+        const rendered = renderHeader({ onChangeView: noop, leftSidebarNavActive: true, view }, mode);
+        expect(screen.queryByTestId("header-workflow-slot")).toBeNull();
+        expect(document.querySelector(".header-workflow-slot")).toBeNull();
+        rendered.unmount();
+      }
+    });
+
+    /*
+     * FN-439 cas (b) : même contrat pour le producteur mobile de `header-left`, SANS Board de fond.
+     *
+     * FNXC:WorkflowControls 2026-09-16-23:24:
+     * FN-483 : ce cas reste le contrat de la route seule. Le contexte de Board de fond est couvert juste en dessous.
+     */
+    it("ne rend le slot workflow mobile que sur board et list sans Board de fond", () => {
+      for (const view of ["board", "list"] as const) {
+        const rendered = renderHeader({ onChangeView: noop, mobileNavEnabled: true, view }, "mobile");
+        expect(screen.getByTestId("header-workflow-slot")).toHaveClass("header-workflow-slot--mobile");
+        rendered.unmount();
+      }
+
+      renderHeader({ onChangeView: noop, mobileNavEnabled: true, view: "missions" }, "mobile");
+      expect(screen.queryByTestId("header-workflow-slot")).toBeNull();
+      expect(document.querySelector(".header-workflow-slot")).toBeNull();
+    });
+
+    /*
+     * FN-483 : le symptôme d'origine. Sur téléphone, le Board reste actif derrière chaque drawer, donc le slot doit
+     * survivre au changement de destination — même nœud DOM avant, pendant et après — sinon le Board replie son
+     * sélecteur en ligne sous le header.
+     */
+    it("garde le même nœud de slot pendant que la destination change au-dessus d'un Board de fond", () => {
+      function BackgroundBoardHeaderHarness() {
+        const [view, setView] = useState<"board" | "command-center" | "list" | "planning">("board");
+        return (
+          <>
+            <button data-testid="go-command-center" onClick={() => setView("command-center")} />
+            <button data-testid="go-list" onClick={() => setView("list")} />
+            <button data-testid="go-planning" onClick={() => setView("planning")} />
+            <button data-testid="go-board" onClick={() => setView("board")} />
+            <Header
+              onOpenSettings={noop}
+              onOpenGitHubImport={noop}
+              onChangeView={noop}
+              mobileNavEnabled
+              boardBackgroundActive
+              view={view}
+            />
+          </>
+        );
+      }
+
+      mockMatchMedia("mobile");
+      render(<BackgroundBoardHeaderHarness />);
+      const initialSlot = screen.getByTestId("header-workflow-slot");
+
+      for (const destination of ["go-command-center", "go-list", "go-planning", "go-board"] as const) {
+        fireEvent.click(screen.getByTestId(destination));
+        expect(screen.getAllByTestId("header-workflow-slot")).toHaveLength(1);
+        expect(screen.getByTestId("header-workflow-slot")).toBe(initialSlot);
+        expect(initialSlot.isConnected).toBe(true);
+      }
+    });
+
+    /* FN-483 : le contexte de fond ne s'applique pas aux vraies pages tablette/ordinateur. */
+    it.each(["tablet", "desktop"] as const)("ignore le contexte de Board de fond sur une vraie page %s", (mode) => {
+      renderHeader({ onChangeView: noop, leftSidebarNavActive: true, view: "missions", boardBackgroundActive: true }, mode);
+      expect(screen.queryByTestId("header-workflow-slot")).toBeNull();
+      expect(document.querySelector(".header-workflow-slot")).toBeNull();
+    });
+
+    /*
+    FNXC:WorkflowControls 2026-09-17-02:14:
+    FN-481 : symptôme d'origine — « en vue tablette le sélecteur de projet se met à droite du sélecteur de workflow ».
+    La tablette garde la pill, donc `hideFullNav` y est vrai, mais son Header doit rester organisé comme l'ordinateur :
+    sélecteur de projet dans `header-left`, slot peuplé dans `header-actions`, et ordre DOM projet → workflow →
+    recherche. Le test monte un vrai portail dans le slot pour que le placement soit prouvé sur un nœud peuplé.
+    */
+    it.each([
+      ["tablet", "board"],
+      ["tablet", "list"],
+      ["desktop", "board"],
+      ["desktop", "list"],
+    ] as const)("garde la disposition ordinateur du slot workflow en %s sur %s", (mode, slotView) => {
+      const { container } = renderHeader(
+        {
+          onChangeView: noop,
+          /* Tablette : shell réel (pill propriétaire, pas de colonne de gauche). Ordinateur : navigation large. */
+          mobileNavEnabled: mode === "tablet",
+          leftSidebarNavActive: mode === "desktop",
+          view: slotView,
+          projects: [{ id: "p1", name: "Projet un", path: "/p1" }],
+          currentProject: { id: "p1", name: "Projet un", path: "/p1" },
+          onViewAllProjects: noop,
+          onSelectProject: noop,
+          onSearchChange: noop,
+          projectId: "p1",
+        },
+        mode,
+      );
+
+      const slots = screen.getAllByTestId("header-workflow-slot");
+      expect(slots).toHaveLength(1);
+      const slot = slots[0]!;
+      expect(slot).not.toHaveClass("header-workflow-slot--mobile");
+      expect(slot.closest(".header-actions")).not.toBeNull();
+      expect(slot.closest(".header-left")).toBeNull();
+
+      /* Portail réel : un slot vide serait masqué par `:empty` et ne prouverait aucun ordre visible. */
+      const populated = document.createElement("div");
+      populated.className = "board-workflow-toolbar";
+      populated.dataset.testid = "portal-workflow-control";
+      slot.appendChild(populated);
+
+      const projectTrigger = screen.getByTestId("project-selector-trigger");
+      expect(projectTrigger.closest(".header-left")).not.toBeNull();
+      const searchControl = container.querySelector<HTMLElement>(".header-actions [data-testid$=\"header-search-btn\"], .header-actions [data-testid$=\"header-search-input\"]");
+      expect(searchControl).not.toBeNull();
+
+      const projectBeforeSlot = projectTrigger.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING;
+      expect(projectBeforeSlot).toBeTruthy();
+      const slotBeforeSearch = slot.compareDocumentPosition(searchControl!) & Node.DOCUMENT_POSITION_FOLLOWING;
+      expect(slotBeforeSearch).toBeTruthy();
+    });
+
+    /* FN-481 : la disposition compacte reste réservée au téléphone et n'apparaît pas sur tablette. */
+    it("ne rend aucun slot workflow compact sur tablette", () => {
+      renderHeader({ onChangeView: noop, mobileNavEnabled: true, view: "board" }, "tablet");
+      expect(document.querySelector(".header-workflow-slot--mobile")).toBeNull();
+      expect(screen.getAllByTestId("header-workflow-slot")).toHaveLength(1);
+    });
+
+    /* FN-481 : aucun slot orphelin sur une vue sans workflow, quel que soit le mode compact. */
+    it.each(["mobile", "tablet"] as const)("ne laisse aucun slot résiduel sur une vue sans workflow en %s", (mode) => {
+      renderHeader({ onChangeView: noop, mobileNavEnabled: true, view: "missions" }, mode);
+      expect(screen.queryByTestId("header-workflow-slot")).toBeNull();
+      expect(document.querySelector(".header-workflow-slot")).toBeNull();
     });
 
     it("renders the workflow portal slot in the mobile top header when mobile nav owns view switching", () => {
@@ -201,8 +727,110 @@ describe("Header", () => {
       expect(screen.queryByTestId("mobile-header-new-task")).toBeNull();
     });
 
+    it("keeps the mobile New Task action last and after search and usage", () => {
+      const { container } = renderHeader({
+        mobileNavEnabled: true,
+        projectId: "project-1",
+        onNewTask: vi.fn(),
+        onSearchChange: vi.fn(),
+        onOpenUsage: vi.fn(),
+      }, "mobile");
+
+      const actions = container.querySelector(".header-actions");
+      const newTask = screen.getByTestId("mobile-header-new-task");
+      const search = screen.getByTestId("mobile-header-search-btn");
+      const usage = screen.getByTestId("mobile-header-usage-btn");
+      const children = Array.from(actions?.children ?? []);
+
+      expect(actions?.lastElementChild).toBe(newTask);
+      expect(children.indexOf(search)).toBeLessThan(children.indexOf(newTask));
+      expect(children.indexOf(usage)).toBeLessThan(children.indexOf(newTask));
+      expect(screen.getAllByTestId("mobile-header-new-task")).toHaveLength(1);
+      expect(actions?.firstElementChild).not.toBe(newTask);
+      expect(actions?.firstElementChild?.matches("button.btn-icon")).toBe(true);
+      expect(actions?.firstElementChild?.querySelector("svg")).not.toBeNull();
+    });
+
+    /*
+     * FN-437 cas (e) : remplaçant du test « keeps the retired desktop Header New Task action absent… ». La création ne
+     * doit plus dépendre de l'écran affiché, donc le Header — seule surface présente partout — expose désormais cette
+     * action sur ordinateur aussi.
+     */
+    it("rend l'action New Task du Header sur ordinateur et l'appelle au clic", () => {
+      const onNewTask = vi.fn();
+      renderHeader({ projectId: "project-1", onNewTask }, "desktop");
+      const action = screen.getByTestId("mobile-header-new-task");
+      expect(action).toHaveClass("view-action-button", "view-action-button--create");
+      fireEvent.click(action);
+      expect(onNewTask).toHaveBeenCalledOnce();
+    });
+
+    /*
+     * FN-437 cas (g) : l'action reste unique et dernière dans la rangée d'actions sur ordinateur — le retour de cette
+     * affordance ne doit ni créer de doublon dans `header-actions` ni se glisser avant les autres contrôles.
+     */
+    it("garde une seule action New Task, en dernier, dans header-actions sur ordinateur", () => {
+      const { container } = renderHeader(
+        { projectId: "project-1", onNewTask: vi.fn(), onChangeView: noop, onSearchChange: vi.fn() },
+        "desktop",
+      );
+      const action = screen.getByTestId("mobile-header-new-task");
+      expect(screen.getAllByRole("button", { name: "New Task" })).toHaveLength(1);
+      expect(screen.getAllByTestId("mobile-header-new-task")).toHaveLength(1);
+      expect(container.querySelector(".header-actions")?.lastElementChild).toBe(action);
+    });
+
+    it.each(["tablet", "mobile"] as const)("builds the %s New Task action from the shared create primitive", (tier) => {
+      const onNewTask = vi.fn();
+      renderHeader({ projectId: "project-1", onNewTask }, tier);
+      const action = screen.getByTestId("mobile-header-new-task");
+      expect(action).toHaveClass("view-action-button", "view-action-button--create");
+      fireEvent.click(action);
+      expect(onNewTask).toHaveBeenCalledOnce();
+    });
+
+    /*
+     * FN-437 cas (f) : remplaçant du test « suppresses the global New Task action when List owns… ». Sur ordinateur
+     * l'action est présente pour TOUTES les vues, y compris `list` — la demande est explicite « peu importe la vue »,
+     * et le bouton propre à `ListView` (conscient du workflow sélectionné) vit dans une autre barre. Sous ordinateur le
+     * comportement compact est inchangé : `list` reste exclue.
+     */
+    it("rend l'action New Task en vue list sur ordinateur et la retire en compact", () => {
+      const onNewTask = vi.fn();
+      const desktop = renderHeader({ projectId: "project-1", view: "list", onNewTask }, "desktop");
+      const action = screen.getByTestId("mobile-header-new-task");
+      fireEvent.click(action);
+      expect(onNewTask).toHaveBeenCalledOnce();
+      desktop.unmount();
+
+      for (const tier of ["tablet", "mobile"] as const) {
+        const compact = renderHeader({ projectId: "project-1", view: "list", onNewTask }, tier);
+        expect(screen.queryByTestId("mobile-header-new-task")).toBeNull();
+        compact.unmount();
+      }
+    });
+
+    it.each(["tablet", "mobile"] as const)("renders one functional Alpha New Task action last at the %s tier", (tier) => {
+      const onNewTask = vi.fn();
+      const { container } = renderHeader({ projectId: "project-1", onNewTask }, tier);
+      const action = screen.getByTestId("mobile-header-new-task");
+      expect(container.querySelector(".header-actions")?.lastElementChild).toBe(action);
+      expect(screen.getAllByRole("button", { name: "New Task" })).toHaveLength(1);
+      fireEvent.click(action);
+      expect(onNewTask).toHaveBeenCalledOnce();
+    });
+
+    it.each(["desktop", "tablet", "mobile"] as const)("omits the Alpha New Task action without project or callback at the %s tier", (tier) => {
+      const rendered = renderHeader({ onNewTask: vi.fn() }, tier);
+      expect(screen.queryByTestId("mobile-header-new-task")).toBeNull();
+      rendered.unmount();
+      renderHeader({ projectId: "project-1" }, tier);
+      expect(screen.queryByTestId("mobile-header-new-task")).toBeNull();
+    });
+
+    // FN-437 : la paire Board/List n'existe plus ensemble sur téléphone, ces cas d'état actif passent donc sur tablette.
     it("shows board view as active by default", () => {
-      renderHeader({ onChangeView: noop });
+      renderHeader({ onChangeView: noop }, "tablet");
       const boardBtn = screen.getByTitle("Board view");
       const listBtn = screen.getByTitle("List view");
       expect(boardBtn.className).toContain("active");
@@ -210,7 +838,7 @@ describe("Header", () => {
     });
 
     it("shows list view as active when view is 'list'", () => {
-      renderHeader({ onChangeView: noop, view: "list" });
+      renderHeader({ onChangeView: noop, view: "list" }, "tablet");
       const boardBtn = screen.getByTitle("Board view");
       const listBtn = screen.getByTitle("List view");
       expect(boardBtn.className).not.toContain("active");
@@ -226,7 +854,8 @@ describe("Header", () => {
 
     it("calls onChangeView with 'list' when clicking list view button", () => {
       const onChangeView = vi.fn();
-      renderHeader({ onChangeView, view: "board" });
+      // FN-437 : le bouton List du Header n'existe plus sur téléphone ; le contrat de clic se vérifie sur tablette.
+      renderHeader({ onChangeView, view: "board" }, "tablet");
       fireEvent.click(screen.getByTitle("List view"));
       expect(onChangeView).toHaveBeenCalledWith("list");
     });
@@ -272,7 +901,8 @@ describe("Header", () => {
     });
 
     it("has correct aria attributes for accessibility", () => {
-      renderHeader({ onChangeView: noop, view: "board" });
+      // FN-437 : la paire Board/List coexiste sur tablette/ordinateur uniquement.
+      renderHeader({ onChangeView: noop, view: "board" }, "tablet");
       const boardBtn = screen.getByTitle("Board view");
       const listBtn = screen.getByTitle("List view");
       expect(boardBtn.getAttribute("aria-pressed")).toBe("true");
@@ -328,12 +958,16 @@ describe("Header", () => {
       expect(screen.getByRole("menu", { name: "More views" })).toBeInTheDocument();
     });
 
-    it("shows secrets in overflow and routes to secrets view", () => {
-      const onChangeView = vi.fn();
-      renderHeader({ onChangeView, view: "board" });
+    /*
+     * FN-426 moved Secrets into Settings → project Secrets, so the header no longer offers it as a destination of its
+     * own. The `secrets` id is still recognized by App's routing (old links and persisted views open that Settings
+     * section), but the standalone menu entry and its shell must be gone.
+     */
+    it("no longer offers a standalone Secrets destination in the overflow menu", () => {
+      renderHeader({ onChangeView: noop, view: "board" });
       fireEvent.click(screen.getByTestId("view-toggle-overflow-trigger"));
-      fireEvent.click(screen.getByTestId("view-overflow-secrets"));
-      expect(onChangeView).toHaveBeenCalledWith("secrets");
+      expect(screen.queryByTestId("view-overflow-secrets")).toBeNull();
+      expect(within(screen.getByRole("menu", { name: "More views" })).queryByText("Secrets")).toBeNull();
     });
 
     it("renders dependency graph in overflow and uses canonical graph task view", () => {
@@ -416,30 +1050,18 @@ describe("Header", () => {
       expect(screen.getByTestId("view-toggle-overflow-trigger")).toBeDefined();
     });
 
-    it("keeps desktop Artifacts and Command Center inline without Command Center overflow", () => {
-      renderHeader({ onChangeView: noop, showAgentsTab: true }, "desktop");
-
-      expect(screen.getByTitle("Artifacts view")).toBeInTheDocument();
-      const agentsButton = screen.getByTitle("Agents view");
-      const commandCenterButton = screen.getByTestId("view-toggle-command-center");
-      expect(commandCenterButton.previousElementSibling).toBe(agentsButton);
-
+    it("omits standalone Artifacts and Recommendations destinations on desktop and tablet", () => {
+      const desktop = renderHeader({ onChangeView: noop, showAgentsTab: true }, "desktop");
+      expect(screen.queryByTestId("view-toggle-documents")).toBeNull();
       fireEvent.click(screen.getByTestId("view-toggle-overflow-trigger"));
-      expect(screen.queryByTestId("view-overflow-command-center")).toBeNull();
       expect(screen.queryByTestId("view-overflow-documents")).toBeNull();
-    });
+      expect(screen.queryByTestId("view-overflow-recommendations")).toBeNull();
+      desktop.unmount();
 
-    it("promotes Command Center after Agents and moves Artifacts to overflow on tablet", () => {
       renderHeader({ onChangeView: noop, showAgentsTab: true }, "tablet");
-
-      const agentsButton = screen.getByTitle("Agents view");
-      const commandCenterButton = screen.getByTestId("view-toggle-command-center");
-      expect(commandCenterButton.previousElementSibling).toBe(agentsButton);
-      expect(screen.queryByTitle("Artifacts view")).toBeNull();
-
       fireEvent.click(screen.getByTestId("view-toggle-overflow-trigger"));
-      expect(screen.getByTestId("view-overflow-documents")).toHaveTextContent("Artifacts view");
-      expect(screen.queryByTestId("view-overflow-command-center")).toBeNull();
+      expect(screen.queryByTestId("view-overflow-documents")).toBeNull();
+      expect(screen.queryByTestId("view-overflow-recommendations")).toBeNull();
     });
 
     it("renders view overflow trigger when skills tab is enabled", () => {
@@ -628,9 +1250,9 @@ describe("Header", () => {
       expect(onOpenUsage).toHaveBeenCalledWith(mockRect);
     });
 
-    it("does not render usage button inline on mobile when onOpenUsage is provided", () => {
+    it("keeps usage in the legacy mobile overflow when bottom navigation is inactive", () => {
       renderHeader({ onOpenUsage: vi.fn() }, "mobile");
-      // Button should NOT be inline on mobile (it's in overflow menu)
+      expect(screen.queryByTestId("mobile-header-usage-btn")).toBeNull();
       expect(screen.queryByTitle("View usage")).toBeNull();
       expect(screen.queryByTestId("desktop-header-usage-btn")).toBeNull();
     });
@@ -639,6 +1261,33 @@ describe("Header", () => {
       renderHeader({ onOpenUsage: vi.fn() }, "mobile");
       fireEvent.click(screen.getByTitle("More header actions"));
       expect(screen.getByTestId("overflow-usage-btn")).toBeDefined();
+    });
+
+    it("opens Usage with button bounds from the official mobile header shortcut", () => {
+      const onOpenUsage = vi.fn();
+      renderHeader({
+        mobileNavEnabled: true,
+        onOpenUsage,
+      }, "mobile");
+
+      const usageButton = screen.getByTestId("mobile-header-usage-btn") as HTMLButtonElement;
+      const mockRect = {
+        top: 10,
+        bottom: 42,
+        left: 200,
+        right: 232,
+        width: 32,
+        height: 32,
+        x: 200,
+        y: 10,
+        toJSON: () => ({}),
+      } as DOMRect;
+      usageButton.getBoundingClientRect = vi.fn(() => mockRect);
+
+      expect(usageButton).toHaveAccessibleName("View usage");
+      fireEvent.click(usageButton);
+      expect(onOpenUsage).toHaveBeenCalledWith(mockRect);
+      expect(screen.queryByTestId("mobile-menu-trigger")).toBeNull();
     });
 
     it("does not call onOpenUsage from the removed desktop toolbar button", () => {
@@ -842,9 +1491,9 @@ describe("Header", () => {
     it("renders the desktop search toggle after the empty workflow portal slot", () => {
       renderHeader({ onSearchChange: vi.fn(), onChangeView: noop, view: "board", leftSidebarNavActive: true }, "desktop");
       const workflowSlot = screen.getByTestId("header-workflow-slot");
-      const searchToggle = screen.getByTestId("desktop-header-search-btn");
+      const searchToggle = screen.getByTestId("desktop-inline-header-search-btn");
 
-      expect(screen.getAllByTestId("desktop-header-search-btn")).toHaveLength(1);
+      expect(screen.getAllByTestId("desktop-inline-header-search-btn")).toHaveLength(1);
       expect(workflowSlot.compareDocumentPosition(searchToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
 
@@ -856,9 +1505,9 @@ describe("Header", () => {
       workflowSwitcher.dataset.testid = "mock-workflow-switcher";
       workflowSwitcher.textContent = "Coding workflow";
       workflowSlot.appendChild(workflowSwitcher);
-      const searchToggle = screen.getByTestId("desktop-header-search-btn");
+      const searchToggle = screen.getByTestId("desktop-inline-header-search-btn");
 
-      expect(screen.getAllByTestId("desktop-header-search-btn")).toHaveLength(1);
+      expect(screen.getAllByTestId("desktop-inline-header-search-btn")).toHaveLength(1);
       expect(workflowSlot.compareDocumentPosition(searchToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(workflowSwitcher.compareDocumentPosition(searchToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
@@ -1010,64 +1659,93 @@ describe("Header", () => {
       expect(onSearchChange).toHaveBeenCalledWith("");
     });
 
-    it("renders branch filters in desktop board search panel only", () => {
-      renderHeader({
-        onSearchChange: vi.fn(),
-        view: "board",
-        branchOptions: ["feature/a"],
-        baseBranchOptions: ["main"],
-      });
-      fireEvent.click(screen.getByTestId("desktop-header-search-btn"));
-      expect(screen.getByTestId("header-branch-filters-desktop")).toBeInTheDocument();
-      expect(screen.getByTestId("working-branch-filter")).toBeInTheDocument();
-      expect(screen.getByTestId("target-branch-filter")).toBeInTheDocument();
-      expect(screen.getByRole("option", { name: "All working branches" })).toHaveValue("");
-      expect(screen.getByRole("option", { name: "No working branch" })).toHaveValue("__fusion:no-branch__");
-      expect(screen.getByRole("option", { name: "All base branches" })).toHaveValue("");
-      expect(screen.getByRole("option", { name: "No base branch" })).toHaveValue("__fusion:no-branch__");
-    });
+    it.each(["desktop", "tablet", "mobile"] as const)("does not render removed branch filters on %s", (mode) => {
+      renderHeader({ onSearchChange: vi.fn(), view: "board" }, mode);
+      if (mode === "mobile") fireEvent.click(screen.getByTestId("mobile-header-search-btn"));
+      else if (mode === "tablet") fireEvent.click(screen.getByTestId("desktop-header-search-btn"));
 
-    it("does not render branch filters in list view", () => {
-      renderHeader({ onSearchChange: vi.fn(), view: "list" });
-      fireEvent.click(screen.getByTestId("desktop-header-search-btn"));
+      expect(screen.queryByText("Working branch")).toBeNull();
+      expect(screen.queryByText("Base branch")).toBeNull();
       expect(screen.queryByTestId("header-branch-filters-desktop")).toBeNull();
+      expect(screen.queryByTestId("header-branch-filters-mobile")).toBeNull();
     });
 
-    it("calls branch filter callbacks with selected values, unassigned sentinel, and reset", () => {
-      const onBranchFilterChange = vi.fn();
-      const onBaseBranchFilterChange = vi.fn();
-      renderHeader({
-        onSearchChange: vi.fn(),
-        view: "board",
-        branchOptions: ["feature/a"],
-        baseBranchOptions: ["release"],
-        onBranchFilterChange,
-        onBaseBranchFilterChange,
-      });
+    it("rend le champ Alpha desktop inline sans panneau flottant", () => {
+      const { container } = renderHeader({ onSearchChange: vi.fn(), view: "board" }, "desktop");
+      fireEvent.click(screen.getByTestId("desktop-inline-header-search-btn"));
+      expect(container.querySelector(".header-actions .header-search--inline")).toBeInTheDocument();
+      expect(container.querySelector(".header-floating-search")).toBeNull();
+      expect(document.querySelector('[aria-modal="true"]')).toBeNull();
+    });
+
+    it.each([
+      { tier: "tablet" as const, triggerTestId: "desktop-header-search-btn" },
+      { tier: "mobile" as const, triggerTestId: "mobile-header-search-btn" },
+    ])("preserves the Alpha $tier floating search", ({ tier, triggerTestId }) => {
+      const onSearchChange = vi.fn();
+      const { container } = renderHeader({ onSearchChange, view: "board" }, tier);
+
+      expect(screen.getByTestId(triggerTestId)).toBeInTheDocument();
+      expect(screen.queryByTestId("desktop-inline-header-search-btn")).toBeNull();
+      fireEvent.click(screen.getByTestId(triggerTestId));
+
+      const floatingSearch = container.querySelector(".header-floating-search");
+      expect(floatingSearch).toBeInTheDocument();
+      expect(floatingSearch?.querySelector('[role="combobox"]')).toBeInTheDocument();
+      expect(container.querySelector(".header-actions .header-search--inline")).toBeNull();
+      expect(screen.queryByTestId("alpha-task-search-overlay")).toBeNull();
+      expect(document.querySelector('[aria-modal="true"]')).toBeNull();
+
+      fireEvent.change(screen.getByRole("combobox"), { target: { value: "alpha query" } });
+      expect(onSearchChange).toHaveBeenCalledWith("alpha query");
+    });
+
+    /*
+    FNXC:TaskSearch 2026-09-17-07:43:
+    FN-494 remplace le cas « applique l'id sélectionné au filtre ». Ce contrat est supprimé : les deux
+    champs flottants ne fournissaient aucun `onSelectTask`, donc une sélection écrivait l'identifiant
+    dans le filtre Board/List et n'ouvrait jamais la fiche. La règle est désormais identique aux trois
+    hôtes : vider le champ, fermer la recherche, ouvrir la fiche.
+    */
+    it.each(["tablet", "mobile"] as const)("(c2)/(c3) la sélection vide le champ, ferme la recherche et ouvre la fiche sur %s", async (tier) => {
+      mockFetchTaskPage.mockResolvedValue(searchPage([
+        { id: "FN-352", title: "Dans la barre de recherche" },
+      ]) as never);
+      const onQueryChange = vi.fn();
+      const onSelectSearchTask = vi.fn();
+      renderSearchHeader(tier, { onQueryChange, onSelectSearchTask });
+      if (tier === "tablet") fireEvent.click(screen.getByTestId("desktop-header-search-btn"));
+      if (tier === "mobile") fireEvent.click(screen.getByTestId("mobile-header-search-btn"));
+
+      const input = screen.getByRole("combobox");
+      fireEvent.change(input, { target: { value: "52" } });
+
+      await waitFor(() => expect(screen.getByText("FN-352")).toBeInTheDocument());
+      expect(screen.queryByRole("listbox")).toBeNull();
+
+      fireEvent.click(screen.getByText("FN-352"));
+
+      expect(onSelectSearchTask).toHaveBeenCalledTimes(1);
+      expect(onSelectSearchTask.mock.calls[0][0].id).toBe("FN-352");
+      expect(onQueryChange).toHaveBeenCalledWith("");
+      expect(onQueryChange).not.toHaveBeenCalledWith("FN-352");
+      // Ni panneau portalisé, ni champ de recherche encore monté.
+      await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
+      expect(document.querySelector(".task-search-results")).toBeNull();
+    });
+
+    it("transmet la requête au serveur plutôt que de filtrer une collection chargée", async () => {
+      mockFetchTaskPage.mockResolvedValue(searchPage([{ id: "FN-902", title: "Add the bonjour.txt file" }]) as never);
+      renderSearchHeader("tablet");
       fireEvent.click(screen.getByTestId("desktop-header-search-btn"));
-      fireEvent.change(screen.getByTestId("working-branch-filter"), { target: { value: "feature/a" } });
-      fireEvent.change(screen.getByTestId("working-branch-filter"), { target: { value: "__fusion:no-branch__" } });
-      fireEvent.change(screen.getByTestId("target-branch-filter"), { target: { value: "release" } });
-      fireEvent.change(screen.getByTestId("target-branch-filter"), { target: { value: "__fusion:no-branch__" } });
-      fireEvent.change(screen.getByTestId("working-branch-filter"), { target: { value: "" } });
-      expect(onBranchFilterChange).toHaveBeenCalledWith("feature/a");
-      expect(onBranchFilterChange).toHaveBeenCalledWith("__fusion:no-branch__");
-      expect(onBranchFilterChange).toHaveBeenCalledWith("");
-      expect(onBaseBranchFilterChange).toHaveBeenCalledWith("release");
-      expect(onBaseBranchFilterChange).toHaveBeenCalledWith("__fusion:no-branch__");
-    });
 
-    it("renders branch filters in mobile expanded search for board view", () => {
-      renderHeader({
-        onSearchChange: vi.fn(),
-        view: "board",
-        branchOptions: ["feature/mobile"],
-        baseBranchOptions: ["main"],
-      }, "mobile");
-      fireEvent.click(screen.getByTestId("mobile-header-search-btn"));
-      expect(screen.getByTestId("header-branch-filters-mobile")).toBeInTheDocument();
-      expect(screen.getByTestId("working-branch-filter-mobile")).toBeInTheDocument();
-      expect(screen.getByTestId("target-branch-filter-mobile")).toBeInTheDocument();
+      fireEvent.change(screen.getByRole("combobox"), { target: { value: ".txt" } });
+
+      // Suffixes and literal punctuation reach the shared server predicate untouched.
+      await waitFor(() => expect(mockFetchTaskPage).toHaveBeenCalledWith(
+        "project-a",
+        expect.objectContaining({ query: ".txt" }),
+      ));
     });
   });
 

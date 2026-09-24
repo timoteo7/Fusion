@@ -18,9 +18,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { mkdir, readFile, writeFile, rename, chmod, unlink } from "node:fs/promises";
 import { existsSync, mkdirSync, realpathSync, renameSync } from "node:fs";
 import type { ConfigChangedBy, ConfigKind, ConfigurationRevision, ConfigurationTarget, GlobalSettings } from "../types.js";
-import { CONFIG_CHANGED_BY_SYSTEM } from "../types.js";
-import { DEFAULT_GLOBAL_SETTINGS } from "../types.js";
-import { sanitizeCliAgentsSettings } from "./settings-schema.js";
+import { COLOR_THEMES, CONFIG_CHANGED_BY_SYSTEM, DEFAULT_GLOBAL_SETTINGS, DEFAULT_UI_STYLE, isUiStyle } from "../types.js";
+import { normalizeChatSnippets, sanitizeCliAgentsSettings } from "./settings-schema.js";
 import type { AsyncDataLayer } from "../postgres/data-layer.js";
 import { GLOBAL_CONFIGURATION_OWNER_ID, appendGlobalConfigurationRevision, createConfigurationRevision, getGlobalConfigurationRevision, listGlobalConfigurationRevisions } from "../async-stores/async-configuration-revision-store.js";
 
@@ -45,6 +44,30 @@ function bumpSettingsCacheEpoch(settingsPath: string): number {
   const next = getSettingsCacheEpoch(settingsPath) + 1;
   settingsCacheEpochs.set(settingsPath, next);
   return next;
+}
+
+const validColorThemes = new Set<string>(COLOR_THEMES);
+
+/** Merge defaults and prevent unknown persisted theme IDs from escaping the global settings boundary. */
+function normalizeGlobalSettings(raw: Record<string, unknown>): GlobalSettings {
+  const settings = { ...DEFAULT_GLOBAL_SETTINGS, ...raw } as GlobalSettings;
+  /*
+  FNXC:LiquidGlassTheme 2026-09-09-16:20:
+  Global color-theme persistence accepts only the canonical registry. Missing or stale identifiers resolve to Shadcn Ember on reads and are replaced by that default on the next write, while every registered historical preset remains valid.
+  */
+  if (typeof raw.colorTheme !== "string" || !validColorThemes.has(raw.colorTheme)) {
+    settings.colorTheme = DEFAULT_GLOBAL_SETTINGS.colorTheme;
+  }
+  /*
+  FNXC:UiStyleAxis 2026-09-15-00:20:
+  FN-399's interface style is normalized exactly like colorTheme: an absent, wrongly typed, `null`-reset
+  or unknown persisted value resolves to "classic" on read and is replaced by that default on the next
+  write. Unrelated keys — including unknown historical ones — are preserved untouched by the merge above.
+  */
+  if (!isUiStyle(raw.uiStyle)) {
+    settings.uiStyle = DEFAULT_UI_STYLE;
+  }
+  return settings;
 }
 
 function getHomeDir(): string {
@@ -280,7 +303,7 @@ export class GlobalSettingsStore {
         continue;
       }
 
-      this.cachedSettings = { ...DEFAULT_GLOBAL_SETTINGS, ...parsed } as GlobalSettings;
+      this.cachedSettings = normalizeGlobalSettings(parsed);
       this.cachedSettingsEpoch = currentEpoch;
       return this.cachedSettings;
     }
@@ -329,6 +352,8 @@ export class GlobalSettingsStore {
           // unknown adapter ids and invalid fields are dropped before persist so
           // a malformed `cliAgents` payload can never reach launch resolution.
           merged[key] = sanitizeCliAgentsSettings(value);
+        } else if (key === "chatSnippets") {
+          merged[key] = normalizeChatSnippets(value);
         } else {
           // normal value → set it
           merged[key] = value;
@@ -337,7 +362,7 @@ export class GlobalSettingsStore {
 
       // After merging, fill in defaults for any missing keys
       // This ensures fields that were deleted (by null) get their default value
-      const withDefaults = { ...DEFAULT_GLOBAL_SETTINGS, ...merged } as GlobalSettings;
+      const withDefaults = normalizeGlobalSettings(merged);
 
       const revision = revisionLayer ? createConfigurationRevision({
         projectId: GLOBAL_CONFIGURATION_OWNER_ID,
@@ -396,7 +421,7 @@ export class GlobalSettingsStore {
         throw new Error(`Global configuration revision ${revisionId} was not found`);
       }
       const current = await this.readRawForUpdate();
-      const restored = target.before as Record<string, unknown>;
+      const restored = normalizeGlobalSettings(target.before as Record<string, unknown>);
       const rollback = createConfigurationRevision({
         projectId: GLOBAL_CONFIGURATION_OWNER_ID,
         ownerScope: "global",
@@ -409,7 +434,7 @@ export class GlobalSettingsStore {
         rollbackToRevisionId: target.id,
       });
       if (!rollback) throw new Error(`Configuration revision ${revisionId} is already restored`);
-      await this.writeVersionedSnapshot(layer, rollback, current, restored);
+      await this.writeVersionedSnapshot(layer, rollback, current, restored as unknown as Record<string, unknown>);
       this.cachedSettings = { ...DEFAULT_GLOBAL_SETTINGS, ...restored } as GlobalSettings;
       return rollback;
     });

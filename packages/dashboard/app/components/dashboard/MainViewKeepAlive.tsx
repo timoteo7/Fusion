@@ -1,9 +1,10 @@
-import { Suspense } from "react";
+import { Suspense, useCallback, useRef, type ComponentProps } from "react";
 import { Board } from "../Board";
 import { CapacityRiskBanner } from "../CapacityRiskBanner";
 import { PageErrorBoundary } from "../ErrorBoundary";
 import { KeepAliveView } from "../KeepAliveView";
 import { ListView } from "../ListView";
+import { MobileDrawer } from "../MobileDrawer";
 import type { MainContentProps } from "./types";
 
 /*
@@ -29,9 +30,20 @@ export interface MainViewKeepAliveProps {
   mountedIds: readonly KeepAliveMainViewId[];
   projectKey: string;
   mainContentProps: MainContentProps;
+  mobileDrawer?: {
+    activeId: Exclude<KeepAliveMainViewId, "board"> | null;
+    backgroundActive?: boolean;
+    title: string;
+    onClose: () => void;
+  };
 }
 
-function renderBoardSubtree(props: MainContentProps, active: boolean) {
+function renderBoardSubtree(
+  props: MainContentProps,
+  active: boolean,
+  onOpenHistory: () => void,
+  onRefinementCreated: NonNullable<ComponentProps<typeof Board>["onRefinementCreated"]>,
+) {
   const {
     capacityRiskBannerEnabled,
     capacityRiskDismissed,
@@ -39,13 +51,14 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
     handleDismissCapacityRisk,
     filteredBoardTasks,
     currentProject,
+    isRemote,
     maxConcurrent,
-    effectiveMaxConcurrent,
+    maxWorktrees,
     showWorktreeGrouping,
     moveTask,
+    boostTask,
     pauseTask,
     openBoardTaskDetail,
-    openDetailTask,
     openGroupModalWithNav,
     addToast,
     handleBoardQuickCreate,
@@ -53,7 +66,6 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
     openPlanningWithInitialPlanWithNav,
     autoMerge,
     mergeStrategy,
-    toggleAutoMerge,
     planAutoApproveEnabled,
     togglePlanAutoApprove,
     globalPaused,
@@ -64,18 +76,23 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
     resetTask,
     duplicateTask,
     mergeTask,
-    archiveTask,
-    unarchiveTask,
     revertTask,
-    modalManager,
+    restoreTaskRevert,
     deleteTask,
-    archiveAllDone,
-    loadArchivedTasks,
-    loadMoreArchivedTasks,
-    archivedSortMode,
-    changeArchivedSortMode,
-    archivedHasMore,
-    archivedLoadingMore,
+    loadMoreCurrentTasks,
+    currentTasksTotal,
+    currentTasksHasMore,
+    currentTasksLoadingMore,
+    currentTasksPaginationError,
+    currentTasksProgressKey,
+    retryCurrentTasksPagination,
+    loadMoreCompletedTasks,
+    completedCounts,
+    completedHasMore,
+    completedLoadingMore,
+    completedPaginationError,
+    completedProgressKey,
+    retryCompletedTasksPagination,
     searchQuery,
     availableModels,
     handleOpenDetailWithTab,
@@ -87,11 +104,9 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
     handleOpenMission,
     lastFetchTimeMs,
     prAuthAvailable,
-    openWorkflowEditorWithNav,
-    openCreateWorkflowWithNav,
-    sidebarActive,
-    isMobile,
   } = props;
+  /* FNXC:OfficialDashboardDesign 2026-09-13-00:38: Board and List always own the Header workflow slot in the official desktop shell. */
+  const workflowControlsInHeader = true;
 
   return (
     <PageErrorBoundary>
@@ -99,15 +114,16 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
         <CapacityRiskBanner signal={capacityRiskSignal} onDismiss={handleDismissCapacityRisk} />
       ) : null}
       <Board
+        onBoostTask={boostTask}
         tasks={filteredBoardTasks}
         projectId={currentProject?.id}
         maxConcurrent={maxConcurrent}
-        effectiveMaxConcurrent={effectiveMaxConcurrent}
+        maxWorktrees={maxWorktrees}
         showWorktreeGrouping={showWorktreeGrouping}
         onMoveTask={moveTask}
         onPauseTask={pauseTask}
         onOpenDetail={openBoardTaskDetail}
-        onOpenRefine={(task) => openDetailTask(task, undefined, { initialAction: "refine" })}
+        onRefinementCreated={onRefinementCreated}
         onOpenGroupModal={openGroupModalWithNav}
         addToast={addToast}
         onQuickCreate={handleBoardQuickCreate}
@@ -115,7 +131,6 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
         onPlanningMode={openPlanningWithInitialPlanWithNav}
         autoMerge={autoMerge}
         mergeStrategy={mergeStrategy}
-        onToggleAutoMerge={toggleAutoMerge}
         planAutoApproveEnabled={planAutoApproveEnabled}
         onTogglePlanAutoApprove={togglePlanAutoApprove}
         globalPaused={globalPaused}
@@ -126,18 +141,23 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
         onResetTask={resetTask}
         onDuplicateTask={duplicateTask}
         onMergeTask={mergeTask}
-        onArchiveTask={archiveTask}
-        onUnarchiveTask={unarchiveTask}
         onRevertTask={revertTask}
-        onReviseTask={(task) => modalManager.openNewTaskWithDescription(task.description)}
+        onRestoreRevertTask={restoreTaskRevert}
         onDeleteTask={deleteTask}
-        onArchiveAllDone={archiveAllDone}
-        onLoadArchivedTasks={loadArchivedTasks}
-        onLoadMoreArchivedTasks={loadMoreArchivedTasks}
-        archivedSortMode={archivedSortMode}
-        onArchivedSortModeChange={changeArchivedSortMode}
-        archivedHasMore={archivedHasMore}
-        archivedLoadingMore={archivedLoadingMore}
+        onLoadMoreCurrentTasks={isRemote ? undefined : loadMoreCurrentTasks}
+        currentTasksTotal={isRemote ? undefined : currentTasksTotal}
+        currentTasksHasMore={isRemote ? false : currentTasksHasMore}
+        currentTasksLoadingMore={isRemote ? false : currentTasksLoadingMore}
+        currentTasksPaginationError={isRemote ? null : currentTasksPaginationError}
+        currentTasksProgressKey={isRemote ? undefined : currentTasksProgressKey}
+        onRetryCurrentTasks={isRemote ? undefined : retryCurrentTasksPagination}
+        onLoadMoreCompletedTasks={isRemote ? undefined : loadMoreCompletedTasks}
+        completedCounts={isRemote ? undefined : completedCounts}
+        completedHasMore={isRemote ? false : completedHasMore}
+        completedLoadingMore={isRemote ? false : completedLoadingMore}
+        completedPaginationError={isRemote ? null : completedPaginationError}
+        completedProgressKey={isRemote ? undefined : completedProgressKey}
+        onRetryCompletedTasks={isRemote ? undefined : retryCompletedTasksPagination}
         searchQuery={searchQuery}
         availableModels={availableModels}
         onOpenDetailWithTab={handleOpenDetailWithTab}
@@ -149,99 +169,102 @@ function renderBoardSubtree(props: MainContentProps, active: boolean) {
         onOpenMission={handleOpenMission}
         lastFetchTimeMs={lastFetchTimeMs}
         prAuthAvailable={prAuthAvailable}
-        onOpenWorkflowEditor={openWorkflowEditorWithNav}
-        onCreateWorkflow={openCreateWorkflowWithNav}
-        workflowControlsInHeader={sidebarActive || isMobile}
+        workflowControlsInHeader={workflowControlsInHeader}
+        onOpenHistory={onOpenHistory}
         active={active}
       />
     </PageErrorBoundary>
   );
 }
 
-function renderListSubtree(props: MainContentProps, active: boolean) {
+function renderListSubtree(
+  props: MainContentProps,
+  active: boolean,
+  onRefinementCreated: NonNullable<ComponentProps<typeof Board>["onRefinementCreated"]>,
+  showWorkflowControls: boolean,
+) {
   const {
     isRemote,
     remoteData,
     tasks,
     currentProject,
-    moveTask,
     retryTask,
     onOpenChatWithPrefill,
     deleteTask,
-    modalManager,
     pauseTask,
     unpauseTask,
-    archiveTask,
     revertTask,
+    restoreTaskRevert,
     mergeTask,
     resetTask,
     duplicateTask,
-    ingestCreatedTasks,
     openDetailTask,
     popOutTaskDetail,
     addToast,
     globalPaused,
     openNewTaskWithNav,
-    handleBoardQuickCreate,
-    openPlanningWithInitialPlanWithNav,
     availableModels,
     favoriteProviders,
     favoriteModels,
     handleToggleFavorite,
     handleToggleModelFavorite,
     searchQuery,
+    loadMoreCurrentTasks,
+    currentTasksHasMore,
+    currentTasksLoadingMore,
+    currentTasksPaginationError,
+    currentTasksProgressKey,
+    retryCurrentTasksPagination,
     lastFetchTimeMs,
-    prAuthAvailable,
     autoMerge,
-    openMobileTasksInPopup,
-    taskDetailChatFirst,
     mergeStrategy,
-    openWorkflowEditorWithNav,
-    openCreateWorkflowWithNav,
-    sidebarActive,
-    isMobile,
   } = props;
+  const workflowControlsInHeader = true;
 
   return (
     <PageErrorBoundary>
       <ListView
         tasks={isRemote && remoteData.tasks.length > 0 ? remoteData.tasks : tasks}
         projectId={currentProject?.id}
-        onMoveTask={moveTask}
         onRetryTask={retryTask}
         onOpenChatWithPrefill={onOpenChatWithPrefill}
         onDeleteTask={deleteTask}
-        onReviseTask={(task) => modalManager.openNewTaskWithDescription(task.description)}
         onPauseTask={pauseTask}
         onUnpauseTask={unpauseTask}
-        onArchiveTask={archiveTask}
         onRevertTask={revertTask}
+        onRestoreRevertTask={restoreTaskRevert}
         onMergeTask={mergeTask}
         onResetTask={resetTask}
         onDuplicateTask={duplicateTask}
-        onRefinementCreated={(task) => ingestCreatedTasks([task])}
+        onRefinementCreated={onRefinementCreated}
         onOpenDetail={(task, options) => openDetailTask(task, undefined, options)}
         onPopOut={popOutTaskDetail}
         addToast={addToast}
         globalPaused={globalPaused}
         onNewTask={openNewTaskWithNav}
-        onQuickCreate={handleBoardQuickCreate}
-        onPlanningMode={openPlanningWithInitialPlanWithNav}
         availableModels={availableModels}
         favoriteProviders={favoriteProviders}
         favoriteModels={favoriteModels}
         onToggleFavorite={handleToggleFavorite}
         onToggleModelFavorite={handleToggleModelFavorite}
         searchQuery={searchQuery}
+        onLoadMoreCurrentTasks={isRemote ? undefined : loadMoreCurrentTasks}
+        currentTasksHasMore={isRemote ? false : currentTasksHasMore}
+        currentTasksLoadingMore={isRemote ? false : currentTasksLoadingMore}
+        currentTasksPaginationError={isRemote ? null : currentTasksPaginationError}
+        currentTasksProgressKey={isRemote ? undefined : currentTasksProgressKey}
+        onRetryCurrentTasks={isRemote ? undefined : retryCurrentTasksPagination}
         lastFetchTimeMs={lastFetchTimeMs}
-        prAuthAvailable={prAuthAvailable}
         autoMerge={autoMerge}
-        openMobileTasksInPopup={openMobileTasksInPopup}
-        taskDetailChatFirst={taskDetailChatFirst}
         mergeStrategy={mergeStrategy}
-        onOpenWorkflowEditor={openWorkflowEditorWithNav}
-        onCreateWorkflow={openCreateWorkflowWithNav}
-        workflowControlsInHeader={sidebarActive || isMobile}
+        workflowControlsInHeader={workflowControlsInHeader}
+        /*
+        FNXC:WorkflowControls 2026-09-16-23:24:
+        FN-483 : sous un drawer téléphone, Board reste actif derrière List et possède déjà `#header-workflow-slot`.
+        List reste entièrement active — ses tâches et son filtrage suivent la sélection partagée — mais ne publie plus
+        de second sélecteur dans ce header.
+        */
+        showWorkflowControls={showWorkflowControls}
         active={active}
       />
     </PageErrorBoundary>
@@ -255,7 +278,6 @@ function renderChatSubtree(props: MainContentProps, active: boolean) {
     addToast,
     experimentalFeatures,
     chatComposerPrefill,
-    setQuickChatOpen,
     onOpenSessionInNewWindow,
     onSendAsReport,
   } = props;
@@ -269,7 +291,6 @@ function renderChatSubtree(props: MainContentProps, active: boolean) {
           experimentalFeatures={experimentalFeatures}
           initialComposerDraft={chatComposerPrefill?.text}
           initialComposerDraftNonce={chatComposerPrefill?.nonce}
-          onPopOut={() => setQuickChatOpen(true)}
           onOpenSessionInNewWindow={onOpenSessionInNewWindow}
           onSendAsReport={onSendAsReport}
           findActive={active}
@@ -280,26 +301,76 @@ function renderChatSubtree(props: MainContentProps, active: boolean) {
   );
 }
 
-function renderMainViewSubtree(id: KeepAliveMainViewId, props: MainContentProps, active: boolean) {
+function renderMainViewSubtree(
+  id: KeepAliveMainViewId,
+  props: MainContentProps,
+  active: boolean,
+  onOpenHistory: () => void,
+  onRefinementCreated: NonNullable<ComponentProps<typeof Board>["onRefinementCreated"]>,
+  listShowsWorkflowControls: boolean,
+) {
   switch (id) {
     case "board":
-      return renderBoardSubtree(props, active);
+      return renderBoardSubtree(props, active, onOpenHistory, onRefinementCreated);
     case "list":
-      return renderListSubtree(props, active);
+      return renderListSubtree(props, active, onRefinementCreated, listShowsWorkflowControls);
     case "chat":
       return renderChatSubtree(props, active);
   }
 }
 
-export function MainViewKeepAlive({ activeId, mountedIds, projectKey, mainContentProps }: MainViewKeepAliveProps) {
+export function MainViewKeepAlive({ activeId, mountedIds, projectKey, mainContentProps, mobileDrawer }: MainViewKeepAliveProps) {
+  /*
+  FNXC:HistoryRenderStability 2026-09-12-23:15:
+  Window or drawer routing rerenders this retained host while Board data stays unchanged. Keep
+  every locally adapted column action stable while forwarding to the latest owners, so opening History cannot invalidate memoized workflow columns through History, Refine, or Revise callback identity churn.
+  */
+  const mainContentPropsRef = useRef(mainContentProps);
+  mainContentPropsRef.current = mainContentProps;
+  /* FNXC:HistoryModalSurface 2026-09-15-04:29: FN-403: opening History is a modal request, never a view change, so the retained Board subtree is untouched. */
+  const handleOpenHistory = useCallback(() => {
+    mainContentPropsRef.current.openHistory();
+  }, []);
+  /*
+  FNXC:TaskRefine 2026-09-14-22:23:
+  FN-400: this host no longer routes Refine anywhere. The card and the list row own the standalone composer, and this
+  retained host only forwards the created child into shared board state through a stable callback.
+  */
+  const handleRefinementCreated = useCallback<NonNullable<ComponentProps<typeof Board>["onRefinementCreated"]>>((task) => {
+    mainContentPropsRef.current.ingestCreatedTasks([task]);
+  }, []);
+
   return (
     <>
       {mountedIds.map((id) => {
-        const isActive = activeId === id;
-        return (
+        const isDrawerView = mobileDrawer !== undefined && id !== "board";
+        const isActive = activeId === id || (mobileDrawer !== undefined && mobileDrawer.backgroundActive !== false && id === "board");
+        /*
+        FNXC:WorkflowControls 2026-09-16-23:24:
+        FN-483 : un Board de fond ACTIF est l'unique propriétaire du sélecteur contextuel. Sur une vraie page large
+        (aucun drawer), ou quand le fond est explicitement désactivé, List reprend ce rôle normalement.
+        */
+        const boardBackgroundOwnsHeaderSlot = mobileDrawer !== undefined && mobileDrawer.backgroundActive !== false;
+        const subtree = (
           <KeepAliveView key={`${projectKey}:${id}`} hidden={!isActive} testId={`${id}-keep-alive`}>
-            {renderMainViewSubtree(id, mainContentProps, isActive)}
+            {renderMainViewSubtree(id, mainContentProps, isActive, handleOpenHistory, handleRefinementCreated, !boardBackgroundOwnsHeaderSlot)}
           </KeepAliveView>
+        );
+        if (!isDrawerView) return subtree;
+        return (
+          <MobileDrawer
+            key={`${projectKey}:${id}`}
+            open={mobileDrawer.activeId === id}
+            title={mobileDrawer.title}
+            onClose={mobileDrawer.onClose}
+            keepMounted
+            testId={`mobile-drawer-${id}`}
+            surfaceGroup={id === "chat" ? "chat" : undefined}
+            contentOwnsHeader
+            contentOwnsScroll
+          >
+            {subtree}
+          </MobileDrawer>
         );
       })}
     </>

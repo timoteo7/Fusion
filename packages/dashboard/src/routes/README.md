@@ -33,7 +33,7 @@ The following is the complete top-level registrar map currently imported by `rou
 - `registerAuthRoutes` — domain registrar mounted by `createApiRoutes`.
 - `registerRuntimeProviderRoutes` — domain registrar mounted by `createApiRoutes`.
 - `registerFnBinaryRoutes` — domain registrar mounted by `createApiRoutes`.
-- `registerAiTextAssistantRoutes` — AI refine, translate, goal-draft, and title-summary endpoints.
+- `registerAiTextAssistantRoutes` — AI refine, translate, goal-draft, title-summary, and header task search (`POST /ai/search-tasks`) endpoints. Task search runs on its own 60/hour per (project, IP) budget so repeated searching cannot starve the 10/hour refine/draft helpers.
 - `registerUsageRoutes` — domain registrar mounted by `createApiRoutes`.
 - `registerCommandCenterRoutes` — domain registrar mounted by `createApiRoutes`.
 - `registerKnowledgeRoutes` — domain registrar mounted by `createApiRoutes`.
@@ -69,7 +69,7 @@ The following is the complete top-level registrar map currently imported by `rou
 - `registerSetupActivityRoutes` — the late activity feed, concurrency, and setup split export from `register-setup-activity-routes.ts`.
 - `registerIntegratedDevServerRouter` — domain registrar mounted by `createApiRoutes`.
 - `registerAgentSkillsRoutes` — domain registrar mounted by `createApiRoutes`.
-- `registerPatchnodeRoutes` — project-scoped read-only Patchnode delivery feed.
+- `registerPatchnodeRoutes` — project-scoped read-only History delivery feed.
 - `registerProxyRoutes` — domain registrar mounted by `createApiRoutes`.
 
 `registerFilesTerminalWorkspaceRoutes` is an infrastructure aggregator: it preserves nested `session-diff → file-workspace → terminal` registration order. Its file operation routes stay before generic file wildcards. `registerIntegratedRouters` mounts the missions, ideation, insights, evals, research, experiments, todos, goals, roadmaps, stash-recovery, and branch-group integrated routers; `registerIntegratedDevServerRouter` mounts `/dev-server`.
@@ -145,7 +145,7 @@ Express matches in registration order. `create-api-routes-mount-sequence.ts` is 
 ## Ordering rules
 
 - Specific operation paths precede parameterized and wildcard paths.
-- `registerProxyRoutes` is always last; its explicit `/proxy/:nodeId/health`, project, task, project-health, and event paths precede `ALL /proxy/:nodeId/{*splat}` inside the registrar.
+- `registerProxyRoutes` is always last; its explicit `/proxy/:nodeId/health`, project, task, `tasks/page`, `ai/search-tasks`, project-health, and event paths precede `ALL /proxy/:nodeId/{*splat}` inside the registrar. The two header-search forwards must stay explicit: the wildcard composes its upstream path without the shared helper's `/api` prefix, and `POST /proxy/:nodeId/ai/search-tasks` additionally needs a JSON body, a 30s budget above the upstream generation budget, and downstream-disconnect abort propagation.
 - Keep model → auth → usage, the agent core/list → core → runtime chain, and project → node → sync → mesh → discovery → inbound-sync ordering unchanged unless a tested precedence migration requires it.
 - Keep integrated routers before project/node routes and the integrated dev-server router before skills and proxy routes.
 - Keep plugin management registration ahead of the later `createPluginRouter` mount. Its `/plugins/:id` handler calls `next()` for `registry`, allowing the sub-router's registry route to serve that static path.

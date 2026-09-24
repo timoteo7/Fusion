@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getDevServerState, saveDevServerState } from "../hooks/modalPersistence";
 import { isWipColumnRole } from "../utils/columnRoles";
+import { getTaskTitleDisplayText } from "../utils/taskTitleDisplay";
 import type { RefObject } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ExternalLink, Eye, Loader2, Monitor, Play, RefreshCw, RotateCw, ShieldAlert, Square, X } from "lucide-react";
+import { AlertTriangle, ExternalLink, Eye, Loader2, Monitor, Play, RefreshCw, RotateCw, ShieldAlert, Square } from "lucide-react";
 import type { Task, TaskDetail } from "@fusion/core";
 import "./DevServerView.css";
 import type { DetectedDevServerCommand } from "../api";
@@ -14,9 +15,11 @@ import { usePreviewEmbed } from "../hooks/usePreviewEmbed";
 import { useOverlayDismiss } from "../hooks/useOverlayDismiss";
 import type { ToastType } from "../hooks/useToast";
 import { DevServerLogViewer } from "./DevServerLogViewer";
+import { FloatingWindow } from "./FloatingWindow";
 import { PreviewIframe } from "./PreviewIframe";
 import { recordResumeEvent } from "../utils/resumeInstrumentation";
 import { ViewHeader } from "./ViewHeader";
+import { ViewActionButton } from "./ViewActionButton";
 
 interface DevServerViewProps {
   /** Per-task resolved column flags, from MainContent. */
@@ -736,36 +739,29 @@ export function DevServerView({ addToast, projectId, tasks, columnFlagsByTaskId 
               </span>
             </span>
             <div className="dev-server-header-actions">
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
+              <ViewActionButton
+                kind="create"
+                icon={Play}
+                label={actionInFlight === "start" ? t("devserver.starting", "Starting...") : t("devserver.start", "Start")}
                 onClick={handleStart}
                 disabled={startDisabled}
                 data-testid="dev-server-start-button"
-              >
-                <Play size={14} />
-                <span>{actionInFlight === "start" ? t("devserver.starting", "Starting...") : t("devserver.start", "Start")}</span>
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
+              />
+              <ViewActionButton
+                icon={Square}
+                className="btn-danger"
+                label={actionInFlight === "stop" ? t("devserver.stopping", "Stopping...") : t("devserver.stop", "Stop")}
                 onClick={handleStop}
                 disabled={stopDisabled}
                 data-testid="dev-server-stop-button"
-              >
-                <Square size={14} />
-                <span>{actionInFlight === "stop" ? t("devserver.stopping", "Stopping...") : t("devserver.stop", "Stop")}</span>
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm"
+              />
+              <ViewActionButton
+                icon={RotateCw}
+                label={actionInFlight === "restart" ? t("devserver.restarting", "Restarting...") : t("devserver.restart", "Restart")}
                 onClick={handleRestart}
                 disabled={restartDisabled}
                 data-testid="dev-server-restart-button"
-              >
-                <RotateCw size={14} />
-                <span>{actionInFlight === "restart" ? t("devserver.restarting", "Restarting...") : t("devserver.restart", "Restart")}</span>
-              </button>
+              />
             </div>
           </>
         )}
@@ -861,7 +857,8 @@ export function DevServerView({ addToast, projectId, tasks, columnFlagsByTaskId 
               <option value="">{t("devserver.projectRootNoTask", "Project root (no task)")}</option>
               {executingTasks.map((task) => (
                 <option key={task.id} value={task.id}>
-                  {task.title ? `${task.id} — ${task.title}` : task.id}
+                  {/* FNXC:TaskTitleDisplay 2026-09-14-17:05: FN-391 — shared label projection. */}
+                  {`${task.id} — ${getTaskTitleDisplayText(task)}`}
                 </option>
               ))}
             </select>
@@ -999,33 +996,50 @@ export function DevServerView({ addToast, projectId, tasks, columnFlagsByTaskId 
       )}
 
       {isNarrowRightDockPreviewMode && isPreviewModalOpen && (
-        <div className="modal-overlay open devserver-preview-modal-overlay" {...previewModalOverlayDismissProps}>
+        /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: FN-394 hosts the narrow-dock preview in the shared window so it can be snapped beside the board instead of being a fixed overlay. */
+        <FloatingWindow
+          windowKey="devserver-preview"
+          modal
+          hideHeader
+          surfaceGroup="dialog"
+          title={t("devserver.preview", "Preview")}
+          ariaLabelledBy="devserver-preview-modal-title"
+          onClose={closePreviewModal}
+          dragHandleSelector=".devserver-preview-modal .devserver-preview-modal__titlebar"
+          className="floating-window--dialog floating-window--devserver-preview"
+          overlayClassName="devserver-preview-modal-overlay"
+          defaultSize={{ width: 820, height: 620 }}
+          minSize={{ width: 320, height: 260 }}
+          suspendGeometryPersistenceOnMobile
+          suspendGeometryPersistenceOnShortViewport
+          backdropMouseHandlers={previewModalOverlayDismissProps}
+        >
           <div
             className="modal devserver-preview-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="devserver-preview-modal-title"
             tabIndex={-1}
             ref={previewModalRef}
             data-testid="devserver-preview-modal"
           >
-            <div className="devserver-preview-modal__titlebar">
-              <h2 id="devserver-preview-modal-title">{t("devserver.preview", "Preview")}</h2>
-              <button
-                type="button"
-                className="btn btn-sm btn-icon"
-                onClick={closePreviewModal}
-                aria-label={t("devserver.closePreviewModal", "Close preview modal")}
-                data-testid="devserver-preview-modal-close"
-              >
-                <X />
-              </button>
-            </div>
+            {/*
+            FNXC:StandardizedViewLayout 2026-09-13-22:40:
+            FN-379 remediation: the narrow-dock preview window shares the canonical header instead of a local
+            titlebar row, keeping its labelling id and close test hook.
+            */}
+            <ViewHeader
+              className="devserver-preview-modal__titlebar"
+              titleId="devserver-preview-modal-title"
+              title={t("devserver.preview", "Preview")}
+              onClose={closePreviewModal}
+              closeButtonProps={{
+                "aria-label": t("devserver.closePreviewModal", "Close preview modal"),
+                "data-testid": "devserver-preview-modal-close",
+              }}
+            />
             <div className="devserver-preview-modal__body">
               {renderPreviewContent()}
             </div>
           </div>
-        </div>
+        </FloatingWindow>
       )}
     </div>
   );

@@ -1,6 +1,8 @@
-import type { AgentLogEntry, AgentRole, SteeringComment, Task, TaskDetail } from "@fusion/core";
+import type { AgentLogEntry, AgentRole, ChatSnippet, SteeringComment, Task, TaskDetail } from "@fusion/core";
+import { UiButton, UiListBox, UiListBoxItem, UiTextArea } from "./ui";
 import { isCompleteColumnRole, isWipColumnRole } from "../utils/columnRoles";
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertTriangle, ChevronDown, Cpu, Loader2, Maximize2, Minimize2, Send } from "lucide-react";
@@ -10,6 +12,7 @@ import { addSteeringComment, refineTask } from "../api";
 import { useAgentLogs } from "../hooks/useAgentLogs";
 import { isLogGapMarker } from "../hooks/logStreamReconcile";
 import { useComposerDictation } from "../hooks/useComposerDictation";
+import { useChatSnippets } from "../hooks/useChatSnippetsCache";
 import { MicButton } from "./MicButton";
 import type { ToastType } from "../hooks/useToast";
 import { getErrorMessage } from "@fusion/core";
@@ -27,8 +30,12 @@ import {
 import { formatAgentLogTimingLabels, markdownComponents } from "./AgentLogViewer";
 import { ToolCallDetails } from "./ToolCallDetails";
 import { ThinkingTrace, isInteractiveDisclosureTarget } from "./ThinkingTrace";
-import { parseRuntimeModelMarker } from "./effective-model-resolution";
+import { parseRuntimeModelMarker, parseRuntimeModelMarkerThinkingLevel } from "./effective-model-resolution";
 import { useChatMessageLayout } from "../context/ChatMessageLayoutContext";
+import { useChatEnterSubmits } from "../context/ChatSubmitOnEnterContext";
+import { getSlashTriggerMatch } from "./chat-commands";
+import { useStickyBottomFollow } from "../hooks/useStickyBottomFollow";
+import { applySnippetToDraft, filterChatSnippets, matchStandaloneSnippetInvocation } from "./chat-snippets";
 import "./TaskChatTab.css";
 
 interface TaskChatTabProps {
@@ -45,13 +52,33 @@ interface TaskChatTabProps {
   expanded?: boolean;
   onToggleExpanded?: () => void;
   effectiveModels?: Partial<Record<"triage" | "executor" | "reviewer" | "merger", TaskChatModelInfo | null>>;
+  footerTarget?: HTMLElement | null;
+  /** Keeps the state owner mounted while withholding its composer from an inactive shell footer. */
+  footerVisible?: boolean;
+}
+
+/*
+FNXC:TaskDetailActivity 2026-09-12-02:34:
+Activity Live conserve son transcript et son état dans le Content, tandis que steering/refinement et leurs menus sont portalisés dans le Footer direct du shell. Feed et Raw ne fournissent aucune cible et ne créent donc aucun footer vide.
+*/
+function TaskChatFooterPortal({ target, children }: { target?: HTMLElement | null; children: ReactNode }) {
+  return target ? createPortal(children, target) : children;
 }
 
 type AgentLogRole = AgentRole | undefined;
 
+/*
+FNXC:TaskDetailChat 2026-09-15-08:46:
+FN-410: the Live role icon identifies the model AND the reasoning effort that was actually applied,
+because the same model at `minimal` and at `max` is not the same run. The level is resolved, never
+guessed: the runtime "using model" marker first, then the shared lane precedence. When no source
+supplies one, the badge is omitted entirely (no empty span, no orphan label) and the accessible name
+stays exactly what it was before this change.
+*/
 type TaskChatModelInfo = {
   provider: string;
   modelId?: string;
+  thinkingLevel?: string;
 };
 
 type UserChatMessage = Pick<SteeringComment, "id" | "text" | "createdAt"> & { optimistic?: boolean };
@@ -73,9 +100,6 @@ const BOTTOM_FOLLOW_THRESHOLD = 48;
 const TOP_LOAD_THRESHOLD = 48;
 const INITIAL_LOADING_INDICATOR_DELAY_MS = 150;
 
-function isTranscriptNearBottom(container: HTMLElement): boolean {
-  return container.scrollHeight - (container.scrollTop + container.clientHeight) <= BOTTOM_FOLLOW_THRESHOLD;
-}
 
 function getRoleLabel(role: AgentLogRole, t: TFunction<"app">): string {
   switch (role) {
@@ -96,7 +120,10 @@ function parseModelMarker(entry: AgentLogEntry): TaskChatModelInfo | null {
   if (entry.type !== "status" && entry.type !== "text") return null;
   const role = entry.agent === PLANNER_AGENT_ROLE ? "Planning" : entry.agent === "executor" ? "Executor" : entry.agent === "reviewer" ? "Reviewer" : null;
   if (!role) return null;
-  return parseRuntimeModelMarker(entry.text, role);
+  const parsed = parseRuntimeModelMarker(entry.text, role);
+  if (!parsed) return null;
+  const thinkingLevel = parseRuntimeModelMarkerThinkingLevel(entry.text, role);
+  return thinkingLevel ? { ...parsed, thinkingLevel } : parsed;
 }
 
 function makeModelInfo(provider: string | undefined, modelId: string | undefined): TaskChatModelInfo | null {
@@ -148,15 +175,77 @@ function getModelForRole(
   FNXC:TaskDetailChat 2026-06-23-00:54:
   Default executor models such as OpenAI Codex GPT-5.5 can resolve through settings rather than task overrides or log markers. Task chat receives the same effective model resolution used by the task-detail model header so role icons match Chat and Agent Log instead of falling back to CPU for default-backed agents.
   */
-  return getRuntimeModelForRole(entries, role) ?? getEffectiveModelForRole(effectiveModels, role) ?? getExplicitModelForRole(task, role);
+  const resolved = getRuntimeModelForRole(entries, role) ?? getEffectiveModelForRole(effectiveModels, role) ?? getExplicitModelForRole(task, role);
+  if (!resolved || resolved.thinkingLevel) return resolved;
+
+  /*
+  FNXC:TaskDetailChat 2026-09-15-08:46:
+  FN-410: MODEL precedence is untouched above. A runtime marker that names a model without a thinking
+  annotation (older engine rows, or a lane that logged none) still leaves the effort knowable from the
+  task/lane resolution the host passes in, so backfill only that field — never the provider/model.
+  */
+  const laneThinkingLevel = getEffectiveModelForRole(effectiveModels, role)?.thinkingLevel;
+  return laneThinkingLevel ? { ...resolved, thinkingLevel: laneThinkingLevel } : resolved;
 }
 
-function TaskChatAgentIcon({ label, modelInfo }: { label: string; modelInfo: TaskChatModelInfo | null }) {
+/*
+FNXC:TaskDetailChat 2026-09-15-08:46:
+FN-410: canonical thinking levels get a localized label; a non-canonical value coming from a
+historical marker is shown verbatim rather than dropped or normalized away, so an operator reading an
+old log still sees what that run recorded.
+*/
+const THINKING_LEVEL_LABEL_KEYS: Record<string, string> = {
+  off: "taskChat.thinkingLevels.off",
+  minimal: "taskChat.thinkingLevels.minimal",
+  low: "taskChat.thinkingLevels.low",
+  medium: "taskChat.thinkingLevels.medium",
+  high: "taskChat.thinkingLevels.high",
+  xhigh: "taskChat.thinkingLevels.xhigh",
+  max: "taskChat.thinkingLevels.max",
+};
+
+const THINKING_LEVEL_FALLBACKS: Record<string, string> = {
+  off: "Off",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Very High",
+  max: "Max",
+};
+
+function formatThinkingLevel(level: string | undefined, t: TFunction<"app">): string | null {
+  const normalized = level?.trim();
+  if (!normalized) return null;
+  const key = THINKING_LEVEL_LABEL_KEYS[normalized.toLowerCase()];
+  return key ? t(key, THINKING_LEVEL_FALLBACKS[normalized.toLowerCase()]) : normalized;
+}
+
+function TaskChatAgentIcon({ label, modelInfo, t }: { label: string; modelInfo: TaskChatModelInfo | null; t: TFunction<"app"> }) {
+  const thinkingLabel = formatThinkingLevel(modelInfo?.thinkingLevel, t);
+  /*
+  FNXC:TaskDetailChat 2026-09-15-08:46:
+  FN-410: the reasoning effort joins the accessible name and tooltip only when a real source supplied
+  it. With no level, `describedTitle` stays byte-identical to the pre-FN-410 string and no badge
+  element is rendered at all — no empty span, no orphan aria-label.
+  */
+  const withThinking = (title: string) => (
+    thinkingLabel ? t("taskChat.thinkingLevelTitle", "{{title}} · thinking: {{level}}", { title, level: thinkingLabel }) : title
+  );
+  const thinkingBadge = thinkingLabel ? (
+    <span className="task-chat-provider-thinking" data-testid="task-chat-provider-thinking" aria-hidden="true">
+      {thinkingLabel}
+    </span>
+  ) : null;
+
   if (modelInfo?.provider) {
-    const title = modelInfo.modelId ? `${label}: ${modelInfo.provider}/${modelInfo.modelId}` : `${label}: ${modelInfo.provider}`;
+    const title = withThinking(modelInfo.modelId ? `${label}: ${modelInfo.provider}/${modelInfo.modelId}` : `${label}: ${modelInfo.provider}`);
     return (
-      <span className="task-chat-provider-icon" title={title} aria-label={title}>
-        <ProviderIcon provider={modelInfo.provider} size="md" />
+      <span className="task-chat-provider">
+        <span className="task-chat-provider-icon" title={title} aria-label={title}>
+          <ProviderIcon provider={modelInfo.provider} size="md" />
+        </span>
+        {thinkingBadge}
       </span>
     );
   }
@@ -165,10 +254,13 @@ function TaskChatAgentIcon({ label, modelInfo }: { label: string; modelInfo: Tas
   FNXC:TaskDetailChat 2026-06-23-00:42:
   Task chat role headers should use provider logos whenever the role's model provider is known, and a neutral CPU fallback when it is not. Avoid role clip-art avatars so executor/reviewer/merger rows read as professional model execution blocks rather than cartoon agent identities.
   */
-  const title = `${label}: model provider unknown`;
+  const title = withThinking(`${label}: model provider unknown`);
   return (
-    <span className="task-chat-provider-icon task-chat-provider-icon--fallback" title={title} aria-label={title}>
-      <Cpu size={18} aria-hidden="true" />
+    <span className="task-chat-provider">
+      <span className="task-chat-provider-icon task-chat-provider-icon--fallback" title={title} aria-label={title}>
+        <Cpu size={18} aria-hidden="true" />
+      </span>
+      {thinkingBadge}
     </span>
   );
 }
@@ -697,11 +789,16 @@ function TaskChatUserMessage({ message }: { message: UserChatMessage }) {
   );
 }
 
-export function TaskChatTab({ task, columnFlags, projectId, active, addToast, onTaskUpdated, onRefinementCreated, expanded = false, onToggleExpanded, effectiveModels }: TaskChatTabProps) {
+export function TaskChatTab({ task, columnFlags, projectId, active, addToast, onTaskUpdated, onRefinementCreated, expanded = false, onToggleExpanded, effectiveModels, footerTarget, footerVisible = true }: TaskChatTabProps) {
   const { t } = useTranslation("app");
   const chatMessageLayout = useChatMessageLayout();
+  const enterSubmits = useChatEnterSubmits();
   const { entries, loading, loadMore, hasMore, loadingMore } = useAgentLogs(task.id, active, projectId);
   const [draft, setDraft] = useState("");
+  const chatSnippets = useChatSnippets();
+  const [showSnippetMenu, setShowSnippetMenu] = useState(false);
+  const [snippetFilter, setSnippetFilter] = useState("");
+  const [highlightedSnippetIndex, setHighlightedSnippetIndex] = useState(0);
   const [sending, setSending] = useState(false);
   const [loadingIndicatorTaskId, setLoadingIndicatorTaskId] = useState<string | null>(null);
   const sendingRef = useRef(false);
@@ -746,6 +843,14 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
     ? t("taskChat.donePlaceholder", "Start a refinement task for this completed task")
     : t("taskChat.activePlaceholder", "Steer the currently executing agent");
   const canSend = draft.trim().length > 0 && !sending;
+  const filteredSnippets = useMemo(
+    () => filterChatSnippets(snippetFilter, chatSnippets),
+    [chatSnippets, snippetFilter],
+  );
+
+  useEffect(() => {
+    setHighlightedSnippetIndex(0);
+  }, [snippetFilter]);
 
   useEffect(() => {
     if (!loading || transcriptItemCount > 0) {
@@ -790,15 +895,34 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
     anchorFrameRef.current = null;
   }, []);
 
+  /*
+  FNXC:StickyBottomScroll 2026-09-14-20:19:
+  FN-398 : le transcript de tâche partage désormais le propriétaire unique du suivi du bas. L'intention utilisateur
+  désengage de façon synchrone, indépendamment du seuil de 48 px : auparavant un geste sous ce seuil laissait
+  `isTranscriptAtBottomRef` à vrai, et le `followTail` des observateurs (ou la boucle de 6 frames) réécrivait
+  `scrollTop` en bas avant même la livraison de l'événement `scroll`.
+  */
+  const stickyFollow = useStickyBottomFollow(transcriptRef, {
+    rearmThresholdPx: BOTTOM_FOLLOW_THRESHOLD,
+    attachKey: active,
+    onFollowingChange: (following) => {
+      isTranscriptAtBottomRef.current = following;
+      setIsTranscriptAtBottom(following);
+    },
+  });
+
   const setTranscriptFollowing = useCallback((following: boolean) => {
+    stickyFollow.setFollowing(following);
     isTranscriptAtBottomRef.current = following;
     setIsTranscriptAtBottom(following);
-  }, []);
+  }, [stickyFollow]);
 
   const anchorTranscriptToBottom = useCallback((container: HTMLElement) => {
     cancelAnchorTranscriptFrame();
     if (!container.isConnected) return;
 
+    // FN-398 : la boucle abandonne dès qu'une intention utilisateur est arrivée depuis son démarrage.
+    const intentGenerationAtStart = stickyFollow.intentGenerationRef.current;
     let frame = 0;
     let stableFrames = 0;
     let lastScrollHeight = -1;
@@ -807,8 +931,10 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
     const writeBottom = () => {
       anchorFrameRef.current = null;
       if (!container.isConnected || !isTranscriptAtBottomRef.current) return;
+      if (stickyFollow.intentGenerationRef.current !== intentGenerationAtStart) return;
 
       container.scrollTop = container.scrollHeight;
+      stickyFollow.noteProgrammaticWrite(container.scrollTop);
       previousScrollHeightRef.current = container.scrollHeight;
       setTranscriptFollowing(true);
       if (container.scrollHeight === lastScrollHeight) {
@@ -827,7 +953,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
     };
 
     writeBottom();
-  }, [cancelAnchorTranscriptFrame, setTranscriptFollowing]);
+  }, [cancelAnchorTranscriptFrame, setTranscriptFollowing, stickyFollow]);
 
   useEffect(() => {
     if (!active) return;
@@ -841,6 +967,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
     const followTail = () => {
       if (!isTranscriptAtBottomRef.current) return;
       container.scrollTop = container.scrollHeight;
+      stickyFollow.noteProgrammaticWrite(container.scrollTop);
       previousScrollHeightRef.current = container.scrollHeight;
     };
     const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(followTail);
@@ -851,7 +978,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
     };
-  }, [active]);
+  }, [active, stickyFollow]);
 
   useLayoutEffect(() => () => {
     cancelAnchorTranscriptFrame();
@@ -918,15 +1045,14 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
       const previousHeight = pendingPrependScrollHeightRef.current ?? previousScrollHeight;
       const heightDelta = container.scrollHeight - previousHeight;
       container.scrollTop = previousTop + Math.max(0, heightDelta);
-      pendingPrependScrollHeightRef.current = null;
-      setTranscriptFollowing(isTranscriptNearBottom(container));
+      // Restauration de préfixe : écriture programmatique fencée, et le suivi n'est jamais réarmé par un prepend.
+      stickyFollow.noteProgrammaticWrite(container.scrollTop);
     } else if (transcriptItemCount > previousCount) {
       const shouldFollow = previousCount === 0 || isTranscriptAtBottomRef.current;
       if (shouldFollow) {
         container.scrollTop = container.scrollHeight;
+        stickyFollow.noteProgrammaticWrite(container.scrollTop);
         setTranscriptFollowing(true);
-      } else {
-        setTranscriptFollowing(isTranscriptNearBottom(container));
       }
       if (pendingPrependScrollHeightRef.current !== null) {
         pendingPrependScrollHeightRef.current = container.scrollHeight;
@@ -938,7 +1064,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
     previousScrollHeightRef.current = container.scrollHeight;
     previousFirstEntryKeyRef.current = firstEntryKey;
     previousAgentEntryCountRef.current = entries.length;
-  }, [active, entries.length, firstEntryKey, setTranscriptFollowing, transcriptItemCount]);
+  }, [active, entries.length, firstEntryKey, setTranscriptFollowing, stickyFollow, transcriptItemCount]);
 
   const loadPreviousMessages = useCallback(async () => {
     const container = transcriptRef.current;
@@ -953,28 +1079,79 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
     }
   }, [active, hasMore, loadMore, loadingMore]);
 
+  /*
+  FN-398 : la décision de suivi appartient au propriétaire unique (écouteur natif exécuté avant la délégation
+  React). Ce gestionnaire ne fait plus que la comptabilité de hauteur et le déclenchement de la pagination haute.
+  */
   const handleTranscriptScroll = useCallback(() => {
     const container = transcriptRef.current;
     if (!container) return;
     previousScrollHeightRef.current = container.scrollHeight;
-    setTranscriptFollowing(isTranscriptNearBottom(container));
     if (container.scrollTop <= TOP_LOAD_THRESHOLD) {
       void loadPreviousMessages();
     }
-  }, [loadPreviousMessages, setTranscriptFollowing]);
+  }, [loadPreviousMessages]);
 
+  /** Réengagement explicite : le bouton de retour au bas reste une commande utilisateur autoritaire. */
   const scrollTranscriptToBottom = useCallback(() => {
     const container = transcriptRef.current;
     if (!container) return;
-    container.scrollTop = container.scrollHeight;
+    stickyFollow.followBottom();
     previousScrollHeightRef.current = container.scrollHeight;
     setTranscriptFollowing(true);
-  }, [setTranscriptFollowing]);
+  }, [setTranscriptFollowing, stickyFollow]);
+
+  const handleSnippetSelect = useCallback((snippet: ChatSnippet) => {
+    const applied = applySnippetToDraft(
+      draft,
+      snippet,
+      textareaRef.current?.selectionStart ?? draft.length,
+    );
+    if (!applied) return;
+    setDraft(applied.value);
+    setShowSnippetMenu(false);
+    setSnippetFilter("");
+    setHighlightedSnippetIndex(0);
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(applied.cursorPosition, applied.cursorPosition);
+      autosizeRef.current?.resize();
+    });
+  }, [draft]);
+
+  const handleDraftChange = useCallback((event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const nextValue = event.target.value;
+    setDraft(nextValue);
+    const triggerMatch = getSlashTriggerMatch(nextValue.slice(0, event.target.selectionStart ?? nextValue.length));
+    if (triggerMatch) {
+      setShowSnippetMenu(true);
+      setSnippetFilter(triggerMatch.filter);
+    } else {
+      setShowSnippetMenu(false);
+      setSnippetFilter("");
+    }
+  }, []);
 
   const handleSubmit = useCallback(async (event?: React.FormEvent) => {
     event?.preventDefault();
     const text = draft.trim();
     if (!text || sendingRef.current) return;
+    const snippetInvocation = matchStandaloneSnippetInvocation(text, chatSnippets);
+    if (snippetInvocation) {
+      /*
+      FNXC:ChatSnippets 2026-09-03-15:56:
+      Activity Chat expands a standalone /name before the duplicate-send guard, optimistic transcript, refinement, or steering APIs. The inserted prompt stays editable and requires a second explicit submit.
+      */
+      setDraft(snippetInvocation.prompt);
+      setShowSnippetMenu(false);
+      setSnippetFilter("");
+      window.requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(snippetInvocation.prompt.length, snippetInvocation.prompt.length);
+        autosizeRef.current?.resize();
+      });
+      return;
+    }
     sendingRef.current = true;
 
     const latestTimestampMs = getLatestTranscriptTimestampMs(entries, userMessages);
@@ -1028,20 +1205,53 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
       sendingRef.current = false;
       setSending(false);
     }
-  }, [addToast, draft, entries, isDoneTask, onRefinementCreated, onTaskUpdated, projectId, task.id, userMessages]);
+  }, [addToast, chatSnippets, draft, entries, isDoneTask, onRefinementCreated, onTaskUpdated, projectId, task.id, userMessages]);
 
   /**
    * FNXC:TaskDetailChat 2026-06-13-19:05:
-   * Task-detail chat follows chat composer keyboard expectations: Enter sends, Shift+Enter keeps textarea newline entry, Cmd/Ctrl+Enter remains supported for existing users, and IME composition Enter is ignored so CJK candidate selection is not submitted mid-composition.
+   * Dans le Chat de tâche, Entrée sans Cmd/Ctrl ni Shift dépend de `chatSubmitOnEnter`. `Shift+Enter`, y compris avec Cmd/Ctrl, reste un saut de ligne ; `Cmd/Ctrl+Enter` sans Shift reste l’accélérateur d’envoi. La garde de composition IME court-circuite cet accélérateur, et le menu de snippets garde la priorité sur Entrée et Cmd/Ctrl+Enter, mais pas sur Shift+Enter puisqu’il exige `!event.shiftKey`.
    */
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter") return;
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.shiftKey) return;
+    if (showSnippetMenu && event.key === "ArrowDown") {
+      event.preventDefault();
+      if (filteredSnippets.length > 0) {
+        setHighlightedSnippetIndex((current) => (current + 1) % filteredSnippets.length);
+      }
+      return;
+    }
+    if (showSnippetMenu && event.key === "ArrowUp") {
+      event.preventDefault();
+      if (filteredSnippets.length > 0) {
+        setHighlightedSnippetIndex((current) => current === 0 ? filteredSnippets.length - 1 : current - 1);
+      }
+      return;
+    }
+    if (showSnippetMenu && (event.key === "Enter" || event.key === "Tab") && !event.shiftKey && filteredSnippets.length > 0) {
+      event.preventDefault();
+      handleSnippetSelect(filteredSnippets[highlightedSnippetIndex] ?? filteredSnippets[0]!);
+      return;
+    }
+    if (showSnippetMenu && event.key === "Escape") {
+      event.preventDefault();
+      setShowSnippetMenu(false);
+      return;
+    }
+    /*
+    FNXC:ChatComposer 2026-09-06-01:54:
+    `Shift+Enter` n'envoie jamais, y compris combiné à `Cmd/Ctrl` : `Cmd/Ctrl+Shift+Enter` n'est pas un envoi. Elle insère un saut de ligne, sauf dans le Chat lorsqu'un menu d'autocomplétion est ouvert — les trois menus du Chat (fichiers/tâches, agents, compétences) la consomment alors sans insérer de saut de ligne. Dans le Chat de tâche et le Chat du planificateur, `Shift+Enter` traverse le menu et insère bien un saut de ligne.
+    `Cmd/Ctrl+Enter` sans `Shift` envoie, indépendamment du réglage `chatSubmitOnEnter` et du type de pointeur.
+    `Entrée` sans `Cmd/Ctrl` ni `Shift` est gouvernée par `chatSubmitOnEnter` ; `Alt` n'est pas un modificateur d'envoi et ne change rien à cette règle.
+    Les règles 2 et 3 s'appliquent lorsqu'aucun menu d'autocomplétion n'est ouvert. Un menu ouvert a la priorité et consomme `Entrée` comme `Cmd/Ctrl+Enter` ; `Échap` ferme le menu et rétablit les règles.
+    Dans le Chat de tâche uniquement, une composition IME en cours (saisie CJK) court-circuite tout, `Cmd/Ctrl+Enter` compris, jusqu'à la validation du candidat.
+    Le bouton d'envoi reste rendu et actif dès que le brouillon n'est pas vide — menu ouvert et composition IME compris. Sur brouillon vide il est désactivé, comme aujourd'hui.
+    */
+    if (event.key !== "Enter" || event.shiftKey) return;
+    if (!(event.metaKey || event.ctrlKey) && !enterSubmits) return;
 
     event.preventDefault();
     void handleSubmit();
-  }, [handleSubmit]);
+  }, [enterSubmits, filteredSnippets, handleSnippetSelect, handleSubmit, highlightedSnippetIndex, showSnippetMenu]);
 
   /*
   FNXC:TaskDetailChat 2026-07-01-00:00:
@@ -1062,7 +1272,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
   return (
     <div className={`task-chat-tab${chatMessageLayout === "full-width" ? " task-chat-tab--full-width" : ""}`} data-testid="task-chat-tab">
       {onToggleExpanded ? (
-        <button
+        <UiButton
           type="button"
           className="btn btn-icon btn-sm task-chat-expand-toggle task-chat-expand-toggle--overlay"
           onClick={onToggleExpanded}
@@ -1072,7 +1282,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
         >
           {/* FNXC:TaskDetailActivity 2026-07-01-00:00: TaskDetailModal passes Activity-expanded state into Live so this existing chat overlay remains the single Live expand affordance without adding a separate toolbar row. */}
           {expanded ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
-        </button>
+        </UiButton>
       ) : null}
       <div
         className="task-chat-transcript"
@@ -1089,7 +1299,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
                 <span>{t("taskChat.loadingEarlierMessages", "Loading earlier messages…")}</span>
               </div>
             ) : (
-              <button
+              <UiButton
                 type="button"
                 className="btn btn-secondary btn-sm task-chat-load-previous"
                 onClick={() => { void loadPreviousMessages(); }}
@@ -1097,7 +1307,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
                 data-testid="task-chat-load-previous"
               >
                 {t("taskChat.loadPreviousMessages", "Load previous messages")}
-              </button>
+              </UiButton>
             )}
           </div>
         ) : null}
@@ -1122,7 +1332,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
             return (
               <section className="task-chat-group" key={`${item.role ?? "agent"}-${itemIndex}`} aria-label={t("taskChat.agentMessages", "{{label}} messages", { label: item.label })}>
                 <header className="task-chat-group-header">
-                  <TaskChatAgentIcon label={item.label} modelInfo={modelInfo} />
+                  <TaskChatAgentIcon label={item.label} modelInfo={modelInfo} t={t} />
                   <div>
                     <div className="task-chat-role-label">{item.label}</div>
                     <div className="task-chat-group-meta">
@@ -1148,7 +1358,7 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
           })
         )}
         {transcriptItemCount > 0 && !isTranscriptAtBottom ? (
-          <button
+          <UiButton
             type="button"
             className="task-chat-jump-to-bottom"
             onClick={scrollTranscriptToBottom}
@@ -1157,25 +1367,47 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
           >
             <ChevronDown aria-hidden="true" />
             <span>{t("taskChat.latest", "Latest")}</span>
-          </button>
+          </UiButton>
         ) : null}
       </div>
 
+      {footerVisible ? <TaskChatFooterPortal target={footerTarget}>
       <form className="task-chat-composer" onSubmit={handleSubmit} aria-label={composerFormLabel}>
+        {showSnippetMenu && filteredSnippets.length > 0 ? (
+          <UiListBox className="chat-skill-menu task-chat-snippet-menu" data-testid="task-chat-snippet-menu" aria-label={t("chat.snippetSuggestions", "Snippet suggestions")}>
+            {filteredSnippets.map((snippet, index) => (
+              <UiListBoxItem
+                key={snippet.name}
+                id={snippet.name}
+                textValue={snippet.name}
+                legacyAs="button"
+                aria-selected={index === highlightedSnippetIndex}
+                className={`chat-skill-menu-item${index === highlightedSnippetIndex ? " chat-skill-menu-item--highlighted" : ""}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setHighlightedSnippetIndex(index)}
+                onClick={() => handleSnippetSelect(snippet)}
+              >
+                <span className="chat-skill-menu-item-name">/{snippet.name}</span>
+                <span className="chat-skill-menu-item-description">{t("chat.snippetSuggestion", "Insert saved prompt")}</span>
+              </UiListBoxItem>
+            ))}
+          </UiListBox>
+        ) : null}
         <div className="task-chat-composer-row">
-          <textarea
+          <UiTextArea
             ref={handleComposerRef}
             className="input task-chat-input"
             value={draft}
             placeholder={composerPlaceholder}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={handleDraftChange}
             onKeyDown={handleKeyDown}
+            enterKeyHint={enterSubmits ? "send" : "enter"}
             disabled={sending}
             aria-label={t("taskChat.messageActiveAgentSession", "Message active agent session")}
             rows={1}
           />
           <MicButton {...dictation.micProps} disabled={sending} />
-          <button
+          <UiButton
             type="submit"
             className="btn btn-primary btn-icon task-chat-send"
             disabled={!canSend}
@@ -1185,9 +1417,10 @@ export function TaskChatTab({ task, columnFlags, projectId, active, addToast, on
             onMouseDown={handleSendMouseDown}
           >
             {sending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Send aria-hidden="true" />}
-          </button>
+          </UiButton>
         </div>
       </form>
+      </TaskChatFooterPortal> : null}
     </div>
   );
 }

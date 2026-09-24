@@ -48,6 +48,7 @@ import {getTaskMergeBlocker} from "../merge/task-merge.js";
 import {resolveRequiredPreMergeStepIds} from "../merge/required-pre-merge-steps.js";
 import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
 import {readTaskRow as readTaskRowAsync, readTaskRowInTransaction, upsertTaskRowInTransaction} from "./async/async-persistence.js";
+import { observeOverlapWaitTransitionInTransaction } from "./overlap-wait-ops.js";
 import {disposeTaskBeforeMove} from "../tasks/task-move-disposer.js";
 import {resolveTaskSymbolsForTask} from "../tasks/task-symbol-resolution.js";
 
@@ -130,6 +131,9 @@ Mirrors getTaskWorkflowSelectionAsyncImpl's query exactly, including the
 project-id scoping (FNXC:WorkflowModelLanes): shared PostgreSQL deployments reuse
 task ids across projects, so an unscoped read could resolve another project's
 workflow and gate this move against the wrong pool entirely.
+
+FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
 */
 async function readTaskWorkflowSelectionInTransaction(
   tx: DbTransaction,
@@ -146,7 +150,9 @@ async function readTaskWorkflowSelectionInTransaction(
     ))
     .limit(1);
   const workflowId = rows[0]?.workflowId;
-  return typeof workflowId === "string" && workflowId.length > 0 ? workflowId : undefined;
+  return typeof workflowId === "string" && workflowId.length > 0
+    ? workflowId
+    : undefined;
 }
 
 
@@ -335,34 +341,16 @@ export async function handoffToReviewImpl(store: TaskStore, taskId: string, opts
       }
 
       /*
-      FNXC:WorkflowResolvedColumns 2026-07-31-12:30 (fleet — moves.ts cluster):
-      THE ARCHIVE GUARD IS A ROLE QUESTION, resolved from the task's own workflow.
-
-      This refuses a hand-off from an archived card. Against the literal `archived`, a board whose
-      archive lane is renamed never matched, so an archived card could be handed to review — the
-      invariant this error exists to protect, silently unenforced.
-
-      The IR is resolved here rather than 28 lines down where `handoffTarget` already reads it, and
-      that hoist is safe: this function has already awaited `readTaskRowAsync` above, so no new tick
-      boundary is introduced. The later read reuses this one.
-
-      Absent or trait-free IR keeps the legacy id, so an unconverted board is byte-identical.
+      FNXC:WorkflowResolvedColumns 2026-07-31-12:30:
+      Hand-off refuses soft-deleted and historical-sentinel rows. The workflow read is hoisted for
+      the review-target resolution below; no archive role exists in live workflow metadata.
       */
       const handoffIr = await resolveWorkflowIrForTask(store, taskId).catch(() => undefined);
-      const handoffArchivedLanes = handoffIr ? new Set(columnsWithFlag(handoffIr, "archived")) : undefined;
-      /*
-      FNXC:WorkflowResolvedColumns 2026-07-31-17:40:
-      THIS ARM STAYS INLINE, deliberately. Naming it would move the TypeScript tally that
-      `archived-column-gate-parity.test.ts` pins, and that guard's whole argument is that the
-      archived gate's three encodings must move together — the SQL halves still compare the raw
-      string, so converting the TypeScript side alone is the split brain it exists to prevent.
-      Measured: naming it turned that suite red on `TypeScript encoding changed`.
-      */
-      const taskIsArchived = handoffArchivedLanes && handoffArchivedLanes.size > 0
-        ? handoffArchivedLanes.has(task.column)
-        /* DELIBERATE-LITERAL — the degraded fallback arm; the live arm above uses the resolved set. */
-        : task.column === "archived";
-      if (taskIsArchived || task.deletedAt != null) {
+      /* DELIBERATE-LITERAL: the `task.column === "archived"` is intentional — hand-off refuses
+         historical-sentinel rows, and the sentinel column id is the correct check here since no
+         archive role exists in live workflow metadata. */
+      const taskIsHistorical = task.column === "archived";
+      if (taskIsHistorical || task.deletedAt != null) {
         throw new HandoffInvariantViolationError(
           taskId,
           task.column,
@@ -551,7 +539,7 @@ export async function moveTaskInternalImpl(store: TaskStore, id: string, toColum
               moveSource,
             },
           });
-          await enqueueMergeQueueInTransaction(tx, id, { priority: task.priority, now: internal.now }, {
+          await enqueueMergeQueueInTransaction(tx, id, { now: internal.now }, {
             agentId: internal.runContext?.agentId,
             runId: internal.runContext?.runId,
           }, moveReviewColumns);
@@ -1220,6 +1208,15 @@ export async function moveTaskInternalImpl(store: TaskStore, id: string, toColum
       // Upsert the task row (update column + all mutated fields).
       // FNXC:MultiProjectIsolation 2026-07-10: pass the bound projectId (stamped
       // on insert, preserved on update) so partitioning survives moves.
+      const overlapRow = await readTaskRowInTransaction(tx, id, { includeDeleted: true }, layer.projectId);
+      if (overlapRow) {
+        await observeOverlapWaitTransitionInTransaction(tx, {
+          projectId: layer.projectId?.trim() || "__legacy_unscoped__",
+          previous: store.rowToTask(store.pgRowToTaskRow(overlapRow)),
+          nextOverlapBlockedBy: task.overlapBlockedBy,
+          observedAt: movedAt,
+        });
+      }
       await upsertTaskRowInTransaction(tx, task as unknown as Record<string, unknown>, context, layer.projectId);
 
       // U4 (flag-ON) parity with the SQLite branch below: write the
@@ -1292,7 +1289,7 @@ export async function moveTaskInternalImpl(store: TaskStore, id: string, toColum
           .where(eq(schema.project.mergeQueue.taskId, id))
           .limit(1);
         alreadyEnqueued = existingRows.length > 0;
-        await enqueueMergeQueueInTransaction(tx, id, { priority: task.priority, now: internal.now }, {
+        await enqueueMergeQueueInTransaction(tx, id, { now: internal.now }, {
           agentId: internal.runContext?.agentId,
           runId: internal.runContext?.runId,
         }, moveReviewColumns);

@@ -9,7 +9,7 @@ const severityAuditLog = createLogger("dashboard-board-workflows");
  * tasks, the workflow each card belongs to plus the (deduplicated) set of
  * workflow definitions referenced — each carrying its ordered columns, display
  * names, and *resolved trait flags* (archived / hold / complete / wip etc.) so
- * the client can render lanes, hide archived columns, show promote affordances,
+ * the client can render live lanes and show promote affordances,
  * and pre-check drag adjacency/capacity without a second round-trip.
  *
  * The payload is served by a sibling endpoint (`GET /tasks/board-workflows`)
@@ -110,7 +110,6 @@ const BUILTIN_WORKFLOW_COLUMN_LABELS: Record<string, string> = {
   "in-progress": "In Progress",
   "in-review": "In Review",
   done: "Done",
-  archived: "Archived",
 };
 
 function toV2(ir: WorkflowIr): WorkflowIrV2 | undefined {
@@ -155,6 +154,21 @@ function isManualIntakeColumn(col: WorkflowIrColumn): boolean {
   if (flags.intake !== true) return false;
   const intakeTrait = (col.traits ?? []).find((trait) => trait.trait === "intake");
   return (intakeTrait?.config as { autoTriage?: boolean } | undefined)?.autoTriage === false;
+}
+
+/*
+FNXC:TaskQueueOrder 2026-09-17-13:51:
+FN-509: the SERVER needs the same column facts the board card reasons about, so the Boost endpoint
+can refuse a lane that has no automatic queue instead of persisting a durable rank on a Complete or
+manual-capture card. Reusing this module keeps `manualIntake` a single derivation.
+*/
+export function resolveBoardColumnFlags(
+  ir: WorkflowIr,
+  columnId: string,
+): BoardWorkflowColumn["flags"] | undefined {
+  const column = toV2(ir)?.columns.find((col) => col.id === columnId);
+  if (!column) return undefined;
+  return { ...resolveColumnFlags(column), ...(isManualIntakeColumn(column) ? { manualIntake: true } : {}) };
 }
 
 function describeColumns(ir: WorkflowIr, canonicalizeLifecycle = false): BoardWorkflowColumn[] {

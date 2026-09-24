@@ -12,7 +12,7 @@ import {join} from "node:path";
 import {existsSync, statSync} from "node:fs";
 import type {Task, TaskDetail, ColumnId, ArchivedTaskEntry, TaskVerificationRequest, TaskVerificationResultSummary, TaskVerificationStatus, TaskRecommendation, TaskRecommendationListItem, TaskRecommendationListPage} from "../types.js";
 import * as schema from "../postgres/schema/index.js";
-import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import "../builtin-traits.js";
 import {allowsAutoMergeProcessing} from "../merge/task-merge.js";
 import {getInReviewStallReason, DEFAULT_STALE_MERGING_MIN_AGE_MS, type InReviewStallContext} from "../tasks/in-review-stall.js";
@@ -21,7 +21,7 @@ import {getInReviewStalledSignal, type InReviewStalledContext} from "../tasks/in
 import {getStalePausedReviewSignal, type StalePausedReviewContext} from "../tasks/stale-paused-review.js";
 import {getStalePausedTodoSignal} from "../tasks/stale-paused-todo.js";
 import {resolveLifecycleColumns, resolveReviewColumns} from "../workflows/workflow-lifecycle-traits.js";
-import {resolveWorkflowIrForTask} from "../workflows/workflow-ir-resolver.js";
+import {prefetchWorkflowIrs, prefetchWorkflowSelections, resolveWorkflowIrForTask, type WorkflowDefinitionReadTally, type WorkflowSelectionCache, type WorkflowSelectionReadTally} from "../workflows/workflow-ir-resolver.js";
 import type {WorkflowIr} from "../workflows/workflow-ir-types.js";
 
 import {getTaskAgeStalenessSignal, type TaskAgeStalenessThresholds} from "../tasks/task-age-staleness.js";
@@ -31,8 +31,9 @@ import {computeRetrySummary} from "../tasks/retry-summary.js";
 // FNXC:TaskLookup404 2026-07-26-11:20: typed miss signal so API boundaries can
 // answer 404 instead of 500 (see TaskNotFoundError in task-store/errors.ts).
 import {TaskNotFoundError} from "../task-store/errors.js";
-import { resolveProjectColumnsForRoles } from "../project-lane-vocabulary.js";
+import { ARCHIVED_SENTINEL_LANES, resolveProjectColumnsForRoles } from "../project-lane-vocabulary.js";
 import { taskProjectScope } from "../postgres/data-layer.js";
+import { taskQueuePageKey, type TaskQueuePageKey } from "./task-queue-order-ops.js";
 
 /** Merge storage tiers while preserving primary-source authority and order. */
 function mergePrimaryById<T extends { id: string }>(primary: T[], secondary: T[]): T[] {
@@ -128,10 +129,9 @@ function hasFreshAgentLogActivitySinceTaskUpdate(
 }
 
 import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
-import {readTaskRow, readLiveTaskRows, readTaskRowByProposalClaimId, readTaskRowsBySourceLineage} from "./async/async-persistence.js";
-import {searchTasksTsvector, searchTasksLike} from "./async/async-search.js";
+import {countLiveTasks, readCompletedTaskPage, readTaskRow, readLiveTaskRows, readTaskRowByProposalClaimId, readTaskRowsBySourceLineage} from "./async/async-persistence.js";
+import {buildTaskSearchPredicate, liveSearchPredicate, searchTasksTsvector} from "./async/async-search.js";
 import {
-  getArchivedTask,
   listArchivedTasks as listArchivedTaskEntries,
   listArchivedTasksByCreatedOrder,
   searchArchivedTasks,
@@ -152,9 +152,10 @@ async function resolveHoldColumnForTask(
   store: TaskStore,
   taskId: string,
   cache?: Map<string, WorkflowIr>,
+  selectionCache?: WorkflowSelectionCache,
 ): Promise<string> {
   try {
-    const lifecycle = resolveLifecycleColumns(await resolveWorkflowIrForTask(store, taskId, cache));
+    const lifecycle = resolveLifecycleColumns(await resolveWorkflowIrForTask(store, taskId, cache, selectionCache));
     return lifecycle?.hold ?? "todo";
   } catch {
     return "todo";
@@ -191,10 +192,12 @@ async function resolveReviewColumnsForTask(
   store: TaskStore,
   taskId: string,
   cache?: Map<string, WorkflowIr>,
+  selectionCache?: WorkflowSelectionCache,
+  definitionReadTally?: WorkflowDefinitionReadTally,
 ): Promise<ReadonlySet<string>> {
   const columns = new Set<string>(["in-review"]);
   try {
-    const ir = await resolveWorkflowIrForTask(store, taskId, cache);
+    const ir = await resolveWorkflowIrForTask(store, taskId, cache, selectionCache, definitionReadTally);
     if (ir) for (const id of resolveReviewColumns(ir)) columns.add(id);
   } catch { /* degraded: the legacy id above still answers */ }
   return columns;
@@ -228,26 +231,11 @@ export async function getTaskImpl(store: TaskStore, id: string, options?: { acti
       });
       if (!pgRow) {
         /*
-        FNXC:PostgresArchiveReads 2026-07-14-17:09:
-        Archive is cold storage, not deletion from the public read model. Task detail must fall back to the project-scoped archive snapshot so an archived card remains inspectable after its live row is tombstoned.
+        FNXC:TaskLookup404 2026-07-26-11:20:
+        Missing and soft-deleted tasks are absent from the live task-detail model. Historical snapshots
+        remain internal migration/forensic records and cannot resurrect a deleted card through getTask.
         */
-        const archived = await getArchivedTask(layer.db, id, layer.projectId);
-        if (!archived) {
-          /*
-          FNXC:TaskLookup404 2026-07-26-11:20:
-          Backend/Postgres miss. Throw the typed TaskNotFoundError (message kept
-          byte-identical to the legacy `Task ${id} not found` string) so route
-          catches can map it to 404. Nothing on this path sets an errno `code`,
-          so the routes' legacy ENOENT check never fired and every unknown task
-          id 500'd.
-          */
-          throw new TaskNotFoundError(id);
-        }
-        const archivedTask = store.archiveEntryToTask(archived, false);
-        return {
-          ...archivedTask,
-          prompt: archived.prompt ?? store.generatePromptFromArchiveEntry(archived),
-        };
+        throw new TaskNotFoundError(id);
       }
       const task = store.rowToTask(store.pgRowToTaskRow(pgRow));
       const now = Date.now();
@@ -342,14 +330,63 @@ export async function getTaskImpl(store: TaskStore, id: string, options?: { acti
 });
   }
 
-export async function listTasksImpl(store: TaskStore, options?: { limit?: number; offset?: number; /** When false, exclude tasks in the `archived` column. Default: true (backward compatible). */ includeArchived?: boolean; /** When true, omit heavy fields (log, comments, steps, workflowStepResults, steeringComments) * from each row to make list responses cheap for board-style consumers. Detail fields default * to empty arrays in the returned Task objects; use `getTask(id)` to load full data. */ slim?: boolean; /** Restrict to a single column (e.g. 'in-review' for the auto-merge sweep). * Widened to {@link ColumnId} (#1403) so custom-column filters are accepted. */ column?: ColumnId; /** Opt-in startup-only memo for repeated slim reads during boot choreography. */ startupMemo?: boolean; /** Forensic read: surface soft-deleted tasks (deletedAt IS NOT NULL). * VAL-DATA-006 — only admin/forensic surfaces should set this; live readers * must leave it unset so tombstoned tasks stay off the board (VAL-DATA-005). */ includeDeleted?: boolean; }): Promise<Task[]> {
-    const includeArchived = options?.includeArchived ?? true;
+export interface ListTasksOptions {
+  limit?: number;
+  offset?: number;
+  /** Exclusive createdAt/id tuple used by bounded Board pages. */
+  afterCreatedAt?: string;
+  afterId?: string;
+  /** Exclusive keyset for the shared queue orders (see `task-queue-order-ops.ts`). */
+  afterQueueKey?: TaskQueuePageKey;
+  afterIntakeKey?: Pick<TaskQueuePageKey, "createdAt" | "id">;
+  /** Historical compatibility snapshots participate only when explicitly requested. */
+  includeArchived?: boolean;
+  /** Omit heavy detail fields for board-style consumers. */
+  slim?: boolean;
+  /** Restrict to one or several custom-capable column ids. */
+  column?: ColumnId;
+  columns?: readonly ColumnId[];
+  /** Exclude one or several custom-capable column ids. */
+  excludeColumns?: readonly ColumnId[];
+  /** Select the SQL page by creation or latest completion-lane entry. */
+  sort?: "created-asc" | "completion-desc" | "completion-date-desc" | "queue-order" | "intake-desc";
+  startupMemo?: boolean;
+  /** Caller-owned per-pass workflow IR cache; shared only within one read pass. */
+  irCache?: Map<string, WorkflowIr>;
+  /** Observed definition reads issued during this list pass (zero for warm/builtin IRs). */
+  definitionReadTally?: WorkflowDefinitionReadTally;
+  /** Forensic-only: include soft-deleted rows. */
+  includeDeleted?: boolean;
+  /*
+  FNXC:WorkflowScheduling 2026-09-06-09:41:
+  FN-9261 lets a caller own the per-pass workflow-selection cache and read tally so a list
+  hydration batches selection reads once instead of issuing one per row. Both stay optional:
+  an omitted cache means the pass allocates its own and the tally is simply not reported.
+  */
+  selectionCache?: WorkflowSelectionCache;
+  selectionReadTally?: WorkflowSelectionReadTally;
+}
+
+export async function listTasksImpl(store: TaskStore, options?: ListTasksOptions): Promise<Task[]> {
+    /*
+    FNXC:TaskArchiveRemoval 2026-09-04-18:25:
+    Ordinary task reads are live-only by default. Cold archive snapshots remain available solely to
+    explicit migration and forensic callers; an omitted compatibility flag must never resurrect
+    historical rows into schedulers, APIs, or workflow scans.
+    */
+    const includeArchived = options?.includeArchived ?? false;
     const slim = options?.slim ?? false;
     const columnFilter = options?.column;
     const startupMemoEnabled = options?.startupMemo ?? (!store.isWatching && slim);
 
     if (startupMemoEnabled && slim && options?.limit === undefined && options?.offset === undefined) {
-      const memoKey = `${includeArchived ? "all" : "active"}:${columnFilter ?? "*"}`;
+      const memoKey = [
+        includeArchived ? "all" : "active",
+        columnFilter ?? "*",
+        options?.columns?.join(",") ?? "*",
+        options?.excludeColumns?.join(",") ?? "*",
+        options?.sort ?? "created-asc",
+      ].join(":");
       const now = Date.now();
       const cached = store.startupSlimListMemo.get(memoKey);
       if (cached && cached.expiresAt > now) {
@@ -396,24 +433,15 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
     const paginationOffset = Math.max(0, options?.offset ?? 0);
     const paginationLimit = options?.limit !== undefined ? Math.max(0, options.limit) : undefined;
     /*
-    FNXC:PostgresArchiveReads 2026-07-14-17:09:
-    Pagination belongs to the composed active-plus-archive result. When cold storage participates, fetch both sources before sorting, deduplicating, and slicing; paginating only project.tasks can make archived rows unreachable or shift them onto the wrong page.
+    FNXC:TaskArchiveRemoval 2026-09-04-18:25 DELIBERATE-LITERAL:
+    Explicit migration/forensic reads compose live rows with cold snapshots before global pagination.
+    A column filter admits cold storage only when it names the historical sentinel; no workflow
+    archive role participates.
     */
-    /*
-    FNXC:WorkflowResolvedColumns 2026-07-31-14:10 (fleet — reads.ts cluster):
-    "IS THE CALLER FILTERING TO THE ARCHIVE LANE?" — a role question about the FILTER, not a task.
-
-    Cold storage holds archived rows. Against the literal, a caller filtering to a renamed archive
-    lane took this branch as false, so cold storage was skipped and the filtered view returned only
-    whatever archived rows still sat in `project.tasks` — a short list presented as the whole archive.
-
-    `resolveProjectColumnsForRoles` seeds the legacy id before adding resolved ones, so an unconverted
-    board is byte-identical and a resolution failure keeps the previous answer.
-    */
-    const archivedFilterLanes = await resolveProjectColumnsForRoles(store, ["archived"]).catch(() => undefined);
-    const columnFilterIsArchive = columnFilter !== undefined
-      && (archivedFilterLanes && archivedFilterLanes.size > 0 ? archivedFilterLanes : LEGACY_ARCHIVE_LANES).has(columnFilter);
-    const includeColdStorage = includeArchived && (!columnFilter || columnFilterIsArchive);
+    const historicalSentinels = ARCHIVED_SENTINEL_LANES;
+    const columnFilterIsHistorical = columnFilter !== undefined
+      && (historicalSentinels && historicalSentinels.size > 0 ? historicalSentinels : LEGACY_ARCHIVE_LANES).has(columnFilter);
+    const includeColdStorage = includeArchived && (!columnFilter || columnFilterIsHistorical);
     const boundedMergedPrefix = includeColdStorage && paginationLimit !== undefined
       ? paginationOffset + paginationLimit
       : undefined;
@@ -422,7 +450,14 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
     const filteredRows = await readLiveTaskRows(layer, {
       includeDeleted: options?.includeDeleted,
       column: columnFilter ?? undefined,
-      excludeColumn: !columnFilter && !includeArchived ? "archived" : undefined,
+      columns: options?.columns,
+      excludeColumn: !columnFilter && !options?.columns && !options?.excludeColumns && !includeArchived ? "archived" : undefined,
+      excludeColumns: options?.excludeColumns,
+      sort: options?.sort,
+      afterCreatedAt: options?.afterCreatedAt,
+      afterId: options?.afterId,
+      afterQueueKey: options?.afterQueueKey,
+      afterIntakeKey: options?.afterIntakeKey,
       ...(boundedMergedPrefix !== undefined
         ? { limit: boundedMergedPrefix, offset: 0 }
         : sqlPaginated
@@ -440,7 +475,15 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
     design (U1's `resolveTaskLifecycleColumns` takes the cache for exactly this),
     so reads scale with the number of WORKFLOWS, not the number of cards.
     */
-    const listPassIrCache = new Map<string, WorkflowIr>();
+    const listPassIrCache = options?.irCache ?? new Map<string, WorkflowIr>();
+    /* FNXC:WorkflowScheduling 2026-09-05-23:12: List hydration prefetches once per pass; getTaskImpl remains individual because one row has no N+1. The tally reports store-internal reads to callers without changing badge fallback semantics. */
+    const listPassSelectionCache = options?.selectionCache ?? new Map<string, import("../workflows/workflow-ir-resolver.js").WorkflowSelection | undefined>();
+    const listSelectionReads = await prefetchWorkflowSelections(store, filteredRows.map((row) => String(row.id)), listPassSelectionCache);
+    if (options?.selectionReadTally) {
+      options.selectionReadTally.batched += listSelectionReads.batched;
+      options.selectionReadTally.singles += listSelectionReads.singles;
+    }
+    await prefetchWorkflowIrs(store, filteredRows.map((row) => String(row.id)), listPassIrCache, listPassSelectionCache, options?.definitionReadTally);
     /*
      * FNXC:SqliteFinalRemoval 2026-06-26-10:30:
      * Compute staleness thresholds once for the whole list pass, mirroring
@@ -467,7 +510,7 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
       main's FNXC:WorkflowLifecycle 2026-07-01-23:27 behavior, which the
       PostgreSQL cutover's store split predated.
       */
-      const reviewColumnsForRow = await resolveReviewColumnsForTask(store, task.id, listPassIrCache);
+      const reviewColumnsForRow = await resolveReviewColumnsForTask(store, task.id, listPassIrCache, listPassSelectionCache, options?.definitionReadTally);
       const hasFreshAgentLogActivity = hasFreshAgentLogActivitySinceTaskUpdate(store, task, now, reviewColumnsForRow);
       const executingTaskIds = hasFreshAgentLogActivity ? new Set<string>([task.id]) : undefined;
       task.inReviewStall = isMergeQueued ? undefined : getInReviewStallReason(task, {
@@ -500,7 +543,7 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
         // Paused-only (the signal is a no-op otherwise), sharing the list-pass
         // IR cache so one workflow is read once per pass, not once per card.
         holdColumn:
-          task.paused === true ? await resolveHoldColumnForTask(store, task.id, listPassIrCache) : undefined,
+          task.paused === true ? await resolveHoldColumnForTask(store, task.id, listPassIrCache, listPassSelectionCache) : undefined,
         engineActiveSinceMs: settings.engineActiveSinceMs,
         engineActivationGraceMs: settings.engineActivationGraceMs,
       });
@@ -523,7 +566,7 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
           thresholds: staleThresholds,
           engineActiveSinceMs: settings.engineActiveSinceMs,
           engineActivationGraceMs: settings.engineActivationGraceMs,
-          lifecycle: await resolveTaskLifecycleColumns(store, task.id, listPassIrCache),
+          lifecycle: await resolveTaskLifecycleColumns(store, task.id, listPassIrCache, listPassSelectionCache),
         });
       } catch (err) {
         if (!(err instanceof RangeError)) throw err;
@@ -554,6 +597,14 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
     FNXC:PostgresArchiveReadPerformance 2026-07-14-17:50:
     A global page ending at K can only contain rows from each source's first K entries. Bound both SQL reads to K, then apply live-ID authority and the exact shared comparator before slicing. Unbounded callers retain the complete-result contract.
     */
+    /* FNXC:TaskQueueOrder 2026-09-17-12:07: every SQL-ordered mode is already final; only the
+       default created-ascending merge below needs the cold-storage composition pass. */
+    if (!includeColdStorage && (
+      options?.sort === "completion-desc"
+      || options?.sort === "completion-date-desc"
+      || options?.sort === "queue-order"
+      || options?.sort === "intake-desc"
+    )) return tasks;
     const archiveEntries = includeColdStorage
       ? boundedMergedPrefix !== undefined
         ? await listArchivedTasksByCreatedOrder(layer.db, boundedMergedPrefix, layer.projectId)
@@ -574,6 +625,297 @@ export async function listTasksImpl(store: TaskStore, options?: { limit?: number
     if (!includeColdStorage) return sorted;
     if (paginationLimit === undefined) return sorted.slice(paginationOffset);
     return sorted.slice(paginationOffset, paginationOffset + paginationLimit);
+}
+
+export interface TaskListPage {
+  tasks: Task[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+interface TaskListCursor {
+  createdAt: string;
+  id: string;
+  query?: string;
+}
+
+function decodeTaskListCursor(value: string): TaskListCursor {
+  let parsed: unknown;
+  try { parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")); }
+  catch { throw new TypeError("Invalid task list cursor"); }
+  const cursor = parsed as { createdAt?: unknown; id?: unknown; query?: unknown } | null;
+  if (!cursor || typeof cursor.createdAt !== "string" || Number.isNaN(Date.parse(cursor.createdAt)) || typeof cursor.id !== "string" || !cursor.id) {
+    throw new TypeError("Invalid task list cursor");
+  }
+  if (cursor.query !== undefined && typeof cursor.query !== "string") {
+    throw new TypeError("Invalid task list cursor");
+  }
+  return {
+    createdAt: cursor.createdAt,
+    id: cursor.id,
+    ...(typeof cursor.query === "string" ? { query: cursor.query } : {}),
+  };
+}
+
+/*
+FNXC:TaskSearchPagination 2026-09-17-08:46:
+FN-497: the header task search must present the most recently created match first, so the text lane orders by `created_at DESC, id DESC`.
+The order and the keyset continuation predicate are ONE invariant: inverting only one of them makes pagination skip or repeat rows silently.
+These two helpers are exported so the pair can be proven by rendering SQL without a database.
+Board table pagination (the no-query branch) deliberately stays ascending and must not use them.
+*/
+export function buildTaskSearchPageOrder() {
+  return [desc(schema.project.tasks.createdAt), desc(schema.project.tasks.id)] as const;
+}
+
+export function buildTaskSearchPageCursorPredicate(cursor?: { createdAt: string; id: string }) {
+  if (!cursor) return undefined;
+  return or(
+    lt(schema.project.tasks.createdAt, cursor.createdAt),
+    and(eq(schema.project.tasks.createdAt, cursor.createdAt), lt(schema.project.tasks.id, cursor.id)),
+  );
+}
+
+/*
+FNXC:TaskListPagination 2026-09-07-16:03:
+Board task pages exclude completion history before the SQL limit and continue with an exclusive createdAt/id tuple. The exact count is independent of the page, while page hydration and workflow enrichment are paid only for returned rows.
+*/
+export async function listCurrentTasksPageImpl(store: TaskStore, options: { limit?: number; cursor?: string; query?: string } = {}): Promise<TaskListPage> {
+  const limit = Math.min(200, Math.max(1, Math.trunc(options.limit ?? 100) || 100));
+  const cursor = options.cursor ? decodeTaskListCursor(options.cursor) : undefined;
+  const query = options.query?.trim();
+  if (cursor && (cursor.query ?? undefined) !== (query || undefined)) throw new TypeError("Invalid task list cursor");
+  const layer = store.asyncLayer;
+  if (!layer) throw new Error("Task pagination requires the async task backend");
+
+  /*
+  FNXC:TaskSearchPagination 2026-09-11-22:33:
+  Dashboard search uses the shared project-scoped literal/lexical membership predicate before LIMIT, so suffixes and punctuation behave exactly like shared search. The createdAt/id keyset, exact total, and query-bound opaque cursor remain SQL-owned and cannot drift from membership.
+  */
+  if (query) {
+    const textPredicate = buildTaskSearchPredicate(query);
+    if (!textPredicate) return { tasks: [], total: 0, hasMore: false, nextCursor: null };
+    const searchPredicate = and(
+      textPredicate,
+      liveSearchPredicate(false, layer.projectId, ARCHIVED_SENTINEL_LANES),
+      buildTaskSearchPageCursorPredicate(cursor),
+    );
+    const totalPredicate = and(
+      textPredicate,
+      liveSearchPredicate(false, layer.projectId, ARCHIVED_SENTINEL_LANES),
+    );
+    const [countRows, pageRows] = await Promise.all([
+      layer.db.select({ count: sql<number>`count(*)::int` }).from(schema.project.tasks).where(totalPredicate),
+      layer.db.select({ ...getTableColumns(schema.project.tasks) })
+        .from(schema.project.tasks)
+        .where(searchPredicate)
+        .orderBy(...buildTaskSearchPageOrder())
+        .limit(limit + 1),
+    ]);
+    const hasMore = pageRows.length > limit;
+    const selectedRows = pageRows.slice(0, limit);
+    const tasks = await hydrateSearchTaskRows(store, selectedRows, true);
+    const last = tasks.at(-1);
+    return {
+      tasks,
+      total: countRows[0]?.count ?? 0,
+      hasMore,
+      nextCursor: hasMore && last
+        ? Buffer.from(JSON.stringify({ query, createdAt: last.createdAt, id: last.id }), "utf8").toString("base64url")
+        : null,
+    };
+  }
+
+  const completeColumns = [...await resolveProjectColumnsForRoles(store, ["complete"])] as ColumnId[];
+  const [total, rows] = await Promise.all([
+    countLiveTasks(layer, { excludeColumns: completeColumns }),
+    store.listTasks({
+      excludeColumns: completeColumns,
+      includeArchived: false,
+      slim: true,
+      limit: limit + 1,
+      sort: "created-asc",
+      startupMemo: false,
+      afterCreatedAt: cursor?.createdAt,
+      afterId: cursor?.id,
+    }),
+  ]);
+  const hasMore = rows.length > limit;
+  const tasks = rows.slice(0, limit);
+  const last = tasks.at(-1);
+  return {
+    tasks,
+    total,
+    hasMore,
+    nextCursor: hasMore && last ? Buffer.from(JSON.stringify({ createdAt: last.createdAt, id: last.id }), "utf8").toString("base64url") : null,
+  };
+}
+
+/*
+FNXC:TaskQueueOrder 2026-09-17-13:51:
+BOARD LANES ARE PAGED IN THEIR OWN ORDER. The generic board page is selected by creation ascending,
+so a boosted card — or a freshly captured Ideas card — that starts beyond the limit is simply not in
+the page, and no amount of client sorting can bring it to the head. This reader selects ONE lane
+scope with the same SQL order the lane renders in (`queue` = Boost then arrival, `intake` = newest
+first), so the head of every visible lane is loaded even for a project with thousands of live cards.
+
+The continuation is the server's own opaque keyset, bound to project, order and lane membership: a
+cursor minted for another lane or another order would interleave two total orders and silently skip
+or repeat rows, so it is rejected rather than replayed.
+*/
+export type TaskQueuePageOrder = "queue" | "intake";
+
+export interface TaskQueuePageOptions {
+  /** The lane scope: one or more column ids that share this order. */
+  columns: readonly string[];
+  order?: TaskQueuePageOrder;
+  limit?: number;
+  cursor?: string;
+}
+
+type TaskQueueCursorPayload = {
+  v: 1;
+  projectId: string;
+  order: TaskQueuePageOrder;
+  scope: string;
+  sequence: string;
+  createdAt: string;
+  id: string;
+};
+
+function taskQueueScopeSignature(columns: readonly string[]): string {
+  return [...new Set(columns)].sort().join("\u0000");
+}
+
+function decodeTaskQueueCursor(cursor: string, projectId: string, order: TaskQueuePageOrder, scope: string): TaskQueueCursorPayload {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<TaskQueueCursorPayload>;
+    if (parsed.v !== 1 || parsed.projectId !== projectId || parsed.order !== order || parsed.scope !== scope
+      || typeof parsed.id !== "string" || !parsed.id
+      || typeof parsed.sequence !== "string" || !/^\d{1,32}$/.test(parsed.sequence)
+      || typeof parsed.createdAt !== "string" || Number.isNaN(Date.parse(parsed.createdAt))) {
+      throw new Error("mismatch");
+    }
+    return parsed as TaskQueueCursorPayload;
+  } catch {
+    throw new TypeError("Invalid task queue cursor");
+  }
+}
+
+/** Return one keyset page of a single board lane scope, ordered in SQL before the limit. */
+export async function listTaskQueuePageImpl(store: TaskStore, options: TaskQueuePageOptions): Promise<TaskListPage> {
+  const limit = Math.min(200, Math.max(1, Math.trunc(options.limit ?? 50) || 50));
+  const order: TaskQueuePageOrder = options.order === "intake" ? "intake" : "queue";
+  const columns = [...new Set(options.columns.filter((column) => typeof column === "string" && column.length > 0))];
+  const layer = store.asyncLayer;
+  if (!layer) throw new Error("Task pagination requires the async task backend");
+  if (columns.length === 0) return { tasks: [], total: 0, hasMore: false, nextCursor: null };
+  const scope = taskQueueScopeSignature(columns);
+  const cursor = options.cursor ? decodeTaskQueueCursor(options.cursor, layer.projectId ?? "", order, scope) : undefined;
+
+  const [total, rows] = await Promise.all([
+    countLiveTasks(layer, { columns }),
+    store.listTasks({
+      columns: columns as ColumnId[],
+      includeArchived: false,
+      slim: true,
+      limit: limit + 1,
+      sort: order === "intake" ? "intake-desc" : "queue-order",
+      startupMemo: false,
+      ...(cursor
+        ? order === "intake"
+          ? { afterIntakeKey: { createdAt: cursor.createdAt, id: cursor.id } }
+          : { afterQueueKey: { sequence: cursor.sequence, createdAt: cursor.createdAt, id: cursor.id } }
+        : {}),
+    }),
+  ]);
+  const hasMore = rows.length > limit;
+  const tasks = rows.slice(0, limit);
+  const last = tasks.at(-1);
+  const nextCursor = hasMore && last
+    ? Buffer.from(JSON.stringify({
+        v: 1,
+        projectId: layer.projectId ?? "",
+        order,
+        scope,
+        ...taskQueuePageKey(last),
+      } satisfies TaskQueueCursorPayload), "utf8").toString("base64url")
+    : null;
+  return { tasks, total, hasMore, nextCursor };
+}
+
+export interface CompletedTaskCounts {
+  byColumn: Record<string, number>;
+  byWorkflow: Record<string, Record<string, number>>;
+}
+
+export interface CompletedTaskPage {
+  tasks: Task[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  counts: CompletedTaskCounts;
+}
+
+/*
+FNXC:TaskQueueOrder 2026-09-17-12:07:
+The cursor contract version is bumped to 2 with FN-509's removal of the selectable Done sort. A v1
+cursor was minted under a sort the server no longer honours, so replaying it would interleave two
+different total orders and produce gaps or duplicates; rejecting it forces a clean restart at the
+head instead.
+*/
+type CompletedCursorPayload = {
+  v: 2;
+  projectId: string;
+  completionAt: string;
+  numericSuffix: string;
+  id: string;
+};
+
+function decodeCompletedCursor(cursor: string, projectId: string): CompletedCursorPayload {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<CompletedCursorPayload>;
+    if (parsed.v !== 2 || parsed.projectId !== projectId || typeof parsed.id !== "string"
+      || typeof parsed.numericSuffix !== "string" || !/^\d+$/.test(parsed.numericSuffix)
+      || typeof parsed.completionAt !== "string" || Number.isNaN(Date.parse(parsed.completionAt))) {
+      throw new Error("mismatch");
+    }
+    return parsed as CompletedCursorPayload;
+  } catch {
+    throw new TypeError("Invalid completed-task cursor");
+  }
+}
+
+/**
+ * Return a stable keyset page from every workflow completion lane, together with exact scoped counts.
+ *
+ * FNXC:DoneKeysetPagination 2026-09-08-22:25:
+ * The opaque continuation binds project, sort mode, and the final total-order key. Clients must replay only this server cursor: deriving an offset from deduplicated or SSE-mutated rows can skip permanent history entries.
+ */
+export async function listCompletedTasksImpl(
+  store: TaskStore,
+  options?: { limit?: number; cursor?: string; slim?: boolean },
+): Promise<CompletedTaskPage> {
+  const rawLimit = options?.limit ?? 50;
+  const limit = Math.min(500, Math.max(1, Math.trunc(rawLimit) || 50));
+  const completeColumns = [...await resolveProjectColumnsForRoles(store, ["complete"])] as ColumnId[];
+  const layer = store.asyncLayer;
+  if (!layer) throw new Error("Completed-task pagination requires the async task backend");
+  const projectId = layer.projectId ?? "";
+  const cursor = options?.cursor ? decodeCompletedCursor(options.cursor, projectId) : undefined;
+  const defaultWorkflowId = (await store.getDefaultWorkflowId()) ?? "builtin:coding";
+  const result = await readCompletedTaskPage(layer, { columns: completeColumns, limit, cursor, defaultWorkflowId });
+  const hasMore = result.rows.length > limit;
+  const pageRows = result.rows.slice(0, limit);
+  const tasks = pageRows.map((row) => store.rowToTask(store.pgRowToTaskRow(row)));
+  const last = tasks.at(-1);
+  const completionAt = last ? (last.columnMovedAt ?? last.updatedAt ?? last.createdAt) : undefined;
+  const numericSuffix = last?.id.match(/-([0-9]+)$/)?.[1] ?? "0";
+  const nextCursor = hasMore && last
+    ? Buffer.from(JSON.stringify({ v: 2, projectId, completionAt: completionAt!, numericSuffix, id: last.id } satisfies CompletedCursorPayload), "utf8").toString("base64url")
+    : null;
+  return { tasks, total: result.total, hasMore, nextCursor, counts: result.counts };
 }
 
 export async function listTasksModifiedSinceImpl(store: TaskStore, since: string, limit?: number, opts?: { includeArchived?: boolean },): Promise<{ tasks: Task[]; hasMore: boolean }> {
@@ -614,24 +956,14 @@ export async function listTasksModifiedSinceImpl(store: TaskStore, since: string
     ];
     if (!includeArchived) {
       /*
-      FNXC:WorkflowResolvedColumns 2026-07-31-09:10:
-      ARCHIVED ROWS LEAKED INTO THE LIVE STREAM ON A RENAMED BOARD.
-
-      This filter backs the SSE watcher and modified-since polling — the incremental feed the
-      dashboard applies to its live task list. It excluded the literal `archived`, so on a board
-      whose archive lane is named anything else the predicate matched EVERY row and excluded
-      nothing: archived cards arrived in the live feed and reappeared on the board.
-
-      Nothing errors, and a full refetch filters archived rows by another path, so the symptom is
-      archived work that comes back until the next reload.
-
-      `resolveProjectColumnsForRoles` seeds the legacy ids before adding resolved ones, so the set is
-      never empty and an unconverted board excludes exactly `archived` as before. The fallback covers
-      a resolution failure, where excluding nothing would be worse than excluding the legacy id.
+      FNXC:TaskArchiveRemoval 2026-09-04-18:25 DELIBERATE-LITERAL:
+      This filter backs the SSE watcher and modified-since polling, so it must never publish the
+      historical `archived` sentinel into the dashboard's live task list. Archive is no longer a
+      workflow role; the fixed sentinel exclusion is migration compatibility, not trait resolution.
       */
-      const archivedColumns = await resolveProjectColumnsForRoles(store, ["archived"]).catch(() => undefined);
-      if (archivedColumns && archivedColumns.size > 0) {
-        conditions.push(notInArray(schema.project.tasks.column, [...archivedColumns]));
+      const historicalSentinels = ARCHIVED_SENTINEL_LANES;
+      if (historicalSentinels && historicalSentinels.size > 0) {
+        conditions.push(notInArray(schema.project.tasks.column, [...historicalSentinels]));
       } else {
         conditions.push(sql`${schema.project.tasks.column} != 'archived'`);
       }
@@ -677,13 +1009,16 @@ export async function listTasksModifiedSinceImpl(store: TaskStore, since: string
     const reviewColumnsByTaskId = new Map<string, ReadonlySet<string>>();
     const lifecycleByTaskId = new Map<string, Awaited<ReturnType<typeof resolveTaskLifecycleColumns>>>();
     {
+      /* FNXC:WorkflowScheduling 2026-09-05-23:12: Incremental hydration resolves multiple lanes per row, so selection prefetch prevents its former 2–3 reads per task while absent selections retain builtin:coding behavior. */
       const irCache = new Map<string, WorkflowIr>();
+      const selectionCache = new Map<string, import("../workflows/workflow-ir-resolver.js").WorkflowSelection | undefined>();
+      await prefetchWorkflowSelections(store, pageRows.map((row) => row.id), selectionCache);
       for (const pgRow of pageRows) {
         const row = store.pgRowToTaskRow(pgRow);
-        reviewColumnsByTaskId.set(row.id, await resolveReviewColumnsForTask(store, row.id, irCache));
-        lifecycleByTaskId.set(row.id, await resolveTaskLifecycleColumns(store, row.id, irCache));
+        reviewColumnsByTaskId.set(row.id, await resolveReviewColumnsForTask(store, row.id, irCache, selectionCache));
+        lifecycleByTaskId.set(row.id, await resolveTaskLifecycleColumns(store, row.id, irCache, selectionCache));
         if (store.rowToTask(row).paused !== true) continue;
-        holdColumnByTaskId.set(row.id, await resolveHoldColumnForTask(store, row.id, irCache));
+        holdColumnByTaskId.set(row.id, await resolveHoldColumnForTask(store, row.id, irCache, selectionCache));
       }
     }
     const tasks = pageRows.map((pgRow) => {
@@ -774,6 +1109,77 @@ export async function listTasksModifiedSinceImpl(store: TaskStore, since: string
     return { tasks, hasMore };
 }
 
+async function hydrateSearchTaskRows(
+  store: TaskStore,
+  pgRows: Record<string, unknown>[],
+  slim: boolean,
+): Promise<Task[]> {
+const now = Date.now();
+const settings = await store.getSettingsFast();
+const mergeQueuedTaskIds = await store.getMergeQueuedTaskIdsAsync();
+// Shared across the page so one workflow is read once, not once per hit.
+const searchPassIrCache = new Map<string, WorkflowIr>();
+/* FNXC:WorkflowScheduling 2026-09-05-23:12: Search hydration has the same per-row selection N+1 as board lists; prefetch retains the default workflow for cached absent selections. */
+const searchPassSelectionCache = new Map<string, import("../workflows/workflow-ir-resolver.js").WorkflowSelection | undefined>();
+await prefetchWorkflowSelections(store, pgRows.map((row) => String(row.id)), searchPassSelectionCache);
+await prefetchWorkflowIrs(store, pgRows.map((row) => String(row.id)), searchPassIrCache, searchPassSelectionCache);
+  return Promise.all(pgRows.map(async (pgRow) => {
+  const task = store.rowToTask(store.pgRowToTaskRow(pgRow));
+  const isMergeQueued = mergeQueuedTaskIds.has(task.id);
+  /*
+  FNXC:WorkflowLifecycle 2026-07-05-15:40:
+  In-review merge/review agents stream progress to agent-log JSONL without
+  necessarily mutating the task row. Treat fresh agent-log writes as active
+  ownership for stall-badge hydration so the board does not show
+  Stalled/Merge stalled while a merger is visibly making progress. Restores
+  main's FNXC:WorkflowLifecycle 2026-07-01-23:27 behavior, which the
+  PostgreSQL cutover's store split predated.
+  */
+  /* FNXC:WorkflowLifecycleColumns 2026-07-31-01:20 (fleet): resolved ONCE for this row — it was
+     resolved inline twice below, and the fresh-activity gate could not see it at all. */
+  const reviewColumnsForRow = await resolveReviewColumnsForTask(store, task.id, searchPassIrCache, searchPassSelectionCache);
+  const hasFreshAgentLogActivity = hasFreshAgentLogActivitySinceTaskUpdate(store, task, now, reviewColumnsForRow);
+  const executingTaskIds = hasFreshAgentLogActivity ? new Set<string>([task.id]) : undefined;
+  task.inReviewStall = isMergeQueued ? undefined : getInReviewStallReason(task, {
+    now,
+    reviewColumns: reviewColumnsForRow,
+    executingTaskIds,
+    autoMerge: allowsAutoMergeProcessing(task, settings),
+    engineActiveSinceMs: settings.engineActiveSinceMs,
+    engineActivationGraceMs: settings.engineActivationGraceMs,
+  });
+  task.inReviewStalled = isMergeQueued ? undefined : getInReviewStalledSignal(task, {
+    now,
+    executingTaskIds,
+    reviewColumns: reviewColumnsForRow,
+    thresholdMs: settings.inReviewStalledThresholdMs,
+    autoMerge: allowsAutoMergeProcessing(task, settings),
+    engineActiveSinceMs: settings.engineActiveSinceMs,
+    engineActivationGraceMs: settings.engineActivationGraceMs,
+  } satisfies InReviewStalledContext);
+  task.stalledReview = isMergeQueued || hasFreshAgentLogActivity ? undefined : detectStalledReview(task, { now, reviewColumns: reviewColumnsForRow });
+  task.retrySummary = computeRetrySummary(task);
+  if (slim) {
+    task.timedExecutionMs = store.computeTimedExecutionMs(task.log);
+    task.log = [];
+  }
+  if (task.steps.length > 0) {
+    return task;
+  }
+  // FNXC:TaskDetailPromptResilience 2026-07-10-16:00 (merge port from main):
+  // an unreadable PROMPT.md must not reject this Promise.all and 500 the
+  // entire search — degrade to the persisted (empty) steps and log.
+  try {
+    const steps = await store.parseStepsFromPrompt(task.id);
+    return steps.length > 0 ? { ...task, steps } : task;
+  } catch (err) {
+    storeLog.warn(`[task-detail] failed to sync steps from PROMPT.md for ${task.id} during searchTasks: ${err instanceof Error ? err.message : String(err)}`);
+    return task;
+  }
+}));
+
+}
+
 export async function searchTasksImpl(store: TaskStore, query: string, options?: { limit?: number; offset?: number; slim?: boolean; includeArchived?: boolean }): Promise<Task[]> {
     // FNXC:RuntimePersistenceAsync 2026-06-24-11:00:
     // Backend-mode searchTasks delegates live rows to the generated tsvector
@@ -786,11 +1192,12 @@ export async function searchTasksImpl(store: TaskStore, query: string, options?:
     const limit = options?.limit;
     const offset = options?.offset ?? 0;
     if (limit !== undefined && Math.max(0, limit) === 0) return [];
-    const includeArchived = options?.includeArchived ?? true;
+    const includeArchived = options?.includeArchived ?? false;
     const slim = options?.slim ?? false;
-    // The tsvector path is the primary search (GIN-backed). The LIKE path is
-    // a fallback if the tsvector query returns no results (e.g., if the search
-    // index is cold).
+    /*
+    FNXC:TaskStoreSearch 2026-09-11-22:52:
+    The shared tsvector query already combines indexed lexical recall with raw literal substring membership. Do not retry an empty result through the legacy tokenized LIKE helper: stripping punctuation there would broaden queries such as `foo*` into `foo` and return text that does not contain what the user typed.
+    */
     const mergedPrefixLimit = includeArchived && limit !== undefined
       ? Math.max(0, offset) + Math.max(0, limit)
       : undefined;
@@ -798,93 +1205,20 @@ export async function searchTasksImpl(store: TaskStore, query: string, options?:
     const sourceOffset = includeArchived ? 0 : offset;
     /*
     FNXC:WorkflowResolvedColumns 2026-07-31-23:59:
-    Search excludes the board's OWN archive lanes, not the `archived` id. Against the literal, a card
-    filed away on a renamed board still surfaced in every live search — including the CREATE-time
-    near-duplicate check, which would then reject a new task as a duplicate of one the operator had
-    already archived.
-
-    Resolved once here and threaded into both search paths. `resolveArchivedLanes` returns undefined
-    on an unreadable workflow list, and `liveSearchPredicate` falls back to the literal, so an
-    unconverted board is byte-identical.
+    Live search excludes the stable historical sentinel and soft-deleted rows. Internal forensic
+    reads may explicitly compose cold snapshots, but no workflow archive role participates.
     */
-    const searchArchivedLanes = await resolveProjectColumnsForRoles(store, ["archived"]).catch(() => undefined);
-    let pgRows = await searchTasksTsvector(layer.db, trimmedQuery, {
+    const searchHistoricalSentinels = ARCHIVED_SENTINEL_LANES;
+    const pgRows = await searchTasksTsvector(layer.db, trimmedQuery, {
       limit: sourceLimit,
       offset: sourceOffset,
       includeArchived,
-      archivedColumns: searchArchivedLanes,
+      archivedColumns: searchHistoricalSentinels,
       // FNXC:MultiProjectIsolation 2026-07-10: scope search to the bound project
       // (load-bearing for the CREATE-time near-duplicate check via searchTasks).
       projectId: layer.projectId,
     });
-    if (pgRows.length === 0) {
-      pgRows = await searchTasksLike(layer.db, trimmedQuery, {
-        limit: sourceLimit,
-        offset: sourceOffset,
-        includeArchived,
-        archivedColumns: searchArchivedLanes,
-        projectId: layer.projectId,
-      });
-    }
-    const now = Date.now();
-    const settings = await store.getSettingsFast();
-    const mergeQueuedTaskIds = await store.getMergeQueuedTaskIdsAsync();
-    // Shared across the page so one workflow is read once, not once per hit.
-    const searchPassIrCache = new Map<string, WorkflowIr>();
-    const tasks = await Promise.all(pgRows.map(async (pgRow) => {
-      const task = store.rowToTask(store.pgRowToTaskRow(pgRow));
-      const isMergeQueued = mergeQueuedTaskIds.has(task.id);
-      /*
-      FNXC:WorkflowLifecycle 2026-07-05-15:40:
-      In-review merge/review agents stream progress to agent-log JSONL without
-      necessarily mutating the task row. Treat fresh agent-log writes as active
-      ownership for stall-badge hydration so the board does not show
-      Stalled/Merge stalled while a merger is visibly making progress. Restores
-      main's FNXC:WorkflowLifecycle 2026-07-01-23:27 behavior, which the
-      PostgreSQL cutover's store split predated.
-      */
-      /* FNXC:WorkflowLifecycleColumns 2026-07-31-01:20 (fleet): resolved ONCE for this row — it was
-         resolved inline twice below, and the fresh-activity gate could not see it at all. */
-      const reviewColumnsForRow = await resolveReviewColumnsForTask(store, task.id, searchPassIrCache);
-      const hasFreshAgentLogActivity = hasFreshAgentLogActivitySinceTaskUpdate(store, task, now, reviewColumnsForRow);
-      const executingTaskIds = hasFreshAgentLogActivity ? new Set<string>([task.id]) : undefined;
-      task.inReviewStall = isMergeQueued ? undefined : getInReviewStallReason(task, {
-        now,
-        reviewColumns: reviewColumnsForRow,
-        executingTaskIds,
-        autoMerge: allowsAutoMergeProcessing(task, settings),
-        engineActiveSinceMs: settings.engineActiveSinceMs,
-        engineActivationGraceMs: settings.engineActivationGraceMs,
-      });
-      task.inReviewStalled = isMergeQueued ? undefined : getInReviewStalledSignal(task, {
-        now,
-        executingTaskIds,
-        reviewColumns: reviewColumnsForRow,
-        thresholdMs: settings.inReviewStalledThresholdMs,
-        autoMerge: allowsAutoMergeProcessing(task, settings),
-        engineActiveSinceMs: settings.engineActiveSinceMs,
-        engineActivationGraceMs: settings.engineActivationGraceMs,
-      } satisfies InReviewStalledContext);
-      task.stalledReview = isMergeQueued || hasFreshAgentLogActivity ? undefined : detectStalledReview(task, { now, reviewColumns: reviewColumnsForRow });
-      task.retrySummary = computeRetrySummary(task);
-      if (slim) {
-        task.timedExecutionMs = store.computeTimedExecutionMs(task.log);
-        task.log = [];
-      }
-      if (task.steps.length > 0) {
-        return task;
-      }
-      // FNXC:TaskDetailPromptResilience 2026-07-10-16:00 (merge port from main):
-      // an unreadable PROMPT.md must not reject this Promise.all and 500 the
-      // entire search — degrade to the persisted (empty) steps and log.
-      try {
-        const steps = await store.parseStepsFromPrompt(task.id);
-        return steps.length > 0 ? { ...task, steps } : task;
-      } catch (err) {
-        storeLog.warn(`[task-detail] failed to sync steps from PROMPT.md for ${task.id} during searchTasks: ${err instanceof Error ? err.message : String(err)}`);
-        return task;
-      }
-    }));
+    const tasks = await hydrateSearchTaskRows(store, pgRows, slim);
     if (!includeArchived) return tasks;
     /*
     FNXC:PostgresArchiveReads 2026-07-14-17:09:

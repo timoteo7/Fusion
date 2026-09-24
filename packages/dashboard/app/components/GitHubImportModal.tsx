@@ -1,3 +1,4 @@
+import { ViewHeader } from "./ViewHeader";
 import "./GitHubImportModal.css";
 import { useState, useEffect, useCallback, useContext, useRef, useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -1602,30 +1603,27 @@ export function GitHubImportModal({ isOpen, onClose, onImport, onPlanningMode, o
   */
   const inner = (
     <div className={`modal modal-lg github-import-modal${isEmbedded ? " github-import-modal--embedded" : ""}`}>
-      {isEmbedded ? (
-        /*
-        FNXC:RightDockEmbedding 2026-06-22-00:40:
-        Import Tasks is a main-content destination, so its header reads like Command Center (cc-header/cc-title): a plain title row with the GitHub logo and the shared 1.125rem embedded-title font, no modal-header bar or close button. Padding matches the embedded view container.
-        */
-        <header className="github-import-modal__embedded-header">
-          <h2 className="github-import-modal__embedded-title">
-            <GithubIcon size={20} />
-            {t("git.importTasksHeading", "Import Tasks")}
-          </h2>
-        </header>
-      ) : (
-        <div className="modal-header github-import-modal__header">
-          <div>
-            <h3 id="github-import-modal-title">{t("git.importFromGitHub", "Import from GitHub")}</h3>
-            <p className="github-import-modal__subtitle">
-              {t("git.importSubtitle", "Choose a detected remote, load open issues or pull requests, and import one into the board.")}
-            </p>
-          </div>
-          <button className="modal-close" onClick={onClose} aria-label={t("git.closeModalAriaLabel", "Close import modal")}>
-            &times;
-          </button>
-        </div>
-      )}
+      {/*
+      FNXC:StandardizedViewLayout 2026-09-13-21:43:
+      Import Tasks keeps its real full-width candidate list and floating previews rather than inventing a split pane. Embedded and floating hosts share one canonical header; only the floating host adds its required close action.
+      */}
+      <ViewHeader
+        className={isEmbedded ? "github-import-modal__embedded-header" : "modal-header github-import-modal__header"}
+        icon={GithubIcon}
+        titleId="github-import-modal-title"
+        title={(
+          <span className={isEmbedded ? "github-import-modal__embedded-title" : "github-import-modal__title-copy"}>
+            <span>{isEmbedded ? t("git.importTasksHeading", "Import Tasks") : t("git.importFromGitHub", "Import from GitHub")}</span>
+            {!isEmbedded ? (
+              <span className="github-import-modal__subtitle">
+                {t("git.importSubtitle", "Choose a detected remote, load open issues or pull requests, and import one into the board.")}
+              </span>
+            ) : null}
+          </span>
+        )}
+        onClose={isEmbedded ? undefined : onClose}
+        closeButtonProps={{ "aria-label": t("git.closeModalAriaLabel", "Close import modal") }}
+      />
 
         <div className="modal-body github-import-modal__body">
           {/*
@@ -2067,7 +2065,6 @@ export function GitHubImportModal({ isOpen, onClose, onImport, onPlanningMode, o
               minSize={{ width: 420, height: 360 }}
               /* FNXC:ModalGeometryPersistence 2026-07-15-19:30: Import detail is a ≤768px sheet, so preserve its desktop floating geometry instead of touching it on mobile. */
               suspendGeometryPersistenceOnMobile
-              persistGeometryKey="floating-window:github-import-detail"
               className="floating-window--github-import-detail"
             >
               <div className="github-import-detail-panel">
@@ -2458,7 +2455,6 @@ export function GitHubImportModal({ isOpen, onClose, onImport, onPlanningMode, o
                     minSize={{ width: 420, height: 360 }}
                     /* FNXC:ModalGeometryPersistence 2026-07-15-19:30: GitLab detail shares the ≤768px import sheet behavior and must preserve the shared desktop geometry record. */
                     suspendGeometryPersistenceOnMobile
-                    persistGeometryKey="floating-window:github-import-detail"
                     className="floating-window--github-import-detail"
                   >
                     <div className="github-import-detail-panel">
@@ -2527,7 +2523,6 @@ export function GitHubImportModal({ isOpen, onClose, onImport, onPlanningMode, o
       defaultSize={{ width: 1200, height: 720 }}
       minSize={{ width: 480, height: 480 }}
       /* FNXC:ModalTouchGeometry 2026-07-26-19:05: The legacy size-only key cannot restore FloatingWindow position, so a new complete geometry key intentionally resets once. */
-      persistGeometryKey="floating-window:github-import"
       suspendGeometryPersistenceOnMobile
       suspendGeometryPersistenceOnShortViewport
       /* FNXC:ModalTouchGeometry 2026-07-26-19:05: Preserve the global default-off dismissal preference; unconditional pointer-down would lose the data-safety contract. */

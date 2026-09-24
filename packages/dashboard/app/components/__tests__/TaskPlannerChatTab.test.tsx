@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { TaskPlannerChatTab } from "../TaskPlannerChatTab";
 import { ChatMessageLayoutProvider } from "../../context/ChatMessageLayoutContext";
 import { clampChatInputHeight, getChatInputAutomaticMaxHeight, getChatInputBoxMetrics } from "../../utils/chatInputAutosize";
+import { __test_resetChatSnippetsCache } from "../../hooks/useChatSnippetsCache";
 
 const taskPlannerChatCss = readFileSync(resolve(__dirname, "../TaskPlannerChatTab.css"), "utf8");
 const originalScrollTopDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTop");
@@ -14,13 +15,16 @@ const originalScrollHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLEleme
 const originalClientHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
 
 const mockModelCatalog = vi.hoisted(() => ({
+  favoriteProviders: [] as string[],
+  favoriteModels: [] as string[],
+  refresh: vi.fn().mockResolvedValue(undefined),
   models: [
     { provider: "anthropic", id: "claude-plan", name: "Claude Plan", reasoning: true, contextWindow: 200000 },
     { provider: "enterprise-provider", id: "very-long-production-model", name: "Enterprise Production Model With A Readable Long Name", reasoning: true, contextWindow: 200000 },
   ],
 }));
 
-const { mockEnsureTaskPlannerChatSession, mockFetchTaskPlannerChatSession, mockFetchChatSession, mockFetchChatMessages, mockFetchSettings, mockFetchTaskDetail, mockUpdateChatSession, mockStreamChatResponse, mockAttachChatStream, mockCancelChatResponse, mockAddSteeringComment, mockTranslations, mockT } = vi.hoisted(() => {
+const { mockEnsureTaskPlannerChatSession, mockFetchTaskPlannerChatSession, mockFetchChatSession, mockFetchChatMessages, mockFetchSettings, mockFetchGlobalSettings, mockUpdateGlobalSettings, mockFetchTaskDetail, mockUpdateChatSession, mockStreamChatResponse, mockAttachChatStream, mockCancelChatResponse, mockAddSteeringComment, mockTranslations, mockT } = vi.hoisted(() => {
   const translations = new Map<string, string>();
   return {
     mockEnsureTaskPlannerChatSession: vi.fn(),
@@ -28,6 +32,8 @@ const { mockEnsureTaskPlannerChatSession, mockFetchTaskPlannerChatSession, mockF
     mockFetchChatSession: vi.fn(),
     mockFetchChatMessages: vi.fn(),
     mockFetchSettings: vi.fn().mockResolvedValue({}),
+    mockFetchGlobalSettings: vi.fn().mockResolvedValue({ chatSnippets: [] }),
+    mockUpdateGlobalSettings: vi.fn().mockResolvedValue({ chatSnippets: [] }),
     mockFetchTaskDetail: vi.fn(),
     mockUpdateChatSession: vi.fn(),
     mockStreamChatResponse: vi.fn(),
@@ -46,8 +52,22 @@ const { mockEnsureTaskPlannerChatSession, mockFetchTaskPlannerChatSession, mockF
 vi.mock("../../hooks/useModelsCache", () => ({
   useModelsCache: () => ({
     models: mockModelCatalog.models,
-    favoriteProviders: [],
-    favoriteModels: [],
+    favoriteProviders: mockModelCatalog.favoriteProviders,
+    favoriteModels: mockModelCatalog.favoriteModels,
+    refresh: mockModelCatalog.refresh,
+  }),
+}));
+
+vi.mock("../../hooks/useVoiceDictation", () => ({
+  useVoiceDictation: () => ({
+    enabled: true,
+    supported: true,
+    state: "idle",
+    partialText: "",
+    finalText: "",
+    error: undefined,
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
   }),
 }));
 
@@ -66,6 +86,8 @@ vi.mock("../../api", async (importOriginal) => {
     fetchChatSession: mockFetchChatSession,
     fetchChatMessages: mockFetchChatMessages,
     fetchSettings: mockFetchSettings,
+    fetchGlobalSettings: mockFetchGlobalSettings,
+    updateGlobalSettings: mockUpdateGlobalSettings,
     fetchTaskDetail: mockFetchTaskDetail,
     updateChatSession: mockUpdateChatSession,
     streamChatResponse: mockStreamChatResponse,
@@ -194,7 +216,10 @@ function plannerQuestionMessage(id: string, args: Record<string, unknown>, creat
 
 describe("TaskPlannerChatTab", () => {
   beforeEach(() => {
+    __test_resetChatSnippetsCache();
     vi.clearAllMocks();
+    mockFetchGlobalSettings.mockReturnValue(new Promise(() => {}));
+    mockUpdateGlobalSettings.mockResolvedValue({ chatSnippets: [] });
     mockTranslations.clear();
     const plannerSession = makePlannerSession();
     mockFetchTaskPlannerChatSession.mockResolvedValue({ session: plannerSession });
@@ -211,6 +236,27 @@ describe("TaskPlannerChatTab", () => {
       { provider: "anthropic", id: "claude-plan", name: "Claude Plan", reasoning: true, contextWindow: 200000 },
       { provider: "enterprise-provider", id: "very-long-production-model", name: "Enterprise Production Model With A Readable Long Name", reasoning: true, contextWindow: 200000 },
     ];
+  });
+
+  it("renders the real planner composer through the shared Alpha boundary", async () => {
+    const view = render(
+      <>
+        <>
+          <TaskPlannerChatTab task={makeTask("FN-7310")} active taskChatModel={{ provider: "anthropic", modelId: "claude-plan" }} addToast={vi.fn()} />
+        </>
+      </>,
+    );
+    expect(await screen.findByLabelText("Message task chat")).toHaveAttribute("data-ui", "textarea");
+    expect(view.container.querySelector('[data-ui="button"]')).not.toBeNull();
+
+    view.rerender(
+      <>
+        <>
+          <TaskPlannerChatTab task={makeTask("FN-7310")} active taskChatModel={{ provider: "anthropic", modelId: "claude-plan" }} addToast={vi.fn()} />
+        </>
+      </>,
+    );
+    expect(screen.getByLabelText("Message task chat")).not.toHaveAttribute("data-ui");
   });
 
   afterEach(() => {
@@ -247,7 +293,7 @@ describe("TaskPlannerChatTab", () => {
       undefined,
     );
     expect(mockEnsureTaskPlannerChatSession).not.toHaveBeenCalled();
-    expect(mockFetchChatMessages).toHaveBeenCalledWith("chat-planner", { order: "asc" }, undefined);
+    expect(mockFetchChatMessages).toHaveBeenCalledWith("chat-planner", { limit: 50, order: "desc" }, undefined);
     const modelBadge = screen.getByTestId("task-planner-chat-model");
     expect(modelBadge).toHaveAccessibleName("anthropic/claude-plan");
     expect(modelBadge).toHaveAttribute("title", "anthropic/claude-plan");
@@ -295,6 +341,39 @@ describe("TaskPlannerChatTab", () => {
       undefined,
       { taskId: "FN-7310" },
     );
+  });
+
+  it("persists model favorites from the task-chat portal and reports rollback failures", async () => {
+    const user = userEvent.setup();
+    const addToast = vi.fn();
+    renderPlannerChat({ addToast });
+
+    await screen.findByTestId("task-planner-chat-empty");
+    await user.click(screen.getByTestId("chat-thinking-btn"));
+    expect(screen.getByTestId("chat-thinking-popover").parentElement).toBe(document.body);
+    expect(document.querySelector(".task-planner-chat-composer")?.contains(screen.getByTestId("chat-thinking-popover"))).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Chat model" }));
+    let portal = await screen.findByTestId("model-combobox-portal");
+    const claudeActionRow = within(portal).getByText("Claude Plan").closest(".model-combobox-option-row");
+    const claudeFavoriteButton = claudeActionRow?.querySelector<HTMLButtonElement>(".model-combobox-option-favorite");
+    expect(claudeFavoriteButton).toHaveAttribute("aria-label", "Add {{name}} to favorites");
+    await user.click(claudeFavoriteButton!);
+
+    await waitFor(() => expect(mockUpdateGlobalSettings).toHaveBeenCalledWith({
+      favoriteProviders: [],
+      favoriteModels: ["anthropic/claude-plan"],
+    }));
+    expect(screen.getByTestId("chat-thinking-popover")).toBeInTheDocument();
+    expect(mockUpdateChatSession).not.toHaveBeenCalled();
+
+    mockUpdateGlobalSettings.mockRejectedValueOnce(new Error("write failed"));
+    portal = screen.getByTestId("model-combobox-portal");
+    const enterpriseActionRow = within(portal).getByText("Enterprise Production Model With A Readable Long Name").closest(".model-combobox-option-row");
+    const enterpriseFavoriteButton = enterpriseActionRow?.querySelector<HTMLButtonElement>(".model-combobox-option-favorite");
+    expect(enterpriseFavoriteButton).toHaveAttribute("aria-label", "Add {{name}} to favorites");
+    await user.click(enterpriseFavoriteButton!);
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith("Failed to update model favorites", "error"));
+    expect(enterpriseFavoriteButton).toHaveTextContent("☆");
   });
 
   it("restores the project default model through the unified popover and closes only after choosing a thinking level", async () => {
@@ -768,7 +847,7 @@ describe("TaskPlannerChatTab", () => {
 
     await Promise.resolve();
     await Promise.resolve();
-    expect(mockFetchChatMessages).not.toHaveBeenCalledWith("chat-old-task", { order: "asc" }, undefined);
+    expect(mockFetchChatMessages).not.toHaveBeenCalledWith("chat-old-task", { limit: 50, order: "desc" }, undefined);
     expect(screen.queryByText("Stale old task answer")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /Summarize recent activity/ }));
     expect(mockStreamChatResponse).toHaveBeenCalledWith(
@@ -1112,6 +1191,36 @@ describe("TaskPlannerChatTab", () => {
     const mobileCss = taskPlannerChatCss.slice(taskPlannerChatCss.indexOf("@media (max-width: 768px)"));
     expect(mobileCss).not.toMatch(/\.task-planner-chat-transcript\s*\{/);
     expect(mobileCss).not.toMatch(/\.task-planner-chat-transcript[^}]*\b(?:overflow|scroll-behavior|height|flex)\s*:/);
+  });
+
+  it("inserts a chat snippet on the first submit without stream or persistent queue, then sends it normally", async () => {
+    const prompt = "lance toujours les tests avec chrome devtool mcp";
+    mockFetchGlobalSettings.mockResolvedValue({ chatSnippets: [{ name: "test", prompt }] });
+    const storageSpy = vi.spyOn(Storage.prototype, "setItem");
+    renderPlannerChat();
+    await screen.findByTestId("task-planner-chat-empty");
+    const input = screen.getByLabelText("Message task chat");
+    const send = screen.getByRole("button", { name: "Send" });
+
+    await userEvent.type(input, "/test");
+    await screen.findByRole("option", { name: /\/test/i });
+    fireEvent.click(send);
+
+    await waitFor(() => expect(input).toHaveValue(prompt));
+    expect(mockStreamChatResponse).not.toHaveBeenCalled();
+    expect(mockEnsureTaskPlannerChatSession).not.toHaveBeenCalled();
+    expect(storageSpy.mock.calls.some(([, value]) => String(value).includes(prompt))).toBe(false);
+
+    fireEvent.click(send);
+    await waitFor(() => expect(mockStreamChatResponse).toHaveBeenCalledWith(
+      "chat-planner",
+      prompt,
+      expect.any(Object),
+      undefined,
+      undefined,
+      { taskId: "FN-7310" },
+    ));
+    storageSpy.mockRestore();
   });
 
   it("sends messages through the chat stream and appends success responses", async () => {
@@ -1994,7 +2103,7 @@ describe("TaskPlannerChatTab", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Planner provider rate limit");
     await waitFor(() => expect(screen.getAllByText("hello after 429")).toHaveLength(1));
-    expect(mockFetchChatMessages).toHaveBeenCalledWith("chat-planner", { order: "asc" }, undefined);
+    expect(mockFetchChatMessages).toHaveBeenCalledWith("chat-planner", { limit: 50, order: "desc" }, undefined);
   });
 
   it("rolls back planner optimistic message for pre-acceptance failures", async () => {
@@ -2398,15 +2507,14 @@ describe("TaskPlannerChatTab", () => {
       expect(textarea).toHaveValue("next message");
     });
 
-    // The planner command menu renders only commands (not skills), so its
-    // accessible copy must say "command", not the reused skill-menu copy.
-    it("labels the command menu with command-specific copy, not skill copy", async () => {
+    // The unified slash menu can render commands and snippets, so its accessible copy must describe the shared affordance rather than the skill picker it reuses visually.
+    it("labels the command menu with slash-specific copy, not skill copy", async () => {
       renderPlannerChat({ task: makeTask("FN-7310", { column: "in-progress" }) });
       const textarea = await screen.findByLabelText("Message task chat");
 
       fireEvent.change(textarea, { target: { value: "/" } });
 
-      const menu = await screen.findByRole("listbox", { name: /command suggestions/i });
+      const menu = await screen.findByRole("listbox", { name: /slash suggestions/i });
       expect(menu).toBeInTheDocument();
       expect(screen.queryByRole("listbox", { name: /skill suggestions/i })).not.toBeInTheDocument();
     });
@@ -2540,6 +2648,50 @@ describe("TaskPlannerChatTab", () => {
       void streamHandlers;
     });
 
+    it("keeps planner composition active while a force-send cancellation is pending", async () => {
+      const user = userEvent.setup();
+      const streamHandlers: any[] = [];
+      const cancelDeferred = createDeferred<{ success: boolean; interrupted: boolean }>();
+      mockCancelChatResponse.mockReturnValueOnce(cancelDeferred.promise);
+      mockStreamChatResponse.mockImplementation((_sessionId, _content, handlers) => {
+        streamHandlers.push(handlers);
+        return { close: vi.fn(), isConnected: () => true };
+      });
+
+      renderPlannerChat();
+      await screen.findByTestId("task-planner-chat-empty");
+      await user.click(screen.getByRole("button", { name: /Summarize recent activity/ }));
+      await waitFor(() => expect(streamHandlers).toHaveLength(1));
+
+      const input = screen.getByLabelText("Message task chat");
+      await user.type(input, "Force this queued message");
+      await user.keyboard("{Enter}");
+      await waitFor(() => expect(screen.getByTestId("task-planner-chat-pending-force-0")).toBeInTheDocument());
+      await user.click(screen.getByTestId("task-planner-chat-pending-force-0"));
+      await waitFor(() => expect(mockCancelChatResponse).toHaveBeenCalledTimes(1));
+
+      expect(input).not.toBeDisabled();
+      expect(screen.getByRole("button", { name: "Start voice dictation" })).not.toBeDisabled();
+      expect(screen.getByTestId("chat-thinking-btn")).toBeDisabled();
+      expect(screen.getByTestId("task-planner-chat-pending-edit-0")).toBeDisabled();
+      expect(screen.getByTestId("task-planner-chat-pending-force-0")).toBeDisabled();
+      expect(screen.queryByTestId("chat-attach-btn")).not.toBeInTheDocument();
+
+      await user.type(input, "Typed during planner cancellation");
+      expect(input).toHaveValue("Typed during planner cancellation");
+      expect(screen.getByTestId("chat-send-btn")).not.toBeDisabled();
+      await user.keyboard("{Enter}");
+
+      expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("Typed during planner cancellation")).toBeInTheDocument();
+      expect(input).toHaveValue("");
+
+      cancelDeferred.resolve({ success: true, interrupted: true });
+      await waitFor(() => expect(mockStreamChatResponse).toHaveBeenCalledTimes(2));
+      expect(mockStreamChatResponse.mock.calls[1][1]).toBe("Force this queued message");
+      expect(screen.getByText("Typed during planner cancellation")).toBeInTheDocument();
+    });
+
     it("waits for durable cancellation and history reconciliation before force dispatching a non-front entry", async () => {
       const user = userEvent.setup();
       const streamHandlers: any[] = [];
@@ -2625,6 +2777,51 @@ describe("TaskPlannerChatTab", () => {
       await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Failed to save the interrupted planner response"));
       expect(screen.getByText("Retain me")).toBeInTheDocument();
       expect(mockStreamChatResponse).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /*
+  FNXC:TaskDetailPlannerChat 2026-09-16-04:39:
+  FN-458 — TaskPlannerChatTab n'a AUCUNE branche JavaScript de breakpoint : sa responsivité est exclusivement CSS. La
+  surface mobile de la commande de retour au bas est donc vérifiée par lecture du feuillet, comme les autres règles
+  mobiles de ce composant. Le cas inter-surfaces assert des constructions de code (noms de classes / testids), jamais
+  une prose ou un commentaire de source.
+  */
+  describe("FN-458 jump-to-bottom affordance", () => {
+    it("styles the jump control with design tokens only and overrides it at the mobile breakpoint", () => {
+      const mobileQueryStart = taskPlannerChatCss.indexOf("@media (max-width: 768px)");
+      expect(mobileQueryStart).toBeGreaterThan(-1);
+      const desktopCss = taskPlannerChatCss.slice(0, mobileQueryStart);
+      const mobileCss = taskPlannerChatCss.slice(mobileQueryStart);
+
+      const baseRule = desktopCss.match(/\.task-planner-chat-jump-to-bottom\s*\{[^}]*\}/)?.[0] ?? "";
+      expect(baseRule).not.toBe("");
+      expect(baseRule).toContain("position: absolute");
+      // Tokens only: no hardcoded px, hex, or rgba() anywhere in the control's base rule.
+      expect(baseRule).not.toMatch(/\d+px/);
+      expect(baseRule).not.toContain("#");
+      expect(baseRule).not.toContain("rgba(");
+
+      const mobileRule = mobileCss.match(/\.task-planner-chat-jump-to-bottom\s*\{[^}]*\}/)?.[0] ?? "";
+      expect(mobileRule).not.toBe("");
+      expect(mobileRule).not.toMatch(/\d+px/);
+      expect(mobileRule).not.toContain("#");
+      expect(mobileRule).not.toContain("rgba(");
+
+      // The control must never cover the expand toggle overlay.
+      expect(desktopCss).toMatch(/\.task-planner-chat-expand-toggle--overlay\s*\{[^}]*z-index:\s*3/);
+      expect(baseRule).toMatch(/z-index:\s*2/);
+
+      // The control is a sibling of the virtualized scroller inside a dedicated positioned viewport.
+      expect(desktopCss).toMatch(/\.task-planner-chat-transcript-viewport\s*\{[^}]*position: relative/);
+    });
+
+    it("keeps the sibling jump affordance rendered by the other chat transcript surfaces", () => {
+      const taskChatTabSource = readFileSync(resolve(__dirname, "../TaskChatTab.tsx"), "utf8");
+      const chatViewSource = readFileSync(resolve(__dirname, "../ChatView.tsx"), "utf8");
+
+      expect(taskChatTabSource).toContain('data-testid="task-chat-jump-to-bottom"');
+      expect(chatViewSource).toContain('data-testid="chat-jump-to-latest"');
     });
   });
 });

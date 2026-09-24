@@ -1,0 +1,279 @@
+/*
+FNXC:ProjectNotes 2026-09-09-23:29:
+Notes fills the main-content pane below the shared header. Desktop and tablet use one edge-to-edge split with only a sidebar divider; narrow or short screens drill between full-width list and detail panels without card chrome.
+
+FNXC:ProjectNotesSelection 2026-09-09-23:29:
+The selected note uses an accent tint and persistent inset marker independently of hover and keyboard focus. The marker follows the pending request id so a click remains unmistakable while detail content loads.
+*/
+.notes-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  inline-size: 100%;
+  block-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+.notes-layout {
+  display: flex;
+  flex: 1;
+  min-inline-size: 0;
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+.notes-list,
+.notes-detail {
+  min-block-size: 0;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.notes-list {
+  display: flex;
+  flex: 0 0 calc(var(--space-lg) * 18.75);
+  min-inline-size: 0;
+  flex-direction: column;
+  border-inline-end: var(--btn-border-width) solid var(--color-border);
+}
+
+/*
+FNXC:DashboardSearchField 2026-09-17-02:59:
+FN-485 : la recherche de Notes est UN seul champ — loupe et texte d'invite vivent DANS le champ, comme la
+recherche d'en-tête, mais le champ reste affiché EN PERMANENCE (aucun déclencheur loupe préalable). Cette
+règle ne possède plus que la géométrie de la RANGÉE (padding, séparateur bas) ; l'apparence du champ vient
+du primitif partagé `search-field` de `styles.css`. Ne pas redéclarer ici de bordure, de fond ni de taille
+d'icône : c'est exactement la duplication qui avait fait sortir l'icône et le libellé hors du champ.
+*/
+.notes-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  padding: var(--space-md);
+  border-block-end: var(--btn-border-width) solid var(--color-border);
+}
+
+.notes-search .search-field {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.notes-view .view-header svg {
+  inline-size: var(--icon-size-md);
+  block-size: var(--icon-size-md);
+  flex-shrink: 0;
+}
+
+.notes-list-items {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/*
+FNXC:NotesEditing 2026-09-15-21:23:
+FN-435 : la ligne de liste possède désormais le renommage et la suppression, donc elle ne peut plus être un seul
+`<button>` — un bouton ne peut pas contenir d'autres boutons. La ligne devient un conteneur positionné qui héberge la
+cible de sélection, le champ de renommage en place et le menu d'actions, en réutilisant `btn-icon` plutôt qu'en
+forkant un bouton propre à Notes.
+*/
+.notes-list-item {
+  position: relative;
+  inline-size: 100%;
+  display: flex;
+  align-items: stretch;
+  border-block-end: var(--btn-border-width) solid var(--color-border);
+  background: transparent;
+  color: var(--color-text);
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.notes-list-item-select {
+  flex: 1;
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.notes-list-item-rename {
+  flex: 1;
+  min-inline-size: 0;
+  margin: var(--space-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+/*
+FNXC:NotesRowActions 2026-09-17-03:18:
+FN-486 : le bouton « … » de la ligne et son menu positionné en absolu sont SUPPRIMÉS avec leurs règles. Les
+mêmes actions sont servies par le menu contextuel partagé, portalisé dans le viewport, donc atteignable depuis
+la popover d'en-tête, le tiroir téléphone et le dock sans être rogné par leur conteneur.
+*/
+
+.notes-list-item:hover {
+  background: var(--color-surface-hover);
+}
+
+.notes-list-item:focus-within {
+  position: relative;
+  box-shadow: var(--focus-ring-strong);
+}
+
+.notes-list-item-select:focus-visible {
+  outline: none;
+}
+
+.notes-list-item--selected {
+  background: color-mix(in srgb, var(--todo) 12%, var(--color-surface));
+  box-shadow: inset var(--space-xs) 0 0 var(--todo);
+}
+
+.notes-list-item--selected:hover {
+  background: color-mix(in srgb, var(--todo) 12%, var(--color-surface-hover));
+}
+
+.notes-list-item--selected:focus-visible {
+  box-shadow: inset var(--space-xs) 0 0 var(--todo), var(--focus-ring-strong);
+}
+
+.notes-list-item strong,
+.notes-list-item time {
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-list-item--selected strong {
+  color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.notes-list-item time {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.notes-detail {
+  display: flex;
+  flex: 1;
+  min-inline-size: 0;
+  flex-direction: column;
+}
+
+/*
+FNXC:NotesRowActions 2026-09-17-10:37:
+FN-506 : le déclencheur « … » de l'en-tête réutilise `btn btn-icon` ; seul l'alignement optique de l'icône dans
+la grappe d'actions est ajusté, en jetons de design, sans variante de bouton parallèle.
+*/
+.notes-header-actions-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.notes-save-state {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.notes-editor,
+.notes-editor .file-editor-container {
+  display: flex;
+  flex: 1;
+  min-block-size: 0;
+}
+
+.notes-editor {
+  overflow: hidden;
+}
+
+.notes-state {
+  padding: var(--space-xl);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.notes-detail-empty {
+  margin: auto;
+}
+
+.notes-conflict,
+.notes-error {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  color: var(--color-text);
+}
+
+.notes-error {
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+}
+
+.notes-conflict p {
+  flex: 1;
+  margin: 0;
+}
+
+.notes-back {
+  display: none;
+}
+
+/*
+FNXC:DesktopRightDock 2026-09-12-04:06:
+Compact/list-only Notes garde toujours la liste dans le dock; chaque détail appartient à sa fenêtre dédiée et ne peut donc pas remplacer cette liste à une largeur quelconque.
+*/
+.notes-view--compact .notes-layout,
+.notes-view--list-only .notes-layout {
+  display: block;
+}
+
+.notes-view--compact .notes-list,
+.notes-view--list-only .notes-list {
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
+}
+
+@media (max-width: 768px), (max-height: 480px) {
+  .notes-layout { display: block; }
+  .notes-list, .notes-detail { inline-size: 100%; block-size: 100%; border: 0; }
+  .notes-view--detail .notes-list { display: none; }
+  .notes-view:not(.notes-view--detail) .notes-detail { display: none; }
+  .notes-back { display: inline-flex; }
+  .notes-conflict, .notes-error { flex-wrap: wrap; }
+}
+
+.notes-view--dedicated .notes-layout,
+.notes-view--dedicated .notes-detail {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
+}
+
+.notes-view--dedicated .notes-back {
+  display: none;
+}
+
+.notes-view--dedicated :is(.notes-conflict, .notes-error) {
+  flex-wrap: wrap;
+}
+
+.notes-view--floating { block-size: 100%; background: var(--surface); }
+.notes-view--floating .view-header { cursor: move; }

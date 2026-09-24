@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 
 import { BUILTIN_WORKFLOW_SETTINGS } from "../workflows/builtin-workflow-settings.js";
+import { DEFAULT_CODE_REVIEW_MAX_REVISIONS } from "../workflows/builtin-code-review-group.js";
 import type { WorkflowIr } from "../workflows/workflow-ir-types.js";
 import {
   resolveEffectiveSettings,
@@ -77,9 +78,9 @@ function makeStore(opts: {
 }
 
 describe("resolveOptionalReviewRevisionBudget", () => {
-  it("treats unset built-in Plan Review and Code Review settings as unbounded", () => {
+  it("keeps Plan Review unbounded and gives unset Code Review the bounded default", () => {
     expect(resolveOptionalReviewRevisionBudget({ optionalGroupId: "plan-review", workflowSettings: {} })).toBe("unbounded");
-    expect(resolveOptionalReviewRevisionBudget({ optionalGroupId: "code-review", workflowSettings: {} })).toBe("unbounded");
+    expect(resolveOptionalReviewRevisionBudget({ optionalGroupId: "code-review", workflowSettings: {} })).toBe(DEFAULT_CODE_REVIEW_MAX_REVISIONS);
   });
 
   it("uses explicit workflow values before node config, including zero", () => {
@@ -229,7 +230,7 @@ describe("resolveEffectiveSettings (per-task)", () => {
     expect(Object.keys(eff)).toHaveLength(0);
   });
 
-  it("inherits every project model lane from the active default workflow across custom workflows", async () => {
+  it("does not read project model lanes from the active default workflow", async () => {
     const projectModelLanes = {
       executionProvider: "exec-provider",
       executionModelId: "exec-model",
@@ -259,17 +260,18 @@ describe("resolveEffectiveSettings (per-task)", () => {
 
     const eff = await resolveEffectiveSettings(store, { id: "t1" });
 
-    expect(eff).toMatchObject(projectModelLanes);
+    expect(eff).toEqual({});
+    expect(store.getDefaultWorkflowId).not.toHaveBeenCalled();
   });
 
-  it("keeps project model lanes ahead of selected-workflow values while retaining the workflow fallback", async () => {
+  it("keeps selected-workflow values isolated from flat project settings", async () => {
     const customWithModelLanes: WorkflowIr = {
       ...CUSTOM_NO_SETTINGS,
       settings: BUILTIN_WORKFLOW_SETTINGS.filter((setting) =>
         ["executionProvider", "executionModelId", "executionThinkingLevel", "planningProvider", "planningModelId"].includes(setting.id)),
     };
     const store = makeStore({
-      defaultWorkflowId: "builtin:coding",
+      defaultWorkflowIdThrows: true,
       selection: { t1: { workflowId: "wf-custom", stepIds: [] } },
       defs: { "wf-custom": { ir: customWithModelLanes } },
       values: {
@@ -291,11 +293,6 @@ describe("resolveEffectiveSettings (per-task)", () => {
     const eff = await resolveEffectiveSettings(store, { id: "t1" });
 
     expect(eff).toMatchObject({
-      executionProvider: "project-provider",
-      executionModelId: "project-model",
-      executionThinkingLevel: "medium",
-      planningProvider: "project-plan-provider",
-      planningModelId: "project-plan-model",
       selectedWorkflowModelLanes: {
         executionProvider: "workflow-provider",
         executionModelId: "workflow-model",
@@ -304,7 +301,7 @@ describe("resolveEffectiveSettings (per-task)", () => {
     });
   });
 
-  it("applies a custom active-default model baseline to selection-less tasks", async () => {
+  it("does not consult a custom active-default row for selection-less tasks", async () => {
     const customDefaultWithModelLanes: WorkflowIr = {
       ...CUSTOM_NO_SETTINGS,
       settings: BUILTIN_WORKFLOW_SETTINGS.filter((setting) =>
@@ -325,14 +322,11 @@ describe("resolveEffectiveSettings (per-task)", () => {
 
     const eff = await resolveEffectiveSettings(store, { id: "t-none" });
 
-    expect(eff).toMatchObject({
-      validatorProvider: "project-review-provider",
-      validatorModelId: "project-review-model",
-      validatorThinkingLevel: "high",
-    });
+    expect(eff.validatorProvider).toBeUndefined();
+    expect(store.getDefaultWorkflowId).not.toHaveBeenCalled();
   });
 
-  it("uses authoritative async values for both selected-workflow overrides and the project model baseline", async () => {
+  it("uses authoritative async values for selected-workflow overrides only", async () => {
     const customWithPlanningLane: WorkflowIr = {
       ...CUSTOM_NO_SETTINGS,
       settings: BUILTIN_WORKFLOW_SETTINGS.filter((setting) =>
@@ -356,15 +350,13 @@ describe("resolveEffectiveSettings (per-task)", () => {
     const eff = await resolveEffectiveSettings(store, { id: "t1" });
 
     expect(eff).toMatchObject({
-      planningProvider: "project-provider",
-      planningModelId: "project-model",
       selectedWorkflowModelLanes: {
         planningProvider: "workflow-provider",
         planningModelId: "workflow-model",
       },
     });
     expect(store.getWorkflowSettingValues).not.toHaveBeenCalled();
-    expect(store.getWorkflowSettingValuesAsync).toHaveBeenCalledWith("builtin:coding", PROJECT);
+    expect(store.getWorkflowSettingValuesAsync).not.toHaveBeenCalledWith("builtin:coding", PROJECT);
     expect(store.getWorkflowSettingValuesAsync).toHaveBeenCalledWith("wf-custom", PROJECT);
   });
 
@@ -395,7 +387,7 @@ describe("resolveEffectiveSettings (per-task)", () => {
       values: { "builtin:coding::proj-1": { executionProvider: "anthropic" } },
     });
     const eff = await resolveEffectiveSettings(store, { id: "t1" });
-    expect(eff.executionProvider).toBe("anthropic");
+    expect(eff.selectedWorkflowModelLanes).toEqual({ executionProvider: "anthropic" });
     expect(Object.prototype.hasOwnProperty.call(eff, "executionModelId")).toBe(false);
   });
 
@@ -443,7 +435,7 @@ describe("resolveEffectiveSettings (per-task)", () => {
 });
 
 describe("resolveEffectiveSettingsDetailedById", () => {
-  it("keeps the default workflow's stored planning lane as the project baseline", async () => {
+  it("isolates the default workflow's stored planning lane", async () => {
     const store = makeStore({
       defaultWorkflowId: "builtin:coding",
       values: {
@@ -455,11 +447,11 @@ describe("resolveEffectiveSettingsDetailedById", () => {
     });
 
     const result = await resolveEffectiveSettingsDetailedById(store, "builtin:coding", "proj-9");
-    expect(result.effective).toMatchObject({
+    expect(result.effective.selectedWorkflowModelLanes).toEqual({
       planningProvider: "project-provider",
       planningModelId: "project-model",
     });
-    expect(result.effective.selectedWorkflowModelLanes).toBeUndefined();
+    expect(result.effective.planningProvider).toBeUndefined();
   });
 
   it("keeps a distinct workflow pair separate from the project baseline", async () => {
@@ -485,8 +477,6 @@ describe("resolveEffectiveSettingsDetailedById", () => {
 
     const result = await resolveEffectiveSettingsDetailedById(store, "wf-custom", "proj-9");
     expect(result.effective).toMatchObject({
-      planningProvider: "project-provider",
-      planningModelId: "project-model",
       selectedWorkflowModelLanes: {
         planningProvider: "workflow-provider",
         planningModelId: "workflow-model",

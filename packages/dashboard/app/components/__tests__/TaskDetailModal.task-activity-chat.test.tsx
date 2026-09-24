@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { act, render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { type ComponentProps } from "react";
 import type { AgentLogEntry } from "@fusion/core";
@@ -67,7 +67,7 @@ function openActivityViewMenu() {
   if (!existingMenu) {
     fireEvent.click(screen.getByRole("button", { name: "Activity" }));
   }
-  return screen.getByRole("menu", { name: "Activity views" });
+  return screen.getByRole("menu", { name: "Activity views" }).closest<HTMLElement>(".activity-view-menu")!;
 }
 
 function activityViewLabels(): string[] {
@@ -142,7 +142,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
     expect(screen.queryByRole("form", { name: "Task activity composer" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Feed" })).toBeInTheDocument();
     expect(screen.getByText("Posted update")).toBeInTheDocument();
-    expect(screen.queryByText("Existing steering guidance")).not.toBeInTheDocument();
+    expect(screen.getByText("Existing steering guidance")).not.toBeVisible();
     expect(screen.queryByTestId("agent-log-viewer")).not.toBeInTheDocument();
 
     selectActivityView("raw-logs");
@@ -151,7 +151,119 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
     expect(screen.queryByRole("form", { name: "Task activity composer" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Feed" })).not.toBeInTheDocument();
     expect(screen.getByTestId("agent-log-viewer")).toBeInTheDocument();
-    expect(screen.getByText("raw executor line")).toBeInTheDocument();
+    expect(screen.getAllByText("raw executor line").some((node) => node.closest('[aria-hidden="true"]') == null)).toBe(true);
+  });
+
+  /*
+  FNXC:TaskDetailActivity 2026-09-15-08:46:
+  FN-410: the Activity view options rendered side by side because the column layout sat on the
+  portaled surface while the option buttons live inside the `[role="menu"]` element. jsdom does not
+  compute layout, so the proof is structural here (every option is a direct child of the menu element
+  carrying the vertical-list class) and completed by the CSS contract asserted in
+  TaskDetailModal.css.test.ts for both the base and the mobile breakpoint.
+  */
+  it("FN-410 rend les vues d'Activity comme une liste verticale portée par l'élément [role=menu]", () => {
+    mockRawLogs([]);
+    renderModal();
+
+    const surface = openActivityViewMenu();
+    const menu = screen.getByRole("menu", { name: "Activity views" });
+    expect(surface.contains(menu)).toBe(true);
+    expect(menu).toHaveClass("activity-view-menu-list");
+
+    const options = screen.getAllByRole("menuitem");
+    expect(options.map((option) => option.textContent?.trim())).toEqual(["Live", "Feed", "Raw"]);
+    for (const option of options) {
+      expect(option).toHaveClass("activity-view-menu-item");
+      expect(option.parentElement).toBe(menu);
+    }
+  });
+
+  it("FN-410 garde la liste verticale quand l'oversight ajoute l'option Interventions", () => {
+    mockRawLogs([]);
+    renderModal({
+      task: makeTask({
+        id: "FN-410-oversight",
+        column: "in-progress" as any,
+        plannerOversightLevel: "autonomous",
+        log: [],
+        steeringComments: [],
+      }),
+    });
+
+    openActivityViewMenu();
+    const menu = screen.getByRole("menu", { name: "Activity views" });
+    expect(menu).toHaveClass("activity-view-menu-list");
+
+    const options = screen.getAllByRole("menuitem");
+    expect(options.map((option) => option.textContent?.trim())).toEqual(["Live", "Feed", "Raw", "Interventions"]);
+    for (const option of options) {
+      expect(option.parentElement).toBe(menu);
+    }
+  });
+
+  /*
+  FNXC:TaskDetailChat 2026-09-15-08:46:
+  FN-410 end to end: a task log carrying the engine's thinking-effort annotation must surface that
+  effort on the Live role icon of the matching role, through the real TaskDetailModal wiring.
+  */
+  it("FN-410 expose le niveau de réflexion sur l'icône de modèle de Live", () => {
+    mockRawLogs([
+      {
+        timestamp: "2026-06-30T20:03:00.000Z",
+        taskId: "FN-410-thinking",
+        type: "status",
+        agent: "executor",
+        text: "Executor using model: openai/gpt-4o (thinking effort: high)",
+      },
+      { timestamp: "2026-06-30T20:04:00.000Z", taskId: "FN-410-thinking", type: "text", agent: "executor", text: "executor output" },
+    ] as AgentLogEntry[]);
+
+    renderModal({
+      task: makeTask({
+        id: "FN-410-thinking",
+        column: "in-progress" as any,
+        plannerOversightLevel: "off",
+        log: [],
+        steeringComments: [],
+      }),
+    });
+
+    const executorGroup = screen.getByRole("region", { name: "Executor messages" });
+    expect(within(executorGroup).getByTestId("task-chat-provider-thinking")).toHaveTextContent("High");
+    expect(within(executorGroup).getByLabelText("Executor: openai/gpt-4o · thinking: High")).toBeInTheDocument();
+  });
+
+  it("conserve le brouillon et le transcript Live à travers Feed, Raw et un autre onglet", async () => {
+    const user = userEvent.setup();
+    mockRawLogs([
+      { timestamp: "2026-06-30T20:03:00.000Z", taskId: "FN-7315", type: "text", agent: "executor", text: "stream conservé" },
+    ] as AgentLogEntry[]);
+    renderModal({ initialTab: "chat" });
+
+    const transcript = screen.getByTestId("task-chat-transcript");
+    const input = screen.getByRole("textbox", { name: "Message active agent session" });
+    await user.type(input, "brouillon persistant");
+
+    selectActivityView("feed");
+    expect(screen.queryByRole("textbox", { name: "Message active agent session" })).toBeNull();
+    expect(transcript).not.toBeVisible();
+    expect(screen.getByTestId("activity-live-keep-alive")).toHaveAttribute("aria-hidden", "true");
+
+    selectActivityView("raw-logs");
+    expect(screen.getByTestId("agent-log-viewer")).toBeInTheDocument();
+    expect(transcript).not.toBeVisible();
+
+    selectActivityView("current");
+    expect(screen.getByTestId("task-chat-transcript")).toBe(transcript);
+    expect(screen.getByRole("textbox", { name: "Message active agent session" })).toHaveValue("brouillon persistant");
+
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    expect(transcript).not.toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "Message active agent session" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Activity" }));
+    expect(screen.getByTestId("task-chat-transcript")).toBe(transcript);
+    expect(screen.getByRole("textbox", { name: "Message active agent session" })).toHaveValue("brouillon persistant");
   });
 
   it("FN-8779: keeps Feed scrolling separate from the shared action footer across Feed states and switches", async () => {
@@ -190,28 +302,26 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
     }));
     const long = renderModal({ task: makeTask({ id: "FN-8779-long", log: longLog }), initialTab: "logs" });
     const feedBody = long.baseElement.querySelector<HTMLElement>(".detail-body--feed");
-    const feedContent = feedBody?.querySelector<HTMLElement>(".detail-body-content");
-    const feedSection = feedContent?.querySelector<HTMLElement>(".detail-section--feed");
+    const feedSection = feedBody?.querySelector<HTMLElement>(":scope > .detail-activity");
     const feedList = feedSection?.querySelector<HTMLElement>(".detail-activity-list");
     const detailRoot = feedBody?.closest<HTMLElement>(".task-detail-content");
     const footer = detailRoot?.querySelector<HTMLElement>(":scope > .modal-actions");
 
     expect(screen.getByText("Repeated Feed entry 80")).toBeInTheDocument();
     expect(feedBody).not.toBeNull();
-    expect(feedContent).not.toBeNull();
     expect(feedSection).not.toBeNull();
     expect(feedList).not.toBeNull();
-    expect(footer).not.toBeNull();
-    expect(feedBody?.parentElement).toBe(footer?.parentElement);
-    expect(feedBody).not.toContainElement(footer);
+    expect(footer).toBeNull();
+    expect(feedBody?.parentElement).toBe(detailRoot);
+    expect(feedBody?.querySelector(".modal-actions")).toBeNull();
     expect(feedList).toContainElement(screen.getByText("Repeated Feed entry 80"));
-    expect(screen.getByTestId("task-chat-expand-toggle")).toBeVisible();
+    expect(screen.getAllByTestId("task-chat-expand-toggle").some((button) => button.closest('[aria-hidden="true"]') == null)).toBe(true);
 
     selectActivityView("current");
     expect(long.baseElement.querySelector(".detail-body--feed")).toBeNull();
     selectActivityView("feed");
     expect(long.baseElement.querySelector(".detail-body--feed")).not.toBeNull();
-    expect(screen.getByTestId("task-chat-expand-toggle")).toBeVisible();
+    expect(screen.getAllByTestId("task-chat-expand-toggle").some((button) => button.closest('[aria-hidden="true"]') == null)).toBe(true);
 
     vi.mocked(fetchTaskDetail).mockResolvedValue(makeTask());
   });
@@ -227,7 +337,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
       loadingMore: false,
     });
 
-    const overlay = renderModal({ taskDetailChatFirst: false });
+    const overlay = renderModal({ taskDetailDefaultTab: "activity" });
     expect(screen.getByRole("button", { name: "Activity" })).toHaveClass("detail-tab-active");
     expect(screen.getByTestId("task-chat-transcript")).toBeInTheDocument();
     expect(screen.queryByText("Loading agent output…")).not.toBeInTheDocument();
@@ -242,7 +352,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
         onMergeTask={noopMerge}
         onOpenDetail={noopOpenDetail}
         addToast={noop}
-        taskDetailChatFirst={false}
+        taskDetailDefaultTab="activity"
       />,
     );
     expect(screen.getByRole("button", { name: "Activity" })).toHaveClass("detail-tab-active");
@@ -250,7 +360,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
     expect(screen.queryByText("Loading agent output…")).not.toBeInTheDocument();
     embedded.unmount();
 
-    renderModal({ taskDetailChatFirst: true });
+    renderModal({ taskDetailDefaultTab: "chat" });
     expect(screen.getByRole("button", { name: "Chat" })).toHaveClass("detail-tab-active");
     expect(screen.getByTestId("task-planner-chat-panel")).toBeInTheDocument();
     expect(screen.queryByTestId("task-chat-transcript")).not.toBeInTheDocument();
@@ -304,7 +414,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
 
       selectActivityView("raw-logs");
       expect(screen.getByTestId("agent-log-viewer")).toBeInTheDocument();
-      expect(screen.getByText("raw executor line")).toBeInTheDocument();
+      expect(screen.getAllByText("raw executor line").some((node) => node.closest("[aria-hidden=\"true\"]") == null)).toBe(true);
 
       selectActivityView("current");
       expect(screen.getByText("Existing steering guidance")).toBeInTheDocument();
@@ -348,13 +458,13 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
       const activityButton = screen.getByRole("button", { name: "Activity" });
 
       fireEvent.click(activityButton);
-      let menu = screen.getByRole("menu", { name: "Activity views" });
+      let menu = screen.getByRole("menu", { name: "Activity views" }).closest<HTMLElement>(".activity-view-menu")!;
       performanceNowSpy.mockReturnValue(120);
       act(() => {
         visualViewport.dispatchEvent(new Event("resize"));
         visualViewport.dispatchEvent(new Event("scroll"));
       });
-      menu = screen.getByRole("menu", { name: "Activity views" });
+      menu = screen.getByRole("menu", { name: "Activity views" }).closest<HTMLElement>(".activity-view-menu")!;
 
       expect(menu.parentElement).toBe(document.body);
       expect(document.querySelector(".detail-tabs")).not.toContainElement(menu);
@@ -379,7 +489,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
 
       selectActivityView("raw-logs");
       expect(screen.getByTestId("agent-log-viewer")).toBeInTheDocument();
-      expect(screen.getByText("raw executor line")).toBeInTheDocument();
+      expect(screen.getAllByText("raw executor line").some((node) => node.closest("[aria-hidden=\"true\"]") == null)).toBe(true);
 
       selectActivityView("current");
       expect(screen.getByText("Existing steering guidance")).toBeInTheDocument();
@@ -581,7 +691,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
       const activityButton = screen.getByRole("button", { name: "Activity" });
       fireEvent.click(activityButton);
       expect(screen.getByRole("menu", { name: "Activity views" })).toBeInTheDocument();
-      const menu = screen.getByRole("menu", { name: "Activity views" });
+      const menu = screen.getByRole("menu", { name: "Activity views" }).closest<HTMLElement>(".activity-view-menu")!;
       expect(menu.parentElement).toBe(document.body);
 
       // Same-gesture echo inside the popup host: must reposition, not close.
@@ -723,7 +833,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
   it("restores Chat-first ordering and omitted non-done default when the project setting is enabled", () => {
     mockRawLogs([]);
 
-    renderModal({ taskDetailChatFirst: true });
+    renderModal({ taskDetailDefaultTab: "chat" });
 
     expect(topLevelTabLabels().slice(0, 2)).toEqual(["Chat", "Activity"]);
     expect(screen.getByRole("button", { name: "Chat" })).toHaveClass("detail-tab-active");
@@ -731,10 +841,54 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
     expect(screen.queryByRole("tablist", { name: "Activity views" })).not.toBeInTheDocument();
   });
 
+  /*
+  FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+  FN-442 turned the Chat-first boolean into a three-value project choice, so each value must carry BOTH the landing tab of
+  an open with no explicit tab AND the head order of the Activity / Chat / Definition trio (chosen tab first, then the
+  other two in canonical order). The two invariants that did NOT change are asserted for every value too: an explicit
+  deep link always wins, and a terminal-column task still lands on Summary.
+  */
+  const defaultTabCases = [
+    { setting: "activity" as const, landingTabLabel: "Activity", headOrder: ["Activity", "Chat", "Plan"] },
+    { setting: "chat" as const, landingTabLabel: "Chat", headOrder: ["Chat", "Activity", "Plan"] },
+    { setting: "definition" as const, landingTabLabel: "Plan", headOrder: ["Plan", "Activity", "Chat"] },
+  ];
+
+  for (const { setting, landingTabLabel, headOrder } of defaultTabCases) {
+    it(`lands on ${landingTabLabel} and leads the tab bar with it for taskDetailDefaultTab="${setting}"`, () => {
+      mockRawLogs([]);
+
+      renderModal({ taskDetailDefaultTab: setting });
+
+      expect(topLevelTabLabels().slice(0, 3)).toEqual(headOrder);
+      expect(screen.getByRole("button", { name: landingTabLabel })).toHaveClass("detail-tab-active");
+    });
+
+    it(`keeps an explicit deep link authoritative over taskDetailDefaultTab="${setting}"`, () => {
+      mockRawLogs([]);
+
+      renderModal({ taskDetailDefaultTab: setting, initialTab: "stats" });
+
+      expect(topLevelTabLabels().slice(0, 3)).toEqual(headOrder);
+      expect(screen.getByRole("button", { name: "Stats" })).toHaveClass("detail-tab-active");
+    });
+
+    it(`keeps a terminal-column task on Summary for taskDetailDefaultTab="${setting}"`, () => {
+      mockRawLogs([]);
+
+      renderModal({
+        taskDetailDefaultTab: setting,
+        task: makeTask({ id: "FN-7315-done", column: "done" as never, plannerOversightLevel: "off", log: [], steeringComments: [] }),
+      });
+
+      expect(screen.getByRole("button", { name: "Summary" })).toHaveClass("detail-tab-active");
+    });
+  }
+
   it("keeps explicit Activity, planner Chat, and Logs deep links stable across the ordering setting", () => {
     mockRawLogs([]);
 
-    const { rerender } = renderModal({ initialTab: "chat", taskDetailChatFirst: true });
+    const { rerender } = renderModal({ initialTab: "chat", taskDetailDefaultTab: "chat" });
 
     expect(topLevelTabLabels().slice(0, 2)).toEqual(["Chat", "Activity"]);
     expect(screen.getByRole("button", { name: "Activity" })).toHaveClass("detail-tab-active");
@@ -750,7 +904,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
         onOpenDetail={noopOpenDetail}
         addToast={noop}
         initialTab="planner-chat"
-        taskDetailChatFirst={false}
+        taskDetailDefaultTab="activity"
       />,
     );
 
@@ -767,7 +921,7 @@ describe("TaskDetailModal Activity and planner Chat tab integration", () => {
         onOpenDetail={noopOpenDetail}
         addToast={noop}
         initialTab="logs"
-        taskDetailChatFirst={true}
+        taskDetailDefaultTab="chat"
       />,
     );
 

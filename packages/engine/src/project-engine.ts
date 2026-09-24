@@ -26,7 +26,7 @@ import {
   type TraitFlags,
   allowsAutoMergeProcessing,
   hasSharedBranchMemberAutoMergeHold,
-  compareTasksByPriorityThenAgeAndId,
+  compareTasksByQueueOrder,
   emitOverseerConfirmation,
   emitOverseerEscalation,
   emitOverseerObservation,
@@ -37,6 +37,7 @@ import {
   planConfirmedMergeChecklistReconciliation,
   PreMergeStepsNotRunError,
   PRE_MERGE_STEPS_NOT_RUN_BLOCKER,
+  isStaleContentApprovalBlocker,
   classifyMergeSweepAdmission,
   classifyWorkflowNodeMergeRegion,
   isActiveMergeStatus,
@@ -53,7 +54,7 @@ import {
   resolveMaxAutoMergeRetries,
   resolveTaskLifecycleColumns,
   resolveTaskSessionAdvisorEnabled,
-  sortTasksByPriorityThenAgeAndId,
+  sortTasksByQueueOrder,
   resolveWipTargetForTask,
   clearMergeConfirmedTransientStatus,
   classifyGhError,
@@ -112,12 +113,13 @@ import {
 import { promoteBranchGroup, type BranchGroupPromotionResult, type CreateGroupPrFn, type SyncGroupPrFn } from "./merge/group-merge-coordinator.js";
 import { rerouteWorkspaceReviewToCodeReview } from "./merge/workspace-review-reroute.js";
 import { rerouteSingularStaleContentToReview } from "./merge/stale-content-review-reroute.js";
+import { rerouteUnrunPreMergeGateToReview } from "./merge/pre-merge-gate-reseed.js";
 import { WorkspaceEnvironmentError } from "./merge/workspace-integration-target.js";
 import {
   formatAdmissionCapacityQueuedReason,
   persistedTopLevelAgentTaskIdsFromStore,
   projectAdmissionCoordinator,
-  resolveActiveTaskCapacityLimit,
+  resolveAgentCapacityLimit,
 } from "./concurrency/concurrency.js";
 import { canStartNextMergeBody } from "./merge/merge-reclaim-policy.js";
 import { clearOwnedMergeStamp } from "./merge/clear-orphaned-merge-stamp.js";
@@ -941,7 +943,12 @@ export class ProjectEngine {
             taskId: task.id,
             projectId,
             lane: "review",
+            consumesWorktree: false,
             createdAt: task.createdAt,
+            // FNXC:TaskQueueOrder 2026-09-17-12:07: Boost scope travels with the candidate.
+            column: task.column,
+            ...(task.columnMovedAt ? { columnMovedAt: task.columnMovedAt } : {}),
+            ...(task.queueBoost ? { queueBoost: task.queueBoost } : {}),
             start: async () => {
               // Do not run merge work in the coordinator; hand the exact queued
               // id back to the single-flight pump, which will consume this marker.
@@ -1147,7 +1154,7 @@ export class ProjectEngine {
     store.on("task:moved", this.specDriftTaskMutationHandler);
     /*
     FNXC:SpecDrift 2026-08-23-06:25:
-    Startup replay is live-task-only. Archived cards cannot act on drift, and
+    Startup replay is live-task-only. Deleted/historical cards cannot act on drift, and
     replaying them consumes planning-lock sessions during restart; unarchive emits
     task:updated, so a returning card still enters through the subscriptions above.
     */
@@ -2248,10 +2255,34 @@ export class ProjectEngine {
         // Live surface cleared — allow a fresh skip log if work goes live again later.
         this.plannerLiveRetrySkipLogDedup.delete(`${task.id}::${decision.watchedStage ?? "executor"}`);
         /* FNXC:WorkflowResolvedColumns 2026-07-30-22:20: census-invisible moveTask DESTINATION — a call argument, not a comparison. */
-        await moveTaskToContainedBackwardTarget(store, task.id, "self-healing-stranded-recovery", {
+        const contained = await moveTaskToContainedBackwardTarget(store, task.id, "self-healing-stranded-recovery", {
           preserveProgress: true,
           moveSource: "engine",
         }, task.column);
+        /*
+        FNXC:PlannerOversight 2026-09-15-19:20:
+        FN-429. This callback used to discard the containment result and `return true` unconditionally, so a
+        refusal — `in-place-recovery` (this reason has no backward-move authority), `no-contained-target`, or a
+        capacity deferral — was reported to PlannerRecoveryController as a successful retry. On FN-428 that
+        produced a "retry" claim roughly every 45 seconds while `lifecycle-move` logged the same refusal and
+        nothing moved. A refusal now returns false (the attempt is not consumed as progress) and writes one
+        durable diagnostic per (taskId, stage, reason), reusing the dedup set the existing
+        `clearPlannerLiveRetrySkipLogDedup` helper clears. No backward-move authority is added anywhere.
+        */
+        if (!contained.moved) {
+          const stage = (decision.watchedStage ?? "executor") as string;
+          const outcome = "reason" in contained ? contained.reason : `deferred-${contained.deferred}`;
+          const refusalKey = `${task.id}::${stage}::${outcome}`;
+          if (!this.plannerLiveRetrySkipLogDedup.has(refusalKey)) {
+            this.plannerLiveRetrySkipLogDedup.add(refusalKey);
+            runtimeLog.log(`[planner-oversight] retry_step not dispatched for ${task.id} — lifecycle recovery stayed in place (${outcome})`);
+            await store.logEntry(
+              task.id,
+              `[planner] stage=${stage} signal=retry-not-dispatched: lifecycle recovery contained in place (${outcome})`,
+            ).catch(() => undefined);
+          }
+          return false;
+        }
         // FN-7551: the attempt just dispatched — record it as attemptCount + 1
         // (decision.attemptCount is the count BEFORE this dispatch).
         await this.emitOverseerInterventionSafe(() =>
@@ -2888,7 +2919,21 @@ export class ProjectEngine {
       requiredPreMergeStepIds: mergeGate.requiredPreMergeStepIds,
       mergeContent,
     });
-    if (blocker === "task has a pre-merge approval recorded against different content" && mergeContent.kind === "singular") {
+    if (blocker === PRE_MERGE_STEPS_NOT_RUN_BLOCKER && mergeContent.kind === "singular") {
+      const reroute = await rerouteUnrunPreMergeGateToReview(store, task, {
+        requiredPreMergeStepIds: mergeGate.requiredPreMergeStepIds,
+        mergeContent,
+      }).catch(() => ({ rerouted: false, reason: "no-unrun-gate" as const, nodeId: undefined, workflowStepId: undefined }));
+      if (reroute.rerouted) {
+        await store.logEntry(task.id, "[pre-merge] The workflow graph was re-seeded at an enabled pre-merge gate that never ran.");
+      }
+      await emitBoundedRunAudit(store, {
+        taskId: task.id, agentId: "merge-gate", runId: `${task.id}:merge-gate`, domain: "database",
+        mutationType: "task:merge-unrun-pre-merge-gate-rerouted", target: task.id,
+        metadata: { taskId: task.id, nodeId: reroute.nodeId, workflowStepId: reroute.workflowStepId, reason: reroute.reason, source: "merge-gate", missingGateCount: mergeGate.requiredPreMergeStepIds.size },
+      });
+    }
+    if (isStaleContentApprovalBlocker(blocker) && mergeContent.kind === "singular") {
       const reroute = await rerouteSingularStaleContentToReview(store, task, {
         requiredPreMergeStepIds: mergeGate.requiredPreMergeStepIds,
         mergeContent,
@@ -2898,9 +2943,10 @@ export class ProjectEngine {
         nodeId: undefined,
         workflowStepId: undefined,
       }));
-      if (reroute.rerouted) {
-        await store.logEntry(task.id, `[pre-merge] Code Review re-entry is owned by the workflow graph after stale content evidence was refused.`);
-      }
+      await store.logEntry(
+        task.id,
+        `[pre-merge] Review lane '${reroute.nodeId ?? "unknown"}' approved older content; re-review is owned by the workflow graph (${reroute.reason}).`,
+      );
       const auditKey = `${task.id}:${reroute.reason}`;
       if (!this.staleContentRerouteAuditKeys.has(auditKey)) {
         this.staleContentRerouteAuditKeys.add(auditKey);
@@ -2964,7 +3010,7 @@ export class ProjectEngine {
 
     entries.sort((a, b) => {
       if (a.manual !== b.manual) return a.manual ? -1 : 1;
-      if (a.task && b.task) return compareTasksByPriorityThenAgeAndId(a.task, b.task);
+      if (a.task && b.task) return compareTasksByQueueOrder(a.task, b.task);
       if (a.task) return -1;
       if (b.task) return 1;
       return a.order - b.order;
@@ -3226,7 +3272,7 @@ export class ProjectEngine {
     for (const heldTaskId of [...this.mergeSweepHoldReasons.keys()]) {
       if (!candidateIds.has(heldTaskId)) this.mergeSweepHoldReasons.delete(heldTaskId);
     }
-    const eligible = sortTasksByPriorityThenAgeAndId(
+    const eligible = sortTasksByQueueOrder(
       candidates.filter((t, i) => {
         if (!allowFlags[i]) return false;
         const admission = admissions[i]!;
@@ -3583,7 +3629,7 @@ export class ProjectEngine {
       }
 
       // Drop retained observations for tasks that have left the in-flight set
-      // (moved to done/archived/failed/etc.) so the ring buffers don't leak.
+      // (moved to Complete/failed/etc.) so the ring buffers don't leak.
       for (const taskId of overseer.getObservedTaskIds()) {
         if (!inFlightIds.has(taskId)) {
           overseer.clear(taskId);
@@ -4444,10 +4490,8 @@ export class ProjectEngine {
             */
             await projectAdmissionCoordinator.admitNext({
               projectId: cwd,
-              maxConcurrent: resolveActiveTaskCapacityLimit({
+              maxConcurrent: resolveAgentCapacityLimit({
                 maxConcurrent: admissionSettings.maxConcurrent,
-                maxWorktrees: admissionSettings.maxWorktrees,
-                worktreeLimitEnabled: admissionSettings.worktreeLimitEnabled,
               }),
               claimed: async () => (await getMergeClaimSnapshot()).count,
               claimedTaskIds: async () => (await getMergeClaimSnapshot()).ids,
@@ -4455,7 +4499,12 @@ export class ProjectEngine {
                 taskId,
                 projectId: cwd,
                 lane: "review",
+                consumesWorktree: false,
                 createdAt: mergeCandidate?.createdAt,
+                // FNXC:TaskQueueOrder 2026-09-17-12:07: Boost scope travels with the candidate.
+                ...(mergeCandidate?.column !== undefined ? { column: mergeCandidate.column } : {}),
+                ...(mergeCandidate?.columnMovedAt ? { columnMovedAt: mergeCandidate.columnMovedAt } : {}),
+                ...(mergeCandidate?.queueBoost ? { queueBoost: mergeCandidate.queueBoost } : {}),
                 start: async () => {
                   selected = true;
                   return true;
@@ -4464,10 +4513,8 @@ export class ProjectEngine {
             });
             if (!selected) {
               const snapshot = await getMergeClaimSnapshot();
-              const limit = resolveActiveTaskCapacityLimit({
+              const limit = resolveAgentCapacityLimit({
                 maxConcurrent: admissionSettings.maxConcurrent,
-                maxWorktrees: admissionSettings.maxWorktrees,
-                worktreeLimitEnabled: admissionSettings.worktreeLimitEnabled,
               });
               if (snapshot.count >= limit) {
                 /*
@@ -4477,9 +4524,8 @@ export class ProjectEngine {
                 snapshot proves exhaustion rather than a higher-priority candidate winning.
                 */
                 const reason = formatAdmissionCapacityQueuedReason({
-                  maxConcurrent: admissionSettings.maxConcurrent,
-                  maxWorktrees: admissionSettings.maxWorktrees,
-                  worktreeLimitEnabled: admissionSettings.worktreeLimitEnabled,
+                  gate: "maxConcurrent",
+                  limit,
                   claimed: snapshot.count,
                   holderTaskIds: snapshot.ids,
                 });

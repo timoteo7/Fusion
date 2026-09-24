@@ -73,7 +73,7 @@ import { mkdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { ApiError, badRequest } from "../api-error.js";
 import { resolveGithubTrackingAuth } from "../github-auth.js";
-import { emitWorkflowSseEvent } from "../sse.js";
+import { emitChatSnippetsUpdatedSseEvent, emitWorkflowSseEvent } from "../sse.js";
 import { generateRemoteToken, issueRemoteAuthToken, maskRemoteToken } from "../remote-auth.js";
 import { invalidateAllGlobalSettingsCaches } from "../project-store-resolver.js";
 import type { ApiRoutesContext } from "./types.js";
@@ -682,18 +682,6 @@ export function registerSettingsMemoryRoutes(ctx: ApiRoutesContext, deps: Settin
         clientSettings.overlapIgnorePaths = sanitizeOverlapIgnorePaths(clientSettings.overlapIgnorePaths);
       }
 
-      if (clientSettings.autoArchiveDoneAfterMs !== undefined) {
-        const ageMs = clientSettings.autoArchiveDoneAfterMs;
-        if (!Number.isInteger(ageMs) || ageMs < 60_000 || ageMs > 10 * 365 * 24 * 60 * 60 * 1000) {
-          throw badRequest("autoArchiveDoneAfterMs must be between 60000 and 315360000000");
-        }
-      }
-      if (clientSettings.doneAutoArchiveDays !== undefined) {
-        const doneAutoArchiveDays = clientSettings.doneAutoArchiveDays;
-        if (!Number.isInteger(doneAutoArchiveDays) || doneAutoArchiveDays < 0 || doneAutoArchiveDays > 3650) {
-          throw badRequest("doneAutoArchiveDays must be an integer between 0 and 3650");
-        }
-      }
       const operationalLogRetentionDays = clientSettings.operationalLogRetentionDays;
       if (operationalLogRetentionDays !== undefined && operationalLogRetentionDays !== null) {
         if (
@@ -703,12 +691,6 @@ export function registerSettingsMemoryRoutes(ctx: ApiRoutesContext, deps: Settin
         ) {
           throw badRequest("operationalLogRetentionDays must be one of: 0, 7, 14, 30, 60, 90");
         }
-      }
-      if (
-        clientSettings.archiveAgentLogMode !== undefined &&
-        !["none", "compact", "full"].includes(clientSettings.archiveAgentLogMode)
-      ) {
-        throw badRequest("archiveAgentLogMode must be one of: none, compact, full");
       }
       if (clientSettings.unavailableNodePolicy !== undefined) {
         const validatedUnavailableNodePolicy = validateUnavailableNodePolicy(clientSettings.unavailableNodePolicy);
@@ -2032,6 +2014,17 @@ export function registerSettingsMemoryRoutes(ctx: ApiRoutesContext, deps: Settin
         for (const engine of engineManager.getAllEngines().values()) {
           engine.getTaskStore().getGlobalSettingsStore().invalidateCache();
         }
+      }
+
+      /*
+      FNXC:SnippetsDestination 2026-09-16-21:44:
+      FN-476: the Snippets destination dropped its manual refresh, so a successful snippet write must tell every open
+      client its cached list is stale. Published AFTER the write and after the cache invalidations above, and only when
+      this patch actually touched `chatSnippets` — an unrelated settings save must not churn every composer. The
+      notification is fact-only (a timestamp), never the settings body or a prompt.
+      */
+      if (Object.hasOwn(globalPatch, "chatSnippets")) {
+        emitChatSnippetsUpdatedSseEvent();
       }
 
       /* FNXC:SettingsBackups 2026-07-16-14:45: global writes own the single shared-cluster backup routine; project writes must not create competing schedules. */

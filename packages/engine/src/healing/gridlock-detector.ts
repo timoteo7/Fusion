@@ -21,7 +21,7 @@ future cleanup revisits this, the question to ask is whether dependency and over
 deadlock are still possible — not whether capacity is simpler.
 */
 import type { MissionStore, Task, TaskStore, WorkflowIr } from "@fusion/core";
-import { compareTasksByPriorityThenAgeAndId, fileScopeLeaseBlocksCandidate, normalizeOverlapScopeForTask, resolveTaskLifecycleColumns, resolveWorkflowIrForTask, columnsWithFlag } from "@fusion/core";
+import { compareTasksByQueueOrder, fileScopeLeaseBlocksCandidate, normalizeOverlapScopeForTask, resolveTaskLifecycleColumns, resolveWorkflowIrForTask, columnsWithFlag } from "@fusion/core";
 import { createLogger } from "../logger.js";
 import { classifyFileScopeLease, filterPathsByIgnoreList, isCoordinationOnlyTask, pathsOverlap } from "../scheduler.js";
 
@@ -119,15 +119,18 @@ export class GridlockDetector {
     Gridlock reporting must use the same active/dormant lease classification as admission. A preserved
     worktree outside WIP or review remains a dormant holder, and priority → age → id picks the one
     holder that genuinely blocks a waiting card instead of reporting its files as free.
+
+    FNXC:OverlapScheduling 2026-09-01-14:49:
+    Checkout-free planning cards are not overlap holders and cannot manufacture a planning gridlock;
+    a retained checkout remains the durable evidence for a genuine dormant-holder cycle.
     */
-    const rolesByTask = new Map<string, { wip?: string; review?: string; complete?: string; archived?: string } | undefined>();
+    const rolesByTask = new Map<string, { wip?: string; review?: string; complete?: string } | undefined>();
     for (const task of tasks) {
       const roles = await resolveTaskLifecycleColumns(this.store, task.id, irCache);
       rolesByTask.set(task.id, roles ? {
         wip: roles.wip,
         review: roles.review,
         complete: roles.complete,
-        archived: roles.archived,
       } : undefined);
     }
     const handoffAcceptedByTaskId = new Map<string, boolean>();
@@ -148,7 +151,7 @@ export class GridlockDetector {
             handoffAccepted: handoffAcceptedByTaskId.get(task.id) ?? false,
             isWipColumn: roles.wip === task.column,
             isReviewColumn: roles.review === task.column,
-            isTerminalColumn: roles.complete === task.column || roles.archived === task.column,
+            isTerminalColumn: roles.complete === task.column,
           }
           : {
             mergeRequestContractShadowEnabled: settings.mergeRequestContractShadowEnabled,
@@ -169,7 +172,7 @@ export class GridlockDetector {
       .sort((a, b) => a.id.localeCompare(b.id));
     const dormantLeaseHolders = leaseHolders
       .filter((task) => classifications.get(task.id)?.kind === "dormant")
-      .sort(compareTasksByPriorityThenAgeAndId);
+      .sort(compareTasksByQueueOrder);
     const leaseScopes = new Map<string, string[]>();
     if (settings.groupOverlappingFiles) {
       for (const holder of leaseHolders) {
@@ -202,21 +205,21 @@ export class GridlockDetector {
     deadlocks a board, so the three roles stay a union rather than becoming `resolveLifecycleColumns`'s
     first-per-role.
 
-    Unioned with the legacy trio because `resolveWorkflowIrForTask` returns the BUILT-IN IR for a missing
+    Unioned with the legacy review/completion pair because `resolveWorkflowIrForTask` returns the built-in IR for a missing
     or corrupt workflow rather than throwing; without the union a degraded board resolves a satisfied set
     that excludes its own terminal lanes and every dependency reads as unmet.
     */
     const satisfiedColumnsByTaskId = new Map<string, ReadonlySet<string>>();
     for (const task of tasks) {
-      const columns = new Set<string>(["done", "in-review", "archived"]);
+      const columns = new Set<string>(["done", "in-review"]);
       try {
         const ir = await resolveWorkflowIrForTask(this.store, task.id, irCache);
         if (ir) {
-          for (const flag of ["complete", "archived", "mergeOrchestration", "mergeBlocker", "humanReview"] as const) {
+          for (const flag of ["complete", "mergeOrchestration", "mergeBlocker", "humanReview"] as const) {
             for (const id of columnsWithFlag(ir, flag)) columns.add(id);
           }
         }
-      } catch { /* degraded: legacy trio only */ }
+      } catch { /* degraded: legacy pair only */ }
       satisfiedColumnsByTaskId.set(task.id, columns);
     }
 

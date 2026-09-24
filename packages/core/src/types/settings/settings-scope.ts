@@ -11,6 +11,7 @@ import type {
   Locale,
   ReviewArtifactsMode,
   ThemeMode,
+  UiStyle,
   AnthropicAuthPreference,
 } from "../ui/execution-and-ui.js";
 import type {
@@ -45,7 +46,7 @@ import type { UpdateChannel } from "../../i18n/app-version.js";
 import type { ModelPricing } from "../../ai/model-pricing.js";
 import type { SecretScope } from "../../secrets/secrets-store.js";
 // Structural deps still defined in types.ts — import type-only (cycle is type-only).
-import type { AgentPromptsConfig, ArchiveAgentLogMode, TaskTokenBudget } from "../../types.js";
+import type { AgentPromptsConfig, TaskTokenBudget } from "../../types.js";
 
 // ── Settings Scope Types ────────────────────────────────────────────────
 //
@@ -258,12 +259,12 @@ export interface McpServersSettings {
 }
 
 /*
-FNXC:DashboardShortcuts 2026-07-04-00:00:
-FN-7553 adds four more configurable actions on top of the FN-7494/FN-7507 base (quickChat, terminal), each reusing an existing App navigation handler (no new nav destinations). All fields share blank-to-disable semantics: an empty string disables that action's runtime listener.
+FNXC:DashboardShortcuts 2026-09-14-10:42:
+FN-390 replaces the Quick Chat-specific binding with a generic modal-visibility callback that is disabled by default. All fields share blank-to-disable semantics: an empty string disables that action's runtime listener.
 */
 export interface DashboardKeyboardShortcuts {
-  /** Opens the dashboard Quick Chat surface. Empty string disables this shortcut. Default: "Space". */
-  quickChat?: string;
+  /** Toggles the app-selected dashboard modal surface. Empty string disables this shortcut. Default: empty. */
+  toggleModalVisibility?: string;
   /** Opens or toggles the dashboard Terminal surface. Empty string disables this shortcut. Default: "Ctrl+`". */
   terminal?: string;
   /** Opens the dashboard Files browser. Empty string disables this shortcut. Default: "Ctrl+E". */
@@ -274,6 +275,13 @@ export interface DashboardKeyboardShortcuts {
   openCommandCenter?: string;
   /** Opens the New Task modal. Empty string disables this shortcut. Default: "Ctrl+Shift+N". */
   newTask?: string;
+  /*
+  FNXC:DashboardShortcuts 2026-09-16-02:27:
+  FN-441 adds a keyboard owner for the chat list: the full-screen drawer on phones, the footer popover on
+  desktop. It is a global-only setting like every other binding here, and shares the blank-to-disable contract.
+  */
+  /** Opens the chat list (mobile drawer / desktop footer popover). Empty string disables this shortcut. Default: "Ctrl+Shift+L". */
+  openChatList?: string;
 }
 
 export interface BackupSettingsMigrationCandidate {
@@ -306,6 +314,11 @@ export interface VoiceInputSettings {
   language?: string;
 }
 
+export interface ChatSnippet {
+  name: string;
+  prompt: string;
+}
+
 export interface GlobalSettings {
   /** Maximum PostgreSQL server connections for Fusion's embedded database. Applied on the next Fusion restart. */
   embeddedPostgresMaxConnections?: number;
@@ -322,6 +335,13 @@ export interface GlobalSettings {
   themeMode?: ThemeMode;
   /** Color theme preference for accent colors and styling. Default: "shadcn-ember"; "default" and "ocean" remain valid explicit legacy selections. */
   colorTheme?: ColorTheme;
+  /**
+   * FNXC:UiStyleAxis 2026-09-15-00:20:
+   * Interface style (non-chromatic grammar) preference, independent of `colorTheme`. Global because it
+   * is an operator appearance choice like themeMode/colorTheme, never a per-project override. Missing,
+   * unknown or wrongly typed values resolve to "classic" on read and are replaced on the next write.
+   */
+  uiStyle?: UiStyle;
   /** Token→hex override map for the customizable shadcn theme. Applied only when `colorTheme === "shadcn-custom"`; dashboard sanitizes keys and values before writing CSS custom properties. */
   shadcnCustomColors?: Record<string, string>;
   /** Dashboard font size scale percentage. Bounded to 85-125. Default: 100. */
@@ -339,8 +359,8 @@ export interface GlobalSettings {
   /** When false, fn dashboard and fn serve skip automatic mDNS/DNS-SD LAN discovery. Default: true (FN-8202 opt-out). */
   localNetworkDiscoveryEnabled?: boolean;
   /**
-   * FNXC:DashboardShortcuts 2026-07-04-00:00:
-   * Dashboard keyboard shortcuts are global operator preferences because they control browser UI affordances, not project execution policy. Defaults keep Space for Quick Chat and Ctrl+` for Terminal; blank values intentionally disable an action.
+   * FNXC:DashboardShortcuts 2026-09-14-10:42:
+   * FN-390 keeps dashboard keyboard shortcuts global and makes modal visibility generic and disabled by default. Ctrl+` retains the Terminal default; blank values intentionally disable an action.
    */
   dashboardKeyboardShortcuts?: DashboardKeyboardShortcuts;
   /**
@@ -358,6 +378,16 @@ export interface GlobalSettings {
    * This global-only operator keyboard preference defaults to true to preserve Enter-submits behavior. When disabled, Enter inserts a newline and Cmd/Ctrl+Enter submits; shared projects must never change an operator's keyboard behavior.
    */
   quickAddSubmitOnEnter?: boolean;
+  /**
+   * FNXC:ChatComposer 2026-09-06-01:54:
+   * Cette préférence clavier reste globale uniquement afin qu’un projet partagé ne puisse jamais imposer le comportement d’un opérateur. Le mode `auto` insère un saut de ligne lorsque le pointeur primaire est tactile et envoie sinon ; le pointeur, plutôt que la largeur, préserve l’envoi par Entrée dans une fenêtre de bureau étroite pilotée à la souris. Le réglage gouverne uniquement Entrée sans Cmd/Ctrl ni Shift, après les branches d’autocomplétion, la garde Shift et, dans TaskChatTab, la garde de composition IME ; Cmd/Ctrl+Enter sans Shift ne le consulte jamais.
+   */
+  chatSubmitOnEnter?: "auto" | "always" | "never";
+  /**
+   * FNXC:ChatSnippets 2026-09-03-15:56:
+   * Reusable dashboard-chat prompts are a global operator preference because direct and task chats span projects. They use the existing global settings transport and need neither project persistence nor a dedicated route.
+   */
+  chatSnippets?: ChatSnippet[];
   /** Active UI locale (e.g. `"en"`, `"zh-CN"`, `"fr"`). One of `SUPPORTED_LOCALES`.
    *  When unset, each surface resolves the locale at runtime (browser/env
    *  detection) and falls back to `DEFAULT_LOCALE` ("en"). */
@@ -723,6 +753,11 @@ export interface GlobalSettings {
   /** Global baseline AI model ID for task execution.
    *  Must be set together with `executionGlobalProvider`. */
   executionGlobalModelId?: string;
+  /** Per-role global executor fallback pair and thinking effort. */
+  executionGlobalFallbackProvider?: string;
+  executionGlobalFallbackCredentialInstanceId?: string;
+  executionGlobalFallbackModelId?: string;
+  executionGlobalFallbackThinkingLevel?: ThinkingLevel;
   /** Global baseline AI model provider for planning/triage (specification) agent.
    *  This is the global lane that project-level `planningProvider` can override.
    *  Must be set together with `planningGlobalModelId`. Falls back to
@@ -733,6 +768,11 @@ export interface GlobalSettings {
   /** Global baseline AI model ID for planning/triage.
    *  Must be set together with `planningGlobalProvider`. */
   planningGlobalModelId?: string;
+  /** Per-role global planner fallback pair and thinking effort. */
+  planningGlobalFallbackProvider?: string;
+  planningGlobalFallbackCredentialInstanceId?: string;
+  planningGlobalFallbackModelId?: string;
+  planningGlobalFallbackThinkingLevel?: ThinkingLevel;
   /** Global baseline AI model provider for validator/reviewer agent.
    *  This is the global lane that project-level `validatorProvider` can override.
    *  Must be set together with `validatorGlobalModelId`. Falls back to
@@ -743,6 +783,11 @@ export interface GlobalSettings {
   /** Global baseline AI model ID for validator/reviewer.
    *  Must be set together with `validatorGlobalProvider`. */
   validatorGlobalModelId?: string;
+  /** Per-role global reviewer fallback pair and thinking effort. */
+  validatorGlobalFallbackProvider?: string;
+  validatorGlobalFallbackCredentialInstanceId?: string;
+  validatorGlobalFallbackModelId?: string;
+  validatorGlobalFallbackThinkingLevel?: ThinkingLevel;
   /** Global baseline AI model provider for title summarization.
    *  This is the global lane that project-level `titleSummarizerProvider` can override.
    *  Must be set together with `titleSummarizerGlobalModelId`. Falls back to
@@ -766,6 +811,11 @@ export interface GlobalSettings {
   /** Global baseline AI model ID for merger agent sessions.
    *  Must be set together with `mergerGlobalProvider`. */
   mergerGlobalModelId?: string;
+  /** Per-role global merger fallback pair and thinking effort. */
+  mergerGlobalFallbackProvider?: string;
+  mergerGlobalFallbackCredentialInstanceId?: string;
+  mergerGlobalFallbackModelId?: string;
+  mergerGlobalFallbackThinkingLevel?: ThinkingLevel;
   /*
   FNXC:GitHubImportTranslate 2026-07-15-09:30:
   Global baseline translate lane. Import auto-translation runs one short readonly call per issue, so operators typically pin a cheap/fast model here rather than inheriting the executor/planner model.
@@ -1082,12 +1132,6 @@ export interface ProjectSettings {
    * grounded candidates do not qualify; this setting never authorizes filler.
    */
   requireTaskRecommendations?: boolean;
-  /**
-   * FNXC:TaskRecommendations 2026-08-13-03:56:
-   * The operator requested an on/off switch for recommendation mailbox notices. This controls
-   * best-effort observability only; disabling it never changes recommendation capture or storage.
-   */
-  recommendationMailboxNoticeEnabled?: boolean;
   /** Hard stop: when true, all automated agent activity is **immediately**
    *  terminated — active triage, execution, and merge agent sessions are
    *  killed, and the scheduler stops dispatching new work. Acts as a
@@ -1102,8 +1146,8 @@ export interface ProjectSettings {
   defaultWorkflowId?: string;
   /**
    * Runtime-only model lanes from the task's selected workflow. They are kept
-   * separate from the project baseline so model resolution can enforce task →
-   * project → global → workflow precedence. This field is never persisted as a
+   * separate from project settings so model resolution can enforce task →
+   * workflow → project → global precedence. This field is never persisted as a
    * project setting.
    *
    * FNXC:CodeOrganization 2026-07-22-00:30:
@@ -1194,8 +1238,9 @@ export interface ProjectSettings {
    * positive integers set a custom cap; 0 disables the shared clamp; invalid values
    * fall back to the finite default. */
   agentToolOutputMaxChars?: number | null;
-  /** Maximum number of concurrent AI agents across all activity types
-   *  (triage specification, task execution, and merge operations). */
+  /** Maximum number of concurrent AI-active tasks across planning, execution,
+   *  review, and merge. This provider/LLM-load limit is independent of the
+   *  execution-worktree limit. */
   maxConcurrent: number;
   /**
    * FNXC:ExecutorToolFailureRetry 2026-08-06-14:56:
@@ -1230,15 +1275,14 @@ export interface ProjectSettings {
    * Max concurrent verification subprocesses (fn_run_verification / merge testCommand builds) across all tasks in this process. Caps stacked monorepo typecheck/build pegging CPU when many tasks are in-progress. Default 1. Raise only on high-core hosts.
    */
   maxConcurrentVerifications?: number;
+  /** Maximum number of live tasks that hold, or are entering, an execution
+   *  checkout. This host CPU/RAM/disk limit does not include checkout-free planning. */
   maxWorktrees: number;
   /**
-   * FNXC:CapacityModel 2026-07-28-22:15 (PR #2502 review):
-   * Whether Max Worktrees GATES DISPATCH for this project. Default true.
-   *
-   * Renamed from `worktreesEnabled`, which two reviewers read as "run tasks
-   * without worktrees" — it never meant that. Tasks always execute in their own
-   * git worktree; this only decides whether the worktree COUNT is a second limit
-   * alongside the agent count.
+   * FNXC:CapacityModel 2026-09-01-14:49:
+   * Whether Max Worktrees gates execution-checkout admission for this project.
+   * Default true. This is independent of the agent/provider limit: planning runs
+   * read-only on the project root and does not consume a worktree slot.
    *
    * When false the operator asked to "limit via total agents only": `maxWorktrees`
    * stops gating dispatch entirely — not raised, not skipped by convention, but
@@ -1247,12 +1291,8 @@ export interface ProjectSettings {
    * "maxWorktrees"). See `resolveWorktreeCapacityLimit` in workflow-capacity.ts
    * for why this is a boolean rather than `maxWorktrees: 0`.
    *
-   * SCOPE: this is a statement about COUNTING, not about isolation or execution.
-   * Both scheduler dispatch paths still allocate a worktree per task with this
-   * off, and planning still runs in the task's own worktree. It does not make
-   * concurrent agents safe to share one checkout — the non-worktree paths that
-   * exist today are fallbacks to the operator's own tree, one of which caused
-   * FN-8600. Turning this off does not grant shared-checkout concurrency.
+   * SCOPE: this is a statement about COUNTING, not execution isolation. Write-capable
+   * task execution still uses a private checkout even when this limit is disabled.
    */
   worktreeLimitEnabled?: boolean;
   pollIntervalMs: number;
@@ -1450,27 +1490,20 @@ export interface ProjectSettings {
    * This is an explicit show/hide project setting. The default-off state hides worktree grouping and labels in both legacy and workflow-mode WIP columns; when enabled, operators see grouping in every WIP/processing column, including workflow-mode columns flagged as counting toward WIP.
    */
   showWorktreeGrouping?: boolean;
-  /**
-   * When true, board task-card clicks open task detail in the right dock when that dock surface is active; otherwise board clicks keep the full main-panel task detail. Default: false.
-   *
-   * FNXC:OpenTasksInRightSidebar 2026-06-28-00:00:
-   * This project-scoped setting is default-off so current board navigation is unchanged. When enabled, only Board card clicks may route to the tablet/desktop right dock; all non-board task-open paths and dock-inactive/mobile states must preserve the full-panel or existing modal behavior.
-   */
-  openTasksInRightSidebar?: boolean;
-  /**
-   * When true, ordinary board task-card clicks open task detail in the existing popped-out FloatingWindow task surface instead of the full main-panel task detail. Default: false.
-   *
-   * FNXC:MobileTaskPopups 2026-07-01-12:00:
-   * This project-scoped setting is default-off so board navigation is unchanged until operators opt in. When enabled, it applies to board-card clicks on every viewport with no deep initial tab and reuses the existing task pop-out/FloatingWindow path; the popup route takes precedence over right-dock routing for those ordinary clicks while all non-board task-open paths remain governed by their existing settings and handlers.
-   */
-  openMobileTasksInPopup?: boolean;
-  /**
-   * When true, open task-detail popups render only on the view where they were opened. Default: true.
-   *
-   * FNXC:TaskPopupViewGating 2026-07-15-15:20:
-   * FN-8016 removed the Board/List restriction so every dashboard view can own task-detail FloatingWindows. This project-scoped setting defaults on; explicit false retains legacy globally shared popups. Scoped popup state is preserved across view switches and returning restores the same persisted position.
-   */
-  taskPopupsBoardListOnly?: boolean;
+  /*
+  FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+  FN-442 removes `openTasksInRightSidebar` and `openMobileTasksInPopup`. Opening a task from the board, from a detail
+  chip (Changes/Retries/Workflow), or from the list is now unconditionally the floating task window; the main panel
+  remains only as the mobile-drawer fallback. Both keys are unknown to the schema — a historical stored value is
+  neither applied nor rewritten, and no migration touches it. `rightSidebarEnabled` is untouched: the optional right
+  tool dock stays, only the "open tasks inside it" entry is gone.
+  */
+  /*
+  FNXC:TaskWindowIdentity 2026-09-14-17:46:
+  FN-392 removes `taskPopupsBoardListOnly`. Task-detail windows are permanently project-scoped: one window per task,
+  available in every view of the active project. A historical stored value is simply unknown to the schema — it is
+  neither applied nor rewritten, and no migration touches it.
+  */
   /**
    * FNXC:TaskCardCostBadge 2026-07-11-12:15:
    * Default-off project setting that lets operators opt board cards into showing derived read-time task cost next to the execution-time badge. Missing/false preserves existing card density and no badge shell renders unless a task has positive token usage.
@@ -1482,10 +1515,32 @@ export interface ProjectSettings {
    */
   chatMessageLayout?: "bubbles" | "full-width";
   /**
-   * FNXC:TaskDetailActivityFirst 2026-06-30-23:59:
-   * Default-off keeps task details Activity-first so omitted non-done opens land on the legacy `chat` Activity → Live surface. Operators can set true to restore Chat-first ordering/default while explicit Activity/Chat/Logs deep links remain stable.
+   * FNXC:Navigation 2026-09-15-14:41:
+   * FN-419: the single source of truth for WHERE the primary navigation menu lives — the bottom footer bar or the
+   * left sidebar column. The two surfaces are mutually exclusive by construction (see
+   * `packages/dashboard/app/utils/navigationPlacement.ts`); before this setting the tablet tier mounted both.
+   * Missing or invalid persisted values resolve to the historical bottom footer placement.
    */
-  taskDetailChatFirst?: boolean;
+  navigationPlacement?: "footer" | "sidebar";
+  /**
+   * FNXC:RightSidebarOptional 2026-09-15-16:04:
+   * FN-426: the right tool dock is no longer a structural part of the shell. Every tool it used to own (Git Manager,
+   * Activity, Secrets, Pull Requests, Files, Chat, List, Notes) now has a first-class access outside it, so the dock
+   * is an explicit opt-in convenience that defaults OFF. This flag controls AVAILABILITY only; the dock's
+   * open/pinned/width/selected-tool preferences stay local (`fusion:right-dock-*`) and can never re-enable it.
+   * Only the exact boolean `true` opts in; absent, null, `"true"`, and numbers all fail closed.
+   */
+  rightSidebarEnabled?: boolean;
+  /**
+   * FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+   * FN-442: one project-scoped three-value choice carries BOTH the landing tab of a task open with no explicit tab
+   * AND the head order of the task-detail tab bar. `definition` maps to the `definition` tab, `chat` to the
+   * `planner-chat` tab, and `activity` to the legacy `chat` Activity → Live surface. Missing or invalid persisted
+   * values resolve to the historical `activity` default; a legacy persisted `taskDetailChatFirst === true` resolves
+   * to `chat` as a read-only compatibility fallback. Explicit deep links and the terminal-column `summary` tab are
+   * unaffected.
+   */
+  taskDetailDefaultTab?: "definition" | "chat" | "activity";
   /** When true, restores the legacy behavior of silently creating sibling
    *  branches like `fusion/FN-123-2` when the canonical task branch is already
    *  checked out elsewhere. Default: false. */
@@ -1685,21 +1740,27 @@ export interface ProjectSettings {
    * remain published surface to avoid a breaking @runfusion/fusion type change.
    */
   /**
-   * @deprecated Inert under master-plan U0; consumed only by soft-deprecated
-   * aiMergeTask. Retained as published surface. Legacy full opt-out switch.
-   * Default: true.
+   * FNXC:MergerUnification 2026-09-09-07:46:
+   * Master-plan U0 retains these published settings without letting their
+   * legacy semantics imply a live merge safeguard. Their sole consumer is the
+   * soft-deprecated aiMergeTask call site in merger.ts; runAiMerge reads none.
+   */
+  /**
+   * @deprecated Inert under master-plan U0. Legacy aiMergeTask treated only
+   * `=== false` as disabled after the worktrunk-deferred short-circuit; it was
+   * the sole opt-out from the any-divergence safety fallback. Default: true.
    */
   prerebaseAutoEnabled?: boolean;
   /**
-   * @deprecated Inert under master-plan U0; consumed only by soft-deprecated
-   * aiMergeTask. Retained as published surface. Legacy hot-file trigger list.
+   * @deprecated Inert under master-plan U0. Legacy aiMergeTask compared exact
+   * hot-file paths from the base commit to the resolved integration ref tip.
    * Default: curated project hot-file list.
    */
   prerebaseHotFiles?: string[];
   /**
-   * @deprecated Inert under master-plan U0; consumed only by soft-deprecated
-   * aiMergeTask. Retained as published surface. Legacy divergence trigger.
-   * Default: 50.
+   * @deprecated Inert under master-plan U0. Legacy aiMergeTask checked this
+   * positive threshold after hot files, with an absent value falling back to 1;
+   * zero did not suppress the any-divergence safety fallback. Default: 50.
    */
   prerebaseDivergenceThreshold?: number;
   /** Strategy used when a merge conflict can't be resolved by AI. See
@@ -1879,9 +1940,10 @@ export interface ProjectSettings {
    *  time-based stuck/stalled/stale signal may fire after activation.
    *  Default: 300000 (5 minutes). Set to 0 to disable the grace period. */
   engineActivationGraceMs?: number;
-  /** Minimum number of identical consecutive in-review stall log entries (same code + reason)
+  /** Minimum number of identical consecutive in-review stall observations in one unchanged episode
    *  before the task is auto-disposed with `pausedReason='in-review-stall-deadlock'`.
-   *  Default: 3. Set to 0 to disable. */
+   *  Proven progress from a fresh failed pre-merge gate starts a new episode.
+   *  Default: 10. Set to 0 to disable. */
   inReviewStallDeadlockThreshold?: number;
   /** Threshold in milliseconds for surfacing paused in-review tasks as stale.
    *  Age is measured from columnMovedAt when present, otherwise updatedAt.
@@ -2009,35 +2071,12 @@ export interface ProjectSettings {
   /** Interval in milliseconds for periodic maintenance (worktree pruning, WAL checkpoint,
    *  orphan cleanup). 0 disables. Default: 900000 (15 min). */
   maintenanceIntervalMs?: number;
-  /** When true, periodic maintenance archives done tasks after the configured age. Default: true. */
-  autoArchiveDoneTasksEnabled?: boolean;
-  /** Age in milliseconds after a task enters done before auto-archive. Default: 172800000 (48h). */
-  autoArchiveDoneAfterMs?: number;
-  /** Retention in integer days before done tasks are auto-archived.
-   *  0 disables this days-based override. When > 0, takes precedence over autoArchiveDoneAfterMs. */
-  doneAutoArchiveDays?: number;
-  /**
-   * FNXC:DuplicateIntake 2026-07-07-00:00 (FN-7658):
-   * Operators do not want same-agent duplicate tasks silently archived on
-   * creation (FN-4892 intake heuristic) — they want visibility and a chance
-   * to decide. When `true`, `_maybeAutoArchiveSameAgentDuplicate` archives the
-   * later task as before. When `false` (the default), the heuristic still
-   * detects the duplicate but flags it in place via the existing near-duplicate
-   * marker (`nearDuplicateOf`/`nearDuplicateScore`) instead of moving it to
-   * `archived`, so the dashboard's yellow "Duplicate" chip with Keep/Archive
-   * actions surfaces it for a human decision. Default: false. */
-  autoArchiveDuplicateTasksEnabled?: boolean;
   /**
    * FNXC:DuplicateIntake 2026-07-16-13:00:
    * Issue #2225 requires triage marker duplicates to stay visible by default: `prompt`
    * blocks for Keep/Delete, `keep` replans, and `delete` restores legacy deletion.
    */
   triageDuplicateResolution?: "prompt" | "keep" | "delete";
-  /** How much agent log content to preserve when a task is moved to cold archive storage.
-   *  - "compact": deterministic summary plus a small recent-entry snapshot (default)
-   *  - "full": copy the full agent.log into archive.db
-   *  - "none": do not copy agent.log content */
-  archiveAgentLogMode?: ArchiveAgentLogMode;
   /** When true, automatically poll and update PR status badges for tasks linked to GitHub PRs.
    *  Default: false. */
   autoUpdatePrStatus?: boolean;
@@ -2282,6 +2321,9 @@ export interface ProjectSettings {
   /** Named scripts that can be referenced by setupScript or other automation.
    *  A map of script name to shell command. */
   scripts?: Record<string, string>;
+  /** Optional display metadata keyed by the same stable script name. Legacy
+   *  settings omit this map and continue to execute through `scripts`. */
+  scriptMetadata?: Record<string, { description?: string }>;
   /** Reference to a named script in the scripts map that runs before task execution.
    *  Used for pre-task setup like environment preparation. */
   setupScript?: string;
@@ -2445,23 +2487,27 @@ export interface ProjectSettings {
    *  - "always": Always handoff after completion (not implemented, reserved for future)
    */
   reviewHandoffPolicy?: "disabled" | "comment-triggered" | "always";
-  /** Quick Chat launcher placement. "floating" shows the draggable FAB, "footer" shows a footer button, "off" hides both. */
-  quickChatButtonMode?: "floating" | "footer" | "off";
   /*
    * FNXC:Navigation 2026-07-17-00:00:
    * Ordered quick-action ids shown before the always-present mobile More tab. Only command-center,
    * tasks, agents, missions, chat, mailbox, and planning are eligible; unset falls back to the
    * default order, invalid/overflow-only ids (including more) are ignored, and omitted ids stay in More.
+   *
+   * FNXC:Navigation 2026-09-17-16:53:
+   * FN-511 : cette clé unique définit CINQ créneaux partagés à l'identique par le pied de page large et la pill
+   * mobile ; `chat` y est une destination ordinaire et le cinquième créneau occupe la place tout à droite du pied de
+   * page large. Toute sélection plus courte est complétée au rendu par l'ordre par défaut (terminé par `chat`), donc
+   * aucune migration n'est nécessaire pour une valeur persistée de quatre destinations.
    */
   mobileNavPrimaryItems?: string[];
-  /**
-   * FNXC:ChatModal 2026-06-28-00:00:
-   * Outside-click dismissal of Quick Chat is now user-configurable; default true preserves the prior always-on behavior from FN-7152.
-   * When true (default), the Quick Chat floating window closes when the user clicks outside it. Set false to keep it open until explicitly closed.
+  /*
+   * FNXC:MobileNavGesture 2026-09-17-16:53:
+   * FN-511 : option MOBILE uniquement. Quand elle est activée, le bouton hamburger du pied de page mobile n'est pas
+   * rendu et la liste des destinations s'ouvre par un glissement vers le haut du pied de page, présentée comme un
+   * tiroir de la largeur de la barre. Défaut : désactivé (hamburger visible, geste désarmé). Sans effet sur le pied
+   * de page large, qui n'est pas glissable.
    */
-  quickChatCloseOnOutsideClick?: boolean;
-  /** Legacy Quick Chat FAB toggle. Prefer quickChatButtonMode for new callers. */
-  showQuickChatFAB?: boolean;
+  mobileNavMenuSwipeGesture?: boolean;
   /**
    * FNXC:ChatModal 2026-07-01-00:00:
    * Task planner sessions (`task-planner:<taskId>`) are hidden from the common Chat feed by default to keep task-detail planning conversations out of Direct chat clutter. Operators can opt back into the previous shared-feed behavior with this project setting.
@@ -2506,7 +2552,7 @@ export interface ProjectSettings {
   /** ISO timestamp after the one-time post-migration system inbox message was durably inserted. */
   postgresMigrationInboxMessageSentAt?: string;
   /** Number of days to retain per-task agent-log JSONL files for soft-deleted
-   *  and archived tasks. Only affects tasks that are no longer active. Entries
+   *  and historical-sentinel tasks. Only affects tasks that are no longer active. Entries
    *  older than this window are removed from the JSONL file during periodic
    *  maintenance. Default: 0 (disabled). Set to a positive integer (e.g. 90)
    *  to enable pruning. */
@@ -2588,6 +2634,13 @@ export {
   resolvePersistAgentThinkingLog,
   sanitizeCliAgentSettings,
   sanitizeCliAgentsSettings,
+  normalizeChatSnippetName,
+  normalizeChatSnippets,
+  readChatSnippets,
+  CHAT_SNIPPET_RESERVED_NAMES,
+  CHAT_SNIPPET_MAX_ENTRIES,
+  CHAT_SNIPPET_MAX_NAME_LENGTH,
+  CHAT_SNIPPET_MAX_PROMPT_LENGTH,
   sanitizeMcpServers,
   CLI_AGENT_ADAPTER_IDS,
   CLI_AGENT_AUTONOMY_MODES,

@@ -1,5 +1,6 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readAppFile } from "../../test/cssFixture";
 import {
   makeTask,
   mockFetchOverlapBlockerReport,
@@ -8,9 +9,25 @@ import {
   noopMerge,
   noopMove,
   noopOpenDetail,
+  readDashboardStylesSource,
   setupTaskDetailModalHooks,
 } from "./TaskDetailModal.test-helpers";
-import { TaskDetailContent } from "../TaskDetailModal";
+import { TaskDetailContent, TaskDetailModal } from "../TaskDetailModal";
+
+/*
+FNXC:TaskDetailTabRelocation 2026-09-17-11:48:
+FN-510: the dismissal action must stay usable from its new Details home. TaskDetailModal imports the
+lifecycle endpoint directly, so the shared "../../api" fixture does not intercept it; mock the owning
+module so the relocation case can prove the dismissal request is still issued.
+*/
+const { mockDismissAiMergeReviewFinding } = vi.hoisted(() => ({
+  mockDismissAiMergeReviewFinding: vi.fn(),
+}));
+
+vi.mock("../../api/tasks/tasks-lifecycle", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/tasks/tasks-lifecycle")>()),
+  dismissAiMergeReviewFinding: mockDismissAiMergeReviewFinding,
+}));
 
 setupTaskDetailModalHooks();
 
@@ -217,5 +234,401 @@ describe("TaskDetailModal tab relocation", () => {
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Plan" })).toHaveClass("detail-tab-active"));
     expect(mockFetchOverlapBlockerReport).not.toHaveBeenCalled();
+  });
+});
+
+const DESKTOP_WIDTH = 1024;
+const MOBILE_WIDTH = 375;
+
+function setViewportWidth(width: number): void {
+  Object.defineProperty(window, "innerWidth", { writable: true, configurable: true, value: width });
+  window.dispatchEvent(new Event("resize"));
+}
+
+const workspaceLandingTask = makeTask({
+  worktree: undefined,
+  workspaceWorktrees: {
+    "repo-a": {
+      worktreePath: "/workspace/repo-a/.worktrees/FN-289",
+      branch: "fusion/FN-289-repo-a",
+      landedSha: "abcdef1234567890",
+    },
+    "repo-b": {
+      worktreePath: "/workspace/repo-b/.worktrees/FN-289",
+      branch: "fusion/FN-289-repo-b",
+    },
+  },
+});
+
+describe("TaskDetail workspace repository summary relocation", () => {
+  afterEach(() => {
+    setViewportWidth(DESKTOP_WIDTH);
+  });
+
+  it("shows landing progress only after navigating from Plan to Details", () => {
+    const { container } = render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="definition"
+        task={workspaceLandingTask}
+      />,
+    );
+
+    expect(screen.queryByTestId("workspace-worktrees-summary")).toBeNull();
+    expect(screen.queryByText(/1 of 2 repos landed/i)).toBeNull();
+    expect(container.querySelector(".detail-section--workspace-repos")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+
+    const summary = screen.getByTestId("workspace-worktrees-summary");
+    expect(within(summary).getByText(/1 of 2 repos landed/i)).toBeInTheDocument();
+    expect(within(summary).getByText("repo-a")).toBeInTheDocument();
+    expect(within(summary).getByText("repo-b")).toBeInTheDocument();
+    expect(within(summary).getByText("abcdef12")).toBeInTheDocument();
+
+    const originalPromptSection = container.querySelector(".detail-section--original-prompt");
+    const workspaceSection = container.querySelector(".detail-section--workspace-repos");
+    expect(originalPromptSection).not.toBeNull();
+    expect(originalPromptSection?.nextElementSibling).toBe(workspaceSection);
+  });
+
+  it("renders landing progress in the overlay modal Details body", () => {
+    const { baseElement } = render(
+      <TaskDetailModal
+        {...sharedProps}
+        initialTab="details"
+        onClose={noop}
+        task={workspaceLandingTask}
+      />,
+    );
+
+    const workspaceSection = baseElement.querySelector(".detail-section--workspace-repos");
+    expect(workspaceSection).not.toBeNull();
+    expect(workspaceSection?.querySelector('[data-testid="workspace-worktrees-summary"]')).not.toBeNull();
+  });
+
+  it("removes landing progress when navigating to every neighboring tab", () => {
+    render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="details"
+        task={workspaceLandingTask}
+      />,
+    );
+
+    expect(screen.getByTestId("workspace-worktrees-summary")).toBeInTheDocument();
+    for (const tabName of ["Plan", "Activity", "Dependencies", "Workflow"]) {
+      fireEvent.click(screen.getByRole("button", { name: tabName }));
+      expect(screen.queryByTestId("workspace-worktrees-summary")).toBeNull();
+    }
+  });
+
+  it("renders landing progress in Details at the mobile breakpoint", () => {
+    setViewportWidth(MOBILE_WIDTH);
+
+    render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="details"
+        task={workspaceLandingTask}
+      />,
+    );
+
+    expect(screen.getByTestId("workspace-worktrees-summary")).toBeInTheDocument();
+    expect(screen.getByText(/1 of 2 repos landed/i)).toBeInTheDocument();
+  });
+
+  it.each([
+    ["single repository", { worktree: "/workspace/.worktrees/FN-289", workspaceWorktrees: undefined }],
+    ["undefined workspace map", { worktree: undefined, workspaceWorktrees: undefined }],
+    ["empty workspace map", { worktree: undefined, workspaceWorktrees: {} }],
+  ])("does not leave an empty workspace section for %s", (_label, overrides) => {
+    const { container } = render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="details"
+        task={makeTask(overrides)}
+      />,
+    );
+
+    expect(container.querySelector(".detail-section--workspace-repos")).toBeNull();
+    expect(screen.queryByTestId("workspace-worktrees-summary")).toBeNull();
+    expect(screen.queryByLabelText("Workspace repos")).toBeNull();
+  });
+
+  it("preserves landed, failed, and pending repository details in Details", () => {
+    render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="details"
+        task={makeTask({
+          worktree: undefined,
+          error: "Workspace partial-land failed",
+          workspaceWorktrees: {
+            "repo-a": {
+              worktreePath: "/workspace/repo-a/.worktrees/FN-289",
+              branch: "fusion/FN-289-repo-a",
+              landedSha: "abcdef1234567890",
+            },
+            "repo-b": {
+              worktreePath: "/workspace/repo-b/.worktrees/FN-289",
+              branch: "fusion/FN-289-repo-b",
+              landFailure: {
+                message: "squash failed: conflict",
+                at: "2026-08-29T00:00:00.000Z",
+              },
+            },
+            "repo-c": {
+              worktreePath: "/workspace/repo-c/.worktrees/FN-289",
+              branch: "fusion/FN-289-repo-c",
+            },
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getAllByTestId("workspace-repo-status-landed")).toHaveLength(1);
+    expect(screen.getAllByTestId("workspace-repo-status-failed")).toHaveLength(1);
+    expect(screen.getAllByTestId("workspace-repo-status-pending")).toHaveLength(1);
+    expect(screen.getByText("squash failed: conflict")).toBeInTheDocument();
+    expect(screen.getByTestId("workspace-partial-land-detail")).toHaveTextContent("Workspace partial-land failed");
+    expect(screen.getByText(/1 of 3 repos landed/i)).toBeInTheDocument();
+  });
+
+  it("keeps exactly one full detail renderer and the compact TaskCard renderer", () => {
+    const css = readDashboardStylesSource();
+    const taskCardSource = readAppFile("components/TaskCard.tsx");
+    const taskDetailSource = readAppFile("components/TaskDetailModal.tsx");
+    const taskCardRenderers = taskCardSource.match(/<WorkspaceWorktreesSummary\b[^>]*\/>/g) ?? [];
+    const taskDetailRenderers = taskDetailSource.match(/<WorkspaceWorktreesSummary\b[^>]*\/>/g) ?? [];
+
+    expect(css).not.toContain(".task-detail-content--planner-chat-expanded .workspace-worktrees-summary");
+    expect(taskCardRenderers).toHaveLength(1);
+    expect(taskCardRenderers[0]).toContain("compact");
+    expect(taskDetailRenderers).toHaveLength(1);
+    expect(taskDetailRenderers[0]).not.toContain("compact");
+    expect([...taskCardRenderers, ...taskDetailRenderers]).toHaveLength(2);
+  });
+});
+
+/*
+FNXC:TaskDetailTabRelocation 2026-09-17-11:48:
+FN-510: operators reported merge mechanics ("Approved — 0 prior finding(s) unconfirmed" plus a raw
+candidate SHA) polluting the Definition/Plan tab. Reconciliation now belongs to Details. These cases
+assert the invariant across every enumerated surface — embedded and overlay hosts, desktop and mobile
+breakpoints, absent/empty/populated-terminal data, the preserved dismissal action, and a source
+census proving a single renderer with no Definition-tab remnant.
+*/
+const AI_MERGE_CANDIDATE_SHA = "8786d5bb3a80da233ab62d8bf2fef8d0976b84ef";
+const AI_MERGE_REGION_NAME = "AI merge review reconciliation";
+
+const aiMergeReviewReconciliationTask = makeTask({
+  aiMergeReviewReconciliation: {
+    sourceSha: "source",
+    integrationTipSha: "tip",
+    candidateSha: AI_MERGE_CANDIDATE_SHA,
+    findings: [],
+    consecutiveCleanApprovals: 1,
+    correctivePasses: 0,
+  },
+});
+
+describe("TaskDetail AI merge review reconciliation relocation", () => {
+  beforeEach(() => {
+    mockDismissAiMergeReviewFinding.mockReset();
+    mockDismissAiMergeReviewFinding.mockResolvedValue(aiMergeReviewReconciliationTask);
+  });
+
+  afterEach(() => {
+    setViewportWidth(DESKTOP_WIDTH);
+  });
+
+  it("shows AI merge reconciliation only after navigating from Plan to Details", () => {
+    const { container } = render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="definition"
+        task={aiMergeReviewReconciliationTask}
+      />,
+    );
+
+    expect(container.querySelector(".ai-merge-review-reconciliation")).toBeNull();
+    expect(screen.queryByRole("region", { name: AI_MERGE_REGION_NAME })).toBeNull();
+    expect(screen.queryByText(/Approved — 0 prior finding\(s\) unconfirmed/)).toBeNull();
+    expect(screen.queryByText(AI_MERGE_CANDIDATE_SHA)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+
+    const region = screen.getByRole("region", { name: AI_MERGE_REGION_NAME });
+    expect(within(region).getByText(/Approved — 0 prior finding\(s\) unconfirmed/)).toBeInTheDocument();
+    expect(within(region).getByText(AI_MERGE_CANDIDATE_SHA)).toBeInTheDocument();
+  });
+
+  it("renders AI merge reconciliation in the overlay modal Details body", () => {
+    const { baseElement } = render(
+      <TaskDetailModal
+        {...sharedProps}
+        initialTab="details"
+        onClose={noop}
+        task={aiMergeReviewReconciliationTask}
+      />,
+    );
+
+    const section = baseElement.querySelector(".ai-merge-review-reconciliation");
+    expect(section).not.toBeNull();
+    expect(section).toHaveTextContent(AI_MERGE_CANDIDATE_SHA);
+  });
+
+  it.each(["Plan", "Activity", "Dependencies"])(
+    "removes AI merge reconciliation when navigating to the %s tab",
+    (tabName) => {
+      const { container } = render(
+        <TaskDetailContent
+          {...sharedProps}
+          embedded
+          initialTab="details"
+          task={aiMergeReviewReconciliationTask}
+        />,
+      );
+
+      expect(container.querySelector(".ai-merge-review-reconciliation")).not.toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: tabName }));
+
+      expect(container.querySelector(".ai-merge-review-reconciliation")).toBeNull();
+      expect(screen.queryByRole("region", { name: AI_MERGE_REGION_NAME })).toBeNull();
+    },
+  );
+
+  it("leaves no reconciliation shell on either tab when the task has no reconciliation", () => {
+    const { container } = render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="details"
+        task={makeTask({ aiMergeReviewReconciliation: undefined })}
+      />,
+    );
+
+    expect(container.querySelector(".ai-merge-review-reconciliation")).toBeNull();
+    expect(screen.queryByRole("region", { name: AI_MERGE_REGION_NAME })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+
+    expect(container.querySelector(".ai-merge-review-reconciliation")).toBeNull();
+    expect(screen.queryByRole("region", { name: AI_MERGE_REGION_NAME })).toBeNull();
+  });
+
+  it("uses the generic title in Details when there is no clean approval and no finding", () => {
+    render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="details"
+        task={makeTask({
+          aiMergeReviewReconciliation: {
+            sourceSha: "source",
+            integrationTipSha: "tip",
+            candidateSha: AI_MERGE_CANDIDATE_SHA,
+            findings: [],
+            consecutiveCleanApprovals: 0,
+            correctivePasses: 0,
+          },
+        })}
+      />,
+    );
+
+    const region = screen.getByRole("region", { name: AI_MERGE_REGION_NAME });
+    expect(within(region).getByRole("heading", { name: AI_MERGE_REGION_NAME })).toBeInTheDocument();
+    expect(within(region).queryByText(/prior finding\(s\) unconfirmed/)).toBeNull();
+    expect(region.querySelector("ul")).toBeNull();
+    expect(within(region).queryByRole("button", { name: "Dismiss this finding" })).toBeNull();
+  });
+
+  it("keeps pending findings, terminal guidance, and the dismissal action usable from Details", () => {
+    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("operator justification");
+
+    try {
+      render(
+        <TaskDetailContent
+          {...sharedProps}
+          embedded
+          initialTab="details"
+          task={makeTask({
+            aiMergeReviewReconciliation: {
+              sourceSha: "source",
+              integrationTipSha: "tip",
+              candidateSha: AI_MERGE_CANDIDATE_SHA,
+              terminal: true,
+              findings: [{ id: "finding-1", text: "Unresolved null check", disposition: "still-present" }],
+              consecutiveCleanApprovals: 1,
+              correctivePasses: 0,
+            },
+          })}
+        />,
+      );
+
+      const region = screen.getByRole("region", { name: AI_MERGE_REGION_NAME });
+      expect(region).toHaveClass("ai-merge-review-reconciliation-terminal");
+      expect(within(region).getByText(/Unresolved null check/)).toBeInTheDocument();
+      expect(
+        within(region).getByText(/Rebase or re-push the branch, dismiss a finding with justification, or land manually\./),
+      ).toBeInTheDocument();
+
+      fireEvent.click(within(region).getByRole("button", { name: "Dismiss this finding" }));
+
+      expect(promptSpy).toHaveBeenCalledTimes(1);
+      expect(mockDismissAiMergeReviewFinding).toHaveBeenCalledWith(
+        aiMergeReviewReconciliationTask.id,
+        "finding-1",
+        "operator justification",
+        undefined,
+      );
+    } finally {
+      promptSpy.mockRestore();
+    }
+  });
+
+  it("keeps AI merge reconciliation off Plan and on Details at the mobile breakpoint", () => {
+    setViewportWidth(MOBILE_WIDTH);
+
+    const definitionRender = render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="definition"
+        task={aiMergeReviewReconciliationTask}
+      />,
+    );
+
+    expect(definitionRender.container.querySelector(".ai-merge-review-reconciliation")).toBeNull();
+    expect(screen.queryByRole("region", { name: AI_MERGE_REGION_NAME })).toBeNull();
+    definitionRender.unmount();
+
+    const detailsRender = render(
+      <TaskDetailContent
+        {...sharedProps}
+        embedded
+        initialTab="details"
+        task={aiMergeReviewReconciliationTask}
+      />,
+    );
+
+    expect(detailsRender.container.querySelector(".ai-merge-review-reconciliation")).not.toBeNull();
+    expect(screen.getByText(/Approved — 0 prior finding\(s\) unconfirmed/)).toBeInTheDocument();
+  });
+
+  it("keeps exactly one reconciliation renderer and no Definition-tab remnant", () => {
+    const taskDetailSource = readAppFile("components/TaskDetailModal.tsx");
+    const renderers = taskDetailSource.match(/className=\{`ai-merge-review-reconciliation/g) ?? [];
+
+    expect(renderers).toHaveLength(1);
+    expect(taskDetailSource).not.toContain('activeTab === "definition" && task.aiMergeReviewReconciliation');
   });
 });

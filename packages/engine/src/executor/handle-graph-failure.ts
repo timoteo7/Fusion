@@ -7,7 +7,7 @@
  * no recovery path applies — never leave a failed graph invisible in in-progress.
  */
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import type { Task, TaskStore, WorkflowIr } from "@fusion/core";
 import {
   nonExecutableDuplicateRedirectReason,
@@ -21,6 +21,7 @@ import {
   resolveReboundTarget,
   resolveStepReopenPolicy,
   resolveWorkflowIrForTask,
+  resolvePreMergeGateForTask,
   TransitionRejectionError,
 } from "@fusion/core";
 import {
@@ -34,14 +35,18 @@ import { getPromptPath } from "../execution/spec-staleness.js";
 import { executorLog } from "../logger.js";
 import { generateSyntheticRunId, type EngineRunContext } from "../util/run-audit.js";
 import { emitBoundedRunAudit } from "./emit-bounded-run-audit.js";
+import { captureMergeContentDescriptor } from "../merge/merge-content-capture.js";
+import { rerouteUnrunPreMergeGateToReview } from "../merge/pre-merge-gate-reseed.js";
 import { MERGE_BOUNDARY_UNPROVEN_VALUE } from "../workflows/workflow-merge-nodes.js";
 import { emitMergeBoundaryUnprovenParked } from "./emit-merge-boundary-unproven-audit.js";
 import { PAUSE_ABORT_PARK_ERROR_MARKER, PAUSE_ABORT_PARK_OPERATOR_MARKER } from "../self-healing.js";
 import {
-  graphFailureErrorTexts,
+  formatGraphFailureDiagnostic,
+  graphFailureNodeErrorText,
   graphFailureValue,
   graphRunReportedPendingReview,
   isMergeGraphFailure,
+  isStalePauseAbortParkFailure,
   latestFailedPreMergeWorkflowStep,
   isSessionContentionGraphFailure,
   isWorkspacePreparationGraphFailure,
@@ -97,6 +102,8 @@ export type HandleGraphFailureDeps = {
   activeCliTaskSessions: Map<string, unknown>;
   activeWorkflowGraphAbortControllers: Map<string, AbortController>;
   processWideGraphRouting: Set<string>;
+  /** Deferred terminal-park callbacks currently in flight (restart-recovery intent chain). */
+  deferredTerminalParksInFlight: Set<string>;
   getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   clearCompletedTaskWatchdog: (taskId: string) => void;
   clearPausedAborted: (taskId: string) => void;
@@ -128,6 +135,46 @@ export type HandleGraphFailureDeps = {
   safeLogEntry: AnyFn;
 };
 
+async function retryTerminalFailurePersistence(
+  store: TaskStore,
+  taskId: string,
+  message: string,
+  runContext: EngineRunContext | undefined,
+  capturedColumnMovedAt: string | undefined,
+): Promise<boolean> {
+  /*
+  FNXC:MergeRetryReliability 2026-09-04-02:24:
+  Bounded terminal persistence can outlive an operator requeue during a store
+  outage. Every retry therefore uses the same atomic lane-move fence as deferred
+  recovery, so an old graph run cannot fail the newly requeued execution.
+  */
+  const delays = [1000, 2000, 4000, 8000, 16000, 32000, 64000];
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    try {
+      await store.updateTaskAtomic(taskId, (current) => {
+        if (
+          !current
+          || current.deletedAt
+          || current.status != null
+          || current.paused
+          || current.userPaused
+          || (typeof capturedColumnMovedAt === "string"
+            && typeof current.columnMovedAt === "string"
+            && current.columnMovedAt !== capturedColumnMovedAt)
+        ) return null;
+        return { error: message, status: "failed" };
+      }, runContext);
+      return true;
+    } catch (error) {
+      if (attempt === delays.length - 1) {
+        executorLog.error(`${taskId}: terminal graph-failure persistence exhausted: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
+  return false;
+}
 export async function handleGraphFailure(
   deps: HandleGraphFailureDeps,
   task: Task,
@@ -241,22 +288,8 @@ export async function handleGraphFailure(
       remains in review. Honor that precise merger park when it carries a hard blocking status;
       requiring only the historical hold lane would let graph teardown overwrite it with a generic
       failure. The review lane already consumes no WIP capacity, so this branch performs no move.
+
       */
-      const parkedMergeNode = result.visitedNodeIds[result.visitedNodeIds.length - 1];
-      if (
-        live.error != null &&
-        (live.column === failureLanes.hold
-          || (live.column === failureLanes.review && live.status === "failed")) &&
-        isMergeGraphFailure(parkedMergeNode)
-      ) {
-        deps.clearPausedAborted(task.id);
-        deps.activeWorktrees.delete(task.id);
-        const mergerParkHonored = `Workflow graph run ended after merger parked task with blocker (${live.error}) — honoring park, not retrying or resuming merge`;
-        executorLog.log(`${task.id}: ${mergerParkHonored}`);
-        await deps.store.logEntry(task.id, mergerParkHonored, undefined, deps.getRunContextFor(task.id));
-        await deps.persistTokenUsage(task.id);
-        return;
-      }
       /*
       FNXC:WorkflowIrPin 2026-07-19-21:10 (KTD-3 drift park, PR #2342):
       A graph run that exited on the drift guard carries WORKFLOW_DRIFT_PARK_CONTEXT_KEY
@@ -294,8 +327,10 @@ export async function handleGraphFailure(
        * freshly-created checkout or consume graph/provider retry budgets.
        */
       if (graphFailureValue(result) === BRANCH_WRITE_PROVENANCE_FAILURE_VALUE) {
-        const diagnostic = graphFailureErrorTexts(result).find((message) => message.includes("branchWriteOrigin is required when branch is provided"))
-          ?? "branchWriteOrigin is required when branch is provided";
+        const branchWriteNodeError = graphFailureNodeErrorText(result);
+        const diagnostic = branchWriteNodeError?.includes("branchWriteOrigin is required when branch is provided")
+          ? branchWriteNodeError
+          : "branchWriteOrigin is required when branch is provided";
         await deps.store.logEntry(task.id, diagnostic, undefined, deps.getRunContextFor(task.id));
         await deps.store.updateTask(task.id, { status: "failed", error: diagnostic }, deps.getRunContextFor(task.id));
         await deps.persistTokenUsage(task.id);
@@ -313,7 +348,7 @@ export async function handleGraphFailure(
       Git diagnostics remain actionable and provider retry accounting is untouched.
       */
       if (isWorkspacePreparationGraphFailure(result)) {
-        const diagnostic = graphFailureErrorTexts(result)[0]
+        const diagnostic = graphFailureNodeErrorText(result)
           ?? "Workspace repository preparation failed before a reviewer session started";
         /*
         FNXC:WorkspacePreparation 2026-08-21-19:52:
@@ -563,6 +598,43 @@ export async function handleGraphFailure(
       creating this memo for the classifiers — so the classifiers read the board and the branches around
       them read the default names.
       */
+      /*
+      FNXC:ManualMergeHoldPauseAbort 2026-09-13-11:01:
+      Evaluate the narrow auto-merge-off manual-hold recovery before honoring a merger park. A
+      matching stale pause-abort failure may clear only in place; every other parked merge error,
+      including an auto-merge-on stale row, remains merger-owned and cannot reach retry routing.
+      A user-paused stale row instead continues to the user-pause guard below, which must retain
+      operator control rather than treating a former engine park as a merger decision.
+      */
+      if (genuinePauseAbort && await deps.isBenignManualMergeHoldPauseAbort(live, result, abortProvenance, pausedAborted, resumeLanesMemo)) {
+        deps.clearPausedAborted(task.id);
+        deps.activeWorktrees.delete(task.id);
+        const manualHoldBenign = "Workflow graph run ended at manual merge hold with auto-merge off — benign, in-review manual-hold state preserved for Merge & Close";
+        executorLog.log(`${task.id}: ${manualHoldBenign}`);
+        await deps.store.logEntry(task.id, manualHoldBenign, undefined, deps.getRunContextFor(task.id));
+        if (live.status != null || live.error != null) {
+          await deps.store.logEntry(task.id, "Auto-recovered: cleared stale auto-merge-off manual merge hold pause-abort failure — failure notification suppressed", undefined, deps.getRunContextFor(task.id));
+          await deps.store.updateTask(task.id, { status: null, error: null }, deps.getRunContextFor(task.id));
+        }
+        await deps.persistTokenUsage(task.id);
+        return;
+      }
+      const parkedMergeNode = result.visitedNodeIds[result.visitedNodeIds.length - 1];
+      if (
+        live.error != null &&
+        (!isStalePauseAbortParkFailure(live, parkedMergeNode) || live.userPaused !== true) &&
+        (live.column === failureLanes.hold
+          || (live.column === failureLanes.review && live.status === "failed")) &&
+        isMergeGraphFailure(parkedMergeNode)
+      ) {
+        deps.clearPausedAborted(task.id);
+        deps.activeWorktrees.delete(task.id);
+        const mergerParkHonored = `Workflow graph run ended after merger parked task with blocker (${live.error}) — honoring park, not retrying or resuming merge`;
+        executorLog.log(`${task.id}: ${mergerParkHonored}`);
+        await deps.store.logEntry(task.id, mergerParkHonored, undefined, deps.getRunContextFor(task.id));
+        await deps.persistTokenUsage(task.id);
+        return;
+      }
       if (genuinePauseAbort && await deps.isReentrantPausedAbortedInFlightNode(live, result, abortProvenance, pausedAborted, deps.userCanceledTaskIds.has(task.id), resumeLanesMemo)) {
         if (await deps.reenterPausedAbortedWorkflowNode(live, result, abortProvenance, resumeLanesMemo)) {
           return;
@@ -590,23 +662,6 @@ export async function handleGraphFailure(
         if (await deps.routeGraphMergeFailureToRetry(live, result, abortProvenance)) {
           return;
         }
-      }
-      if (genuinePauseAbort && await deps.isBenignManualMergeHoldPauseAbort(live, result, abortProvenance, pausedAborted, resumeLanesMemo)) {
-        /*
-        FNXC:WorkflowLifecycle 2026-07-09-14:56:
-        FN-7749 / Runfusion#1979: auto-merge-off manual merge hold is terminal-until-human-merged, not an executor failure. Preserve the `in-review` row for Merge & Close, do not invoke merge retry, and clear only stale pause-abort status/error so FN-5147's no-backward-move/no-reenqueue contract stays intact.
-        */
-        deps.clearPausedAborted(task.id);
-        deps.activeWorktrees.delete(task.id);
-        const manualHoldBenign = "Workflow graph run ended at manual merge hold with auto-merge off — benign, in-review manual-hold state preserved for Merge & Close";
-        executorLog.log(`${task.id}: ${manualHoldBenign}`);
-        await deps.store.logEntry(task.id, manualHoldBenign, undefined, deps.getRunContextFor(task.id));
-        if (live.status != null || live.error != null) {
-          await deps.store.logEntry(task.id, "Auto-recovered: cleared stale auto-merge-off manual merge hold pause-abort failure — failure notification suppressed", undefined, deps.getRunContextFor(task.id));
-          await deps.store.updateTask(task.id, { status: null, error: null }, deps.getRunContextFor(task.id));
-        }
-        await deps.persistTokenUsage(task.id);
-        return;
       }
       if (genuinePauseAbort && isBenignInReviewPauseAbort(live, result, abortProvenance, pausedAborted, deps.userCanceledTaskIds.has(task.id), failureLanes.review)) {
         deps.clearPausedAborted(task.id);
@@ -813,9 +868,9 @@ export async function handleGraphFailure(
           graph run reach this sink, where it logged "Workflow graph failure
           surfaced ... operator action required; retry or explicitly
           unpause/resume" on a task that finished perfectly. The `status:
-          "failed"` write below was already guarded for done/archived, but the
+          "failed"` write below was already guarded for workflow Complete, but the
           alarming operator-action log entry (and its warn) still fired on
-          every auto-merged task. Treat done/archived like the todo benign
+          every auto-merged task. Treat Complete like the todo benign
           case: clear the abort marker, release the worktree slot, log a
           benign completion note, and never emit the PAUSE_ABORT_PARK markers
           (so self-healing's recoverPausedAbortFailures has nothing to chase).
@@ -850,6 +905,7 @@ export async function handleGraphFailure(
       const failedNode = result.visitedNodeIds[result.visitedNodeIds.length - 1];
       const mergeGraphFailure = isMergeGraphFailure(failedNode);
       const failureValue = graphFailureValue(result);
+      const nodeError = graphFailureNodeErrorText(result);
       /*
       FNXC:DuplicateIntake 2026-08-01-19:24:
       Defense in depth for FN-8704: if a card slipped into WIP with PROMPT.md = only
@@ -1094,7 +1150,7 @@ export async function handleGraphFailure(
       if (await deps.routeRetryableRemediationGraphFailureToPreMergeFix(live, failedNode, failureValue)) {
         return;
       }
-      if (await deps.routeGraphFailureToExecutionResume(live, failedNode ?? "unknown", failureValue, resumeLanesMemo)) {
+      if (await deps.routeGraphFailureToExecutionResume(live, failedNode ?? "unknown", failureValue, resumeLanesMemo, nodeError)) {
         return;
       }
       /*
@@ -1179,6 +1235,22 @@ export async function handleGraphFailure(
             "Retry the task after restoring its remediation checkout or revision policy. Use the privileged review bypass only when this failed review is known to be non-blocking.",
             deps.getRunContextFor(task.id),
           );
+          return;
+        }
+        // FN-9243: failure after crossing into review must leave a producer for genuinely unrun gates.
+        const reroute = await (async () => {
+          const gate = await resolvePreMergeGateForTask(deps.store, live.id, live.enabledWorkflowSteps, live);
+          const settings = await deps.store.getSettings();
+          const mergeContent = await captureMergeContentDescriptor(live, { workspaceRootDir: deps.rootDir, settings });
+          return rerouteUnrunPreMergeGateToReview(deps.store, live, {
+            requiredPreMergeStepIds: gate.requiredPreMergeStepIds,
+            mergeContent,
+          });
+        })().catch(() => undefined);
+        if (reroute?.rerouted) {
+          const message = `Workflow graph re-seeded at unrun pre-merge gate '${reroute.nodeId ?? "unknown"}' after review-lane failure`;
+          executorLog.warn(`${task.id}: ${message}`);
+          await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
           return;
         }
         const benignMessage = `Workflow graph run ended after task already advanced to '${live.column}' — no further action needed`;
@@ -1283,7 +1355,7 @@ export async function handleGraphFailure(
           return;
         }
       }
-      const message = `Workflow graph terminated with failure at node '${failedNode ?? "unknown"}'`;
+      const message = formatGraphFailureDiagnostic(failedNode, failureValue, nodeError);
       const settings = await deps.store.getSettings();
       const maxToolFailureRetries = resolveMaxConsecutiveToolFailureRetries(settings);
       if (maxToolFailureRetries > 0 && isExecuteFamilyNode && !live.paused && !live.userPaused && !live.deletedAt && live.column === wipColumn) {
@@ -1432,10 +1504,162 @@ export async function handleGraphFailure(
         if (!escalationTerminalParked) return;
         await emitBoundedRunAudit(deps.store, { taskId: task.id, agentId: "executor", runId: generateSyntheticRunId("escalation-exhausted", task.id), domain: "database", mutationType: "task:execution-escalation-exhausted", target: task.id, metadata: { taskId: task.id, nodeId: failedNode ?? "unknown", hadModelTarget: escalationHadModelTarget, hadNodeTarget: escalationHadNodeTarget } });
       } else {
-        // status "failed" doubles as the self-healing exemption: review-task
-        // revival sweeps skip tasks carrying a non-null status, preventing the
-        // FN-5704-style loop of re-running the graph from scratch.
-        await deps.store.updateTask(task.id, { error: message, status: "failed" }, deps.getRunContextFor(task.id));
+        const parked = await retryTerminalFailurePersistence(
+          deps.store,
+          task.id,
+          message,
+          deps.getRunContextFor(task.id),
+          live.columnMovedAt,
+        );
+        if (!parked) {
+          /*
+          FNXC:MergeRetryReliability 2026-08-26-18:30 (Greptile P1 x6): during a
+          persistent store outage the bounded backoff can exhaust while the task
+          still sits in its lane. Keep re-attempting on a fixed interval until
+          the row is durably terminal or the write's fence rejects it — no round
+          cap, so a store that recovers hours later still finds the row parked
+          instead of lane-resident with null status. Every re-attempt is exactly
+          one fenced write: updateTaskAtomic's reducer re-checks the live row
+          (deleted / already-terminal / paused) atomically, so no separate
+          getTask probe exists — a probe could itself reject during the outage
+          and, landing outside the retry branch, would end the chain. Run
+          identity is fenced by STRICT equality with the id captured at
+          exhaustion, and no chain is scheduled at all when no execution context
+          exists then: two absent (undefined) contexts must never compare equal,
+          or a stale handler could park freshly recovered or requeued work.
+          resumeOrphaned() parks lane-resident null-status rows at restart.
+          */
+          /*
+          FNXC:MergeRetryReliability 2026-09-04-01:51:
+          columnMovedAt changes for every lane move, including operator requeue,
+          making it the durable execution identity. Do not use updatedAt: logs and
+          token usage mutate it without starting a new execution.
+          */
+          const capturedRunId = deps.getRunContextFor(task.id)?.runId;
+          const capturedColumnMovedAt = live.columnMovedAt;
+          // FNXC:MergeRetryReliability 2026-08-29-14:35 (Greptile round-9
+          // Issue 1): the in-memory deferred chain dies with the engine — an
+          // unref'd timeout has no durable ownership, so an exit during the
+          // store outage discards the pending failed-state write and restart
+          // recovery RE-RUNS a task that should have been parked. Persist the
+          // terminal-park intent next to the task's own directory so restart
+          // recovery (resumeOrphaned) can apply it instead of re-executing.
+          // FNXC:MergeRetryReliability 2026-08-29-16:52 (CodeRabbit L1331):
+          // persist the intent on EVERY exhaustion path — including the
+          // no-context branch below — so restart recovery parks the task even
+          // when the deferred chain was never schedulable.
+          const tasksDir = typeof deps.store.getTasksDir === "function"
+            ? deps.store.getTasksDir()
+            : join(deps.rootDir, ".fusion", "tasks");
+          const deferredParkIntentPath = join(tasksDir, task.id, "deferred-terminal-park.json");
+          // Fire-and-forget: the intent write must not delay scheduling the
+          // deferred chain (a blocked fs would push the timer past the
+          // retry window). If the filesystem is unavailable the in-memory
+          // chain still runs; restart recovery simply loses the intent.
+          // FNXC:MergeRetryReliability 2026-08-29-17:08 (CodeRabbit L1351):
+          // hold the write promise and await it inside the deferred chain
+          // before each rm, so a slow fs write cannot recreate the file
+          // after the intent was settled.
+          const intentWrite = writeFile(deferredParkIntentPath, JSON.stringify({ message, writtenAt: new Date().toISOString(), columnMovedAt: capturedColumnMovedAt }), "utf-8")
+            .catch((intentError) => {
+              executorLog.warn(`${task.id}: failed to persist deferred terminal-park intent: ${intentError instanceof Error ? intentError.message : String(intentError)}`);
+            });
+          if (capturedRunId === undefined) {
+            executorLog.warn(`${task.id}: no execution context at exhaustion — skipping deferred terminal park (a null-status lane row is parked at restart)`);
+          } else {
+            const scheduleDeferredTerminalPark = (attempt: number): void => {
+              const handle = setTimeout(() => {
+                void (async function deferredTerminalParkAttempt() {
+                  // FNXC:MergeRetryReliability 2026-08-29-17:40 (CodeRabbit L399):
+                  // expose an observable in-flight marker so tests drive the fence
+                  // from observed state instead of stack traces (rename/inlining
+                  // or a deep async stack could silently disable the fence tests).
+                  deps.deferredTerminalParksInFlight.add(task.id);
+                  try {
+                  const currentRunId = deps.getRunContextFor(task.id)?.runId;
+                  // FNXC:MergeRetryReliability 2026-08-29-12:05 (Greptile round-4
+                  // Issue 1): a cleared context (currentRunId === undefined) means
+                  // normal execution teardown already happened and NO OTHER run
+                  // owns the task — the lane-resident null-status row must still be
+                  // parked now the store recovered. Skipping on undefined made
+                  // recovery depend on an engine restart (resumeOrphaned), leaving
+                  // the task lane-resident indefinitely.
+                  // FNXC:MergeRetryReliability 2026-08-29-12:20 (Greptile round-8
+                  // Issue 1): a cleared context is NOT sufficient proof of a dead
+                  // run — a valid requeue also clears it while the task is live on
+                  // some execution surface. Fence both ways: different ACTIVE run
+                  // id, OR no run id but any live execution surface for the task
+                  // (same surface list the transient resume retry uses), means a
+                  // stale callback must not terminalize newer/requeued work.
+                  const taskHasLiveExecutionSurface =
+                    deps.executing.has(task.id)
+                    || deps.activeSessions.has(task.id)
+                    || deps.activeStepExecutors.has(task.id)
+                    || deps.activeWorkflowStepSessions.has(task.id)
+                    || deps.activeCliTaskSessions.has(task.id)
+                    || deps.activeWorkflowGraphAbortControllers.has(task.id)
+                    || deps.resumingUnpaused.has(task.id)
+                    || deps.processWideGraphRouting.has(task.id);
+                  if (
+                    (currentRunId !== undefined && currentRunId !== capturedRunId)
+                    || (currentRunId === undefined && taskHasLiveExecutionSurface)
+                  ) {
+                    // FNXC:MergeRetryReliability 2026-08-29-16:52 (CodeRabbit L1402):
+                    // a skipped fence ends the chain — the file must not leak so a
+                    // later restart parks work a NEWER run owns.
+                    await intentWrite;
+                    await rm(deferredParkIntentPath, { force: true }).catch(() => undefined);
+                    return;
+                  }
+                let fencedParked = false;
+                try {
+                  await deps.store.updateTaskAtomic(task.id, (current) => {
+                    if (
+                      !current
+                      || current.deletedAt
+                      || current.status != null
+                      || current.paused
+                      || current.userPaused
+                      || (typeof capturedColumnMovedAt === "string"
+                        && typeof current.columnMovedAt === "string"
+                        && current.columnMovedAt !== capturedColumnMovedAt)
+                    ) return null;
+                    fencedParked = true;
+                    return { error: message, status: "failed" };
+                  }, deps.getRunContextFor(task.id));
+                } catch (error) {
+                  if (attempt % 10 === 0) {
+                    executorLog.error(`${task.id}: deferred terminal persistence attempt ${attempt + 1} rejected (${error instanceof Error ? error.message : String(error)}) — re-attempting`);
+                  }
+                  scheduleDeferredTerminalPark(attempt + 1);
+                  return;
+                }
+                // FNXC:MergeRetryReliability 2026-08-29-16:52 (CodeRabbit L1402):
+                // reached only when the fenced write RESOLVED — either the row
+                // was parked (fencedParked) or the reducer declined it (row
+                // already terminal/deleted/paused). Both settle the intent:
+                // dropped the durable marker so a later restart does not re-apply
+                // stale terminal state.
+                // FNXC:MergeRetryReliability 2026-08-29-17:08 (CodeRabbit L1351):
+                // await the intent write BEFORE deleting it, so a slow fs write
+                // cannot recreate the file after the chain settled the intent.
+                await intentWrite;
+                await rm(deferredParkIntentPath, { force: true }).catch(() => undefined);
+                if (fencedParked) {
+                  executorLog.warn(`${task.id}: deferred terminal persistence parked the row after store recovery`);
+                }
+                  } finally {
+                    deps.deferredTerminalParksInFlight.delete(task.id);
+                  }
+              })().catch((error) => executorLog.error(
+                `${task.id}: deferred terminal persistence failed: ${error instanceof Error ? error.message : String(error)}`,
+              ));
+            }, process.env.VITEST || process.env.NODE_ENV === "test" ? 0 : 120_000);
+            handle.unref?.();
+            };
+            scheduleDeferredTerminalPark(0);
+          }
+        }
       }
       executorLog.warn(`${task.id}: ${message}`);
       await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));

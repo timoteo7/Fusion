@@ -1,6 +1,26 @@
 import { pruneStaleCacheEntries } from "./swrCache";
 
 export const MAX_PERSISTED_DRAFT_BYTES = 64_000;
+export const CHAT_OPEN_SESSION_STORAGE_KEY = "kb-chat-active-session";
+
+/*
+FNXC:ChatNavigation 2026-09-07-21:35:
+FN-313 définit la préférence de conversation comme l’identité du fil dont le détail était ouvert, et non comme un simple cache de sélection. L’absence de valeur représente explicitement la liste; les helpers exigent un projet afin qu’aucun hôte secondaire ou intervalle de changement de projet n’écrive une clé non scopée.
+*/
+export function getPersistedChatOpenSession(projectId?: string): string | null {
+  if (!projectId) return null;
+  return getScopedItem(CHAT_OPEN_SESSION_STORAGE_KEY, projectId);
+}
+
+export function setPersistedChatOpenSession(sessionId: string, projectId?: string): void {
+  if (!projectId || !sessionId) return;
+  setScopedItem(CHAT_OPEN_SESSION_STORAGE_KEY, sessionId, projectId);
+}
+
+export function clearPersistedChatOpenSession(projectId?: string): void {
+  if (!projectId) return;
+  removeScopedItem(CHAT_OPEN_SESSION_STORAGE_KEY, projectId);
+}
 
 export const VOLATILE_DRAFT_STORAGE_KEYS = [
   "kb-quick-entry-text",
@@ -27,10 +47,7 @@ export const PROJECT_STORAGE_KEYS: string[] = [
   "kb-dashboard-list-collapsed",
   "kb-dashboard-selected-tasks",
   "kb-dashboard-list-selected-task",
-  "kb-dashboard-list-sidebar-width",
-  "kb-dashboard-mailbox-sidebar-width",
-  "kb-dashboard-agents-sidebar-width",
-  "kb-dashboard-github-import-list-width",
+  "kb-dashboard-view-sidebar-width",
   "kb-dashboard-github-import-state",
   "kb-quick-entry-text",
   "kb-inline-create-text",
@@ -44,9 +61,7 @@ export const PROJECT_STORAGE_KEYS: string[] = [
   "kb-usage-hidden-windows",
   "kb-usage-modal-size",
   "kb-usage-provider-order",
-  "kb-chat-active-session",
-  "kb-dashboard-working-branch-filter",
-  "kb-dashboard-base-branch-filter",
+  CHAT_OPEN_SESSION_STORAGE_KEY,
   "kb-capacity-risk-banner-dismissed",
   "kb-github-setup-warning-missing-since",
   "kb-files-line-numbers",
@@ -68,14 +83,13 @@ export function getScopedItem(baseKey: string, projectId?: string): string | nul
     return null;
   }
 
-  const getItem = window.localStorage?.getItem;
-  if (typeof getItem !== "function") {
-    return null;
-  }
-
   try {
-    return getItem.call(window.localStorage, scopedKey(baseKey, projectId));
+    const storage = window.localStorage;
+    const getItem = storage?.getItem;
+    if (typeof getItem !== "function") return null;
+    return getItem.call(storage, scopedKey(baseKey, projectId));
   } catch {
+    /* FNXC:StandardizedViewSidebar 2026-09-13-16:12: Browser policy may throw while resolving the localStorage property itself. */
     return null;
   }
 }
@@ -184,14 +198,12 @@ export function removeScopedItem(baseKey: string, projectId?: string): void {
     return;
   }
 
-  const removeItem = window.localStorage?.removeItem;
-  if (typeof removeItem !== "function") {
-    return;
-  }
-
   try {
-    removeItem.call(window.localStorage, scopedKey(baseKey, projectId));
+    const storage = window.localStorage;
+    const removeItem = storage?.removeItem;
+    if (typeof removeItem !== "function") return;
+    removeItem.call(storage, scopedKey(baseKey, projectId));
   } catch {
-    // Storage removal is also optional restoration cleanup.
+    // Storage lookup and removal are optional restoration cleanup.
   }
 }

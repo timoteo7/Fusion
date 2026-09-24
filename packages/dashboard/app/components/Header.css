@@ -51,38 +51,6 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
   max-width: none;
 }
 
-.header-branch-filters {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(calc(var(--space-2xl) * 5), 100%), 1fr));
-  gap: var(--space-sm);
-  margin-top: var(--space-sm);
-}
-
-.header-branch-filter-label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  color: var(--text-muted);
-  font-size: calc(var(--space-sm) + var(--space-xs));
-}
-
-.header-branch-filter-select {
-  width: 100%;
-  min-height: calc(var(--space-xl) + var(--space-sm) / 2);
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--space-sm);
-  font-size: calc(var(--space-sm) + var(--space-xs) + var(--space-xs) / 4);
-}
-
-.header-branch-filter-select:focus-visible {
-  border-color: var(--todo);
-  box-shadow: var(--focus-ring);
-  outline: none;
-}
-
 .header-left {
   display: flex;
   align-items: center;
@@ -107,21 +75,42 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
 .header-actions {
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: var(--space-sm);
   position: relative;
-  /* FNXC:DashboardHeader 2026-07-08-00:00: keep the compact action cluster at
-     its intrinsic size (never grow, never shrink below content) so it cannot
-     be squeezed off-row while the shrinking `.header-left` truncates instead. */
-  flex: 0 0 auto;
+  /*
+  FNXC:DashboardHeader 2026-09-12-05:41:
+  Desktop Board/List keeps the portaled workflow selector and following Search action in one row. Let the action cluster and workflow slot shrink while fixed-size buttons retain their width, so long workflow names and populated counts ellipsize before any control can wrap.
+  */
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 100%;
 }
 
 .header-workflow-slot {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
   gap: var(--space-xs);
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.header-actions > .btn-icon {
+  flex: 0 0 auto;
+}
+
+/*
+FNXC:StandardizedViewActions 2026-09-16-23:06:
+FN-437 makes the New Task action a permanent Header entry at every tier, including desktop, where `.header-actions` is
+shrinkable (`flex: 0 1 auto`) and shares the row with the growing workflow slot. Without an explicit shrink contract the
+create button would be the control that compresses when a workflow name is long, exactly like the icon buttons above.
+*/
+.header-actions > .view-action-button {
+  flex: 0 0 auto;
 }
 
 .header-workflow-slot:empty {
@@ -133,15 +122,32 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
   gap: var(--space-xs);
+  width: 100%;
   min-width: 0;
+  max-width: 100%;
   padding: 0;
   border-bottom: 0;
   background: transparent;
 }
 
+.header-workflow-slot .board-workflow-selector,
+.header-workflow-slot .workflow-switcher {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .header-workflow-slot .board-workflow-selector {
   margin-left: 0;
+}
+
+.header-workflow-slot .workflow-switcher-trigger {
+  width: 100%;
+  max-width: 100%;
 }
 
 @media (max-width: 768px) {
@@ -154,6 +160,13 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
 
   FNXC:WorkflowControls 2026-06-23-21:12:
   The mobile workflow dropdown must visually match the board/list segmented toggle height exactly. Pin the toolbar wrapper, switcher, and trigger to the same 32px border-box and remove inherited vertical padding/line-height drift so the top and bottom edges align pixel-for-pixel.
+
+  FNXC:WorkflowControls 2026-09-17-02:14:
+  FN-481 : cette compaction appartient au MODE téléphone, pas à une largeur. Elle vise donc `.header-workflow-slot--mobile`,
+  la classe portée par la seule branche téléphone du slot. Une tablette tactile connue à 768 px CSS reste en mode
+  `tablet` : son slot vit dans `header-actions` sans cette classe et garde la présentation ordinateur (libellé et
+  compteurs visibles, largeur non brideée), exactement comme le sélecteur de projet que `ProjectSelector.css` rétablit
+  déjà par mode. Les autres règles téléphone de ce bloc (en-tête, marque, actions) restent inchangées.
   */
   .header {
     gap: var(--space-sm);
@@ -171,7 +184,7 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
     flex-shrink: 0;
   }
 
-  .header-workflow-slot {
+  .header-workflow-slot--mobile {
     flex: 1 1 auto;
     justify-content: center;
     min-width: 0;
@@ -184,17 +197,17 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
     gap: var(--space-sm);
   }
 
-  .header-workflow-slot:empty {
+  .header-workflow-slot--mobile:empty {
     display: none;
   }
 
-  .header-workflow-slot .board-workflow-toolbar,
-  .header-workflow-slot .list-workflow-control {
+  .header-workflow-slot--mobile .board-workflow-toolbar,
+  .header-workflow-slot--mobile .list-workflow-control {
     height: 32px;
     align-items: center;
   }
 
-  .header-workflow-slot .workflow-switcher {
+  .header-workflow-slot--mobile .workflow-switcher {
     width: clamp(calc(var(--space-2xl) * 3.25), 36vw, calc(var(--space-2xl) * 4));
     height: 32px;
     max-height: 32px;
@@ -203,11 +216,11 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
     align-items: center;
   }
 
-  .header-workflow-slot .workflow-switcher-label {
+  .header-workflow-slot--mobile .workflow-switcher-label {
     display: none;
   }
 
-  .header-workflow-slot .workflow-switcher-trigger {
+  .header-workflow-slot--mobile .workflow-switcher-trigger {
     appearance: none;
     box-sizing: border-box;
     width: 100%;
@@ -221,15 +234,15 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
     overflow: hidden;
   }
 
-  .header-workflow-slot .workflow-switcher-trigger-main {
+  .header-workflow-slot--mobile .workflow-switcher-trigger-main {
     gap: var(--space-xs);
   }
 
-  .header-workflow-slot .workflow-switcher-counts {
+  .header-workflow-slot--mobile .workflow-switcher-counts {
     display: none;
   }
 
-  .header-workflow-slot .workflow-switcher-merging-indicator {
+  .header-workflow-slot--mobile .workflow-switcher-merging-indicator {
     width: calc(var(--space-sm) - 2px);
     height: calc(var(--space-sm) - 2px);
   }
@@ -383,39 +396,21 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
   flex: 1;
 }
 
-.btn-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 28px;
-  width: 28px;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 18px;
-  cursor: pointer;
-  padding: 0;
-  border-radius: var(--radius-md);
-  transition:
-    color var(--transition-fast),
-    background var(--transition-fast);
-}
-.btn-icon svg {
-  stroke: currentColor;
-}
-@media (hover: hover) {
-  .btn-icon:hover {
-    color: var(--text);
-    background: var(--border);
-  }
-}
-.btn-icon:focus-visible {
-  box-shadow: var(--focus-ring-strong);
-  outline: none;
-}
-.btn-icon:active {
-  opacity: 0.7;
-}
+/*
+FNXC:IconOnlyButtonCanon 2026-09-16-19:05:
+FN-471 : la peinture de base de `.btn-icon` (boîte carrée, fond/bordure absents, survol, focus, actif)
+était définie ici, dans un fichier de composant, alors qu'elle est la variante canonique GLOBALE sans
+bordure. Elle vit désormais dans `styles.css`, au même sélecteur nu et à la même spécificité (0,1,0).
+Ce fichier ne conserve que les modificateurs propres au bandeau et sa surcharge scopée
+`.header-actions > .btn-icon`.
+
+FNXC:IconOnlyButtonCanon 2026-09-16-19:33:
+FN-471 : la base ayant migré dans `styles.css`, qui est importé APRÈS `Header.css` (`main.tsx` importe
+`./App` avant `./styles.css`), les modificateurs d'état ne peuvent plus gagner par ordre de document à
+spécificité égale. Ils sont donc écrits en sélecteur composé `.btn-icon.btn-icon--*` (0,2,0), ce qui les
+fait battre la base relocalisée sans jamais relever la spécificité de cette base. C'est la règle du
+projet : on scope la surcharge de composant, on ne touche pas à la primitive globale.
+*/
 .btn-icon--terminal:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -426,7 +421,7 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
   background: none;
 }
 
-.btn-icon--active {
+.btn-icon.btn-icon--active {
   color: var(--text);
   background: var(--border);
   border-color: var(--todo);
@@ -450,25 +445,25 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
   justify-content: center;
 }
 
-.btn-icon--paused {
+.btn-icon.btn-icon--paused {
   color: var(--triage);
 }
 @media (hover: hover) {
-  .btn-icon--paused:hover {
+  .btn-icon.btn-icon--paused:hover {
     color: var(--triage);
   }
 }
-.btn-icon--stopped {
+.btn-icon.btn-icon--stopped {
   color: var(--color-error);
 }
 @media (hover: hover) {
-  .btn-icon--stopped:hover {
+  .btn-icon.btn-icon--stopped:hover {
     color: var(--color-error);
   }
 }
 
 /* Header badge for active sessions */
-.btn-icon--has-indicator {
+.btn-icon.btn-icon--has-indicator {
   position: relative;
 }
 
@@ -804,6 +799,13 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
   transition: border-color var(--transition-fast);
 }
 
+/* FNXC:HeaderTaskSearch 2026-09-12-21:52: Desktop expands Search inline only while requested, in the magnifier's action slot after the workflow selector. The shared dropdown anchors below this token-sized field; compact surfaces retain their existing floating search layout. */
+.header-search--inline {
+  flex: 0 1 calc(var(--space-2xl) * 8);
+  min-width: calc(var(--space-2xl) * 5);
+  max-width: calc(var(--space-2xl) * 10);
+}
+
 .header-search:focus-within {
   border-color: var(--todo);
 }
@@ -1035,14 +1037,6 @@ non-notched devices, so this is a no-op there. Pair with viewport-fit=cover (ind
   /* Mobile search expanded — inside header-floating-search container */
   .mobile-search-expanded {
     width: 100%;
-  }
-
-  .header-branch-filters {
-    grid-template-columns: 1fr;
-  }
-
-  .header-branch-filter-select {
-    min-height: calc(var(--space-xl) + var(--space-md));
   }
 
   /* Mobile: compact node label, no dropdown */

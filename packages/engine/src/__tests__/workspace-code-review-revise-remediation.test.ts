@@ -68,7 +68,7 @@ describe("review remediation gate identity", () => {
 
   it("refuses a reporting-only optional group through the requester and records the refusal", async () => {
     const { task, store, deps, appendReviewRemediationSteps } = routingHarness();
-    store.getTaskWorkflowSelectionAsync.mockResolvedValue({ workflowId: "builtin:coding-ideas-v2" });
+    store.getTaskWorkflowSelectionAsync.mockResolvedValue({ workflowId: "builtin:coding-ideas" });
     Object.assign(store, {
       getWorkflowDefinition: vi.fn(async (id: string) => {
         const workflow = getBuiltinWorkflow(id);
@@ -120,7 +120,11 @@ describe("review remediation gate identity", () => {
 
     await expect(requestPreMergeOptionalStepFix(deps as never, task.id, task, info)).resolves.toBe(true);
 
-    expect(appendReviewRemediationSteps).toHaveBeenCalledWith(task, expect.objectContaining({ nodeId: "custom-check" }));
+    expect(appendReviewRemediationSteps).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({ nodeId: "custom-check" }),
+      expect.objectContaining({ attemptClaim: expect.objectContaining({ revisionKey: "custom-check" }) }),
+    );
   });
 });
 
@@ -496,10 +500,10 @@ describe("graph failure visibility after review advancement", () => {
 
     await (executor as any).handleGraphFailure(live, graphFailure);
 
-    /* FN-267 added a fourth argument: the admission claim this backstop now holds while it hands off. */
+    /* FNXC:ReviewRemediation 2026-09-02-10:50: the graph-failure backstop re-triggers the sole remediation producer without an admission-claim argument. */
     expect(request).toHaveBeenCalledWith(live.id, expect.objectContaining({ id: live.id }), expect.objectContaining({
       nodeId: "code-review-step", reviewKind: "code", verdict: "REVISE",
-    }), expect.anything());
+    }));
     expect(store.logEntry.mock.calls.some((call) => String(call[1]).includes("no further action needed"))).toBe(false);
   });
 

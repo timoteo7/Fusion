@@ -16,6 +16,9 @@ import { getRelativeTimeBucket } from "../utils/relativeTimeAgo";
 import { ToolCallDetails, TOOL_CALL_PREVIEW_MAX_CHARS, TOOL_CALL_PREVIEW_MAX_LINES } from "./ToolCallDetails";
 import { ThinkingTrace } from "./ThinkingTrace";
 import { PreciseTimestamp } from "./PreciseTimestamp";
+import { useVirtualizedList } from "../hooks/useVirtualizedList";
+import { useAutoPaginationSentinel } from "../hooks/useAutoPaginationSentinel";
+import { useStickyBottomFollow } from "../hooks/useStickyBottomFollow";
 
 const MARKDOWN_TOGGLE_STORAGE_KEY = "fn-agent-log-markdown";
 const TOOL_OUTPUT_TOGGLE_STORAGE_KEY = "fn-agent-log-tool-output";
@@ -109,10 +112,6 @@ const BOTTOM_FOLLOW_THRESHOLD_PX = 50;
 function getAgentDisplayName(agent: string, t: TFunction<"app">): string {
   if (agent === PLANNER_AGENT_ROLE) return t("agentLog.agentNameTriage", "Plan");
   return agent;
-}
-
-function isNearBottom(container: HTMLDivElement): boolean {
-  return container.scrollHeight - (container.scrollTop + container.clientHeight) <= BOTTOM_FOLLOW_THRESHOLD_PX;
 }
 
 export function formatAgentLogDuration(ms: number): string {
@@ -332,6 +331,8 @@ interface AgentLogViewerProps {
   totalCount?: number | null;
   /** Shows one explanatory note for visible historical tool rows without saved detail. */
   showMissingDetailHint?: boolean;
+  /** Keeps fullscreen chrome out of phone-owned detail navigation. */
+  allowFullscreen?: boolean;
 }
 
 /**
@@ -342,13 +343,13 @@ interface AgentLogViewerProps {
  * - Coalesces consecutive same-agent `text`/`thinking` chunks into continuous groups
  * - Auto-scrolls to keep latest entries visible when streaming
  * - Supports toggling between markdown-formatted and plain-text rendering
- * - "Load More" button to fetch older entries when pagination is enabled
+ * - Automatic edge pagination for older entries when pagination is enabled
  * - Shows "Showing X of Y entries" summary when totalCount is provided
  *
  * @param entries - Array of log entries (in chronological order, oldest first)
  * @param loading - Whether initial load is in progress
  * @param hasMore - Whether more older entries exist beyond the current page
- * @param onLoadMore - Callback to load older entries
+ * @param onLoadMore - Callback invoked automatically near the history edge
  * @param loadingMore - Whether a load more request is in progress
  * @param totalCount - Total number of entries (when known) for summary display
  */
@@ -363,6 +364,7 @@ export function AgentLogViewer({
   loadingMore = false,
   totalCount = null,
   showMissingDetailHint = false,
+  allowFullscreen = true,
 }: AgentLogViewerProps) {
   const { t } = useTranslation("app");
   const containerRef = useRef<HTMLDivElement>(null);
@@ -381,10 +383,25 @@ export function AgentLogViewer({
   const [isFollowing, setIsFollowing] = useState(true);
   const isFollowingRef = useRef(true);
 
+  /*
+  FNXC:StickyBottomScroll 2026-09-14-20:19:
+  FN-398 : le journal d'agent partage le propriétaire unique du suivi du bas. L'intention utilisateur relâche le
+  suivi de façon synchrone, indépendamment du seuil de 50 px, pour que `followTail` (observateurs de layout et de
+  mutation) cesse d'écrire dès la frame du geste au lieu d'attendre que la géométrie franchisse ce seuil.
+  */
+  const stickyFollow = useStickyBottomFollow(containerRef, {
+    rearmThresholdPx: BOTTOM_FOLLOW_THRESHOLD_PX,
+    onFollowingChange: (following) => {
+      isFollowingRef.current = following;
+      setIsFollowing(following);
+    },
+  });
+
   const setFollowing = useCallback((following: boolean) => {
+    stickyFollow.setFollowing(following);
     isFollowingRef.current = following;
     setIsFollowing(following);
-  }, []);
+  }, [stickyFollow]);
 
   useEffect(() => {
     writeBooleanPref(MARKDOWN_TOGGLE_STORAGE_KEY, renderMarkdown);
@@ -421,10 +438,29 @@ export function AgentLogViewer({
     [visibleEntries],
   );
 
+  const virtualLog = useVirtualizedList({
+    collectionKey: entries[0]?.taskId ?? "empty-log",
+    keys: chronologicalEntryKeys,
+    scrollRef: containerRef,
+    estimateHeight: 96,
+    maxRenderedRows: 60,
+    initialAlign: "end",
+    preservePrependAnchor: false,
+  });
+  const visibleEntryKeys = new Set(virtualLog.visibleKeys);
+  const windowedRenderEntries = renderEntries.filter((_, index) => visibleEntryKeys.has(chronologicalEntryKeys[index]!));
+  const windowedRenderKeys = chronologicalEntryKeys.filter((key) => visibleEntryKeys.has(key));
   const renderGroups = useMemo(
-    () => buildRenderGroups(renderEntries, chronologicalEntryKeys),
-    [renderEntries, chronologicalEntryKeys],
+    () => buildRenderGroups(windowedRenderEntries, windowedRenderKeys),
+    [windowedRenderEntries, windowedRenderKeys],
   );
+  const logPagination = useAutoPaginationSentinel({
+    rootRef: containerRef,
+    hasMore: Boolean(hasMore && onLoadMore),
+    loading: loadingMore,
+    onLoadMore: onLoadMore ?? (() => undefined),
+    direction: "start",
+  });
   /*
   FNXC:ToolCallDisplay 2026-08-29-04:34:
   A missing-detail explanation is host-opted because this viewer also serves historical and
@@ -463,38 +499,32 @@ export function AgentLogViewer({
 
         if (appendedLiveEntry && wasNearBottom) {
           container.scrollTop = container.scrollHeight;
+          stickyFollow.noteProgrammaticWrite(container.scrollTop);
         }
 
         if (prependedOlderEntries) {
           const heightDelta = container.scrollHeight - previousScrollHeight;
           if (heightDelta > 0) {
             container.scrollTop += heightDelta;
+            // Restauration de préfixe : écriture programmatique fencée, jamais un réarmement du suivi.
+            stickyFollow.noteProgrammaticWrite(container.scrollTop);
           }
         }
       }
     }
 
-    if (newEntryCount !== previousCount) {
-      setFollowing(isNearBottom(container));
-    }
+    // FN-398 : la croissance ne décide plus du suivi ; seul le propriétaire unique le fait.
     previousEntryCountRef.current = newEntryCount;
     previousScrollHeightRef.current = container.scrollHeight;
     previousOldestEntryKeyRef.current = oldestEntryKey;
     previousNewestEntryKeyRef.current = newestEntryKey;
-  }, [entries, chronologicalEntryKeys, setFollowing]);
+  }, [entries, chronologicalEntryKeys, stickyFollow]);
 
-  const handleScroll = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    setFollowing(isNearBottom(container));
-  }, [setFollowing]);
-
+  /** Réengagement explicite : le contrôle « Latest » reste une commande utilisateur autoritaire. */
   const scrollToLive = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
+    stickyFollow.followBottom();
     setFollowing(true);
-  }, [setFollowing]);
+  }, [setFollowing, stickyFollow]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -507,6 +537,7 @@ export function AgentLogViewer({
         return;
       }
       container.scrollTop = container.scrollHeight;
+      stickyFollow.noteProgrammaticWrite(container.scrollTop);
     };
     const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(followTail);
     resizeObserver?.observe(container);
@@ -517,7 +548,7 @@ export function AgentLogViewer({
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
     };
-  }, []);
+  }, [stickyFollow]);
 
   // Escape key handler to exit fullscreen mode
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -589,7 +620,7 @@ export function AgentLogViewer({
       <div className={`agent-log-viewer${isFullscreen ? " agent-log-viewer--fullscreen" : ""}`} data-testid="agent-log-viewer">
         {/* FNXC:TaskDetailActivity 2026-07-01-00:00: Activity → Raw owns one fullscreen affordance through AgentLogViewer even while logs are loading, because TaskDetailModal intentionally omits its Activity-level expand button on Raw to avoid duplicate controls. */}
         <div className="agent-log-empty-header">
-          <div className="agent-log-model-header-toggle">{fullscreenToggle}</div>
+          {allowFullscreen ? <div className="agent-log-model-header-toggle">{fullscreenToggle}</div> : null}
         </div>
         <div className="agent-log-loading" role="status" aria-live="polite">{t("agentLog.loading", "Loading agent logs…")}</div>
       </div>
@@ -601,7 +632,7 @@ export function AgentLogViewer({
       <div className={`agent-log-viewer${isFullscreen ? " agent-log-viewer--fullscreen" : ""}`} data-testid="agent-log-viewer">
         {/* FNXC:TaskDetailActivity 2026-07-01-00:00: Empty Raw logs still expose the single AgentLogViewer fullscreen button so Raw never needs the duplicate Activity expand toggle. */}
         <div className="agent-log-empty-header">
-          <div className="agent-log-model-header-toggle">{fullscreenToggle}</div>
+          {allowFullscreen ? <div className="agent-log-model-header-toggle">{fullscreenToggle}</div> : null}
         </div>
         <div className="agent-log-empty">{t("agentLog.empty", "No agent output yet.")}</div>
       </div>
@@ -657,7 +688,7 @@ export function AgentLogViewer({
           >
             {showToolOutput ? t("agentLog.toolsOn", "Tools: On") : t("agentLog.toolsOff", "Tools: Off")}
           </button>
-          {fullscreenToggle}
+          {allowFullscreen ? fullscreenToggle : null}
         </div>
 
         {modelHeaderExpanded && (
@@ -702,7 +733,7 @@ export function AgentLogViewer({
       <div
         ref={containerRef}
         className="agent-log-viewer-scroll"
-        onScroll={handleScroll}
+        onScroll={() => { virtualLog.onScroll(); }}
       >
         {/* Pagination summary */}
         {totalCount !== null && (
@@ -714,25 +745,12 @@ export function AgentLogViewer({
           </div>
         )}
 
-        {hasMore && onLoadMore && (
-          <div className="agent-log-load-more" data-testid="agent-log-load-more">
-            <button
-              className="agent-log-mode-toggle"
-              onClick={onLoadMore}
-              disabled={loadingMore}
-              data-testid="agent-log-load-more-button"
-            >
-              {loadingMore ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" />
-                  {t("agentLog.loadingMore", "Loading…")}
-                </>
-              ) : (
-                t("agentLog.loadMore", "Load More")
-              )}
-            </button>
+        {hasMore && onLoadMore ? (
+          <div ref={logPagination.sentinelRef} className="agent-log-load-more" data-testid="agent-log-auto-pagination-sentinel" role="status" aria-live="polite">
+            {loadingMore ? <><Loader2 size={14} className="animate-spin" />{t("agentLog.loadingMore", "Loading…")}</> : null}
           </div>
-        )}
+        ) : null}
+        {virtualLog.topSpacerHeight > 0 ? <div aria-hidden="true" style={{ height: virtualLog.topSpacerHeight }} /> : null}
 
         {hasMissingToolDetail ? (
           <div className="agent-log-missing-detail-hint" role="note" data-testid="agent-log-missing-detail-hint">
@@ -771,9 +789,13 @@ export function AgentLogViewer({
           if (group.kind === "single") {
             const { entry } = group;
 
+            /*
+            FNXC:TaskDetailActivity 2026-09-12-23:26:
+            Raw conserve ses groupes, sa virtualisation et ses détails complets, mais chaque groupe devient une carte scannable dont la variante sémantique distingue outil, résultat et erreur sans modifier l’ordre du flux.
+            */
             if (entry.type === "tool") {
               return (
-                <div key={group.key} className="agent-log-tool">
+                <div key={group.key} className="agent-log-entry-card agent-log-tool">
                   {agentBadge}
                   <div className="agent-log-tool-title">⚡ {entry.text}<AgentLogTimingLabels entry={entry} /></div>
                   {entry.detail ? <CollapsibleToolDetail detail={entry.detail} type="tool" /> : null}
@@ -783,7 +805,7 @@ export function AgentLogViewer({
 
             if (entry.type === "tool_result") {
               return (
-                <div key={group.key} className="agent-log-tool-result">
+                <div key={group.key} className="agent-log-entry-card agent-log-tool-result">
                   {agentBadge}
                   <div className="agent-log-tool-title">✓ {entry.text}<AgentLogTimingLabels entry={entry} /></div>
                   {entry.detail ? <CollapsibleToolDetail detail={entry.detail} type="tool_result" /> : null}
@@ -793,7 +815,7 @@ export function AgentLogViewer({
 
             if (entry.type === "tool_error") {
               return (
-                <div key={group.key} className="agent-log-tool-error">
+                <div key={group.key} className="agent-log-entry-card agent-log-tool-error">
                   {agentBadge}
                   <div className="agent-log-tool-title">✗ {entry.text}<AgentLogTimingLabels entry={entry} /></div>
                   {entry.detail ? <CollapsibleToolDetail detail={entry.detail} type="tool_error" /> : null}
@@ -808,7 +830,7 @@ export function AgentLogViewer({
 
           if (group.kind === "thinking") {
             return (
-              <div key={group.key} className="agent-log-thinking">
+              <div key={group.key} className="agent-log-entry-card agent-log-thinking">
                 {agentBadge}
                 <AgentLogTimingLabels entry={firstEntry} />
                 <ThinkingTrace text={groupedText} format={renderMarkdown ? "markdown" : "plain"} className={renderMarkdown ? undefined : "agent-log-plain-block"} />
@@ -817,7 +839,7 @@ export function AgentLogViewer({
           }
 
           return (
-            <div key={group.key} className="agent-log-text">
+            <div key={group.key} className="agent-log-entry-card agent-log-text">
               {agentBadge}
               <AgentLogTimingLabels entry={firstEntry} />
               {renderMarkdown ? (
@@ -832,6 +854,7 @@ export function AgentLogViewer({
             </div>
           );
         })}
+        {virtualLog.bottomSpacerHeight > 0 ? <div aria-hidden="true" style={{ height: virtualLog.bottomSpacerHeight }} /> : null}
 
         {!isFollowing && (
           <button

@@ -48,6 +48,9 @@ import {
   type WorktreeDependencyReadiness,
 } from "../worktree/worktree-dependency-install.js";
 import { resolveContentReviewInputProof } from "../worktree/review-diff-fingerprint.js";
+import { parkDependencyConfigurationBlock } from "../worktree/dependency-configuration-block.js";
+import { WORKFLOW_DEPENDENCY_CONFIGURATION_BLOCK_VALUE } from "../workflows/workflow-graph-executor.js";
+import { acknowledgeOverlapResumeContext, readOverlapResumeContextDelivery } from "../execution/overlap-resume-context.js";
 
 const WORKFLOW_THINKING_LEVEL_SET: ReadonlySet<string> = new Set(THINKING_LEVELS);
 const WORKFLOW_STEP_NOT_RUN_REASON_SET: ReadonlySet<string> = new Set(WORKFLOW_STEP_NOT_RUN_REASONS);
@@ -160,11 +163,19 @@ export function resolveWorkspaceReadOnlyGateRepositoryContext(input: {
     : { resolved: true };
 }
 
+/*
+FNXC:WorktreeDependencies 2026-09-13-08:58:
+A dependency configuration block must retain the executing Plan Review graph node, not an inferred
+or stale task node. Retry publishes a successor at this node, so preserving it prevents an
+operator-configured recovery from resuming an unrelated workflow step.
+*/
 export interface PlanReviewDependencyGateInput {
   task: TaskDetail;
   settings: Settings;
   workspaceConfig: WorkspaceConfig | null | undefined;
   worktreePath: string;
+  /** The executing Plan Review graph node; Retry must resume this exact node. */
+  nodeId: string;
   store: TaskStore;
   getRunContextFor: (taskId: string) => EngineRunContext | undefined;
   runConfiguredCommand: DependencyCommandRunner;
@@ -176,12 +187,18 @@ interface DependencyGateTarget {
 }
 
 function dependencyGateDetails(target: DependencyGateTarget, readiness: WorktreeDependencyReadiness): string {
+  if (readiness.readiness === "config-blocked" && readiness.deterministicStop) {
+    const stop = readiness.deterministicStop;
+    return `${target.repository}: command \`${stop.command}\` exited with code ${stop.exitCode ?? "unknown"} (${stop.failureCode}); ${stop.diagnostic}. Correct worktreeInitCommand and select Retry.`;
+  }
   if (readiness.readiness === "unrecognized") {
     return `${target.repository}: unrecognized dependency evidence (${readiness.evidence.join(", ")}); resolve it with fn_install_worktree_dependencies.`;
   }
   const rows = readiness.unresolvedRepos.map((row) => {
     const entry = readiness.entries.find((candidate) => candidate.ecosystem === row.ecosystem);
-    return `${row.manifests.join(", ") || row.ecosystem}; command \`${row.command}\`; ${entry?.reason ?? entry?.outcome ?? "not installed"}`;
+    const outcome = entry?.outcome ?? "not installed";
+    const reason = entry?.reason ?? entry?.rationale ?? outcome;
+    return `${row.manifests.join(", ") || row.ecosystem}; command \`${row.command}\`; ${outcome}: ${reason}`;
   });
   return `${target.repository}: ${rows.join("; ")}`;
 }
@@ -209,7 +226,7 @@ export async function runPlanReviewDependencyGate(
       }
       targets.push({ repository, worktreePath: path });
     }
-  } else if (input.worktreePath && existsSync(input.worktreePath)) {
+  } else if (input.task.worktree && input.worktreePath && existsSync(input.worktreePath)) {
     targets.push({ repository: "task worktree", worktreePath: input.worktreePath });
   } else {
     await input.store.logEntry(
@@ -233,7 +250,7 @@ export async function runPlanReviewDependencyGate(
         taskEnv: process.env,
         logger: executorLog,
       });
-      if (readiness.readiness === "unresolved" || readiness.readiness === "unrecognized") {
+      if (readiness.readiness === "unresolved" || readiness.readiness === "unrecognized" || readiness.readiness === "config-blocked") {
         blocking.push({ target, readiness });
       }
     } catch (error) {
@@ -247,6 +264,21 @@ export async function runPlanReviewDependencyGate(
     }
   }
   if (blocking.length === 0) return null;
+
+  const configurationBlocked = blocking.find(({ readiness }) => readiness.readiness === "config-blocked" && readiness.deterministicStop);
+  if (configurationBlocked?.readiness.deterministicStop) {
+    const stop = configurationBlocked.readiness.deterministicStop;
+    const output = await parkDependencyConfigurationBlock(input.store, {
+      taskId: input.task.id, repository: configurationBlocked.target.repository, command: stop.command,
+      exitCode: stop.exitCode, failureCode: stop.failureCode, diagnostic: stop.diagnostic,
+      nodeId: input.nodeId,
+      getRunContextFor: input.getRunContextFor,
+    });
+    return { outcome: "failure", value: WORKFLOW_DEPENDENCY_CONFIGURATION_BLOCK_VALUE, contextPatch: {
+      output, notes: "Plan Review is suspended until the dependency configuration changes or the operator selects Retry.",
+      findings: [{ severity: "high", title: "Dependency configuration blocked", body: output }],
+    } };
+  }
 
   const lines = ["Dependencies are not installed.", ...blocking.map(({ target, readiness }) => `- ${dependencyGateDetails(target, readiness)}`)];
   const output = lines.join("\n");
@@ -286,11 +318,19 @@ export function toWorkspaceRepoReviewResult(repoOutcome: WorkflowStepOutcome): R
     || repoOutcome.output?.trim()
     || repoOutcome.error?.trim()
     || WORKSPACE_REPO_REVIEW_NO_NOTES_NOTICE;
+  /*
+  FNXC:ReviewVerdictAuthority 2026-09-02-19:25:
+  A successful deterministic script still approves from its exit code, but a prompt review that owed
+  JSON cannot be promoted from transport success alone. Preserve its missing verdict as UNAVAILABLE
+  so workspace aggregation never fabricates authored approval evidence.
+  */
+  const verdict = repoOutcome.verdict
+    ?? (repoOutcome.success && !repoOutcome.verdictRequired ? "APPROVE" : "UNAVAILABLE");
   return {
-    verdict: (repoOutcome.verdict ?? (repoOutcome.success ? "APPROVE" : "UNAVAILABLE")) as ReviewResult["verdict"],
+    verdict: verdict as ReviewResult["verdict"],
     review: reviewText,
     summary: reviewText,
-    retryable: !repoOutcome.success,
+    retryable: !repoOutcome.success || verdict === "UNAVAILABLE",
     ...(repoOutcome.findings ? { findings: repoOutcome.findings } : {}),
   };
 }
@@ -322,7 +362,9 @@ export async function runGraphCustomNode(
   columnBinding?: WorkflowColumnAgent,
   graphContext?: Record<string, unknown>,
   outputLanguage?: ResolvedTaskOutputLanguage,
+  graphSignal?: AbortSignal,
 ): Promise<WorkflowNodeResult> {
+    if (graphSignal?.aborted) return { outcome: "failure", value: "aborted" };
     const cfg = node.config ?? {};
     let live = await deps.store.getTask(nodeTask.id);
 
@@ -439,24 +481,12 @@ export async function runGraphCustomNode(
     const rawCliCommand = executorKind === "cli" && typeof cfg.cliCommand === "string" && cfg.cliCommand.trim()
       ? cfg.cliCommand.trim()
       : undefined;
-    // Isolation guard: write-capable nodes must run inside a task worktree, not
-    // the shared repo root. Before the execute seam runs, live.worktree is unset
-    // — a coding/script/CLI node falling back to deps.rootDir would mutate the
-    // main checkout and cross-contaminate other tasks. Reject such nodes until a
-    // worktree exists. Read-only nodes (default toolMode) are safe against root.
-    /*
-    FNXC:WorkflowReviewers 2026-07-15-00:00:
-    Inline-fix Code Review, Browser Verification, and custom review nodes become
-    write-capable even when their workflow definition says `toolMode: readonly`.
-    Use the shared classifier consumed by graph preparation so issue #2075 cannot
-    leave runtime requiring a worktree that preparation declined to acquire.
-    Plan Review remains excluded because it uses the narrow PROMPT.md writer.
-    */
+    // Nodes that inspect or mutate delivered work must run inside a task worktree,
+    // not the shared repo root. Review nodes still need the checkout when their
+    // session tool policy is read-only; the classifier therefore answers checkout
+    // need rather than whether mutation tools will be exposed.
     const isDeterministicVerificationGate = cfg.workflowAction === "deterministic-verification";
-    const writeCapable = isDeterministicVerificationGate || workflowNodeRequiresWorktree(node, {
-      optionalGroupId,
-      reviewerInlineFixes: (settings as Settings & { reviewerInlineFixes?: boolean }).reviewerInlineFixes,
-    });
+    const writeCapable = isDeterministicVerificationGate || workflowNodeRequiresWorktree(node, { optionalGroupId });
     const workspaceConfig = deps.ensureWorkspaceConfig
       ? await deps.ensureWorkspaceConfig()
       : deps.workspaceConfig;
@@ -491,14 +521,13 @@ export async function runGraphCustomNode(
     }
 
     if (workspaceConfig?.repos.length) {
-      // Always re-read and acquire from the configured set. Repository scope remains durable review
-      // evidence, but is no longer an admission request or a way to narrow task provisioning.
+      // Re-read the configured set, but only write-capable execution may provision it.
       executionTarget = await deps.store.getTask(live.id);
       const missingRepository = workspaceConfig.repos.find((repository) => {
         const path = executionTarget.workspaceWorktrees?.[repository]?.worktreePath;
         return typeof path !== "string" || !existsSync(path);
       });
-      if (missingRepository) {
+      if (writeCapable && missingRepository) {
         await deps.store.logEntry(
           live.id,
           `Workflow node '${node.id}' is acquiring configured workspace checkout '${missingRepository}'`,
@@ -510,10 +539,12 @@ export async function runGraphCustomNode(
     } else if (!workspaceConfig) {
       const recordedWorktreeMissing = Boolean(executionTarget.worktree) && !existsSync(executionTarget.worktree!);
       /*
-      A node with no recorded worktree is pre-execution. A vanished implementation checkout is
-      not silently replaced for ordinary review, while Plan Review can re-acquire its plan tree.
+      FNXC:PlanningBoundary 2026-09-01-14:49:
+      Checkout provisioning belongs exclusively to write-capable execution nodes. Plan Review uses
+      main read-only and never reacquires a vanished path; write-capable nodes preserve stale-path
+      recovery by clearing the missing pointer before acquisition.
       */
-      const shouldAcquire = !executionTarget.worktree || (recordedWorktreeMissing && isPlanReviewNode);
+      const shouldAcquire = writeCapable && (!executionTarget.worktree || recordedWorktreeMissing);
       if (shouldAcquire) {
         const acquisitionTask = recordedWorktreeMissing
           ? ({ ...executionTarget, worktree: undefined, sessionFile: undefined } as TaskDetail)
@@ -577,41 +608,74 @@ export async function runGraphCustomNode(
       }
     }
 
-    const worktreePath = isWorkspaceTask
-      ? legacyWorkspacePath ?? workspaceTaskDir!
-      : executionTarget.worktree!;
-    const nodeSessionBoundary = resolveGraphNodeSessionBoundary({
-      isWorkspace: isWorkspaceTask,
-      writeCapable,
-      legacyWorkspaceLayout: Boolean(legacyWorkspacePath),
-      rootDir: deps.rootDir,
-      worktreePath,
-      confirmedRepositories: workspaceConfig?.repos,
-    });
+    const singularCheckoutAvailable = Boolean(executionTarget.worktree && existsSync(executionTarget.worktree));
+    const planLaneRootFallback = isPlanReviewNode && !singularCheckoutAvailable
+      && !legacyWorkspacePath && !hasWorkspaceCheckout;
+    const worktreePath = planLaneRootFallback
+      ? deps.rootDir
+      : isWorkspaceTask
+        ? legacyWorkspacePath ?? workspaceTaskDir!
+        : executionTarget.worktree ?? deps.rootDir;
+    const nodeSessionBoundary: SessionBoundaryDescriptor | undefined = planLaneRootFallback
+      ? {
+          kind: "read-only-root",
+          writableRoot: null,
+          projectRoot: deps.rootDir,
+          writableAllowlist: [join(deps.rootDir, ".fusion")],
+        }
+      : resolveGraphNodeSessionBoundary({
+          isWorkspace: isWorkspaceTask,
+          writeCapable,
+          legacyWorkspaceLayout: Boolean(legacyWorkspacePath),
+          rootDir: deps.rootDir,
+          worktreePath,
+          confirmedRepositories: workspaceConfig?.repos,
+        });
     /*
-    FNXC:WorktreeDependencies 2026-08-29-06:59:
-    Plan Review is the single lifecycle blocker for dependency readiness. It retries deterministic
-    matrix rows once at this pre-dispatch point, but unfamiliar package-manager evidence remains
-    unrecognized until the planning-only installer records an engine-observed resolution. The
-    returned REVISE follows the existing review budget/replan cap to awaiting-approval; acquisition
-    itself merely logs failures and optional/disabled Plan Review groups never reach this node.
+    FNXC:WorktreeDependencies 2026-09-01-14:49:
+    Fresh Plan Review owns no checkout, so dependency readiness is not determined here and the gate
+    falls through after logging. Execution-time acquisition owns dependency initialization; this
+    compatibility probe remains only for replans that already retain an execution checkout.
     */
     if (isPlanReviewNode) {
+      /*
+      FNXC:WorktreeDependencies 2026-09-13-09:05:
+      A dependency stop raised inside an optional Plan Review template must resume the owning
+      top-level group, not its template child. Only top-level IR nodes are legal continuation
+      targets, so persisting the child would make the operator Retry action unrecoverable.
+      */
+      const dependencyGateNodeId = typeof graphContext?.[WORKFLOW_OPTIONAL_GROUP_CONTEXT_KEY] === "string"
+        ? graphContext[WORKFLOW_OPTIONAL_GROUP_CONTEXT_KEY]
+        : node.id;
       const dependencyGate = await runPlanReviewDependencyGate({
         task: executionTarget,
         settings,
         workspaceConfig,
         worktreePath,
+        nodeId: dependencyGateNodeId,
         store: deps.store,
         getRunContextFor: deps.getRunContextFor,
         runConfiguredCommand: deps.runConfiguredCommand,
       });
       if (dependencyGate) return dependencyGate;
     }
+    const overlapResumeDelivery = writeCapable
+      ? await readOverlapResumeContextDelivery(deps.store, live.id).catch(() => ({ context: undefined, episodes: [] }))
+      : { context: undefined, episodes: [] };
+    const overlapResumeContext = overlapResumeDelivery.context;
+    const acknowledgeCustomContext = () => acknowledgeOverlapResumeContext(deps.store, live.id, overlapResumeDelivery);
     if (isDeterministicVerificationGate) {
-      return runDeterministicVerificationGate({ store: deps.store, getRunContextFor: deps.getRunContextFor }, node, executionTarget, settings, worktreePath);
+      if (overlapResumeContext) {
+        await deps.store.logEntry(live.id, `Workflow node '${node.id}' received overlap synchronization context`, overlapResumeContext, deps.getRunContextFor(live.id));
+      }
+      const result = await runDeterministicVerificationGate({ store: deps.store, getRunContextFor: deps.getRunContextFor }, node, executionTarget, settings, worktreePath);
+      await acknowledgeCustomContext();
+      return result;
     }
     let prompt = typeof cfg.prompt === "string" ? cfg.prompt : "";
+    if (overlapResumeContext) {
+      prompt = [prompt, "", "## Overlap wait synchronization", overlapResumeContext].join("\n");
+    }
     let modelProvider = typeof cfg.modelProvider === "string" && cfg.modelProvider.trim() ? cfg.modelProvider : undefined;
     let modelId = typeof cfg.modelId === "string" && cfg.modelId.trim() ? cfg.modelId : undefined;
 
@@ -736,6 +800,7 @@ export async function runGraphCustomNode(
           worktreePath,
           env,
         );
+        await acknowledgeCustomContext();
         const blocking = node.kind === "gate" || cfg.gateMode === "gate";
         return { outcome: out.success || !blocking ? "success" : "failure", value: out.success ? "passed" : "failed" };
       }
@@ -830,6 +895,7 @@ export async function runGraphCustomNode(
     const principalAgentId = typeof graphContext?.["workflow:principal-agent-id"] === "string"
       ? graphContext["workflow:principal-agent-id"]
       : undefined;
+    if (graphSignal?.aborted) return { outcome: "failure", value: "aborted" };
     let outcome: WorkflowStepOutcome;
     if (workspaceConfig && declaredReviewKind === "code") {
       /*
@@ -857,6 +923,14 @@ export async function runGraphCustomNode(
           repoRootDir: join(deps.rootDir, repoRelPath),
         }));
         let aggregate = await reviewWorkspacePerRepo(workspaceReviewTarget, async (repoWorktreePath): Promise<ReviewResult> => {
+          if (graphSignal?.aborted) {
+            return {
+              verdict: "UNAVAILABLE",
+              retryable: false,
+              review: "Workflow graph execution was cancelled before this repository review started.",
+              summary: "Unavailable: workflow graph execution was cancelled",
+            };
+          }
           const repoRelPath = workspaceConfig.repos.find(
             (repository) => workspaceReviewTarget.workspaceWorktrees?.[repository]?.worktreePath === repoWorktreePath,
           );
@@ -907,12 +981,23 @@ export async function runGraphCustomNode(
               unattended,
               principalAgentId,
               outputLanguage,
+              signal: graphSignal,
               sessionBoundary: reviewBoundary,
               ...(repoRelPath ? { dispatchLabel: repoRelPath } : {}),
               ...(repoDiffBaseCommitSha ? { diffBaseCommitSha: repoDiffBaseCommitSha } : {}),
             });
+          if (graphSignal?.aborted) {
+            return {
+              verdict: "UNAVAILABLE",
+              retryable: false,
+              review: "Workflow graph execution was cancelled during this repository review.",
+              summary: "Unavailable: workflow graph execution was cancelled",
+            };
+          }
+          await acknowledgeCustomContext();
           return toWorkspaceRepoReviewResult(repoOutcome);
         }, { workspaceRepos: workspaceConfig.repos, workspaceRootDir: deps.rootDir, settings });
+        if (graphSignal?.aborted) return { outcome: "failure", value: "aborted" };
         /*
         FNXC:WorkspaceReviewEvidence 2026-08-29-12:17:
         FN-259 removes this graph branch's duplicate repositoryScope patch. Both workspace review
@@ -970,19 +1055,31 @@ export async function runGraphCustomNode(
       }
     } else {
       const dispatchSingularStep = async (reviewInputFingerprint?: string): Promise<WorkflowStepOutcome> => {
+        if (graphSignal?.aborted) {
+          return { success: false, error: "workflow graph execution cancelled", failureValue: "aborted" };
+        }
         if (mode === "script") {
+          if (overlapResumeContext) {
+            await deps.store.logEntry(live.id, `Workflow script '${node.id}' received overlap synchronization context`, overlapResumeContext, deps.getRunContextFor(live.id));
+          }
           const scriptOutcome = await deps.executeScriptWorkflowStep(live, step, worktreePath, settings, nodeEnv);
+          if (graphSignal?.aborted) return { success: false, error: "workflow graph execution cancelled", failureValue: "aborted" };
+          await acknowledgeCustomContext();
           return reviewInputFingerprint === undefined
             ? scriptOutcome
             : { ...scriptOutcome, reviewInputFingerprint };
         }
-        return deps.executeWorkflowStep(live, step, worktreePath, settings, nodeEnv, {
+        const workflowOutcome = await deps.executeWorkflowStep(live, step, worktreePath, settings, nodeEnv, {
           unattended,
           principalAgentId,
           outputLanguage,
+          signal: graphSignal,
           ...(nodeSessionBoundary ? { sessionBoundary: nodeSessionBoundary } : {}),
           ...(reviewInputFingerprint !== undefined ? { reviewInputFingerprint } : {}),
         });
+        if (graphSignal?.aborted) return { success: false, error: "workflow graph execution cancelled", failureValue: "aborted" };
+        await acknowledgeCustomContext();
+        return workflowOutcome;
       };
       /*
       FNXC:ReviewInputProof 2026-09-01-11:18:
@@ -1009,6 +1106,7 @@ export async function runGraphCustomNode(
         outcome = await dispatchSingularStep();
       }
     }
+    if (graphSignal?.aborted) return { outcome: "failure", value: "aborted" };
     /*
      * FNXC:WorkflowReviewFindings 2026-08-05-06:29:
      * Script nodes retain their exit-code verdict semantics, but an explicitly classified review
@@ -1071,6 +1169,7 @@ export async function runGraphCustomNode(
     if (outcome.repositoryScopeRevision !== undefined) contextPatch.repositoryScopeRevision = outcome.repositoryScopeRevision;
     if (outcome.reviewInputFingerprint !== undefined) contextPatch.reviewInputFingerprint = outcome.reviewInputFingerprint;
     if (outcome.reviewedCommitSha !== undefined) contextPatch.reviewedCommitSha = outcome.reviewedCommitSha;
+    if (outcome.verdictRequired) contextPatch.verdictRequired = true;
     if (outcome.supersededFindingIds?.length && outcome.supersededFindingSourceWorkflowStepId) {
       contextPatch.supersededFindingSourceWorkflowStepId = outcome.supersededFindingSourceWorkflowStepId;
       contextPatch.supersededFindingIds = outcome.supersededFindingIds;
@@ -1116,27 +1215,17 @@ export async function runGraphCustomNode(
     FNXC:ReviewLeniency 2026-07-02-00:30 (SUPERSEDED for blocking gates — see below):
     Malformed review output (no parseable verdict, even after the fallback-model retry in executeWorkflowStep) was treated as a NON-BLOCKING advisory rather than a hard gate failure. Operators asked that an unparseable reviewer response not block a task in review — a genuine REVISE (parsed verdict) still blocks, and the advisory_failure value keeps the malformed result visible on the Workflow tab.
 
-    FNXC:ReviewLeniency 2026-08-26-09:34:
-    A BLOCKING gate no longer approves on malformed output. Operator decision, reversing the line
-    above with the reason it was missing: "the only valid reason a task can be blocked is an LLM
-    problem (429, 503); everything else is fixed at the source, or the AI is made unable to return
-    anything other than what is expected — and if it does anyway, restart cleanly".
+    FNXC:ReviewVerdictAuthority 2026-09-02-19:25:
+    A verdict-less review can never authorize approval. The shared core requirement makes every
+    merge-consulted prompt request JSON; both parsers allow prose only to downgrade; this bridge
+    forwards `verdictRequired` and refuses workspace success-to-APPROVE synthesis; graph persistence
+    records a missing required verdict as failed; and merge admission independently rejects legacy
+    review-kind or marked rows without an authored approval verdict.
 
-    Restarting cleanly is ALREADY implemented, twice: `executeWorkflowStep` retries a malformed
-    primary on the fallback model, or self-retries once on the primary when no fallback is
-    configured. `malformed` therefore does not mean "one fumbled response" — it means the reviewer
-    failed to return a usable verdict across every attempt, which IS the LLM-class condition the
-    operator accepts as a legitimate stop.
-
-    What it must never mean is APPROVAL. Measured on a real card: a reviewer reported in prose that
-    the deliverables were absent, carried no verdict JSON, and the gate recorded success — unreviewed
-    work merged on a rejection nobody could see. The prose classifier cannot close this: that text
-    contained no rejection marker at all (no "revise", "reject", "must fix"), because it was a
-    factual statement of absence. Only the ABSENCE of a verdict is detectable, so absence must not
-    approve.
-
-    Advisory gates are untouched: `!blocking` still passes, keeping the original operator ask exactly
-    where it applies — a step that was never allowed to hold a card cannot start holding one.
+    The measured failure was a reviewer reporting absent deliverables in prose with no rejection
+    keyword and no JSON, followed by an advisory success record and merge. Keep the original text
+    visible, but never infer a verdict or rationale from it. Deterministic scripts remain governed by
+    exit status because they never carry `verdictRequired`.
     */
     return {
       /*

@@ -39,7 +39,7 @@ vi.mock("../components/TaskCard", () => ({ TaskCard: () => <div /> }));
 vi.mock("../hooks/useAppSettings", () => ({
   useAppSettings: () => ({ globalPaused: false, enginePaused: false, toggleGlobalPause: vi.fn(), toggleEnginePause: vi.fn(), refresh: vi.fn() }),
 }));
-vi.mock("../hooks/useConfirm", () => ({ useConfirm: () => ({ confirm: vi.fn().mockResolvedValue(true) }) }));
+vi.mock("../hooks/useConfirm", () => ({ useConfirm: () => ({ confirmWithCheckbox: async (options?: { checkbox?: { defaultChecked?: boolean } }) => ({ choice: "cancel" as const, checkboxValue: options?.checkbox?.defaultChecked ?? false }), confirm: vi.fn().mockResolvedValue(true) }) }));
 vi.mock("../hooks/useGlobalConcurrency", () => ({
   useGlobalConcurrency: () => ({ status: "idle", currentlyActive: 0, projectActiveCount: () => 0 }),
 }));
@@ -58,7 +58,7 @@ describe("dashboard concurrency surface data", () => {
   beforeEach(() => {
     api.fetchSettings.mockResolvedValue({ heartbeatMultiplier: 1 });
     api.updateSettings.mockResolvedValue({});
-    api.fetchExecutorStats.mockResolvedValue({ globalPause: false, enginePaused: false, maxConcurrent: 8, effectiveMaxConcurrent: 4, concurrencyBindingKnob: "maxWorktrees" });
+    api.fetchExecutorStats.mockResolvedValue({ globalPause: false, enginePaused: false, maxConcurrent: 8, maxWorktrees: 4, worktreeLimitEnabled: true });
     api.fetchOrgTree.mockResolvedValue([]);
   });
 
@@ -67,9 +67,24 @@ describe("dashboard concurrency surface data", () => {
     worktreeGroupProps.length = 0;
   });
 
+  /*
+  FN-489 contrôle négatif : hors du footer partagé, la variante icône seule d'`EngineControlMenu` (ExecutorStatusBar)
+  conserve strictement sa peinture `btn-icon` ; l'option `triggerClassName` est additive et n'est passée que par
+  `DesktopActionBar`.
+  */
+  it("keeps the icon-only engine control trigger painted by btn-icon outside the shared footer", () => {
+    api.fetchSettings.mockResolvedValue({ maxConcurrent: 6, maxWorktrees: 9, worktreeLimitEnabled: true });
+    const { getByTestId } = render(<EngineControlMenu />);
+
+    const trigger = getByTestId("engine-control-menu-trigger");
+    expect(trigger).toHaveClass("btn-icon");
+    expect(trigger).not.toHaveClass("desktop-action-bar__action");
+    expect(trigger).not.toHaveClass("engine-control-menu__trigger--text");
+  });
+
   it("renders configured values through both editable control surfaces", async () => {
     api.fetchSettings.mockResolvedValue({ maxConcurrent: 6, maxWorktrees: 9, worktreeLimitEnabled: true });
-    api.fetchConfig.mockResolvedValue({ maxConcurrent: 6, maxWorktrees: 9, effectiveMaxConcurrent: 6, concurrencyBindingKnob: "maxConcurrent" });
+    api.fetchConfig.mockResolvedValue({ maxConcurrent: 6, maxWorktrees: 9, worktreeLimitEnabled: true });
     const { getByTestId } = render(<>
       <CommandCenterControls colorTheme="violet" themeMode="dark" onColorThemeChange={() => {}} onThemeModeChange={() => {}} />
       <EngineControlMenu />
@@ -124,14 +139,17 @@ describe("dashboard concurrency surface data", () => {
     expect(engineControlInputs[1].value).toBe("4");
   });
 
-  it("renders the live effective ceiling in Team status", async () => {
+  it("renders independent agent and worktree limits in Team status", async () => {
     render(<TeamArea range={{ from: "2026-01-01", to: "2026-01-07", preset: "7d" }} projectId="project-live" />);
 
-    expect(await screen.findByText("8 (4 effective: maxWorktrees)")).toBeTruthy();
+    const agentLabel = await screen.findByText("Max concurrent");
+    const worktreeLabel = await screen.findByText("Max Worktrees");
+    expect(agentLabel.parentElement).toHaveTextContent("8");
+    expect(worktreeLabel.parentElement).toHaveTextContent("4");
     expect(api.fetchExecutorStats).toHaveBeenCalledWith("project-live");
   });
 
-  it("applies the effective ceiling through the production Column worktree grouping", async () => {
+  it("applies the worktree ceiling through the production Column grouping", async () => {
     const tasks = [task("FN-1", "in-progress"), task("FN-2"), task("FN-3"), task("FN-4"), task("FN-5"), task("FN-6")];
     render(<Column
       column={"in-progress" as never}
@@ -139,7 +157,7 @@ describe("dashboard concurrency surface data", () => {
       tasks={tasks}
       allTasks={tasks}
       maxConcurrent={8}
-      effectiveMaxConcurrent={4}
+      maxWorktrees={4}
       showWorktreeGrouping
       onMoveTask={async () => task("FN-1")}
       onOpenDetail={() => {}}

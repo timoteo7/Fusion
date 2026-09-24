@@ -580,7 +580,14 @@ idle and auto-translate-off views retain their original layout.
   align-items: flex-start;
 }
 
+.github-import-modal__title-copy {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
 .github-import-modal__subtitle {
+  display: block;
   margin-top: var(--space-xs);
   color: var(--text-muted);
   font-size: 13px;
@@ -1767,7 +1774,11 @@ Embedded root drops its uniform --space-lg padding so the header can span edge-t
 
 /*
 FNXC:ViewHeader 2026-06-23-04:15:
-Import Tasks embedded header now adopts the canonical ViewHeader chrome — edge-to-edge --surface bg, no bottom divider, --space-lg/--space-xl padding, and the shared --view-header-min-height (≈61px border-box) — so it matches Agents/Mailbox/Missions/Automations height + padding exactly. (Previously a plain padding-bottom title row with no surface/min-height.)
+Import Tasks embedded header adopts the canonical ViewHeader chrome — edge-to-edge --surface bg, --space-lg/--space-xl padding, and the shared --view-header-min-height (≈61px border-box) — so it matches Agents/Mailbox/Missions/Automations height + padding exactly. (Previously a plain padding-bottom title row with no surface/min-height.)
+
+FNXC:UniversalViewChrome 2026-09-16-21:44:
+FN-476: this header is a bespoke element rather than a rendered `.view-header`, so it must state the universal
+separation itself to stay consistent with every destination. Its former `border-bottom: none` was the old seamless rule.
 */
 .github-import-modal__embedded-header {
   box-sizing: border-box;
@@ -1779,7 +1790,7 @@ Import Tasks embedded header now adopts the canonical ViewHeader chrome — edge
   min-height: var(--view-header-min-height);
   padding: var(--space-lg) var(--space-xl);
   background: var(--surface);
-  border-bottom: none;
+  border-bottom: var(--btn-border-width) solid var(--border);
 }
 
 .github-import-modal__embedded-title {
@@ -1908,4 +1919,43 @@ lives here) and design tokens for spacing/color so the bar matches the modal's o
   font-size: var(--font-size-sm, 13px);
   padding: var(--space-xs) var(--space-xs) 0;
   text-align: center;
+}
+
+/*
+FNXC:GitHubImport 2026-09-07-05:08:
+The phone import screen must use its available width: wrapped provider and type-tab groups previously
+left a wide right gap, while the embedded header and body retained their desktop 24px inset. Keep this
+block at the end of the file so it wins the later embedded base rules without changing desktop or tablet geometry.
+*/
+@media (max-width: 640px) {
+  .github-import-controls > * {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .github-import-provider {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    min-width: 0;
+  }
+
+  .github-import-tabs {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .github-import-provider .github-import-tab,
+  .github-import-tabs .github-import-tab {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  .github-import-modal__embedded-header {
+    padding: var(--space-lg) var(--space-md);
+  }
+
+  .github-import-modal--embedded .github-import-modal__body {
+    padding: var(--space-md);
+  }
 }

@@ -1,3 +1,4 @@
+import { ViewHeader } from "./ViewHeader";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertCircle, Loader2 } from "lucide-react";
@@ -5,6 +6,7 @@ import { api, withProjectId } from "../api/legacy";
 import { LineChart, PieChart } from "./command-center/charts/recharts";
 import type { LineChartSeries, PieChartDatum } from "./command-center/charts/recharts";
 import "./ReliabilityView.css";
+import { FloatingWindow } from "./FloatingWindow";
 
 type ReliabilityResponse = {
   windowDays: number;
@@ -253,9 +255,25 @@ export function ReliabilityView({ projectId }: { projectId?: string } = {}) {
       </div>
 
       {showResetConfirm ? (
-        <div className="modal-overlay open" role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="reliability-reset-title">
-            <div className="modal-header"><h2 id="reliability-reset-title">{t("reliability.resetModal.title", "Reset reliability stats?")}</h2></div>
+        /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: FN-394 hosts this view-owned confirmation in the shared window; Cancel and Reset remain its only decisions. */
+        <FloatingWindow
+          windowKey="reliability-reset"
+          modal
+          hideHeader
+          surfaceGroup="dialog"
+          title={t("reliability.resetModal.title", "Reset reliability stats?")}
+          ariaLabelledBy="reliability-reset-title"
+          onClose={() => setShowResetConfirm(false)}
+          dragHandleSelector=".reliability-reset-modal .modal-header"
+          className="floating-window--dialog floating-window--reliability-reset"
+          defaultSize={{ width: 520, height: 320 }}
+          minSize={{ width: 320, height: 220 }}
+          suspendGeometryPersistenceOnMobile
+          suspendGeometryPersistenceOnShortViewport
+        >
+          <div className="modal reliability-reset-modal">
+            {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Shared chrome for the inline reset confirmation; Cancel/Reset stay its only exits. */}
+            <ViewHeader className="modal-header" titleId="reliability-reset-title" title={t("reliability.resetModal.title", "Reset reliability stats?")} />
             <p>{t("reliability.resetModal.description", "This sets a new baseline for reliability statistics. Historical events older than the reset time are excluded from counts but are not deleted.")}</p>
             {resetError ? <div className="form-error">{resetError}</div> : null}
             <div className="modal-actions">
@@ -272,7 +290,7 @@ export function ReliabilityView({ projectId }: { projectId?: string } = {}) {
               </button>
             </div>
           </div>
-        </div>
+        </FloatingWindow>
       ) : null}
     </section>
   );

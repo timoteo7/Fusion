@@ -71,9 +71,6 @@ const qualityAppFoundationUiTests = [
   "app/__tests__/no-legacy-public.test.ts",
   "app/__tests__/onboarding-overlay-layering.test.ts",
   "app/__tests__/pwa.test.ts",
-  "app/__tests__/quick-chat-mobile-keyboard-layout.test.ts",
-  "app/__tests__/quick-chat-session-dropdown.test.ts",
-  "app/__tests__/quick-chat-tool-calls-mobile-layout.test.ts",
   "app/__tests__/quick-entry-expanded-height.test.tsx",
   "app/__tests__/settings-mobile-wrap.test.ts",
   "app/__tests__/setup-wizard-modal-layout.test.ts",
@@ -93,7 +90,8 @@ const qualityAppFoundationUiTests = [
 const qualityAppHooksAndUtilsTests = [
   // Hooks and utilities are fast, user-visible state/formatting behavior.
   "app/context/**/*.test.tsx",
-  "app/hooks/__tests__/{useAgents,useAgentLogs,useAgentLogs.resume-instrumentation,useAppSettings,useAuthOnboarding,useConfirm,useCurrentProject,useNavigationHistory,useNodes,useNodes.resume-instrumentation,useNodeSettingsSync,useProjects,useProjects.resume-instrumentation,useMeshState.resume-instrumentation,useManagedDockerNodes.resume-instrumentation,usePrChecksStream.resume-instrumentation,useDevServerLogs.resume-instrumentation,useResearch.resume-instrumentation,useBackgroundSessions.resume-instrumentation,useQuickChat,useTasks,useTasks.resume-instrumentation,useChatRooms,useTerminalSessions,useTheme,useToast,useUsageData,useViewportMode,useViewState,useMergeAdvanceNotice}.test.{ts,tsx}",
+  /* FNXC:DashboardTests 2026-09-12-17:32: Shared and Board-specific horizontal mouse-pan contracts belong in the fast hooks/utils shard so delayed capture and consumer exclusions are always collected together. */
+  "app/hooks/__tests__/{useAgents,useAgentLogs,useAgentLogs.resume-instrumentation,useAppSettings,useAuthOnboarding,useConfirm,useCurrentProject,useNavigationHistory,useNodes,useNodes.resume-instrumentation,useNodeSettingsSync,useProjects,useProjects.resume-instrumentation,useMeshState.resume-instrumentation,useManagedDockerNodes.resume-instrumentation,usePrChecksStream.resume-instrumentation,useDevServerLogs.resume-instrumentation,useResearch.resume-instrumentation,useBackgroundSessions.resume-instrumentation,useQuickChat,useTasks,useTasks.resume-instrumentation,useChatRooms,usePoppedOutNotes,useTerminalSessions,useTheme,useToast,useUsageData,useViewportMode,useViewState,useMergeAdvanceNotice,useVirtualizedChatTranscript,useVirtualizedList,useAutoPaginationSentinel,useBoardMousePan,useHorizontalMousePan,useOutsidePointerDismiss,listSurfaceInventory}.test.{ts,tsx}",
   "app/utils/**/*.test.{ts,tsx}",
 ];
 
@@ -106,11 +104,9 @@ const qualityAppComponentTests = [
   "AgentReflectionsTab",
   "AgentTokenStatsPanel",
   "App",
-  "AuthTokenRecoveryDialog",
+  "AuthTokenRecoveryPage",
   "Board",
   "Board.canDropTask",
-  "auto-merge-toggle-blank.mobile",
-  "auto-merge-toggle-blank.mobile-integration",
   "board-mobile",
   "board-mobile-view-switch",
   "BranchGroupCard",
@@ -161,8 +157,6 @@ const qualityAppComponentTests = [
   "PrPanel",
   "PrPanel.merge",
   "PrPanel.reviews",
-  "QuickChatFAB",
-  "QuickChatFAB.shared-cache",
   "ReliabilityView",
   "ResearchView",
   "RightDock",
@@ -256,6 +250,7 @@ const qualityAppChatOnlyTests = [
   "app/components/__tests__/ChatView.mobile.test.tsx",
   "app/components/__tests__/ChatView.mobile-render.test.tsx",
   "app/components/__tests__/ChatView.new-chat-default.test.tsx",
+  "app/components/__tests__/ChatView.open-at-latest.test.tsx",
   "app/components/__tests__/ChatView.sessions-rooms.test.tsx",
   "app/components/__tests__/ChatView.swipe-back.test.tsx",
   "app/components/__tests__/overflowViewRegistry.chat.test.tsx",
@@ -384,7 +379,52 @@ Chromium CDP touch geometry needs its own opt-in project: browser launch is cost
 and coordinate hit testing cannot run in jsdom or an API shard. Keep this single spec outside both the
 quality backfill and deep API lanes so Chromium availability produces an explicit lane result, not duplicate coverage.
 */
-const browserTouchTests = ["src/__tests__/task-modal-touch-resize-browser.test.ts"];
+/*
+FNXC:StandardizedViewLayout 2026-09-13-20:32:
+FN-379's rendered geometry (shared rail width, header creation placement, tactile back target, phone pane
+exclusivity) joins the existing touch lane so it is collected exactly once and self-gates without a local Chromium.
+*/
+const browserTouchTests = [
+  "src/__tests__/task-modal-touch-resize-browser.test.ts",
+  "src/__tests__/view-layout-browser.test.ts",
+  /* FNXC:UiStyleAxis 2026-09-15-00:20: FN-399's appearance axes need a real engine to compose theme colour against style geometry. */
+  "src/__tests__/ui-style-browser.test.ts",
+  /*
+  FNXC:FileBrowserScroll 2026-09-16-22:33:
+  FN-479 : la propriété de défilement du navigateur de fichiers (hauteur calculée, conteneur défilant effectif,
+  pan tactile natif) ne peut être prouvée que par un moteur réel ; jsdom en calcule aucune des trois.
+  */
+  "src/__tests__/file-browser-scroll-browser.test.ts",
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+  FN-512 : les deux moitiés du symptôme clavier (champ recouvert, bande vide) sont des résultats rendus — bord
+  calculé du conteneur propriétaire et distance réelle sous le champ. jsdom n'en calcule aucun, donc la preuve
+  passe par un vrai moteur ; la suite s'auto-gate sans Chromium local comme ses voisines.
+  */
+  "src/__tests__/mobile-keyboard-browser.test.ts",
+  /*
+  FNXC:MobileDrawerGesture 2026-09-17-03:18:
+  FN-486 : la fermeture d'un tiroir depuis une ligne de liste, le placement du menu d'appui long et la parité
+  de géométrie entre le chevron Retour et le « + » sont des résultats RENDUS ; ils exigent un moteur réel et
+  s'auto-désactivent lorsqu'aucun navigateur n'est disponible.
+  */
+  "src/__tests__/drawer-list-interactions-browser.test.ts",
+  /*
+  FNXC:BoardNavigation 2026-09-17-09:49:
+  FN-500 : la fluidité du défilement horizontal du tableau, l'ancrage exact sur une colonne et l'absence
+  d'arrêt intermédiaire sont des résultats RENDUS, pilotés par de vrais gestes tactiles ; jsdom ne calcule
+  ni le layout flex, ni la cascade de snap, ni le pipeline d'entrée. Collectée une seule fois dans cette
+  lane, avec auto-clôture sur la présence d'un Chromium local.
+  */
+  "src/__tests__/board-scroll-browser.test.ts",
+  /*
+  FNXC:TaskSearch 2026-09-17-09:41:
+  FN-477 : la largeur égale à une carte du tableau et la réserve de 1,5 carte sont des géométries
+  rendues ; jsdom retourne des rectangles nuls et ne fait aucune mise en page flex/overflow. Collecté
+  une seule fois dans cette lane, avec auto-clôture sur la présence d'un Chromium local.
+  */
+  "src/__tests__/task-search-browser.test.ts",
+];
 
 const qualityApiTests = [
   // Critical HTTP/server behavior: auth, task/project/settings mutation,
@@ -532,6 +572,15 @@ export const dashboardQualityProjectGlobs = {
 export default defineConfig({
   plugins: [react()],
   resolve: {
+    /*
+    FNXC:StandardizedPluginViews 2026-09-13-22:40:
+    Bundled plugin sources are authored as NodeNext ESM and import siblings with an explicit `.js` suffix.
+    Mapping that suffix back to the TypeScript sources lets the dashboard runner mount the REAL plugin
+    destinations for FN-379's shared-chrome proof instead of a stand-in, and it changes no production build.
+    */
+    extensionAlias: {
+      ".js": [".ts", ".tsx", ".js"],
+    },
     alias: {
       /*
       FNXC:GitHubImportTranslate 2026-07-15-09:30:
@@ -556,6 +605,8 @@ export default defineConfig({
       // FNXC:Quality 2026-07-19-12:00: Keep the Quality plugin's tokenized artifact-media bridge resolvable under host Vitest just as it is in the production dashboard bundle.
       "@fusion/dashboard/app/api/tasks/task-content": resolve(__dirname, "app/api/tasks/task-content.ts"),
       "@fusion/dashboard/app/plugins/types": resolve(__dirname, "app/plugins/types.ts"),
+      // FNXC:StandardizedPluginViews 2026-09-13-22:40: Bundled plugin destinations adopt the cooperative header; keep that bridge resolvable when the host runner mounts the real plugin component.
+      "@fusion/dashboard/app/plugins/PluginDashboardViewHeader": resolve(__dirname, "app/plugins/PluginDashboardViewHeader.tsx"),
       "@fusion/dashboard/app/utils/projectStorage": resolve(__dirname, "app/utils/projectStorage.ts"),
       "@fusion-plugin-examples/droid-runtime/probe": resolve(
         __dirname,

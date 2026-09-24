@@ -1,4 +1,6 @@
 import { getTaskMergeBlocker } from "../merge/task-merge.js";
+/* FNXC:HumanMergeApproval 2026-09-17-22:32: FN-514's delivery lock is a human WAIT, never a stall. */
+import { isHumanMergeApprovalBlocker } from "../merge/human-merge-approval.js";
 import type { Task, TaskLogEntry } from "../types.js";
 
 /*
@@ -61,6 +63,13 @@ export interface InReviewStallContext {
 
 /** Keep aligned with engine DEFAULT_STALE_MERGING_STATUS_MIN_AGE_MS. */
 export const DEFAULT_STALE_MERGING_MIN_AGE_MS = 5 * 60_000;
+export const DEFAULT_IN_REVIEW_STALL_DEADLOCK_THRESHOLD = 10;
+export function resolveInReviewStallDeadlockThreshold(settings?: { inReviewStallDeadlockThreshold?: unknown } | null): number {
+  return resolveNonNegativeInteger(
+    settings?.inReviewStallDeadlockThreshold,
+    DEFAULT_IN_REVIEW_STALL_DEADLOCK_THRESHOLD,
+  );
+}
 /** Historical default for the configurable auto-merge conflict retry cap. */
 export const DEFAULT_MAX_AUTO_MERGE_RETRIES = 3;
 export const DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURE_RETRIES = 2;
@@ -198,21 +207,42 @@ export function classifyProviderError(error: string): ProviderErrorClassificatio
   return "unknown";
 }
 
+/*
+FNXC:InReviewStallProgress 2026-09-10-08:09:
+Identical merge-blocker text is not an episode identity: a newly started or completed top-level
+pre-merge failure proves that correction work advanced even when the blocker sentence is unchanged.
+Only valid durable timestamps reset the suffix; missing or malformed evidence keeps the conservative
+historical count, and priorAttempts never substitutes for the active result.
+*/
+export function getLatestFailedPreMergeStepProgressAt(
+  task: Pick<Task, "workflowStepResults">,
+): number | undefined {
+  let latest: number | undefined;
+  for (const result of task.workflowStepResults ?? []) {
+    if ((result.phase ?? "pre-merge") !== "pre-merge" || result.status !== "failed") continue;
+    for (const timestamp of [result.startedAt, result.completedAt]) {
+      if (!timestamp) continue;
+      const parsed = Date.parse(timestamp);
+      if (Number.isFinite(parsed) && (latest === undefined || parsed > latest)) latest = parsed;
+    }
+  }
+  return latest;
+}
+
 export function countRecentIdenticalStallEntries(
   task: Pick<Task, "log">,
   signal: Pick<InReviewStallSignal, "code" | "reason">,
+  progressAt?: number,
 ): number {
   const trimmedReason = signal.reason.trim();
   const reversed = [...(task.log ?? [])].reverse();
   let count = 0;
 
   for (const entry of reversed) {
-    if (!entry.action.startsWith(IN_REVIEW_STALL_LOG_PREFIX)) {
-      break;
-    }
-    if (!matchesStallEntry(entry, signal.code, trimmedReason)) {
-      break;
-    }
+    if (!entry.action.startsWith(IN_REVIEW_STALL_LOG_PREFIX)) break;
+    if (!matchesStallEntry(entry, signal.code, trimmedReason)) break;
+    const observedAt = Date.parse(entry.timestamp);
+    if (progressAt !== undefined && Number.isFinite(observedAt) && progressAt > observedAt) break;
     count += 1;
   }
 
@@ -227,7 +257,9 @@ function matchesStallEntry(entry: TaskLogEntry, code: InReviewStallCode, reason:
 }
 
 export function getInReviewStallReason(
-  task: Pick<Task, "column" | "paused" | "status" | "error" | "steps" | "workflowStepResults" | "worktree" | "mergeDetails" | "mergeRetries" | "updatedAt"> & { id?: string },
+  task: Pick<Task, "column" | "paused" | "status" | "error" | "steps" | "workflowStepResults" | "worktree" | "mergeDetails" | "mergeRetries" | "updatedAt">
+    & Partial<Pick<Task, "humanMergeApproval">>
+    & { id?: string },
   context: InReviewStallContext = {},
 ): InReviewStallSignal | undefined {
   /*
@@ -309,6 +341,24 @@ export function getInReviewStallReason(
   */
   const mergeBlocker = getTaskMergeBlocker(task, { reviewColumns: context.reviewColumns });
   if (mergeBlocker) {
+    /*
+    FNXC:HumanMergeApproval 2026-09-17-22:32:
+    FN-514 P0 remediation — A CARD WAITING FOR ITS OPERATOR IS NOT STALLED.
+
+    This classifier already exempts `awaiting-user-review`, `awaiting-approval` and `autoMerge:false`
+    for exactly this reason, but the new per-card delivery lock arrives as a merge BLOCKER, so a
+    locked card fell through to `{ code: "merge-blocker" }`. `surfaceInReviewStalls` then logged an
+    identical observation every `taskStuckTimeoutMs` (10 min by default) and, at
+    `inReviewStallDeadlockThreshold` (10), applied `paused: true` + `status: "failed"` — so a card
+    deliberately held for a human decision failed itself after roughly 100 minutes of patience, and
+    the decision panel then disappeared because a paused task reports `blocked`.
+
+    Both waits are exempt: « awaiting a decision » (including the `create-pr` transfer hold, which
+    reports the same blocker) and « a rejection owes corrections ». Neither is a deadlock: each ends
+    on an operator action or on the correction the graph publishes, and neither may be auto-paused,
+    auto-failed, or counted toward the deadlock ladder.
+    */
+    if (isHumanMergeApprovalBlocker(mergeBlocker)) return undefined;
     if (mergeBlocker.startsWith(FAILED_TASK_MERGE_BLOCKER_PREFIX)) {
       const error = mergeBlocker.slice(FAILED_TASK_MERGE_BLOCKER_PREFIX.length).trim();
       if (classifyProviderError(error) === "non_retryable") {

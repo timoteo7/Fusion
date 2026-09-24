@@ -11,7 +11,7 @@ The mock records each TaskCard mount so tests can assert row identity stability:
 const { taskCardMountLog } = vi.hoisted(() => ({ taskCardMountLog: [] as string[] }));
 
 vi.mock("../TaskCard", () => ({
-  TaskCard: ({ task, taskColumnFlags, onOpenDetail, onDeleteTask, onReviseTask }: { task: Task | TaskDetail; taskColumnFlags?: { complete?: boolean }; onOpenDetail: (task: Task | TaskDetail) => void; onDeleteTask?: (id: string) => Promise<Task>; onReviseTask?: (task: Task) => void }) => {
+  TaskCard: ({ task, taskColumnFlags, onOpenDetail, onDeleteTask, onRestoreRevertTask }: { task: Task | TaskDetail; taskColumnFlags?: { complete?: boolean }; onOpenDetail: (task: Task | TaskDetail) => void; onDeleteTask?: (id: string) => Promise<Task>; onRestoreRevertTask?: (id: string, body?: { mode?: string }) => Promise<unknown> }) => {
     useEffect(() => {
       taskCardMountLog.push(task.id);
     }, []);
@@ -24,7 +24,7 @@ vi.mock("../TaskCard", () => ({
         onClick={() => onOpenDetail(task)}
       >
         {task.title ?? task.id}
-        {onReviseTask ? <span data-testid={`mock-task-card-revise-${task.id}`} onClick={(event) => { event.stopPropagation(); onReviseTask(task as Task); }}>Revise</span> : null}
+        {onRestoreRevertTask ? <span data-testid={`mock-task-card-restore-revert-${task.id}`} onClick={(event) => { event.stopPropagation(); void onRestoreRevertTask(task.id, { mode: "auto" }); }}>Restore revert</span> : null}
       </button>
     );
   },
@@ -136,28 +136,25 @@ describe("DockTaskList", () => {
 
   /*
   FNXC:RightDockTasks 2026-06-28-18:38:
-  The right-dock Tasks list is active-by-default: done tasks are opt-in via Show Done, archived tasks never appear, and the incoming active/done order is preserved when completed work is shown.
+  The right-dock Tasks list is active-by-default: completed tasks are opt-in via Show Done, and the incoming active/done order is preserved when completed work is shown.
   */
-  it("hides done and archived tasks by default, then toggles done tasks without showing archived rows", () => {
+  it("hides completed tasks by default, then toggles them without changing row order", () => {
     const active = makeTask("FN-ACTIVE", "Active task", "todo");
     const done = makeTask("FN-DONE", "Done task", "done");
     const laterActive = makeTask("FN-LATER", "Later active task", "in-progress");
-    const archived = makeTask("FN-ARCHIVED", "Archived task", "archived");
     const onOpenTask = vi.fn();
 
-    render(<DockTaskList tasks={[active, done, laterActive, archived]} onOpenTask={onOpenTask} addToast={vi.fn()} />);
+    render(<DockTaskList tasks={[active, done, laterActive]} onOpenTask={onOpenTask} addToast={vi.fn()} />);
 
     expect(screen.getByTestId("dock-task-list-row-FN-ACTIVE")).toBeInTheDocument();
     expect(screen.getByTestId("dock-task-list-row-FN-LATER")).toBeInTheDocument();
     expect(screen.queryByTestId("dock-task-list-row-FN-DONE")).toBeNull();
-    expect(screen.queryByTestId("dock-task-list-row-FN-ARCHIVED")).toBeNull();
 
     const showDone = screen.getByRole("button", { name: "Show Done" });
     expect(showDone).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(showDone);
 
     expect(screen.getByRole("button", { name: "Hide Done" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.queryByTestId("dock-task-list-row-FN-ARCHIVED")).toBeNull();
     expect(screen.getAllByTestId(/dock-task-list-row-/).map((row) => row.getAttribute("data-testid"))).toEqual([
       "dock-task-list-row-FN-ACTIVE",
       "dock-task-list-row-FN-DONE",
@@ -169,20 +166,20 @@ describe("DockTaskList", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Hide Done" }));
     expect(screen.queryByTestId("dock-task-list-row-FN-DONE")).toBeNull();
-    expect(screen.queryByTestId("dock-task-list-row-FN-ARCHIVED")).toBeNull();
   });
 
   /*
   FNXC:RightDockTasks 2026-06-28-18:42:
-  Empty right-dock task states must distinguish a truly empty list from a list whose only rows are completed or archived, so the compact panel never renders blank and the Show Done affordance remains reachable when completed rows exist.
+  Empty right-dock task states must distinguish a truly empty list from a list whose only rows are completed, so the compact panel never renders blank and the Show Done affordance remains reachable when completed rows exist.
   */
-  it("renders reverted complete work as an ordinary dock row with revise", () => {
+  /* FN-416 case (d): the dock row forwards restore-the-revert; the removed Revise handler is gone. */
+  it("renders reverted complete work as an ordinary dock row with restore-the-revert", () => {
     const reverted = {
       ...makeTask("FN-REVERTED", "Cancelled task", "shipped"),
       description: "first line\nsecond line",
       sourceMetadata: { revertedAt: "2026-08-01T00:00:00.000Z" },
     } as Task;
-    const onReviseTask = vi.fn();
+    const onRestoreRevertTask = vi.fn().mockResolvedValue({ mode: "git", clean: true, restoreCommitSha: "restore-sha" });
 
     render(
       <DockTaskList
@@ -190,7 +187,7 @@ describe("DockTaskList", () => {
         columnFlagsByTaskId={new Map([[reverted.id, { complete: true }]])}
         onOpenTask={vi.fn()}
         onDeleteTask={vi.fn()}
-        onReviseTask={onReviseTask}
+        onRestoreRevertTask={onRestoreRevertTask}
         addToast={vi.fn()}
       />,
     );
@@ -200,11 +197,11 @@ describe("DockTaskList", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show Done" }));
     expect(screen.getAllByTestId("dock-task-list-row-FN-REVERTED")).toHaveLength(1);
     expect(screen.getByTestId("mock-task-card-FN-REVERTED")).toHaveAttribute("data-complete", "true");
-    fireEvent.click(screen.getByTestId("mock-task-card-revise-FN-REVERTED"));
-    expect(onReviseTask).toHaveBeenCalledWith(reverted);
+    fireEvent.click(screen.getByTestId("mock-task-card-restore-revert-FN-REVERTED"));
+    expect(onRestoreRevertTask).toHaveBeenCalledWith(reverted.id, { mode: "auto" });
   });
 
-  it("renders distinct empty states for no tasks, only done tasks, and only archived tasks", () => {
+  it("renders distinct empty states for no tasks and only completed tasks", () => {
     const { rerender } = render(<DockTaskList tasks={[]} onOpenTask={vi.fn()} addToast={vi.fn()} />);
 
     expect(screen.getByTestId("dock-task-list")).toBeInTheDocument();
@@ -216,14 +213,8 @@ describe("DockTaskList", () => {
     rerender(<DockTaskList tasks={[makeTask("FN-DONE", "Done only", "done")]} onOpenTask={vi.fn()} addToast={vi.fn()} />);
     expect(screen.getByText("No active tasks")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show Done" })).toBeInTheDocument();
-    expect(screen.getByText(/Archived tasks stay out/i)).toBeInTheDocument();
+    expect(screen.getByText("Completed tasks are hidden until you choose Show Done.")).toBeInTheDocument();
     expect(screen.queryByTestId("dock-task-list-row-FN-DONE")).toBeNull();
-
-    rerender(<DockTaskList tasks={[makeTask("FN-ARCHIVED", "Archived only", "archived")]} onOpenTask={vi.fn()} addToast={vi.fn()} />);
-    expect(screen.getByText("No active tasks")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /done/i })).toBeNull();
-    expect(screen.getByText(/Archived tasks stay out/i)).toBeInTheDocument();
-    expect(screen.queryByTestId("dock-task-list-row-FN-ARCHIVED")).toBeNull();
   });
 
   it("renders duplicate task ids as distinct rows without duplicate React key warnings", () => {

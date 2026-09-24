@@ -1,6 +1,6 @@
 import { isWorkspaceTask, type Task } from "@fusion/core";
 import { getPathBasename } from "./pathDisplay";
-import { isArchivedColumnRole, isCompleteColumnRole, isHoldColumnRole, isReviewColumnRole } from "./columnRoles";
+import { isCompleteColumnRole, isHoldColumnRole, isReviewColumnRole } from "./columnRoles";
 
 export interface WorktreeGroupData {
   /** Stable identity; display labels collide for separate worktree paths. */
@@ -57,12 +57,12 @@ function resolveDependencyOrder(tasks: Task[]): string[] {
  * Queued tasks (eligible "todo" tasks whose dependencies are all satisfied)
  * are always placed in the "Up Next" group — they are never distributed
  * to worktree-specific groups since they have no worktree assignment yet.
- * The number of queued tasks shown is capped at the engine's effective concurrency ceiling.
+ * The number of queued tasks shown is capped at the execution-worktree ceiling.
  */
 export function groupByWorktree(
   inProgressTasks: Task[],
   allTasks: Task[],
-  effectiveConcurrencyLimit: number,
+  worktreeLimit: number,
   /*
   FNXC:WorkflowResolvedColumns 2026-07-29-00:00 (U12 — R8 drift conversion):
   The ids of TASKS whose own column is a hold lane in their own workflow, when the caller
@@ -119,9 +119,8 @@ export function groupByWorktree(
   hold column is renamed the filter matched NOTHING, so the worktree view showed no upcoming
   work at all and read as idle — a whole panel silently empty, with nothing failing.
 
-  Dependency satisfaction below still names terminal ids. That is a separate question from
-  the hold role and is left alone deliberately: it needs `complete`/`mergeBlocker`/`archived`
-  traits for the DEPENDENCY's column, which is another lookup and another unit of work.
+  Dependency satisfaction below is a separate per-dependency question: completion and review
+  roles come from the dependency's own workflow flags.
   */
   // Find queued hold-lane tasks: cards in the hold column with all deps satisfied.
   const taskById = new Map(allTasks.map((t) => [t.id, t]));
@@ -134,10 +133,8 @@ export function groupByWorktree(
       const dep = taskById.get(depId);
       if (!dep) return false;
       const depFlags = dependencyColumnFlags?.get(dep.id);
-      /* Satisfied = the dependency rests in its OWN board's terminal pair, or its review lane —
-         the same union the scheduler's legacy rule uses, preserved exactly. */
+      /* Satisfied = the dependency rests in its OWN board's completion or review lane. */
       return isCompleteColumnRole(depFlags, dep.column)
-        || isArchivedColumnRole(depFlags, dep.column)
         || isReviewColumnRole(depFlags, dep.column);
     }),
   );
@@ -186,8 +183,8 @@ export function groupByWorktree(
     });
   }
 
-  // All eligible queued tasks go into the "Up Next" group (capped at the effective ceiling).
-  const queued = orderedEligible.slice(0, effectiveConcurrencyLimit);
+  // All eligible queued tasks go into the "Up Next" group (capped at worktree capacity).
+  const queued = orderedEligible.slice(0, worktreeLimit);
   if (queued.length > 0) {
     groups.push({
       id: "up-next",

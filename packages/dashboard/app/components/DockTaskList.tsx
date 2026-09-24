@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { isArchivedColumnRole, isCompleteColumnRole } from "../utils/columnRoles";
+import { isCompleteColumnRole } from "../utils/columnRoles";
 import { isTaskReverted } from "../utils/taskRevert";
 import type { GithubIssueAction, Task, TaskDetail } from "@fusion/core";
+import type { RestoreTaskRevertOptions, RestoreTaskRevertResult } from "../api";
 import type { ToastType } from "../hooks/useToast";
 import { TaskCard } from "./TaskCard";
 import "./DockTaskList.css";
@@ -13,9 +14,13 @@ export interface DockTaskListProps {
   tasks: Array<Task | TaskDetail>;
   projectId?: string;
   onOpenTask?: (task: Task | TaskDetail) => void;
-  onReviseTask?: (task: Task) => void;
+  /* FNXC:TaskRevert 2026-09-15-10:00 (FN-416): reverted dock rows expose restore-the-revert, not Delete/Revise buttons. */
+  onRestoreRevertTask?: (id: string, body?: RestoreTaskRevertOptions) => Promise<RestoreTaskRevertResult>;
   onUpdateTask?: (id: string, updates: { title?: string; description?: string; dependencies?: string[]; dismissNearDuplicate?: boolean; githubTracking?: { enabled?: boolean } }) => Promise<Task>;
   onDeleteTask?: (id: string, options?: { removeDependencyReferences?: boolean; removeLineageReferences?: boolean; githubIssueAction?: GithubIssueAction; allowResurrection?: boolean }) => Promise<Task>;
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 — every host that renders a LIVE card forwards Boost,
+     so the affordance is not tied to one surface. Omitting it withholds the button. */
+  onBoostTask?: (id: string, scope: { expectedColumn: string; expectedColumnEntryAt: string }) => Promise<Task>;
   onOpenChatWithPrefill?: (prefillText: string) => void;
   addToast?: (message: string, type?: ToastType) => void;
   prAuthAvailable?: boolean;
@@ -27,7 +32,7 @@ FNXC:RightDockTasks 2026-06-28-16:50:
 The Tasks tab empty state is a real compact task list, not a blank placeholder. TaskCard's own open callback is routed directly to `onOpenTask` so clicking the card opens the dock Tasks detail with the back button; no wrapper click handler competes with TaskCard or the full-panel detail modal.
 
 FNXC:RightDockTasks 2026-06-28-18:25:
-The compact right-dock Tasks list is an active-work queue by default. It hides completed work until the local Show Done toggle is enabled and never renders archived tasks, including in the expanded dock modal that reuses this component.
+The compact right-dock Tasks list is an active-work queue by default. It hides completed work until the local Show Done toggle is enabled, including in the expanded dock modal that reuses this component.
 */
 /*
 FNXC:RightDockTasks 2026-07-22-12:05:
@@ -46,8 +51,9 @@ export function DockTaskList({ columnFlagsByTaskId,
   projectId,
   onOpenTask,
   onDeleteTask,
-  onReviseTask,
+  onRestoreRevertTask,
   onUpdateTask,
+  onBoostTask,
   onOpenChatWithPrefill,
   addToast = () => {},
   prAuthAvailable = false,
@@ -66,9 +72,8 @@ export function DockTaskList({ columnFlagsByTaskId,
 
   /*
   FNXC:WorkflowResolvedColumns 2026-07-30-04:00 (batch-dashboard-app — the dock-wide fix landed):
-  These three decide what the right dock lists: completed cards grouped, archived hidden, done shown
-  only behind `showDone`. Keyed on the literals none matched on a renamed board, so the dock showed
-  ARCHIVED cards and never grouped completed ones.
+  The resolved completion role decides what the right dock lists: completed cards are grouped and shown
+  only behind `showDone`. Keying this on `done` alone failed for renamed workflows.
 
   Previously sized as blocked, because this component mounts only through `overflowViewRegistry` and
   those render props carried no flags. That gap is now closed at the source — App threads the map it
@@ -77,7 +82,7 @@ export function DockTaskList({ columnFlagsByTaskId,
   */
   const isTerminal = useCallback((task: Task | TaskDetail) => {
     const flags = columnFlagsByTaskId?.get(task.id);
-    return { complete: isCompleteColumnRole(flags, task.column), archived: isArchivedColumnRole(flags, task.column) };
+    return { complete: isCompleteColumnRole(flags, task.column) };
   }, [columnFlagsByTaskId]);
   /*
   FNXC:TaskRevert 2026-08-27-02:34:
@@ -96,7 +101,6 @@ export function DockTaskList({ columnFlagsByTaskId,
   const doneTasks = useMemo(() => displayTasks.filter((task) => isTerminal(task).complete), [displayTasks, isTerminal]);
   const visibleTasks = useMemo(() => displayTasks.filter((task) => {
     const roles = isTerminal(task);
-    if (roles.archived) return false;
     if (roles.complete) return showDone;
     return true;
   }), [displayTasks, showDone, isTerminal]);
@@ -106,8 +110,8 @@ export function DockTaskList({ columnFlagsByTaskId,
   const emptyCopy = tasks.length === 0
     ? t("rightDock.emptyCopy", "Tasks you create or import will appear here for quick right-sidebar review.")
     : hasDoneTasks
-      ? t("rightDock.doneHiddenCopy", "Completed tasks are hidden until you choose Show Done. Archived tasks stay out of this compact sidebar.")
-      : t("rightDock.archivedCopy", "Archived tasks stay out of this compact sidebar. Active tasks will appear here when work is available.");
+      ? t("rightDock.doneHiddenCopy", "Completed tasks are hidden until you choose Show Done.")
+      : t("rightDock.emptyCopy", "Tasks you create or import will appear here for quick right-sidebar review.");
   const toggleLabel = showDone ? t("rightDock.hideDone", "Hide Done") : t("rightDock.showDone", "Show Done");
 
   return (
@@ -147,8 +151,9 @@ export function DockTaskList({ columnFlagsByTaskId,
             Every task Delete affordance must reach the shared confirm→delete flow. The right-dock Tasks list is a TaskCard host, so it must pass onDeleteTask instead of rendering cards that silently lack/delete-disable the destructive path.
             */
             onDeleteTask={onDeleteTask}
-            onReviseTask={onReviseTask}
+            onRestoreRevertTask={onRestoreRevertTask}
             onUpdateTask={onUpdateTask}
+            onBoostTask={onBoostTask}
             onOpenChatWithPrefill={onOpenChatWithPrefill}
             addToast={addToast}
             prAuthAvailable={prAuthAvailable}

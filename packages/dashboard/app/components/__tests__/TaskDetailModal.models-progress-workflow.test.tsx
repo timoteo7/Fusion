@@ -5,6 +5,8 @@ FN-7306 labels the stable internal `chat` tab as Activity and keeps it as the de
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import i18next from "../../i18n";
+import frApp from "../../../../i18n/locales/fr/app.json";
 import {
   makeTask,
   noop,
@@ -36,6 +38,16 @@ function selectActivityView(value: ActivitySegmentTestValue) {
     fireEvent.click(screen.getByRole("button", { name: "Activity" }));
   }
   fireEvent.click(screen.getByRole("menuitem", { name: ACTIVITY_VIEW_LABELS[value] }));
+}
+
+/*
+FNXC:TaskDetailDefinition 2026-09-14-20:10:
+FN-391 collapses the Definition step list by default. This shared helper opens it through the real
+disclosure button, so the row-level assertions below keep proving the rendered list rather than
+silently depending on a default-open list that no longer exists.
+*/
+function expandDetailStepList() {
+  fireEvent.click(screen.getByTestId("detail-step-list-toggle"));
 }
 
 describe("TaskDetailModal", () => {
@@ -695,6 +707,151 @@ describe("TaskDetailModal", () => {
       expect(screen.getByText("Progress")).toBeTruthy();
     });
 
+    /*
+    FNXC:TaskDetailDefinition 2026-09-14-20:15:
+    FN-391 puts Progress first and collapses the STEP LIST behind a disclosure — never the counter or
+    the bar, which are the glanceable part. The disclosure keeps the operator's choice across a
+    refresh of the same task (an SSE tick must not slam an open list) and resets only when a
+    different task is opened.
+    */
+    it("renders Progress before Description, the product outcome and the before/after section", () => {
+      render(
+        <TaskDetailModal
+          initialTab="definition"
+          task={makeTask({
+            description: "Definition description",
+            prompt: "# Task: FN-1 - Ordered\n\n## What This Delivers\n\nOutcome body.\n\n## Before → After Transformation\n\nTransformation body.\n",
+            steps: [{ name: "Step 1", status: "done" }],
+          })}
+          onClose={noop}
+          onDeleteTask={noopDelete}
+          onMergeTask={noopMerge}
+          onOpenDetail={noopOpenDetail}
+          addToast={noop}
+        />,
+      );
+
+      const sections = Array.from(document.querySelectorAll(".detail-section"))
+        .filter((section) => section.matches(".detail-step-progress, .detail-definition-description, .detail-definition-outcome, .detail-definition-transformation"))
+        .map((section) => {
+          if (section.classList.contains("detail-step-progress")) return "progress";
+          if (section.classList.contains("detail-definition-description")) return "description";
+          return section.classList.contains("detail-definition-outcome") ? "outcome" : "transformation";
+        });
+
+      expect(sections).toEqual(["progress", "description", "outcome", "transformation"]);
+    });
+
+    it("keeps the counter and bar visible while the step list starts collapsed", () => {
+      render(
+        <TaskDetailModal
+          initialTab="definition"
+          task={makeTask({ steps: [{ name: "Step 1", status: "done" }, { name: "Step 2", status: "pending" }] })}
+          onClose={noop}
+          onDeleteTask={noopDelete}
+          onMergeTask={noopMerge}
+          onOpenDetail={noopOpenDetail}
+          addToast={noop}
+        />,
+      );
+
+      expect(screen.getByText("1/2 completed")).toBeInTheDocument();
+      expect(document.querySelector(".step-progress-track")).toBeInTheDocument();
+      expect(document.querySelector(".detail-step-list")).toBeNull();
+
+      const toggle = screen.getByTestId("detail-step-list-toggle");
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(toggle.getAttribute("aria-controls")).toBe(document.querySelector(".detail-step-progress")?.querySelector("ol")?.id ?? toggle.getAttribute("aria-controls"));
+
+      /*
+      FNXC:TaskDetailDefinition 2026-09-15-16:02:
+      FN-424: the disclosure is now an icon-only chevron sitting on the progress bar's row, so its
+      accessible name comes from `aria-label` and it must stay a real button beside the bar.
+      */
+      expect(toggle.tagName).toBe("BUTTON");
+      expect(toggle).toHaveAttribute("type", "button");
+      expect(toggle).toHaveAccessibleName("Show steps");
+      expect(toggle).toHaveTextContent("");
+      const row = toggle.closest(".detail-progress-row");
+      expect(row).toBeInTheDocument();
+      expect(row!.querySelector(".step-progress-track")).toBeInTheDocument();
+      expect(row!.querySelector(".detail-source-chevron--expanded")).toBeNull();
+    });
+
+    it("expands and collapses the step list through its accessible control", () => {
+      render(
+        <TaskDetailModal
+          initialTab="definition"
+          task={makeTask({ steps: [{ name: "Step 1", status: "done" }, { name: "Step 2", status: "pending" }] })}
+          onClose={noop}
+          onDeleteTask={noopDelete}
+          onMergeTask={noopMerge}
+          onOpenDetail={noopOpenDetail}
+          addToast={noop}
+        />,
+      );
+
+      const toggle = screen.getByTestId("detail-step-list-toggle");
+      fireEvent.click(toggle);
+
+      const list = document.querySelector(".detail-step-list");
+      expect(list).toBeInTheDocument();
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(toggle.getAttribute("aria-controls")).toBe(list!.id);
+      expect(document.querySelectorAll(".detail-step-item")).toHaveLength(2);
+      expect(toggle).toHaveAccessibleName("Hide steps");
+      expect(toggle.querySelector(".detail-source-chevron--expanded")).toBeInTheDocument();
+
+      fireEvent.click(toggle);
+      expect(document.querySelector(".detail-step-list")).toBeNull();
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(toggle).toHaveAccessibleName("Show steps");
+      expect(toggle.querySelector(".detail-source-chevron--expanded")).toBeNull();
+    });
+
+    it("keeps the list open across a refresh of the SAME task and collapses on a task change", () => {
+      const shared = {
+        onClose: noop,
+        onDeleteTask: noopDelete,
+        onMergeTask: noopMerge,
+        onOpenDetail: noopOpenDetail,
+        addToast: noop,
+        initialTab: "definition" as const,
+      };
+      const { rerender } = render(
+        <TaskDetailModal {...shared} task={makeTask({ id: "FN-SAME", steps: [{ name: "Step 1", status: "done" }] })} />,
+      );
+
+      fireEvent.click(screen.getByTestId("detail-step-list-toggle"));
+      expect(document.querySelector(".detail-step-list")).toBeInTheDocument();
+
+      // Same task, new live state (the SSE-tick shape).
+      rerender(<TaskDetailModal {...shared} task={makeTask({ id: "FN-SAME", status: "in-progress", steps: [{ name: "Step 1", status: "done" }] })} />);
+      expect(document.querySelector(".detail-step-list")).toBeInTheDocument();
+
+      // A DIFFERENT task opens collapsed.
+      rerender(<TaskDetailModal {...shared} task={makeTask({ id: "FN-OTHER", steps: [{ name: "Step 1", status: "done" }] })} />);
+      expect(document.querySelector(".detail-step-list")).toBeNull();
+      expect(screen.getByTestId("detail-step-list-toggle")).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("renders no disclosure at all when the task has no steps", () => {
+      render(
+        <TaskDetailModal
+          initialTab="definition"
+          task={makeTask({ steps: [], enabledWorkflowSteps: [] })}
+          onClose={noop}
+          onDeleteTask={noopDelete}
+          onMergeTask={noopMerge}
+          onOpenDetail={noopOpenDetail}
+          addToast={noop}
+        />,
+      );
+
+      expect(screen.queryByTestId("detail-step-list-toggle")).toBeNull();
+      expect(screen.getByText("(no steps defined)")).toBeInTheDocument();
+    });
+
     it("shows '(no steps defined)' when steps array is empty", () => {
       const { container } = render(
         <TaskDetailModal
@@ -712,7 +869,7 @@ describe("TaskDetailModal", () => {
       expect(screen.getByText("(no steps defined)")).toBeTruthy();
     });
 
-    it("renders correct number of segments matching step count", () => {
+    it("renders one labeled list row per step", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
@@ -731,11 +888,15 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const segments = document.querySelectorAll(".step-progress-segment");
-      expect(segments).toHaveLength(3);
+      expandDetailStepList();
+      const rows = document.querySelectorAll(".detail-step-item");
+      expect(rows).toHaveLength(3);
+      expect(screen.getByText("Step 1")).toBeInTheDocument();
+      expect(screen.getByText("Step 2")).toBeInTheDocument();
+      expect(screen.getByText("Step 3")).toBeInTheDocument();
     });
 
-    it("segments have correct status modifier classes", () => {
+    it("list rows have correct status modifier classes", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
@@ -755,14 +916,15 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const segments = document.querySelectorAll(".step-progress-segment");
-      expect(segments[0].classList.contains("step-progress-segment--done")).toBe(true);
-      expect(segments[1].classList.contains("step-progress-segment--in-progress")).toBe(true);
-      expect(segments[2].classList.contains("step-progress-segment--pending")).toBe(true);
-      expect(segments[3].classList.contains("step-progress-segment--skipped")).toBe(true);
+      expandDetailStepList();
+      const rows = document.querySelectorAll(".detail-step-item");
+      expect(rows[0]).toHaveClass("detail-step-item--done");
+      expect(rows[1]).toHaveClass("detail-step-item--in-progress");
+      expect(rows[2]).toHaveClass("detail-step-item--pending");
+      expect(rows[3]).toHaveClass("detail-step-item--skipped");
     });
 
-    it("renders a segment for each ENABLED workflow step, not only implementation steps", () => {
+    it("renders a labeled row for each ENABLED workflow step, not only implementation steps", () => {
       // Regression: the detail Progress bar must include enabled optional workflow steps.
       const { container } = render(
         <TaskDetailModal
@@ -785,17 +947,55 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const segments = document.querySelectorAll(".step-progress-segment");
-      // 2 impl steps + 2 enabled workflow steps = 4 segments.
-      expect(segments).toHaveLength(4);
-      const workflowSegments = document.querySelectorAll(".step-progress-segment--source-workflow");
-      expect(workflowSegments).toHaveLength(2);
-      // code-review ran (passed → unified "done"); browser-verification enabled-not-run (pending).
-      expect(segments[2].classList.contains("step-progress-segment--done")).toBe(true);
-      expect(segments[3].classList.contains("step-progress-segment--pending")).toBe(true);
+      expandDetailStepList();
+      const rows = document.querySelectorAll(".detail-step-item");
+      expect(rows).toHaveLength(4);
+      expect(screen.getAllByText("Workflow gate")).toHaveLength(2);
+      expect(rows[2]).toHaveClass("detail-step-item--done");
+      expect(rows[3]).toHaveClass("detail-step-item--pending");
     });
 
-    it("segments have correct inline background colors based on status", () => {
+    it("renders progress counts, origins, and statuses from a non-English catalog", async () => {
+      i18next.addResourceBundle("fr", "app", frApp, true, true);
+      await act(async () => {
+        await i18next.changeLanguage("fr");
+      });
+
+      const view = render(
+        <TaskDetailModal
+          initialTab="definition"
+          task={makeTask({
+            steps: [{ name: "Implémenter", status: "done" }],
+            enabledWorkflowSteps: ["code-review"],
+            workflowStepResults: [],
+          })}
+          onClose={noop}
+          onDeleteTask={noopDelete}
+          onMergeTask={noopMerge}
+          onOpenDetail={noopOpenDetail}
+          addToast={noop}
+        />,
+      );
+
+      try {
+        // The counter stays visible while the list is collapsed; row copy needs the disclosure open.
+        expect(screen.getByText("1/2 terminées")).toBeInTheDocument();
+        expandDetailStepList();
+        expect(screen.getByText("Implémentation")).toBeInTheDocument();
+        expect(screen.getByText("Étape du workflow")).toBeInTheDocument();
+        expect(screen.getByText("Terminée")).toBeInTheDocument();
+        expect(screen.getByText("En attente")).toBeInTheDocument();
+        expect(screen.queryByText("Workflow gate")).not.toBeInTheDocument();
+      } finally {
+        view.unmount();
+        await act(async () => {
+          await i18next.changeLanguage("en");
+        });
+        i18next.removeResourceBundle("fr", "app");
+      }
+    });
+
+    it("indicators use semantic colors based on status", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
@@ -816,12 +1016,13 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const segments = document.querySelectorAll(".step-progress-segment");
-      expect((segments[0] as HTMLElement).style.backgroundColor).toBe("var(--color-success)");
-      expect((segments[1] as HTMLElement).style.backgroundColor).toBe("var(--in-progress)");
-      expect((segments[2] as HTMLElement).style.backgroundColor).toBe("var(--border)");
-      expect((segments[3] as HTMLElement).style.backgroundColor).toBe("var(--text-dim)");
-      expect((segments[4] as HTMLElement).style.backgroundColor).toBe("var(--border)");
+      expandDetailStepList();
+      const indicators = document.querySelectorAll<HTMLElement>(".detail-step-indicator");
+      expect(indicators[0].style.color).toBe("var(--color-success)");
+      expect(indicators[1].style.color).toBe("var(--in-progress)");
+      expect(indicators[2].style.color).toBe("var(--border)");
+      expect(indicators[3].style.color).toBe("var(--text-dim)");
+      expect(indicators[4].style.color).toBe("var(--border)");
     });
 
     it("displays singular completion label for one-step tasks", () => {
@@ -839,8 +1040,7 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      expect(screen.getByText("1/1 step")).toBeTruthy();
-      expect(screen.queryByText("1/1 steps")).toBeNull();
+      expect(screen.getByText("1/1 completed")).toBeTruthy();
     });
 
     it("displays correct completion count", () => {
@@ -863,11 +1063,10 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      expect(screen.getByText("2/4 steps")).toBeTruthy();
-      expect(screen.queryByText("2/4 step")).toBeNull();
+      expect(screen.getByText("2/4 completed")).toBeTruthy();
     });
 
-    it("has data-tooltip attribute with step name and status on each segment", () => {
+    it("shows visible names and accessible status text for every row", () => {
       const { container } = render(
         <TaskDetailModal
           initialTab="definition"
@@ -885,9 +1084,12 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      const segments = document.querySelectorAll(".step-progress-segment");
-      expect(segments[0].getAttribute("data-tooltip")).toBe("Initialize project (done)");
-      expect(segments[1].getAttribute("data-tooltip")).toBe("Add tests (in-progress)");
+      expandDetailStepList();
+      const rows = document.querySelectorAll(".detail-step-item");
+      expect(rows[0]).toHaveTextContent("Initialize project");
+      expect(rows[0]).toHaveTextContent("Completed");
+      expect(rows[1]).toHaveTextContent("Add tests");
+      expect(rows[1]).toHaveTextContent("In progress");
     });
 
     it("step progress only renders in Definition tab, not in Raw Logs segment", () => {
@@ -1084,7 +1286,8 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Edit task" }));
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+      fireEvent.click(screen.getByTestId("task-detail-header-action-edit"));
       const trigger = await screen.findByTestId("task-form-edit-optional-steps");
       expect(trigger).toHaveTextContent("Steps: 1 selected");
       fireEvent.click(trigger);
@@ -1113,12 +1316,13 @@ describe("TaskDetailModal", () => {
         { templateId: "code-review", name: "Code Review", phase: "pre-merge", defaultOn: true },
         { templateId: "browser-verification", name: "Browser Verification", phase: "pre-merge", defaultOn: false },
       ] as any);
-      vi.mocked(updateTask).mockResolvedValueOnce(makeTask({ title: "Edited title", enabledWorkflowSteps: ["browser-verification"] }) as any);
+      vi.mocked(updateTask).mockResolvedValueOnce(makeTask({ description: "Edited description", enabledWorkflowSteps: ["browser-verification"] }) as any);
 
       render(
         <TaskDetailModal
           initialTab="definition"
-          task={makeTask({ column: "todo" as any, title: "Original title", enabledWorkflowSteps: ["browser-verification"] })}
+          // FNXC:TaskDescriptionEditing 2026-09-14-19:30: FN-391 — the description is the editable text field, and it is editable in manual intake.
+          task={makeTask({ column: "ideas" as any, description: "Original description", enabledWorkflowSteps: ["browser-verification"] })}
           onClose={noop}
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
@@ -1127,10 +1331,11 @@ describe("TaskDetailModal", () => {
         />,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Edit task" }));
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+      fireEvent.click(screen.getByTestId("task-detail-header-action-edit"));
       await screen.findByTestId("task-form-edit-optional-steps");
-      const titleInput = screen.getByRole("textbox", { name: /Title/i });
-      fireEvent.change(titleInput, { target: { value: "Edited title" } });
+      const descriptionInput = screen.getByRole("textbox", { name: /Description/i });
+      fireEvent.change(descriptionInput, { target: { value: "Edited description" } });
       fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
       await waitFor(() => {
@@ -1142,7 +1347,7 @@ describe("TaskDetailModal", () => {
       });
       expect(updateTask).toHaveBeenCalledWith(
         "FN-099",
-        expect.objectContaining({ title: "Edited title" }),
+        expect.objectContaining({ description: "Edited description" }),
         undefined,
       );
     });

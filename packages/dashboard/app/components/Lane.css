@@ -45,6 +45,13 @@
 }
 
 
+/*
+FNXC:NativeUiPresentation 2026-09-15-00:20:
+REMOVED: the two `[data-alpha-surface="false"]` Board scrollbar rules. Production never wrote that value —
+boundaries always published `"true"` — so these were unreachable even before the perimeter was deleted.
+The Board keeps the scrollbar paint it actually renders today; nothing else changes.
+*/
+
 .board.board-workflow-columns {
   flex: 1 1 auto;
   display: flex;

@@ -1,3 +1,4 @@
+import { UiButton, UiInput, UiTextArea } from "./ui";
 import "./ChatQuestionResponse.css";
 
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
@@ -21,7 +22,7 @@ export interface ChatQuestionResponseProps {
 /**
  * FNXC:ChatQuestionResponse 2026-06-16-19:25:
  * In-chat question tools need an attractive shared answer affordance for single-select, multi-select, free-text, and confirm prompts.
- * Historical or already-answered messages must render read-only so old assistant questions do not keep duplicate live input boxes in regular chat or quick chat.
+ * Historical or already-answered messages must render read-only so old assistant questions do not keep duplicate live input boxes in the Chat window, the mobile Chat drawer, or a detached conversation.
  */
 export function ChatQuestionResponse({
   parsed,
@@ -39,6 +40,7 @@ export function ChatQuestionResponse({
     () => parsed.questions.every((question) => isQuestionAnswerValid(question, answers[question.id])),
     [answers, parsed.questions],
   );
+  const hasOptionalQuestion = parsed.questions.some((question) => question.optional === true);
 
   useLayoutEffect(() => {
     for (const controller of autosizeControllers.current.values()) {
@@ -85,7 +87,14 @@ export function ChatQuestionResponse({
         {parsed.questions.map((question, questionIndex) => (
           <article className="chat-question-response__question" key={question.id}>
             {question.header && <p className="chat-question-response__question-header">{question.header}</p>}
-            <h4 className="chat-question-response__question-text">{question.question}</h4>
+            <h4 className="chat-question-response__question-text">
+              {question.question}
+              {!answered && question.optional === true && (
+                <span className="chat-question-response__optional" data-testid={`chat-question-response-optional-${question.id}`}>
+                  {t("chat.questionOptionalLabel", "Optional")}
+                </span>
+              )}
+            </h4>
             {question.description && <p className="chat-question-response__description">{question.description}</p>}
 
             {answered ? null : (
@@ -110,8 +119,12 @@ export function ChatQuestionResponse({
         </div>
       ) : (
         <div className="chat-question-response__actions">
-          <p className="chat-question-response__hint">{t("chat.questionSelectHint", "Answer all questions to continue the chat.")}</p>
-          <button
+          <p className="chat-question-response__hint">
+            {hasOptionalQuestion
+              ? t("chat.questionSelectHintWithOptional", "Answer all required questions to continue the chat.")
+              : t("chat.questionSelectHint", "Answer all questions to continue the chat.")}
+          </p>
+          <UiButton
             type="button"
             className="btn btn-primary chat-question-response__submit"
             data-testid="chat-question-response-submit"
@@ -119,7 +132,7 @@ export function ChatQuestionResponse({
             onClick={handleSubmit}
           >
             {t("chat.questionSubmit", "Send answer")}
-          </button>
+          </UiButton>
         </div>
       )}
     </section>
@@ -149,7 +162,7 @@ function QuestionControls({
 
   if (question.type === "text") {
     return (
-      <textarea
+      <UiTextArea
         className="input chat-question-response__textarea"
         data-testid={`chat-question-response-text-${question.id}`}
         placeholder={t("chat.questionTextPlaceholder", "Type your answer here…")}
@@ -177,7 +190,7 @@ function QuestionControls({
           screen reader users get the same clear selected/unselected signal
           the strengthened CSS now provides visually.
         */}
-        <button
+        <UiButton
           type="button"
           className={`btn chat-question-response__confirm${value === true ? " chat-question-response__confirm--selected" : ""}`}
           data-testid={`chat-question-response-option-${question.id}-yes`}
@@ -186,8 +199,8 @@ function QuestionControls({
           onClick={() => setQuestionAnswer(question.id, true)}
         >
           {t("chat.questionConfirmYes", "Yes")}
-        </button>
-        <button
+        </UiButton>
+        <UiButton
           type="button"
           className={`btn chat-question-response__confirm${value === false ? " chat-question-response__confirm--selected" : ""}`}
           data-testid={`chat-question-response-option-${question.id}-no`}
@@ -196,7 +209,7 @@ function QuestionControls({
           onClick={() => setQuestionAnswer(question.id, false)}
         >
           {t("chat.questionConfirmNo", "No")}
-        </button>
+        </UiButton>
       </div>
     );
   }
@@ -216,7 +229,7 @@ function QuestionControls({
             className={`chat-question-response__option${checked ? " chat-question-response__option--selected" : ""}`}
             data-testid={`chat-question-response-option-${question.id}-${option.id}`}
           >
-            <input
+            <UiInput
               type={isMulti ? "checkbox" : "radio"}
               name={isMulti ? undefined : radioName}
               value={option.id}
@@ -241,7 +254,15 @@ function QuestionControls({
   );
 }
 
+/*
+ * FNXC:ChatQuestionResponse 2026-09-09-02:42:
+ * Optional questions may be submitted blank; their badge makes that affordance discoverable, and only cards containing one use the relaxed hint.
+ */
 function isQuestionAnswerValid(question: ChatQuestion, value: ChatQuestionAnswerValue | undefined): boolean {
+  if (question.optional === true && isUnanswered(value)) {
+    return true;
+  }
+
   if (question.type === "text") {
     return typeof value === "string" && value.trim().length > 0;
   }
@@ -255,4 +276,10 @@ function isQuestionAnswerValid(question: ChatQuestion, value: ChatQuestionAnswer
   }
 
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isUnanswered(value: ChatQuestionAnswerValue | undefined): boolean {
+  return value === undefined
+    || (typeof value === "string" && value.trim().length === 0)
+    || (Array.isArray(value) && value.length === 0);
 }

@@ -22,15 +22,18 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
  * column IDs are byte-identical to these — KTD-1). New code should prefer the
  * workflow-resolved path (`resolveAllowedColumns` / `workflowHasColumn` in
  * `workflow-transitions.ts`) and trait predicates over string equality; this
- * enum remains the canonical id set for the built-in default workflow.
+ * exported tuple is the visible built-in board and therefore excludes the historical sentinel.
+ *
+ * FNXC:TaskArchiveRemoval 2026-09-04-10:36:
+ * `getLiveTaskColumn` deliberately manufactures `"archived"` for soft-deleted parents. The literal
+ * remains type-readable for those internal snapshots without restoring it to the board column list.
  */
-export const COLUMNS = ["triage", "todo", "in-progress", "in-review", "done", "archived"] as const;
+export const COLUMNS = ["triage", "todo", "in-progress", "in-review", "done"] as const;
 /**
- * The closed legacy column union — still the correct type for default-workflow
- * column ids. Movement entry points accept the wider {@link ColumnId}; runtime
- * code validates ids against the task's resolved workflow.
+ * The built-in workflow columns plus the read-only historical soft-delete sentinel. Movement entry
+ * points accept the wider {@link ColumnId}; runtime code validates ids against the task's workflow.
  */
-export type Column = (typeof COLUMNS)[number];
+export type Column = (typeof COLUMNS)[number] | "archived";
 
 /**
  * Column identifier accepted at task-movement entry points (KTD-1).
@@ -90,12 +93,13 @@ export function normalizeColumnId(value: unknown, fallback: ColumnId = DEFAULT_C
   return typeof value === "string" && value.length > 0 ? value : fallback;
 }
 
-/** Ordered task-priority levels for the core task domain contract. */
-export const TASK_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
-export type TaskPriority = (typeof TASK_PRIORITIES)[number];
-
-/**
- * Default task priority used for legacy rows/entries and create flows when
- * callers omit the priority field.
- */
-export const DEFAULT_TASK_PRIORITY: TaskPriority = "normal";
+/*
+FNXC:TaskQueueOrder 2026-09-17-12:07:
+FN-509 DELETES the task-priority contract. `TASK_PRIORITIES`, `TaskPriority` and
+`DEFAULT_TASK_PRIORITY` are gone: there are no importance levels any more, ordinary queues are
+strictly arrival-ordered, and the only forward move is an explicit Boost (see
+`tasks/task-queue-order.ts`). Historical SQL columns and archived documents may still physically
+hold `"urgent"`/`"normal"` strings, but nothing reads them: they are inert compatibility data and
+are never re-emitted as a task field, migrated into a Boost, copied onto a new task, or used to
+sort. Do not re-add a level type to satisfy an old fixture.
+*/

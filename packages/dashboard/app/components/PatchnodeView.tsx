@@ -1,14 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { History, RotateCcw, Search } from "lucide-react";
 import type { PatchnodeDay, PatchnodeEntry } from "@fusion/core";
 import { fetchPatchnode } from "../api";
 import { ViewHeader } from "./ViewHeader";
+import { ViewLayout } from "./ViewLayout";
+import { FloatingWindow } from "./FloatingWindow";
+import { useAutoPaginationSentinel } from "../hooks/useAutoPaginationSentinel";
 import "./PatchnodeView.css";
 
 export interface PatchnodeViewProps {
   projectId?: string;
   onOpenTaskDetail?: (taskId: string) => void | Promise<void>;
+  floating?: { onClose: () => void; onActivate?: () => void; raiseToFrontSignal?: number };
 }
 
 const PAGE_SIZE = 50;
@@ -19,7 +23,7 @@ function utcDayOffset(offset: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-export function PatchnodeView({ projectId, onOpenTaskDetail }: PatchnodeViewProps) {
+export function PatchnodeView({ projectId, onOpenTaskDetail, floating }: PatchnodeViewProps) {
   const { t, i18n } = useTranslation("app");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -30,6 +34,7 @@ export function PatchnodeView({ projectId, onOpenTaskDetail }: PatchnodeViewProp
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
@@ -84,6 +89,8 @@ export function PatchnodeView({ projectId, onOpenTaskDetail }: PatchnodeViewProp
     }
   }, [debouncedSearch, loadedCount, projectId]);
 
+  const pagination = useAutoPaginationSentinel({ rootRef: contentRef, hasMore, loading: loadingMore, onLoadMore: loadMore, direction: "end" });
+
   const today = useMemo(() => utcDayOffset(0), []);
   const yesterday = useMemo(() => utcDayOffset(-1), []);
   const dayLabel = (day: string) => {
@@ -100,12 +107,13 @@ export function PatchnodeView({ projectId, onOpenTaskDetail }: PatchnodeViewProp
     }
   };
 
-  return (
-    <section className="patchnode-view" data-testid="patchnode-view" aria-labelledby="patchnode-title">
-      <ViewHeader
+  /* FNXC:HistoryCollectionLayout 2026-09-13-16:29: History is a read-only chronological collection with no owned detail controller, so it uses the shared bounded shell without inventing a sidebar or create action. */
+  const content = (
+    <ViewLayout className={`patchnode-view${floating ? " patchnode-view--floating" : ""}`} data-testid="patchnode-view" aria-labelledby="patchnode-title" contentOwnsScroll header={<ViewHeader
         icon={History}
         title={t("patchnode.title", "History")}
         titleId="patchnode-title"
+        onClose={floating?.onClose}
         actions={(
           <label className="patchnode-search" role="search">
             <Search aria-hidden="true" />
@@ -119,8 +127,8 @@ export function PatchnodeView({ projectId, onOpenTaskDetail }: PatchnodeViewProp
             />
           </label>
         )}
-      />
-      <div className="patchnode-view__content">
+      />}>
+      <div className="patchnode-view__content" ref={contentRef}>
         {loading ? <p className="patchnode-state">{t("patchnode.loading", "Loading History…")}</p> : null}
         {!loading && error ? (
           <div className="card patchnode-state">
@@ -141,7 +149,19 @@ export function PatchnodeView({ projectId, onOpenTaskDetail }: PatchnodeViewProp
               <span>{t("patchnode.entryCount", { count: day.entries.length, defaultValue: "{{count}} entries" })}</span>
             </header>
             <div className="patchnode-day__entries">
-              {day.entries.map((entry) => (
+              {day.entries.map((entry) => {
+                /*
+                FNXC:PatchnodeView 2026-09-15-23:26:
+                FN-444: an entry captured before the ledger learned the canonical task label — or one whose
+                task has since been deleted, so the repair pass can never reach it — stores its own task id
+                as both label and body. History must never repeat the identifier, so each line is rendered
+                only when it adds information: the label when it is neither empty nor the id already shown
+                in the metadata chip, and the body when it is neither empty nor a repeat of the label or id.
+                An omitted line mounts NO element, so no empty shell contributes to the card's flex gap.
+                */
+                const label = entry.title.trim() && entry.title.trim() !== entry.taskId ? entry.title : "";
+                const body = entry.body.trim() && entry.body.trim() !== entry.taskId && entry.body !== label ? entry.body : "";
+                return (
                 <button
                   className={`card patchnode-entry patchnode-entry--${entry.kind}${entry.revertedAt ? " patchnode-entry--reverted" : ""}`}
                   key={entry.entryId}
@@ -154,15 +174,23 @@ export function PatchnodeView({ projectId, onOpenTaskDetail }: PatchnodeViewProp
                     {entry.kind === "reverted" ? <span className="patchnode-entry__badge patchnode-entry__badge--cancelled"><RotateCcw aria-hidden="true" />{t("patchnode.cancelled", "Cancelled")}</span> : null}
                     {entry.kind === "completed" && entry.revertedAt ? <span className="patchnode-entry__badge">{t("patchnode.reverted", "Reverted")}</span> : null}
                   </span>
-                  <strong>{entry.title}</strong>
-                  <span className="patchnode-entry__body">{entry.body}</span>
+                  {label ? <strong>{label}</strong> : null}
+                  {body ? <span className="patchnode-entry__body">{body}</span> : null}
                 </button>
-              ))}
+                );
+              })}
             </div>
           </section>
         )) : null}
-        {!loading && !error && hasMore ? <button className="btn patchnode-load-more" type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? t("patchnode.loadingMore", "Loading…") : t("patchnode.loadMore", "Load more")}</button> : null}
+        {!loading && !error && hasMore ? <div ref={pagination.sentinelRef} className="patchnode-load-more" role="status" aria-live="polite" data-testid="patchnode-auto-pagination-sentinel">{loadingMore ? t("patchnode.loadingMore", "Loading…") : null}</div> : null}
       </div>
-    </section>
+    </ViewLayout>
   );
+  if (!floating) return content;
+  /*
+  FNXC:HistoryModalSurface 2026-09-15-04:29:
+  FN-403: this is the ONLY History presentation. The activation wrapper must carry the window's full height,
+  because `.patchnode-view` is `height: 100%`; a bare unsized div collapsed the scrollable body inside the window.
+  */
+  return <FloatingWindow title={t("patchnode.title", "History")} ariaLabel={t("patchnode.title", "History")} onClose={() => void floating.onClose()} windowKey="history-view" hideHeader dragHandleSelector=".view-header" minSize={{ width: 360, height: 280 }} raiseToFrontSignal={floating.raiseToFrontSignal}><div className="patchnode-view__window-body" onPointerDown={floating.onActivate} onFocusCapture={floating.onActivate}>{content}</div></FloatingWindow>;
 }

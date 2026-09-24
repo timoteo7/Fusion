@@ -252,20 +252,12 @@ export function hasAdvancedPastPlanning(
   `resolvePlannerLanesForTaskAsync` and passes the answer in.
 
   The default is `LEGACY_PLANNER_LANES`, which populates all four roles, so a caller that passes
-  nothing is byte-identical to the four literals this replaces. A workflow that declares columns but
-  no archive lane leaves that arm undefined and it cannot match — the board has no such lane.
+  nothing preserves the built-in planning vocabulary.
   */
-  roles: { mergedPlanningColumn?: string; lanes?: PlannerLanes; archivedColumn?: string } = { mergedPlanningColumn: "todo" },
+  roles: { mergedPlanningColumn?: string; lanes?: PlannerLanes } = { mergedPlanningColumn: "todo" },
 ): boolean {
   const lanes = roles.lanes ?? LEGACY_PLANNER_LANES;
-  /*
-  `archivedColumn` is a SEPARATE argument rather than a fifth `PlannerLanes` role, and that is a
-  deliberate scope choice. Adding the field surfaced a real divergence between the sync and async
-  planner-lane twins — the shared `_workflow-vocabulary-fixture` models no archive lane, so the two
-  disagree there — and that fixture backs 37 test files. The divergence is worth its own change;
-  it is not this conversion's to force. Absent, the legacy id keeps the previous answer.
-  */
-  const advanced = [lanes.wip, lanes.review, lanes.complete, roles.archivedColumn ?? (roles.lanes ? undefined : "archived")];
+  const advanced = [lanes.wip, lanes.review, lanes.complete];
   if (advanced.some((column) => column !== undefined && column === task.column)) {
     return true;
   }
@@ -469,11 +461,10 @@ export async function resolveReplanTargetColumn(store: TaskStore, taskId: string
  * reopen-to-todo/triage block clears `task.worktree` but deliberately leaves `task.branch`
  * intact, so an unguarded replan move produced a split-brain row: no worktree pointer, but
  * still owning `fusion/<id>`, which is still checked out in the worktree that was just
- * orphaned. The next planning entry (`ensureTaskWorktreeForPlanning` ->
- * `ensureGraphCustomNodeWorktree` -> `acquireTaskWorktree`) therefore skipped its resume
- * branch (gated on `task.worktree`), tried to create the SAME branch fresh, collided, and
- * fell into `cleanupConflictingWorktree` — force-removing the previous worktree and
- * `git branch -D`-ing `fusion/<id>` before re-cutting it off the integration branch.
+ * orphaned. Planning now preserves this metadata without acquiring or touching the checkout;
+ * the next write-capable execution node resumes through `ensureGraphCustomNodeWorktree` ->
+ * `acquireTaskWorktree`. Clearing the pointer would make that execution entry skip its resume
+ * branch, collide with the still-checked-out task branch, and destructively recreate the checkout.
  * Observed on FN-8603: two Plan Review REVISE bounces burned two full teardown +
  * `git worktree add` + init-command cycles (~10s each) and two branch delete/recreate rounds
  * for zero benefit — planning writes its spec to the task store, not the worktree, so the

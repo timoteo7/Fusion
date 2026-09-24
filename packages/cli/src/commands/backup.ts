@@ -132,7 +132,7 @@ export async function runBackupList(projectName?: string): Promise<void> {
       return;
     }
 
-    const totalSize = pairs.reduce((sum, pair) => sum + (pair.project?.size ?? 0) + (pair.central?.size ?? 0), 0);
+    const totalSize = pairs.reduce((sum, pair) => sum + (pair.project?.size ?? 0) + (pair.central?.size ?? 0) + (pair.migrations?.size ?? 0), 0);
     const formattedTotal = formatBytes(totalSize);
 
     console.log("Date                      Size      Filename");
@@ -141,12 +141,11 @@ export async function runBackupList(projectName?: string): Promise<void> {
     for (const pair of pairs) {
       if (pair.project) {
         const date = formatListDate(pair.project.createdAt);
-        const pairSize = formatBytes((pair.project?.size ?? 0) + (pair.central?.size ?? 0)).padEnd(10);
-        const noSibling = pair.central ? "" : "   (no central sibling)";
+        const pairSize = formatBytes((pair.project?.size ?? 0) + (pair.central?.size ?? 0) + (pair.migrations?.size ?? 0)).padEnd(10);
+        const noSibling = pair.central ? (pair.migrations ? "" : "   (migration bookkeeping unavailable)") : "   (no central sibling)";
         console.log(`${date}  ${pairSize}  ${pair.project.filename}${noSibling}`);
-        if (pair.central) {
-          console.log(`${" ".repeat(28)}${formatBytes(pair.central.size).padEnd(10)}  └─ ${pair.central.filename}`);
-        }
+        if (pair.central) console.log(`${" ".repeat(28)}${formatBytes(pair.central.size).padEnd(10)}  └─ ${pair.central.filename}`);
+        if (pair.migrations) console.log(`${" ".repeat(28)}${formatBytes(pair.migrations.size).padEnd(10)}  └─ ${pair.migrations.filename}`);
         continue;
       }
 
@@ -182,21 +181,28 @@ export async function runBackupRestore(filename: string, projectName?: string): 
     context = resolved.context;
     const { manager } = resolved;
 
-    console.log(`Restoring backup: ${filename}`);
-    console.log("A pre-restore backup will be created first.\n");
+    console.log(`Restoring PostgreSQL backup: ${filename}`);
+    console.log("A retained project/archive + central + migration-bookkeeping pre-restore stem will be created first.");
+    console.log("Migration bookkeeping is restored with project/archive data when the selected stem contains it; central-only and legacy restores leave it unchanged.\n");
 
     try {
-      await manager.restoreBackup(filename, { createPreRestoreBackup: true });
-      if (filename.startsWith("fusion-central-")) {
-        console.log(`Successfully restored central database from ${filename}`);
-        console.log("Created pre-restore snapshot: fusion-central-pre-restore-<timestamp>.db");
+      const result = await manager.restoreBackup(filename, { createPreRestoreBackup: true });
+      if (result.restored.length === 2) {
+        console.log(`Successfully restored project/archive and central schemas from the selected dump pair.`);
+      } else if (result.restored[0] === "central") {
+        console.log(`Successfully restored the central schema from ${filename}`);
       } else {
-        console.log(`Successfully restored project database from ${filename}`);
-        console.log("Created pre-restore snapshots: fusion-pre-restore-<timestamp>.db and (if paired) fusion-central-pre-restore-<timestamp>.db");
+        console.log(`Successfully restored the project/archive schemas from ${filename}`);
+      }
+      console.log(`Migration bookkeeping: ${result.migrationBookkeeping}.`);
+      if (result.preRestoreBackup?.project && result.preRestoreBackup.central) {
+        const migrations = result.preRestoreBackup.migrations ? ` + ${result.preRestoreBackup.migrations.filename}` : "";
+        console.log(`Retained pre-restore dumps: ${result.preRestoreBackup.project.filename} + ${result.preRestoreBackup.central.filename}${migrations}`);
       }
     } catch (err) {
       console.error(`Restore failed: ${(err as Error).message}`);
       await closeProjectStore(context);
+      context = undefined;
       process.exit(1);
     }
   } catch (error) {

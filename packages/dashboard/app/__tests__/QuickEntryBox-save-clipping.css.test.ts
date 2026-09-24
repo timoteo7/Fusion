@@ -33,24 +33,33 @@ It would happily pass on CSS that does not actually lay out correctly — do not
 here as evidence the button renders. Re-verify in a browser when touching this row.
 */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { readAppFile } from "../test/cssFixture";
 
-const css = readFileSync(resolve(__dirname, "../components/QuickEntryBox.css"), "utf8");
+const css = readAppFile("components/QuickEntryBox.css");
 
-/** Extract a top-level rule body, asserting it is not nested inside an @media block. */
-function ruleBody(selector: string): { body: string; index: number } {
-  const index = css.indexOf(`${selector} {`);
+/**
+ * Extract a rule body for `selector`. The stylesheet legitimately declares the same selector more than
+ * once (layout floor vs. token sizing vs. the mobile breakpoint), so `contains` selects WHICH declaration
+ * the assertion is about instead of silently binding to whichever happens to come first in the file.
+ */
+function ruleBody(selector: string, contains?: string): { body: string; index: number } {
+  let index = css.indexOf(`${selector} {`);
   expect(index, `rule "${selector}" must exist`).toBeGreaterThan(-1);
-  const start = css.indexOf("{", index) + 1;
-  let depth = 1;
-  let i = start;
-  while (i < css.length && depth > 0) {
-    if (css[i] === "{") depth += 1;
-    if (css[i] === "}") depth -= 1;
-    i += 1;
+  let body = "";
+  while (index > -1) {
+    const start = css.indexOf("{", index) + 1;
+    let depth = 1;
+    let i = start;
+    while (i < css.length && depth > 0) {
+      if (css[i] === "{") depth += 1;
+      if (css[i] === "}") depth -= 1;
+      i += 1;
+    }
+    body = css.slice(start, i - 1);
+    if (!contains || body.includes(contains)) return { body, index };
+    index = css.indexOf(`${selector} {`, i);
   }
-  return { body: css.slice(start, i - 1), index };
+  throw new Error(`rule "${selector}" containing "${contains}" must exist`);
 }
 
 /** True when `index` falls inside any @media block — i.e. the rule is breakpoint-scoped. */
@@ -106,6 +115,62 @@ describe("QuickEntryBox.css — Save button is never clipped (mobile report)", (
       const { index } = ruleBody(selector);
       expect(isInsideMediaQuery(index), `${selector} must not be breakpoint-scoped`).toBe(false);
     }
+  });
+
+  // FN-478 replaced the vertical clip-path mask + Play icon with a circular progress ring. The
+  // invariants that survive that change are the fixed token-sized target itself; the fill affordance
+  // assertions now describe the ring, and negative guards keep the removed mask from coming back.
+  it("keeps the Alpha icon-only hold ring inside fixed token-sized desktop and mobile targets", () => {
+    const { body } = ruleBody('.quick-entry-primary-group [data-testid="quick-entry-save"]', "--ui-control-height");
+    expect(body).toMatch(/min-width:\s*var\(--ui-control-height\)/);
+    expect(body).toMatch(/width:\s*var\(--ui-control-height\)/);
+    expect(body).toMatch(/overflow:\s*hidden/);
+    expect(body).toMatch(/padding:\s*0/);
+
+    // The ring is an overlay layer covering the whole button, hidden until the hold engages.
+    expect(css).toMatch(/\.quick-entry-save-ring\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0/);
+    const ring = ruleBody(".quick-entry-save > .quick-entry-save-icons > .quick-entry-save-ring").body;
+    expect(ring).toMatch(/opacity:\s*0/);
+    expect(ruleBody(".quick-entry-save-ring__indicator", "stroke:").body).toMatch(/stroke:\s*var\(--color-warning\)/);
+    // The SVG is sized relatively so it stays inside the button's `overflow: hidden` at both control sizes.
+    expect(ruleBody(".quick-entry-save-ring > svg").body).toMatch(/width:\s*\d+%/);
+
+    expect(css).toMatch(/animation:\s*quick-entry-hold-ring var\(--quick-entry-hold-duration\) linear forwards/);
+    // FN-453: the fill is scoped to the engaged hold state only, so a brief click never flashes the ring.
+    expect(css).toMatch(
+      /\.quick-entry-save\[data-hold-state="holding"\] \.quick-entry-save-ring__indicator\s*\{\s*animation:/,
+    );
+    expect(css).not.toMatch(/\.quick-entry-save\s+\.quick-entry-save-ring__indicator\s*\{[^}]*animation:/);
+    expect(css).toMatch(/@keyframes quick-entry-hold-ring\s*\{[\s\S]*stroke-dashoffset:\s*0/);
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*animation:\s*none[\s\S]*stroke-dashoffset:\s*50/);
+    expect(css).toMatch(/@media \(max-width: 768px\)[\s\S]*min-width:\s*var\(--ui-touch-height\)/);
+
+    // Negative guards: the removed vertical mask must not return.
+    expect(css).not.toContain("quick-entry-save-progress");
+    expect(css).not.toContain("quick-entry-hold-progress");
+    expect(css).not.toContain("clip-path");
+  });
+
+  it("keeps every Alpha primary icon in the same mobile touch square while desktop remains unchanged", () => {
+    const selector = '.quick-entry-primary-group .btn-icon';
+    const { body, index } = ruleBody(selector, "--ui-touch-height");
+    expect(isInsideMediaQuery(index)).toBe(true);
+
+    for (const property of ["width", "min-width", "max-width", "height", "min-height", "max-height"] as const) {
+      expect(body).toMatch(new RegExp(`(?:^|\\n)\\s*${property}:\\s*var\\(--ui-touch-height\\);`));
+    }
+    expect(body).toMatch(/flex:\s*0\s+0\s+var\(--ui-touch-height\)/);
+    expect(body).toMatch(/padding:\s*0/);
+    expect(body).toMatch(/align-items:\s*center/);
+    expect(body).toMatch(/justify-content:\s*center/);
+    expect(body).not.toMatch(/\d+(?:\.\d+)?px/);
+
+    const desktopSave = ruleBody('.quick-entry-primary-group [data-testid="quick-entry-save"]', "--ui-control-height").body;
+    expect(desktopSave).toMatch(/width:\s*var\(--ui-control-height\)/);
+    expect(desktopSave).not.toContain("--ui-touch-height");
+    expect(css).not.toMatch(
+      /\[data-alpha-surface="true"\] \.quick-entry-options-group[^{}]*\{[^}]*(?:width|min-width|max-width):\s*var\(--ui-touch-height\)/,
+    );
   });
 
   it("keeps the icon touch-target floor the fix must not claw width back from", () => {

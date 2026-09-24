@@ -18,6 +18,11 @@ import {
   writeBoardWorkflowSelection,
 } from "../utils/boardWorkflowSelection";
 import { notifyWorkflowSettingValuesUpdatedFromSse } from "../utils/workflowSettingValuesEvents";
+import {
+  notifyBoardWorkflowSelectionChanged,
+  subscribeBoardWorkflowSelection,
+  type BoardWorkflowSelectionValue,
+} from "../utils/boardWorkflowSelectionEvents";
 
 /*
 FNXC:Workflows 2026-06-22-17:00:
@@ -27,6 +32,16 @@ FNXC:Workflows 2026-06-29-14:45:
 Transient board-workflows fetch failures are not authoritative workflow-mode disable signals. Preserve the last payload and durable workflow selection on API/focus/refresh blips so operators return to their selected lane unless the server explicitly returns workflow mode off, an empty list, or a single unswitchable workflow.
 
 Per-consumer subscription semantics are preserved: each call to this hook installs its OWN visibilitychange/focus listeners and its OWN SSE subscription, so two consumers (Board + Planning slot) each subscribe and unsubscribe independently — the hook does not dedupe across consumers. Dependencies (fetch, subscribeSse, cache helpers) are injectable to keep the hook DI-friendly and free of App-level singletons.
+
+FNXC:BoardWorkflowSelection 2026-09-16-23:24:
+FN-483 — LE CHOIX DE L'OPÉRATEUR EST PARTAGÉ, LES DONNÉES RESTENT LOCALES. Depuis qu'un seul sélecteur contextuel
+existe par en-tête (le Board de fond sur téléphone), les autres consommateurs montés du MÊME projet doivent suivre ce
+choix : une List déjà visitée restait sinon sur l'ancienne lane, puisque la préférence durable n'est relue qu'au
+montage ou au changement de projet. Le setter piloté par l'opérateur publie donc la valeur brute via
+`boardWorkflowSelectionEvents` APRÈS commit, jamais depuis un updater React ; les récepteurs appliquent l'état sans
+réémettre, sans réécrire le stockage et sans rappeler le miroir serveur, de sorte qu'un choix produit AU PLUS UN
+miroir. Les fetch, l'abonnement SSE, le fencing par séquence et le payload restent strictement par instance ; aucun
+cache global n'est introduit. L'ancien contrat d'isolation par instance ne vaut plus que D'UN PROJET À L'AUTRE.
 */
 
 export interface UseBoardWorkflowsParams {
@@ -62,7 +77,7 @@ export interface UseBoardWorkflowsResult {
    *  task missing from `taskWorkflowIds`, since task→workflow assignment emits no workflow SSE).
    *  Resolves when the fetch has SETTLED — it never rejects, since a failed fetch is
    *  non-authoritative — so a caller that must not overlap attempts can await it. */
-  refreshBoardWorkflows: (options?: { forceFresh?: boolean }) => Promise<void>;
+  refreshBoardWorkflows: (options?: { forceFresh?: boolean; taskIds?: readonly string[] }) => Promise<void>;
   /**
    * Raw state setter, exposed so Board can apply optimistic task→workflow assignment.
    * Planning does not use this.
@@ -90,6 +105,13 @@ export function useBoardWorkflows(params: UseBoardWorkflowsParams): UseBoardWork
   const storedSelectionRef = useRef<string | null>(selectedWorkflowId);
   /** Lane mirror queued by the user-driven setter; `undefined` = nothing to flush. */
   const pendingLaneMirrorRef = useRef<string | null | undefined>(undefined);
+  /*
+  FNXC:BoardWorkflowSelection 2026-09-16-23:24:
+  FN-483 : publication inter-consommateurs mise en file par le setter opérateur. Le PROJET D'ORIGINE est mémorisé
+  avec la valeur brute, afin qu'un changement de projet survenu entre le choix et le commit ne diffuse jamais la
+  sélection dans le projet suivant. `undefined` = rien en attente.
+  */
+  const pendingSelectionBroadcastRef = useRef<{ projectId?: string; selection: BoardWorkflowSelectionValue } | undefined>(undefined);
 
   const setSelectedWorkflowId = useCallback<Dispatch<SetStateAction<string | null>>>((nextSelection) => {
     setSelectedWorkflowIdState((previousSelection) => {
@@ -115,6 +137,13 @@ export function useBoardWorkflows(params: UseBoardWorkflowsParams): UseBoardWork
       pendingLaneMirrorRef.current = resolvedSelection && resolvedSelection !== ALL_WORKFLOWS_BOARD_VIEW_ID
         ? resolvedSelection
         : null;
+      /*
+      FNXC:BoardWorkflowSelection 2026-09-16-23:24:
+      FN-483 : même discipline que le miroir — mise en file ici, émission après commit. Émettre depuis cet updater
+      ferait réagir d'autres composants pendant un rendu, et React peut invoquer un updater plus d'une fois. La valeur
+      diffusée est la valeur BRUTE, sentinel agrégé inclus : c'est une vue partagée, pas un identifiant serveur.
+      */
+      pendingSelectionBroadcastRef.current = { projectId, selection: resolvedSelection };
       return resolvedSelection;
     });
   }, [projectId]);
@@ -135,6 +164,34 @@ export function useBoardWorkflows(params: UseBoardWorkflowsParams): UseBoardWork
     pendingLaneMirrorRef.current = undefined;
     void persistBoardWorkflowSelection(pending, projectId).catch(() => {});
   });
+
+  /*
+  FNXC:BoardWorkflowSelection 2026-09-16-23:24:
+  FN-483 : diffusion du choix opérateur aux autres consommateurs montés du même projet, après commit. La demande est
+  VIDÉE AVANT l'émission pour résister à la réentrance et à StrictMode : un récepteur ne peut donc pas provoquer une
+  seconde publication du même choix. Seul ce chemin publie ; ni le montage, ni l'ouverture d'un drawer, ni la
+  réparation d'une sélection périmée ne se transforment en choix utilisateur.
+  */
+  useEffect(() => {
+    const pending = pendingSelectionBroadcastRef.current;
+    if (pending === undefined) return;
+    pendingSelectionBroadcastRef.current = undefined;
+    notifyBoardWorkflowSelectionChanged(pending.projectId, pending.selection);
+  });
+
+  /*
+  FNXC:BoardWorkflowSelection 2026-09-16-23:24:
+  FN-483 : réception. On n'applique QUE l'état local — l'émetteur a déjà écrit la préférence durable et poussé le
+  miroir serveur, donc réécrire ici multiplierait les requêtes par abonné. `storedSelectionRef` suit la valeur pour
+  que la réparation d'une sélection périmée garde son comportement. L'abonnement est scopé par projet et retiré au
+  changement de projet comme au démontage.
+  */
+  useEffect(() => {
+    return subscribeBoardWorkflowSelection(projectId, (selection) => {
+      storedSelectionRef.current = selection;
+      setSelectedWorkflowIdState(selection);
+    });
+  }, [projectId]);
 
   // Stale-response guard: a monotonic sequence ref drops out-of-order responses.
   const boardWorkflowsFetchSeqRef = useRef(0);
@@ -157,7 +214,7 @@ export function useBoardWorkflows(params: UseBoardWorkflowsParams): UseBoardWork
   promise never rejects — a failed fetch stays non-authoritative — so awaiting it is
   safe for every caller.
   */
-  const refreshBoardWorkflows = useCallback((options?: { forceFresh?: boolean }): Promise<void> => {
+  const refreshBoardWorkflows = useCallback((options?: { forceFresh?: boolean; taskIds?: readonly string[] }): Promise<void> => {
     const seq = ++boardWorkflowsFetchSeqRef.current;
     if (options?.forceFresh) {
       clearBoardWorkflowsCache(projectId);
@@ -267,16 +324,24 @@ export function useBoardWorkflows(params: UseBoardWorkflowsParams): UseBoardWork
       return;
     }
 
+    /*
+    FNXC:WorkflowAggregation 2026-09-16-23:24:
+    FN-483 : la vue agrégée est évaluée AVANT le cas mono-workflow. Board portait auparavant son propre état
+    `isAllWorkflowsViewSelected` et écrivait le sentinel en contournant ce setter ; c'est pourquoi « All workflows »
+    survivait à un projet ne proposant qu'un workflow sélectionnable. Maintenant que la sélection agrégée passe par ce
+    chemin commun, la réparation ne doit pas l'effacer : seul un projet sans aucun workflow (`!workflowMode`,
+    traité au-dessus) la retire.
+    */
+    if (isAllWorkflowsSelected) {
+      return;
+    }
+
     if (workflowOptions.length < 2) {
       if (storedSelectionRef.current !== null) {
         removeBoardWorkflowSelection(projectId);
         storedSelectionRef.current = null;
       }
       setSelectedWorkflowIdState(selectedWorkflow?.id ?? null);
-      return;
-    }
-
-    if (isAllWorkflowsSelected) {
       return;
     }
 

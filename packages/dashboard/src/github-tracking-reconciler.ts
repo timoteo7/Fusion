@@ -5,38 +5,16 @@ import type { GlobalSettings, LifecycleColumns, ProjectSettings, Task, TaskSourc
 import { resolveTaskLifecycleColumns } from "@fusion/core";
 import { resolveGithubTrackingAuth } from "./github-auth.js";
 import { GitHubClient } from "./github.js";
+import { safeLogTaskEntry } from "./task-log-safety.js";
 
 const RECONCILE_SCAN_LIMIT = 200;
 const RECONCILE_CONCURRENCY_LIMIT = 4;
-
+const DELETED_DIAGNOSTIC_SIGNATURE_CAP = 50;
 
 /*
-FNXC:WorkflowResolvedColumns 2026-07-31-05:10 (fleet phase — the SYNC-FILTER class, decided):
-PREFETCH A RESOLVED MAP, then filter synchronously. This is the pattern for every
-`.filter((task) => task.column === "<id>")` over a list of OTHER tasks — a shape I flagged across four
-files and left unconverted while waiting for a decision that had to be mine.
-
-THE TWO OPTIONS AND WHY THIS ONE. The alternative is making the predicates async, which forces every
-caller into `for await` and turns one list comprehension into a sequential walk. Prefetching keeps the
-filters synchronous and puts the awaits in one bounded place; it also lets the IR cache do its job, which
-is the whole reason `resolveTaskLifecycleColumns` takes a caller-owned one:
-
-  "A self-healing pass over 400 cards spanning three workflows must read three IRs, not 400."
-
-So the cache is shared across the WHOLE reconcile run, not per pass. The three passes in this file each
-list the board independently; one cache means the IR is read once per distinct workflow for all of them.
-`resolveLifecycleColumns` itself is pure and is not memoized by that cache, so this still costs one cheap
-struct build per task — acceptable in a background reconcile, and stated rather than hidden.
-
-WHY CONVERTING `archived` HERE IS NOT THE SPLIT BRAIN #2724 DESCRIBES. That guard covers the archived
-gate in `packages/core`, where the same question is answered in TypeScript AND in SQL, so converting one
-encoding alone diverges them. This file contains ZERO SQL (measured: no drizzle, no `sql` template, no
-eq/ne) and calls `listTasks({ includeArchived: true })` — the SQL half has already been told to include
-archived rows, so this filter SELECTS among rows it was handed rather than deciding liveness a second
-time. Gate versus consumer is the distinction; a consumer can be converted alone.
-
-WHAT IT COST BEFORE. On a board whose terminal lanes are renamed, every filter here matched nothing, so
-the reconciler closed NO GitHub issues and reported `scanned: 0` — a clean-looking pass that did nothing.
+FNXC:WorkflowResolvedColumns 2026-07-31-05:10:
+Prefetch one workflow-lifecycle map per bounded live-task page, then filter synchronously. Custom
+Complete columns close tracked issues without loading or reviving historical archive snapshots.
 */
 type LifecycleByTaskId = ReadonlyMap<string, LifecycleColumns | undefined>;
 
@@ -71,11 +49,10 @@ async function resolveLifecycleByTaskId(
   return byTaskId;
 }
 
-/** Is this task in a terminal lane — complete or archived — by its OWN workflow's roles? */
+/** Is this task in a Complete lane by its own workflow's roles? */
 function isTerminalTask(task: Task, lifecycleByTaskId: LifecycleByTaskId): boolean {
   const lifecycle = lifecycleByTaskId.get(task.id);
-  return task.column === (lifecycle?.complete ?? "done")
-    || task.column === (lifecycle?.archived ?? "archived");
+  return task.column === (lifecycle?.complete ?? "done");
 }
 
 function hasLinkedTrackingIssue(task: Task): boolean {
@@ -89,12 +66,26 @@ function compareUpdatedAtDesc(a: Task, b: Task): number {
   return delta !== 0 ? delta : b.id.localeCompare(a.id);
 }
 
-/** Is this task in the ARCHIVED lane specifically (used for the FN-5577 done-heuristic)? */
-function isArchivedTask(task: Task, lifecycleByTaskId: LifecycleByTaskId): boolean {
-  return task.column === (lifecycleByTaskId.get(task.id)?.archived ?? "archived");
-}
-
 export class GitHubTrackingReconciler {
+  private readonly deletedDiagnosticSignaturesByStore = new WeakMap<TaskStore, {
+    authSignatures: Set<string>;
+    taskSignatures: Set<string>;
+  }>();
+
+  private warnDeletedDiagnostic(store: TaskStore, signature: string, message: string): void {
+    const known = this.deletedDiagnosticSignaturesByStore.get(store) ?? { authSignatures: new Set<string>(), taskSignatures: new Set<string>() };
+    if (signature.startsWith("auth:")) {
+      if (known.authSignatures.has(signature)) return;
+      known.authSignatures.add(signature);
+    } else {
+      if (known.taskSignatures.has(signature)) return;
+      known.taskSignatures.add(signature);
+      // Keep backlog failures diagnostic without retaining unbounded deleted-task history.
+      while (known.taskSignatures.size > DELETED_DIAGNOSTIC_SIGNATURE_CAP) known.taskSignatures.delete(known.taskSignatures.values().next().value!);
+    }
+    this.deletedDiagnosticSignaturesByStore.set(store, known);
+    severityAuditLog.warn(message);
+  }
   /*
   FNXC:GithubTrackingReconcile 2026-07-16-15:40:
   The three reconcile passes are INDEPENDENT and each MUST run even when another throws.
@@ -110,14 +101,14 @@ export class GitHubTrackingReconciler {
   */
   async runSweep(store: TaskStore, options: { offset: number }): Promise<{ nextOffset: number }> {
     let nextOffset = 0;
-    await this.runPass("deleted/archived", async () => {
-      const result = await this.reconcileDeletedAndArchived(store, {
+    await this.runPass("deleted", async () => {
+      const result = await this.reconcileDeletedTasks(store, {
         offset: options.offset,
         limit: RECONCILE_SCAN_LIMIT,
       });
       nextOffset = result.hasMore ? options.offset + RECONCILE_SCAN_LIMIT : 0;
     });
-    // Done-task tracking + source-issue passes run regardless of the deleted/archived pass outcome.
+    // Done-task tracking + source-issue passes run regardless of the deleted-task pass outcome.
     await this.runPass("done-task tracking", () => this.reconcile(store));
     await this.runPass("source-issue", () => this.reconcileSourceIssues(store));
     return { nextOffset };
@@ -134,7 +125,7 @@ export class GitHubTrackingReconciler {
   }
 
   async reconcile(store: TaskStore): Promise<{ scanned: number; closed: number; skipped: number; errors: number }> {
-    const listedTasks = await store.listTasks({ slim: true, includeArchived: true });
+    const listedTasks = await store.listTasks({ slim: true, includeArchived: false });
     const allTasks = Array.isArray(listedTasks) ? listedTasks : [];
     /*
     FNXC:GithubTracking 2026-08-15-22:27:
@@ -153,9 +144,12 @@ export class GitHubTrackingReconciler {
     const globalSettings = (await store.getGlobalSettingsStore?.()?.getSettings?.() ?? {}) as Pick<GlobalSettings, never>;
     const resolution = resolveGithubTrackingAuth({ projectSettings, globalSettings });
     if (!resolution.ok) {
-      for (const task of tasks) {
-        await store.logEntry(task.id, "Skipped GitHub tracking issue reconciliation", resolution.message);
-      }
+      /*
+      FNXC:TerminalTaskWrites 2026-09-15-21:41:
+      Authentication outages are service-level state. Per-task log writes churn terminal rows on every
+      sweep, so retain one deduplicated diagnostic while leaving live issue reconciliation unchanged.
+      */
+      this.warnDeletedDiagnostic(store, `auth:tracking:${resolution.message}`, `[github-tracking-reconcile] skipped ${tasks.length} GitHub tracking task(s): ${resolution.message}`);
       return { scanned: tasks.length, closed: 0, skipped: tasks.length, errors: 0 };
     }
 
@@ -181,15 +175,16 @@ export class GitHubTrackingReconciler {
           return;
         }
 
-        const stateReason = isArchivedTask(task, lifecycleByTaskId) && !task.executionCompletedAt ? "not_planned" : "completed";
-        await client.setIssueState(issue.owner, issue.repo, issue.number, "closed", stateReason);
+        await client.setIssueState(issue.owner, issue.repo, issue.number, "closed", "completed");
         closed += 1;
       } catch (error) {
         errors += 1;
-        await store.logEntry(
+        await safeLogTaskEntry(
+          store,
           task.id,
           "Failed to reconcile GitHub tracking issue",
           error instanceof Error ? error.message : String(error),
+          { logger: severityAuditLog, context: "github-tracking-reconcile" },
         );
       }
     });
@@ -198,11 +193,11 @@ export class GitHubTrackingReconciler {
   }
 
   async reconcileSourceIssues(store: TaskStore): Promise<{ scanned: number; closed: number; skipped: number; errors: number }> {
-    const listedTasks = await store.listTasks({ slim: false, includeArchived: true });
+    const listedTasks = await store.listTasks({ slim: false, includeArchived: false });
     const allTasks = Array.isArray(listedTasks) ? listedTasks : [];
     const lifecycleByTaskId = await resolveLifecycleByTaskId(store, allTasks, new Map<string, WorkflowIr>(), {
       match: (task, lifecycle) => task.sourceIssue?.provider === "github"
-        && (task.column === (lifecycle?.complete ?? "done") || task.column === (lifecycle?.archived ?? "archived")),
+        && task.column === (lifecycle?.complete ?? "done"),
       limit: RECONCILE_SCAN_LIMIT,
     });
     const tasks = allTasks
@@ -217,9 +212,7 @@ export class GitHubTrackingReconciler {
     const globalSettings = (await store.getGlobalSettingsStore?.()?.getSettings?.() ?? {}) as Pick<GlobalSettings, never>;
     const resolution = resolveGithubTrackingAuth({ projectSettings, globalSettings });
     if (!resolution.ok) {
-      for (const task of tasks) {
-        await store.logEntry(task.id, "Skipped GitHub source issue reconciliation", resolution.message);
-      }
+      this.warnDeletedDiagnostic(store, `auth:source:${resolution.message}`, `[github-tracking-reconcile] skipped ${tasks.length} GitHub source issue task(s): ${resolution.message}`);
       return { scanned: tasks.length, closed: 0, skipped: tasks.length, errors: 0 };
     }
 
@@ -256,18 +249,19 @@ export class GitHubTrackingReconciler {
           return;
         }
 
-        const stateReason = isArchivedTask(task, lifecycleByTaskId) && !task.executionCompletedAt ? "not_planned" : "completed";
-        await client.setIssueState(owner, repo, issueNumberValue, "closed", stateReason);
+        await client.setIssueState(owner, repo, issueNumberValue, "closed", "completed");
         if (!sourceIssue.closedAt) {
           await persistSourceIssueClosedAt(store, task.id, sourceIssue, new Date().toISOString());
         }
         closed += 1;
       } catch (error) {
         errors += 1;
-        await store.logEntry(
+        await safeLogTaskEntry(
+          store,
           task.id,
           "Failed to reconcile GitHub source issue",
           error instanceof Error ? error.message : String(error),
+          { logger: severityAuditLog, context: "github-tracking-reconcile" },
         );
       }
     });
@@ -283,7 +277,7 @@ export class GitHubTrackingReconciler {
     store: TaskStore,
     options?: { offset?: number; limit?: number },
   ): Promise<{ scanned: number; filled: number; skipped: number; errors: number; hasMore: boolean }> {
-    const listedTasks = await store.listTasks({ slim: false, includeArchived: true });
+    const listedTasks = await store.listTasks({ slim: false, includeArchived: false });
     const offset = Number.isInteger(options?.offset) && (options?.offset ?? 0) > 0 ? options?.offset ?? 0 : 0;
     const limit = Number.isInteger(options?.limit) && (options?.limit ?? RECONCILE_SCAN_LIMIT) >= 0
       ? Math.min(options?.limit ?? RECONCILE_SCAN_LIMIT, RECONCILE_SCAN_LIMIT)
@@ -301,9 +295,7 @@ export class GitHubTrackingReconciler {
     const globalSettings = (await store.getGlobalSettingsStore?.()?.getSettings?.() ?? {}) as Pick<GlobalSettings, never>;
     const resolution = resolveGithubTrackingAuth({ projectSettings, globalSettings });
     if (!resolution.ok) {
-      for (const task of tasks) {
-        await store.logEntry(task.id, "Skipped GitHub source issue closed-at backfill", resolution.message);
-      }
+      this.warnDeletedDiagnostic(store, `auth:backfill:${resolution.message}`, `[github-tracking-reconcile] skipped ${tasks.length} GitHub source issue backfill task(s): ${resolution.message}`);
       return { scanned: tasks.length, filled: 0, skipped: tasks.length, errors: 0, hasMore };
     }
 
@@ -337,10 +329,12 @@ export class GitHubTrackingReconciler {
         filled += 1;
       } catch (error) {
         errors += 1;
-        await store.logEntry(
+        await safeLogTaskEntry(
+          store,
           task.id,
           "Failed to backfill GitHub source issue closed-at",
           error instanceof Error ? error.message : String(error),
+          { logger: severityAuditLog, context: "github-tracking-reconcile" },
         );
       }
     });
@@ -348,7 +342,7 @@ export class GitHubTrackingReconciler {
     return { scanned: tasks.length, filled, skipped, errors, hasMore };
   }
 
-  async reconcileDeletedAndArchived(
+  async reconcileDeletedTasks(
     store: TaskStore,
     options?: { offset?: number; limit?: number },
   ): Promise<{ scanned: number; closed: number; skipped: number; errors: number; hasMore: boolean }> {
@@ -357,30 +351,23 @@ export class GitHubTrackingReconciler {
     const tasks = Array.isArray(listedTasks?.tasks) ? listedTasks.tasks : [];
     const hasMore = listedTasks?.hasMore === true;
     /*
-    FNXC:WorkflowResolvedColumns 2026-07-31-05:20:
-    Resolved for the PAGE, not the board — this pass's list comes from
-    `listTasksForGithubTrackingReconcile`, which is already offset/limit bounded (<= RECONCILE_SCAN_LIMIT).
-
-    NOT the split brain #2724 documents, and I checked before converting: that store impl filters on
-    `deletedAt IS NOT NULL` AND `githubTracking IS NOT NULL` — it does NOT compare the column to
-    'archived', so there is no SQL-side encoding of this question to diverge from.
-
-    REACHABILITY, worth recording: in backend mode this pass returns only SOFT-DELETED rows (its own
-    comment says the archived-tasks fallback is a separate AsyncArchiveLineage subsystem, skipped here),
-    and `task.deletedAt` is tested FIRST in the stateReason chain below. So the archived arm is
-    effectively unreachable in backend mode today. Converted anyway rather than deleted: it is the
-    documented FN-5577 done-heuristic, and whether that fallback should be wired here is a separate
-    question from what vocabulary it speaks.
+    FNXC:GithubTrackingReconcile 2026-09-15-15:19:
+    Every row this pass holds was selected with `deletedAt IS NOT NULL`, so task-log writes are refused
+    by construction. Diagnostics belong in the service log and are first-occurrence-only: repeating them
+    each cycle recreates the reported symptom. Issue #3616's outbox cadence is owned by poll outcomes;
+    this pass owes idle projects quiescence: zero task-store writes and no repeated per-cycle work.
+    Retain at most 50 distinct signatures per store so a large deleted backlog cannot grow memory forever.
     */
-    const lifecycleByTaskId = await resolveLifecycleByTaskId(store, tasks, new Map<string, WorkflowIr>());
-
     const projectSettings = ((await store.getSettings()) ?? {}) as Pick<ProjectSettings, "githubAuthMode" | "githubAuthToken">;
     const globalSettings = (await store.getGlobalSettingsStore?.()?.getSettings?.() ?? {}) as Pick<GlobalSettings, never>;
     const resolution = resolveGithubTrackingAuth({ projectSettings, globalSettings });
     if (!resolution.ok) {
-      for (const task of tasks) {
-        await store.logEntry(task.id, "Skipped GitHub tracking issue reconciliation (deleted/archived pass)", resolution.message);
-      }
+      const signature = `auth:${resolution.message}:${tasks.length}`;
+      this.warnDeletedDiagnostic(
+        store,
+        signature,
+        `[github-tracking-reconcile] skipped ${tasks.length} deleted/archived GitHub tracking task(s): ${resolution.message}`,
+      );
       return { scanned: tasks.length, closed: 0, skipped: tasks.length, errors: 0, hasMore };
     }
 
@@ -406,22 +393,16 @@ export class GitHubTrackingReconciler {
           return;
         }
 
-        // Archived entries do not preserve the pre-archive column. FN-5577 uses
-        // executionCompletedAt as the done-heuristic for archived rows.
-        const stateReason = task.deletedAt
-          ? "not_planned"
-          : isArchivedTask(task, lifecycleByTaskId) && task.executionCompletedAt
-            ? "completed"
-            : "not_planned";
-
-        await client.setIssueState(issue.owner, issue.repo, issue.number, "closed", stateReason);
+        await client.setIssueState(issue.owner, issue.repo, issue.number, "closed", "not_planned");
         closed += 1;
       } catch (error) {
         errors += 1;
-        await store.logEntry(
-          task.id,
-          "Failed to reconcile GitHub tracking issue (deleted/archived pass)",
-          error instanceof Error ? error.message : String(error),
+        const message = error instanceof Error ? error.message : String(error);
+        const coordinates = `${issue.owner}/${issue.repo}#${issue.number}`;
+        this.warnDeletedDiagnostic(
+          store,
+          `task:${task.id}:${coordinates}:${message}`,
+          `[github-tracking-reconcile] failed deleted/archived GitHub tracking reconciliation for ${task.id} (${coordinates}): ${message}`,
         );
       }
     });
@@ -443,10 +424,12 @@ async function persistSourceIssueClosedAt(
   try {
     await store.updateTask(taskId, { sourceIssue: { ...sourceIssue, closedAt } });
   } catch (error) {
-    await store.logEntry(
+    await safeLogTaskEntry(
+      store,
       taskId,
       "Failed to persist GitHub source issue closed timestamp",
       error instanceof Error ? error.message : String(error),
+      { logger: severityAuditLog, context: "github-tracking-reconcile" },
     );
   }
 }

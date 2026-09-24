@@ -21,6 +21,11 @@ import {
   ACTIVE_WORKFLOW_WORK_ITEM_STATES,
   computePlanApprovalFingerprint,
   isPlanReviewSatisfied,
+  /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 publishes its per-card decision hold with the satisfied review result. */
+  HUMAN_PLAN_APPROVAL_REASON,
+  isHumanPlanApprovalEnabled,
+  isUnavailablePlanLockError,
+  PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC,
   PLAN_REVIEW_GROUP_ID,
   getBuiltinWorkflow,
   resolveColumnAgentBinding,
@@ -39,12 +44,22 @@ import { resolveWorkflowGateActivityClaim } from "./workflow-gate-activity.js";
 import type { ImplementationExit } from "./implementation-exit.js";
 import type { WorkflowGraphTaskRunResult } from "../workflows/workflow-graph-task-runner.js";
 import { WorkflowGraphTaskRunner } from "../workflows/workflow-graph-task-runner.js";
+/* FNXC:HumanMergeApproval 2026-09-17-18:09: FN-514's per-card delivery barrier and its create-only PR handoff. */
+/* FNXC:HumanMergeApproval 2026-09-17-22:32: FN-514 P0 remediation — the graph is also the rejection-processing owner. */
+import {
+  buildHumanMergeCorrectionPublicationDeps,
+  buildHumanMergeCreatePrHandoff,
+  evaluateHumanMergeDeliveryBarrier,
+  publishHumanMergeCorrection,
+} from "../workflows/human-merge-approval-boundary.js";
+import { captureMergeContentDescriptor } from "../merge/merge-content-capture.js";
 import { WorkflowCustomNodeExecutionService } from "../workflows/workflow-custom-node-execution.js";
 import {
   requiredArtifactReadFailedValue,
   workflowEntryArtifacts,
 } from "../execution/required-workflow-artifacts.js";
 import { getActiveNotificationService } from "../util/notifier.js";
+import { holdWorkflowAdmission, workflowAdmissionHoldReason } from "./workflow-admission-hold.js";
 
 export function buildWorkflowGateActivityMetadata(
   result: CoreWorkflowStepResult,
@@ -126,11 +141,24 @@ export type ExecuteWorkflowGraphDeps = {
   readTaskArtifact: AnyFn;
   recoverMissingRequiredArtifacts: AnyFn;
   requestPreMergeOptionalStepFix: AnyFn;
+  /*
+  FNXC:HumanMergeApproval 2026-09-17-22:32:
+  FN-514 P0 remediation — the EXISTING review → WIP remediation bounce. An accepted human rejection
+  resumes implementation through exactly this contained move, never through a move to Planning.
+  */
+  scheduleWorkflowRerun: (
+    taskId: string,
+    worktreePath: string,
+    message: string,
+    preserveResumeState?: boolean,
+    persistWorktreePath?: boolean,
+  ) => void;
   /** FNXC:PlanReviewNoOp 2026-08-09-22:10: CLOSE_NO_OP accepted terminalization (FN-8841). */
   completePlanReviewNoOp: AnyFn;
   /** FNXC:PlanReviewNoOp 2026-08-09-22:10: hold failed/invalid close evidence on the continuation. */
   holdPlanReviewNoOpContinuation: AnyFn;
   runGraphCustomNode: AnyFn;
+  executeWorkflowStep: AnyFn;
   terminateAllChildren: AnyFn;
 };
 
@@ -268,7 +296,11 @@ type WorkflowStepResultPatch = Pick<
   | "approvedPlanFingerprint"
   | "reviewConvergenceStage"
   | "reviewConvergenceEscalationCount"
->;
+> & {
+  /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 publishes its decision hold in the SAME write as the satisfied Plan Review result. */
+  status?: Task["status"];
+  awaitingApprovalReason?: Task["awaitingApprovalReason"] | null;
+};
 
 type FencedWorkflowStepResultOutcome =
   | { applied: true; task: Task }
@@ -319,11 +351,29 @@ function buildWorkflowStepResultPatch(
     revisionKey: resultToPersist.workflowStepId,
     workflowStepId: resultToPersist.workflowStepId,
   }) ?? sameGate;
+  /*
+  FNXC:HumanPlanApproval 2026-09-15-06:24:
+  FN-408 — for a card carrying the per-card human requirement, the moment Plan Review becomes
+  satisfied is exactly the moment the operator decision becomes possible. Publishing the
+  `awaiting-approval` hold in the SAME durable write as the review result removes the window in
+  which the review is satisfied but nothing yet says a human must decide. The hold is stamped with
+  its own reason so notifications and controls never mislabel it as the revision-cap park.
+
+  This is presentation/routing state only — the authoritative gate is the durable decision itself
+  (isHumanPlanApprovalPending), which every release surface consults independently of status.
+  */
+  const publishesHumanApprovalHold = isPlanReviewResult
+    && isPlanReviewSatisfied(resultToPersist)
+    && isHumanPlanApprovalEnabled(current)
+    && current.status !== "awaiting-approval";
   return {
     resultToPersist,
     results,
     patch: {
       workflowStepResults: results,
+      ...(publishesHumanApprovalHold
+        ? { status: "awaiting-approval" as const, awaitingApprovalReason: HUMAN_PLAN_APPROVAL_REASON }
+        : {}),
       ...reviewConvergenceResetPatch(
         current.workflowStepResults?.find((entry) => entry.workflowStepId === resultToPersist.workflowStepId),
         resultToPersist,
@@ -375,9 +425,17 @@ type PersistWorkflowStepResultDeps = Pick<ExecuteWorkflowGraphDeps, "store" | "g
   & Partial<Pick<ExecuteWorkflowGraphDeps, "workflowGateActivityPrincipals" | "activeWorkflowPrincipals">>;
 
 /** The graph needs durable acceptance separately from the scope-CAS edge-admission result. */
+/*
+FNXC:AuthoritativeGateResult 2026-09-12-22:54:
+Routing must consume the row that durable persistence accepted, not the optimistic result supplied by
+an executing reviewer. A refused or unavailable write has a named disposition so callers can hold a
+required gate without fabricating a reviewer verdict.
+*/
 export type WorkflowStepResultPersistOutcome = {
   scopeCurrent: boolean;
   persisted: boolean;
+  disposition: "applied" | "fence-refused" | "scope-superseded" | "aborted" | "no-writer" | "error";
+  persistedResult?: CoreWorkflowStepResult;
 };
 
 /**
@@ -404,8 +462,8 @@ export async function persistWorkflowStepResultWithOutcome(
   result: CoreWorkflowStepResult,
   fence: WorkflowStepResultPersistFence = {},
 ): Promise<WorkflowStepResultPersistOutcome> {
-  if (typeof deps.store.updateTask !== "function") return { scopeCurrent: true, persisted: false };
-  if (fence.signal?.aborted) return { scopeCurrent: true, persisted: false };
+  if (typeof deps.store.updateTask !== "function") return { scopeCurrent: true, persisted: false, disposition: "no-writer" };
+  if (fence.signal?.aborted) return { scopeCurrent: true, persisted: false, disposition: "aborted" };
 
   try {
     const live = await deps.store.getTask(taskId);
@@ -418,6 +476,7 @@ export async function persistWorkflowStepResultWithOutcome(
     let fenceRefused = false;
     let activityResult = result;
     let activityResults: CoreWorkflowStepResult[] | undefined;
+    let unavailablePlanLockDiagnostic: string | undefined;
 
     const compute = (current: Task, options?: { requireScopeRevision?: number }): WorkflowStepResultPatch | null => {
       if (fence.signal?.aborted) {
@@ -435,12 +494,13 @@ export async function persistWorkflowStepResultWithOutcome(
         scopeSuperseded = true;
         return null;
       }
-      const unprovenApproval = resolveUnprovenReviewApproval(result, {
+      const resultForPersistence = unavailablePlanLockDiagnostic ? activityResult : result;
+      const unprovenApproval = resolveUnprovenReviewApproval(resultForPersistence, {
         workspace: current.workspaceWorktrees !== undefined,
       });
       const built = buildWorkflowStepResultPatch(
         current,
-        unprovenApproval?.downgraded ?? result,
+        unprovenApproval?.downgraded ?? resultForPersistence,
         isPlanReviewResult,
       );
       activityResult = built.resultToPersist;
@@ -463,16 +523,29 @@ export async function persistWorkflowStepResultWithOutcome(
           fenceRefused = true;
           return;
         }
-        await deps.store.lockCurrentPlanWhilePlanningLocked(taskId, fingerprint, prompt);
+        try {
+          await deps.store.lockCurrentPlanWhilePlanningLocked(taskId, fingerprint, prompt);
+        } catch (error) {
+          if (!isUnavailablePlanLockError(error)) throw error;
+          unavailablePlanLockDiagnostic = `${PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC} ${error.reason} (${error.unavailableSections.join(", ") || "unknown section"}).`;
+          activityResult = {
+            ...result,
+            status: "failed",
+            verdict: undefined,
+            output: unavailablePlanLockDiagnostic,
+            notes: unavailablePlanLockDiagnostic,
+          };
+        }
         const written = await writeWorkflowStepResultPatch(deps, taskId, (current) => {
           const patch = compute(current);
-          return patch === null ? null : { ...patch, approvedPlanFingerprint: fingerprint };
+          if (patch === null) return null;
+          return unavailablePlanLockDiagnostic ? patch : { ...patch, approvedPlanFingerprint: fingerprint };
         });
         if (!written.applied) {
           fenceRefused = true;
           return;
         }
-        await deps.store.reconcileSpecDriftWhilePlanningLocked(written.task!);
+        if (!unavailablePlanLockDiagnostic) await deps.store.reconcileSpecDriftWhilePlanningLocked(written.task!);
       });
     } else {
       const written = await writeWorkflowStepResultPatch(
@@ -485,18 +558,24 @@ export async function persistWorkflowStepResultWithOutcome(
       if (!written.applied) fenceRefused = true;
     }
 
-    if (scopeSuperseded) return { scopeCurrent: false, persisted: false };
-    if (fenceRefused) return { scopeCurrent: true, persisted: false };
+    if (scopeSuperseded) return { scopeCurrent: false, persisted: false, disposition: "scope-superseded" };
+    if (fenceRefused) return { scopeCurrent: true, persisted: false, disposition: fence.signal?.aborted ? "aborted" : "fence-refused" };
 
     const persistedResult = activityResults?.find((entry) => entry.workflowStepId === result.workflowStepId) ?? activityResult;
     const approvalDowngraded = result.status === "passed"
       && persistedResult.status === "failed"
       && result.reviewInputFingerprint === undefined
       && persistedResult.verdict === undefined;
-    if (approvalDowngraded) {
+    if (approvalDowngraded || unavailablePlanLockDiagnostic) {
+      /*
+      FNXC:SpecLock 2026-09-07-05:09:
+      A lock rejection previously escaped this writer, leaving the review pending until orphan
+      recovery falsely described it as a crash. Persist a failed, merge-blocking row and timeline
+      entry immediately so operators see the deterministic parser cause.
+      */
       await deps.store.logEntry(
         taskId,
-        `[pre-merge] ${result.workflowStepName} approval invalidated: ${persistedResult.notes ?? persistedResult.output ?? "review input proof missing"}`,
+        `[pre-merge] ${result.workflowStepName} approval invalidated: ${unavailablePlanLockDiagnostic ?? persistedResult.notes ?? persistedResult.output ?? "review input proof missing"}`,
         undefined,
         deps.getRunContextFor(taskId),
       ).catch(() => undefined);
@@ -525,10 +604,10 @@ export async function persistWorkflowStepResultWithOutcome(
         executorLog.warn(`[agent-activity] ${taskId}: failed to record workflow gate activity: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return { scopeCurrent: true, persisted: true };
+    return { scopeCurrent: true, persisted: true, disposition: "applied", persistedResult };
   } catch (error) {
     executorLog.warn(`[agent-activity] ${taskId}: failed to persist workflow step result: ${error instanceof Error ? error.message : String(error)}`);
-    return { scopeCurrent: true, persisted: false };
+    return { scopeCurrent: true, persisted: false, disposition: fence.signal?.aborted ? "aborted" : "error" };
   }
 }
 
@@ -813,8 +892,8 @@ export async function executeWorkflowGraph(
         Custom prompt and review nodes can yield before their session begins. Bind the graph-start
         resolution here so a later task-description or settings edit cannot retarget their output.
         */
-        execute: (node, nodeTask, nodeSettings, columnBinding, context) =>
-          deps.runGraphCustomNode(node, nodeTask, nodeSettings, columnBinding, context, outputLanguage),
+        execute: (node, nodeTask, nodeSettings, columnBinding, context, signal) =>
+          deps.runGraphCustomNode(node, nodeTask, nodeSettings, columnBinding, context, outputLanguage, signal),
         resolveColumnBinding: resolveBindingForNode,
       });
       /*
@@ -845,6 +924,41 @@ export async function executeWorkflowGraph(
         seams: deps.createAuthoritativeWorkflowSeams(settings, outputLanguage),
         prepareNodeExecution: (node, nodeTask, requirement) =>
           deps.prepareGraphNodeExecution(node, nodeTask, settings, requirement),
+        /*
+        FNXC:HumanMergeApproval 2026-09-17-18:09:
+        FN-514 — the per-card delivery barrier. It consults only delivery-effecting nodes, so
+        planning, execution, verification, review and a PR workflow's preparatory `pr-create` run
+        untouched. Content and target evidence come from the SAME capture the merge doors use, so an
+        approval recorded against superseded content cannot deliver new work.
+        */
+        humanMergeDeliveryBarrier: (node, nodeTask) => evaluateHumanMergeDeliveryBarrier(node, nodeTask, {
+          store: deps.store,
+          createPullRequest: buildHumanMergeCreatePrHandoff(deps.options.prNodes, deps.store),
+          resolveEvidence: async (liveTask) => ({
+            mergeContent: await captureMergeContentDescriptor(liveTask, {
+              workspaceRootDir: deps.store.getRootDir(),
+              settings: settings as unknown as Record<string, unknown>,
+            }).catch(() => undefined),
+          }),
+          /*
+          FNXC:HumanMergeApproval 2026-09-17-22:32:
+          FN-514 P0 remediation — THE production caller for rejection processing. Without it an
+          accepted refusal stayed `pending` forever: every door blocked, unlocking released nothing,
+          and no further command was accepted. The graph owns the work, so the dispatch lives here
+          rather than in a detached HTTP timer, and the barrier still HOLDS afterwards — processing a
+          refusal is never a delivery.
+          */
+          publishCorrection: (taskId) => publishHumanMergeCorrection(
+            taskId,
+            buildHumanMergeCorrectionPublicationDeps({
+              store: deps.store,
+              settings,
+              pluginRunner: deps.options.pluginRunner,
+              scheduleWorkflowRerun: (id, worktreePath, message, preserveResumeState, persistWorktreePath) =>
+                deps.scheduleWorkflowRerun(id, worktreePath, message, preserveResumeState, persistWorktreePath),
+            }),
+          ),
+        }),
         beforeNodeExecution: async (node, nodeTask, context) => {
           const principalAdmission = await admitWorkflowPrincipalBeforeNode(
             {
@@ -899,7 +1013,7 @@ export async function executeWorkflowGraph(
             || (node.config?.template as { nodes?: Array<{ config?: Record<string, unknown> }> } | undefined)
               ?.nodes?.every((inner) => inner.config?.workflowAction === "deterministic-verification") === true;
           const writeCapable = !deterministicVerification
-            && (workflowNodeRequiresWorktree(node, { reviewerInlineFixes: settings.reviewerInlineFixes === false ? false : undefined }) || node.kind === "code");
+            && (workflowNodeRequiresWorktree(node) || node.kind === "code");
           const hasCurrentCodeReviewApproval = live.workflowStepResults?.some((result) =>
             result.reviewKind === "code"
             && result.status === "passed"
@@ -1135,9 +1249,7 @@ export async function executeWorkflowGraph(
         });
         return;
       }
-      const principalHoldReason = Object.values(result.context ?? {}).find((value): value is string =>
-        typeof value === "string" && value.startsWith("workflow-principal-"),
-      );
+      const principalHoldReason = workflowAdmissionHoldReason(result);
       /*
        * FNXC:WorkflowAgentRouting 2026-08-07-07:45:
        * Principal availability is a recoverable continuation hold, not a graph
@@ -1167,17 +1279,11 @@ export async function executeWorkflowGraph(
           }
           await deps.store.logEntry(task.id, `Workflow stage held — ${principalHoldReason}`).catch(() => undefined);
         }
-        if (
-          continuation
-          && typeof deps.store.transitionWorkflowWorkItem === "function"
-          && !directWorkflowPrincipalHeldWorkItemIds.has(continuation.id)
-        ) {
-          await deps.store.transitionWorkflowWorkItem(continuation.id, "held", {
-            leaseOwner: null,
-            leaseExpiresAt: null,
-            lastError: principalHoldReason,
-            blockedReason: principalHoldReason,
-          }).catch(() => undefined);
+        if (typeof deps.store.transitionWorkflowWorkItem === "function") {
+          await holdWorkflowAdmission(
+            deps.store, principalHoldReason, continuation?.id,
+            directWorkflowPrincipalWorkItemIds, directWorkflowPrincipalHeldWorkItemIds,
+          );
         }
         return;
       }
@@ -1199,7 +1305,29 @@ export async function executeWorkflowGraph(
           }).catch(() => undefined);
         }));
       }
+      /*
+      FNXC:WorkflowExecution 2026-09-02-10:36:
+      FN-9243 closes a dispatched continuation before a fell-back graph failure. Previously the
+      early return retained a running lease, so the dispatcher retried the same refusal indefinitely.
+      */
+      const closeContinuation = async (state: "failed" | "succeeded"): Promise<void> => {
+        if (!continuation || typeof deps.store.transitionWorkflowWorkItem !== "function") return;
+        if (directWorkflowPrincipalHeldWorkItemIds.has(continuation.id)) return;
+        try {
+          await deps.store.transitionWorkflowWorkItem(continuation.id, state, {
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            lastError: state === "failed" ? "workflow-continuation-failed" : null,
+          });
+        } catch (closeErr) {
+          executorLog.debug(
+            `[workflow-graph] ${task.id}: continuation ${continuation.id} could not be closed as ${state} `
+            + `(likely already terminal): ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`,
+          );
+        }
+      };
       if (result.disposition === "fell-back") {
+        await closeContinuation("failed");
         executorLog.warn(`[workflow-graph] ${task.id} could not resolve workflow — parking task instead of legacy fallback: ${result.reason}`);
         await deps.handleGraphFailure(task, {
           ...result,
@@ -1238,26 +1366,6 @@ export async function executeWorkflowGraph(
         );
         return;
       }
-      /*
-       * FNXC:WorkflowExecution 2026-08-08-03:20:
-       * Closing the continuation is bookkeeping and must never skip handleGraphFailure.
-       */
-      const closeContinuation = async (state: "failed" | "succeeded"): Promise<void> => {
-        if (!continuation || typeof deps.store.transitionWorkflowWorkItem !== "function") return;
-        if (directWorkflowPrincipalHeldWorkItemIds.has(continuation.id)) return;
-        try {
-          await deps.store.transitionWorkflowWorkItem(continuation.id, state, {
-            leaseOwner: null,
-            leaseExpiresAt: null,
-            lastError: state === "failed" ? "workflow-continuation-failed" : null,
-          });
-        } catch (closeErr) {
-          executorLog.debug(
-            `[workflow-graph] ${task.id}: continuation ${continuation.id} could not be closed as ${state} `
-            + `(likely already terminal): ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`,
-          );
-        }
-      };
       if (result.disposition === "failed") {
         await closeContinuation("failed");
         await deps.handleGraphFailure(task, result);

@@ -41,6 +41,47 @@ describe("FileBrowser mobile dropdown regression", () => {
     expect(headerRule).not.toMatch(/overflow\s*:\s*hidden/);
   });
 
+  /*
+   * FN-462 replaced the four-row phone header (`.file-browser-sort-controls { flex: 1 1 100% }` on its own line) with
+   * a three-row compact header: path, search, then ONE un-wrapped actions row. The sort controls now share that row,
+   * so the old full-width assertion described a layout that was itself half of the reported symptom.
+   */
+  it("keeps the phone sort controls inside the single compact actions row", () => {
+    const css = loadAllAppCss();
+    const phoneControls = css.match(/html\[data-viewport-mode="mobile"\] \.file-browser \.file-browser-sort-controls\s*\{[^}]*\}/)?.[0];
+    const phoneActions = css.match(/html\[data-viewport-mode="mobile"\] \.file-browser \.file-browser-header-actions\s*\{[^}]*\}/)?.[0];
+    const phoneSelect = css.match(/html\[data-viewport-mode="mobile"\] \.file-browser \.file-browser-sort-select\s*\{[^}]*\}/)?.[0];
+
+    expect(phoneActions).toMatch(/flex:\s*1 1 100%/);
+    expect(phoneActions).toMatch(/flex-wrap:\s*nowrap/);
+    expect(phoneControls).toMatch(/flex:\s*1 1 auto/);
+    expect(phoneControls).toMatch(/width:\s*auto/);
+    expect(phoneSelect).toMatch(/flex:\s*1 1 auto/);
+    // Strip comments first: the deletion is explained in a comment that quotes the very declaration being ratcheted.
+    const phoneCssWithoutComments = extractMediaBlocks(css, "(max-width: 768px)").join("\n").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(phoneCssWithoutComments).not.toMatch(/\.file-browser-sort-controls\s*\{[^}]*flex:\s*1 1 100%/);
+  });
+
+  it("gives narrow modal sort controls a flexible token-based row", () => {
+    const css = loadAllAppCss();
+    expect(css).toMatch(/\.file-browser-modal--narrow \.file-browser-sort-controls\s*\{[^}]*flex:\s*1 1 calc\(var\(--space-xl\) \* 5\)/);
+    expect(css).toMatch(/\.file-browser-modal--narrow \.file-browser-sort-select\s*\{[^}]*flex:\s*1 1 auto/);
+  });
+
+  it("wraps the file header against the dock tree width in both desktop layouts", () => {
+    const css = loadAllAppCss();
+    const headerRule = css.match(/\.dock-files-view__tree \.file-browser \.file-browser-header\s*\{[^}]*\}/)?.[0];
+    const actionsRule = css.match(/\.dock-files-view__tree \.file-browser \.file-browser-header-actions\s*\{[^}]*\}/)?.[0];
+    const controlsRule = css.match(/\.dock-files-view__tree \.file-browser-sort-controls\s*\{[^}]*\}/)?.[0];
+    const selectRule = css.match(/\.dock-files-view__tree \.file-browser-sort-select\s*\{[^}]*\}/)?.[0];
+
+    expect(headerRule).toMatch(/flex-wrap:\s*wrap/);
+    expect(actionsRule).toMatch(/width:\s*100%/);
+    expect(actionsRule).toMatch(/margin-left:\s*0/);
+    expect(controlsRule).toMatch(/flex:\s*1 1 calc\(var\(--space-xl\) \* 5\)/);
+    expect(selectRule).toMatch(/flex:\s*1 1 auto/);
+  });
+
   it("keeps workspace selector menu positioned above content", () => {
     const css = loadAllAppCss();
     const menuRuleMatch = css.match(/\.workspace-selector-menu\s*\{[^}]*\}/);

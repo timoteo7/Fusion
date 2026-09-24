@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PatchnodeFeed } from "@fusion/core";
+import { readAppFile } from "../../test/cssFixture";
 
 const { fetchPatchnode } = vi.hoisted(() => ({ fetchPatchnode: vi.fn() }));
 vi.mock("../../api", () => ({ fetchPatchnode }));
@@ -36,6 +37,7 @@ describe("PatchnodeView", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("renders History copy in the title, search, and loading state", () => {
@@ -59,12 +61,94 @@ describe("PatchnodeView", () => {
     expect(screen.queryByTestId(/patchnode-day-/)).toBeNull();
   });
 
-  it("renders a populated multi-day feed in server order", async () => {
-    render(<PatchnodeView />);
+  it("keeps the fixed header outside the populated multi-day scroll body", async () => {
+    const css = readAppFile("components/PatchnodeView.css");
+    expect(css).toMatch(/\.patchnode-view\s*\{[^}]*overflow:\s*hidden;/s);
+    expect(css).toMatch(/\.patchnode-view__content\s*\{[^}]*overflow-y:\s*auto;/s);
+
+    const { container } = render(<PatchnodeView floating={{ onClose: vi.fn() }} />);
     expect(await screen.findByTestId("patchnode-day-2026-08-28")).toBeInTheDocument();
     expect(screen.getByTestId("patchnode-day-2026-08-27")).toBeInTheDocument();
+    const view = screen.getByTestId("patchnode-view");
+    const header = view.querySelector(":scope > .view-header");
+    const body = view.querySelector(":scope > .view-layout__body");
+    const scrollBody = view.querySelector(".patchnode-view__content");
+    expect(header).toBeInTheDocument();
+    expect(scrollBody).toBeInTheDocument();
+    // The fixed header stays outside the scrolling body and is still painted first.
+    expect(scrollBody?.contains(header)).toBe(false);
+    expect(view.children[0]).toBe(header);
+    expect(view.children[1]).toBe(body);
+    expect(body?.contains(scrollBody as Node)).toBe(true);
+    // History owns its whole scroll chain, so the shared content zone must not add a second scroller.
+    expect(view).toHaveClass("view-layout--content-owns-scroll");
+    expect(screen.getAllByRole("button", { name: "Close History" })).toHaveLength(1);
+    expect(container.querySelector(".floating-window__close")).toBeNull();
     const older = screen.getByTestId("patchnode-day-2026-08-27");
     expect(older.querySelectorAll(".patchnode-entry")[0]).toHaveTextContent("Cancelled delivery");
+  });
+
+  /*
+  FNXC:HistoryModalSurface 2026-09-15-04:29:
+  FN-403: the floating/drawer host is the ONLY History presentation. One instance, one title, one feed request, and
+  the window body must carry the full height so `.patchnode-view__content` keeps owning the scroll.
+  */
+  it("monte une seule instance flottante qui garde le corps scrollable plein héritage de hauteur", async () => {
+    const css = readAppFile("components/PatchnodeView.css");
+    expect(css).toMatch(/\.patchnode-view__window-body\s*\{[^}]*height:\s*100%;/s);
+    expect(css).toMatch(/\.patchnode-view__window-body\s*\{[^}]*min-height:\s*0;/s);
+    expect(css).toMatch(/\.patchnode-view__window-body\s*\{[^}]*overflow:\s*hidden;/s);
+
+    render(<PatchnodeView floating={{ onClose: vi.fn() }} />);
+    await screen.findByTestId("patchnode-day-2026-08-28");
+
+    expect(document.querySelectorAll('[data-testid="patchnode-view"]')).toHaveLength(1);
+    expect(document.querySelectorAll("#patchnode-title")).toHaveLength(1);
+    expect(fetchPatchnode).toHaveBeenCalledTimes(1);
+    const dialog = screen.getByRole("dialog", { name: "History" });
+    const windowBody = dialog.querySelector(".patchnode-view__window-body");
+    expect(windowBody).not.toBeNull();
+    expect(windowBody?.contains(screen.getByTestId("patchnode-view"))).toBe(true);
+  });
+
+  it("charge l'historique de tous les projets quand aucun projet n'est sélectionné", async () => {
+    render(<PatchnodeView floating={{ onClose: vi.fn() }} />);
+    await screen.findByTestId("patchnode-day-2026-08-28");
+    expect(fetchPatchnode).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 }), undefined);
+  });
+
+  it("paginates through the sentinel rooted in the History scroll body", async () => {
+    let observerCallback: IntersectionObserverCallback | undefined;
+    let observerRoot: Element | Document | null | undefined;
+    class TestIntersectionObserver {
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        observerCallback = callback;
+        observerRoot = options?.root;
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+      root = null;
+      rootMargin = "";
+      thresholds = [];
+    }
+    vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+    fetchPatchnode
+      .mockResolvedValueOnce({ ...feed, hasMore: true })
+      .mockResolvedValueOnce({ days: [], totalEntries: 3, hasMore: false });
+
+    render(<PatchnodeView />);
+    const scrollBody = await screen.findByTestId("patchnode-auto-pagination-sentinel").then((sentinel) => sentinel.parentElement);
+    await waitFor(() => expect(observerCallback).toBeTypeOf("function"));
+    expect(scrollBody).toHaveClass("patchnode-view__content");
+    expect(observerRoot).toBe(scrollBody);
+
+    await act(async () => {
+      observerCallback?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(fetchPatchnode).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 50, offset: 3 }), undefined));
   });
 
   it("re-queries after the search debounce", async () => {
@@ -85,10 +169,95 @@ describe("PatchnodeView", () => {
     expect(screen.getByTestId("patchnode-search")).toHaveValue("missing");
   });
 
-  it("renders a non-empty title fallback body", async () => {
+  /*
+  FNXC:PatchnodeView 2026-09-15-23:26:
+  FN-444 replaced the previous "non-empty title fallback body" expectation: a body that merely repeats the
+  rendered label is the duplication this task removes, so the card must show that text exactly once.
+  */
+  it("renders a body that repeats the label only once", async () => {
     fetchPatchnode.mockResolvedValue({ ...feed, days: [{ ...feed.days[0]!, entries: [{ ...feed.days[0]!.entries[0]!, body: "Search" }] }] });
     render(<PatchnodeView />);
-    expect(await screen.findByText("Search", { selector: ".patchnode-entry__body" })).toBeInTheDocument();
+    const entry = await screen.findByTestId("patchnode-entry-completed:FN-2:2");
+    expect(entry.querySelectorAll(".patchnode-entry__body")).toHaveLength(0);
+    expect(entry.textContent?.match(/Search/g)).toHaveLength(1);
+  });
+
+  describe("label rendering never repeats the task identifier", () => {
+    const singleEntry = (overrides: Record<string, unknown>) => ({
+      ...feed,
+      days: [{ ...feed.days[0]!, entries: [{ ...feed.days[0]!.entries[0]!, ...overrides }] }],
+    });
+    const card = () => screen.findByTestId("patchnode-entry-completed:FN-2:2");
+
+    it("renders the identifier once and the label once for a healthy entry", async () => {
+      render(<PatchnodeView />);
+      const entry = await card();
+      expect(entry.textContent?.match(/FN-2/g)).toHaveLength(1);
+      expect(entry.querySelector("strong")).toHaveTextContent("Search");
+      expect(entry.querySelector(".patchnode-entry__body")).toHaveTextContent("Added search");
+    });
+
+    /*
+    FNXC:PatchnodeView 2026-09-15-23:26:
+    FN-444 symptom reproduction: a legacy entry whose task was deleted can never be repaired by the ledger
+    pass, so the render surface itself must not print the identifier twice.
+    */
+    it("renders an unrepairable legacy entry's identifier exactly once and mounts no empty shell", async () => {
+      fetchPatchnode.mockResolvedValue(singleEntry({ title: "FN-2", body: "FN-2" }));
+      render(<PatchnodeView />);
+      const entry = await card();
+      expect(entry.textContent?.match(/FN-2/g)).toHaveLength(1);
+      expect(entry.querySelectorAll("strong")).toHaveLength(0);
+      expect(entry.querySelectorAll(".patchnode-entry__body")).toHaveLength(0);
+      expect([...entry.children].every((child) => child.textContent?.trim())).toBe(true);
+    });
+
+    it("omits the body element entirely when there is no summary", async () => {
+      fetchPatchnode.mockResolvedValue(singleEntry({ body: "" }));
+      render(<PatchnodeView />);
+      const entry = await card();
+      expect(entry.querySelector("strong")).toHaveTextContent("Search");
+      expect(entry.querySelectorAll(".patchnode-entry__body")).toHaveLength(0);
+    });
+
+    it("keeps the cancelled badge while applying the same label rule to a reverted entry", async () => {
+      fetchPatchnode.mockResolvedValue(singleEntry({ kind: "reverted", title: "FN-2", body: "FN-2" }));
+      render(<PatchnodeView />);
+      const entry = await card();
+      expect(entry).toHaveTextContent("Cancelled");
+      expect(entry.textContent?.replace("Cancelled", "").match(/FN-2/g)).toHaveLength(1);
+    });
+
+    it("applies the same rule in the floating host and at the mobile breakpoint", async () => {
+      const css = readAppFile("components/PatchnodeView.css");
+      // The mobile override must not hide or re-add any label element.
+      expect(css).toMatch(/@media\s*\(max-width:\s*768px\)/);
+      expect(css).not.toMatch(/\.patchnode-entry__body\s*\{[^}]*display:\s*none/s);
+
+      const innerWidth = window.innerWidth;
+      const matchMedia = window.matchMedia;
+      try {
+        Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 640 });
+        vi.stubGlobal("matchMedia", (query: string) => ({
+          matches: /max-width:\s*768px/.test(query),
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }));
+        fetchPatchnode.mockResolvedValue(singleEntry({ title: "FN-2", body: "FN-2" }));
+        render(<PatchnodeView floating={{ onClose: vi.fn() }} />);
+        const entry = await card();
+        expect(entry.textContent?.match(/FN-2/g)).toHaveLength(1);
+        expect(entry.querySelectorAll("strong")).toHaveLength(0);
+      } finally {
+        Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: innerWidth });
+        vi.stubGlobal("matchMedia", matchMedia);
+      }
+    });
   });
 
   it("renders cancelled and reverted treatments", async () => {

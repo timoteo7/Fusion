@@ -1,5 +1,40 @@
 # @fusion-plugin-examples/hermes-runtime
 
+## 0.2.87-beta.4
+
+### Patch Changes
+
+- @fusion/core@0.78.0-beta.4
+- @fusion/plugin-sdk@0.78.0-beta.4
+
+## 0.2.87-beta.3
+
+### Patch Changes
+
+- @fusion/core@0.78.0-beta.3
+- @fusion/plugin-sdk@0.78.0-beta.3
+
+## 0.2.87-beta.2
+
+### Patch Changes
+
+- @fusion/core@0.78.0-beta.2
+- @fusion/plugin-sdk@0.78.0-beta.2
+
+## 0.2.87-beta.1
+
+### Patch Changes
+
+- @fusion/core@0.78.0-beta.1
+- @fusion/plugin-sdk@0.78.0-beta.1
+
+## 0.2.87-beta.0
+
+### Patch Changes
+
+- @fusion/core@0.78.0-beta.0
+- @fusion/plugin-sdk@0.78.0-beta.0
+
 ## 0.2.86
 
 ### Patch Changes

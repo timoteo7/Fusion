@@ -1,6 +1,7 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { Task } from "@fusion/core";
 import { TaskContextMenu, buildTaskActionMenuModel } from "../TaskContextMenu";
 
@@ -28,11 +29,112 @@ function actionIds(task: Task, overrides: Partial<Parameters<typeof buildTaskAct
 describe("TaskContextMenu shared task action model", () => {
   it("mirrors Retry, Reset, and Delete availability across lifecycle states", () => {
     const onRetry = vi.fn();
-    expect(actionIds(makeTask({ column: "triage" }), { onRetry })).toEqual(["retry", "pause", "delete"]);
-    expect(buildTaskActionMenuModel({ task: makeTask({ column: "triage" }), t, onRetry }).shouldShowActionsMenu).toBe(true);
-    expect(actionIds(makeTask({ column: "in-review" }), { onRetry, onReset: vi.fn(), onOpenRefine: vi.fn() })).toEqual(["refine", "retry", "pause", "reset", "delete"]);
+    const onTogglePause = vi.fn();
+    expect(actionIds(makeTask({ column: "triage" }), { onRetry, onTogglePause })).toEqual(["retry", "pause", "delete"]);
+    expect(buildTaskActionMenuModel({ task: makeTask({ column: "triage" }), t, onRetry, onTogglePause }).shouldShowActionsMenu).toBe(true);
+    /* FNXC:TaskRefine 2026-09-14-22:23: FN-400 — hosts now pass a local dialog trigger here rather than a detail-open route. */
+    expect(actionIds(makeTask({ column: "in-review" }), { onRetry, onReset: vi.fn(), onOpenRefine: vi.fn(), onTogglePause })).toEqual(["refine", "retry", "pause", "reset", "delete"]);
     expect(actionIds(makeTask({ column: "done" }), { onRetry, onReset: vi.fn(), onOpenRefine: vi.fn() })).toEqual(["refine", "delete"]);
-    expect(actionIds(makeTask({ column: "archived" }), { onRetry, onReset: vi.fn() })).toEqual(["delete"]);
+  });
+
+  /*
+  FNXC:TaskFollowUp 2026-09-17-18:10:
+  FN-513 — where Follow-up appears, and where it must leave NOTHING behind.
+
+  The two facts that matter are complementarity (a review lane shows Follow-up INSTEAD OF Refine, so
+  no menu ever carries two near-identical composers) and strictness of the Planning exception (only a
+  CURRENT approving plan review qualifies). The descriptor is also absent — not disabled — wherever
+  it does not apply, because a disabled shell is a dead affordance.
+  */
+  describe("FN-513 Follow-up descriptor", () => {
+    const handlers = { onOpenRefine: vi.fn(), onOpenFollowUp: vi.fn() };
+    const approved = [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "passed" as const, verdict: "APPROVE" as const }];
+
+    const ids = (task: Partial<Task>, currentColumnFlags?: Record<string, boolean>) =>
+      actionIds(makeTask(task), { ...handlers, ...(currentColumnFlags ? { currentColumnFlags: currentColumnFlags as never } : {}) });
+
+    it("replaces Refine in implementation and review lanes, and keeps Refine on terminal ones", () => {
+      expect(ids({ column: "in-progress" }, { countsTowardWip: true })).toContain("follow-up");
+      expect(ids({ column: "in-progress" }, { countsTowardWip: true })).not.toContain("refine");
+      expect(ids({ column: "Relecture" }, { humanReview: true })).toContain("follow-up");
+      expect(ids({ column: "Relecture" }, { humanReview: true })).not.toContain("refine");
+      expect(ids({ column: "Livr\u00e9" }, { complete: true })).toContain("refine");
+      expect(ids({ column: "Livr\u00e9" }, { complete: true })).not.toContain("follow-up");
+    });
+
+    it("resolves renamed lanes by trait, with explicit flags beating the column id", () => {
+      // A column NAMED like a review lane but explicitly declared terminal is terminal.
+      expect(ids({ column: "in-review" }, { complete: true })).toContain("refine");
+      expect(ids({ column: "in-review" }, { complete: true })).not.toContain("follow-up");
+      // A column named "done" that really is an implementation lane offers Follow-up.
+      expect(ids({ column: "done" }, { countsTowardWip: true })).toContain("follow-up");
+    });
+
+    it("applies the strict Planning exception", () => {
+      expect(ids({ column: "todo" }, { hold: true })).not.toContain("follow-up");
+      expect(ids({ column: "todo", workflowStepResults: approved }, { hold: true })).toContain("follow-up");
+      // An approval a later round replaced does not qualify.
+      expect(ids({
+        column: "todo",
+        workflowStepResults: [...approved, { workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "failed" as const, verdict: "REVISE" as const }],
+      }, { hold: true })).not.toContain("follow-up");
+      // A live replan does not qualify either.
+      expect(ids({ column: "todo", status: "needs-replan" as never, workflowStepResults: approved }, { hold: true })).not.toContain("follow-up");
+      // Manual capture has nothing planned to follow up on.
+      expect(ids({ column: "ideas", workflowStepResults: approved }, { intake: true, manualIntake: true })).not.toContain("follow-up");
+    });
+
+    it("is absent — not disabled — when the host wires no handler or the state is unsupported", () => {
+      const noHandler = buildTaskActionMenuModel({ task: makeTask({ column: "in-progress" }), t, currentColumnFlags: { countsTowardWip: true } as never });
+      expect(noHandler.actions.map((action) => action.id)).not.toContain("follow-up");
+
+      const unsupported = buildTaskActionMenuModel({
+        task: makeTask({ column: "parking" }),
+        t,
+        currentColumnFlags: { intake: false, hold: false, countsTowardWip: false, mergeBlocker: false, humanReview: false, complete: false } as never,
+        ...handlers,
+      });
+      expect(unsupported.actions.find((action) => action.id === "follow-up")).toBeUndefined();
+      expect(unsupported.actions.some((action) => action.disabled && action.id === "follow-up")).toBe(false);
+    });
+
+    it("invokes exactly the host's follow-up handler when selected", () => {
+      const onOpenFollowUp = vi.fn();
+      const onOpenRefine = vi.fn();
+      const model = buildTaskActionMenuModel({
+        task: makeTask({ column: "in-progress" }),
+        t,
+        currentColumnFlags: { countsTowardWip: true } as never,
+        onOpenFollowUp,
+        onOpenRefine,
+      });
+      model.actions.find((action) => action.id === "follow-up")!.onSelect!();
+      expect(onOpenFollowUp).toHaveBeenCalledTimes(1);
+      expect(onOpenRefine).not.toHaveBeenCalled();
+    });
+  });
+
+  it("offers Bypass failed review for live and eligible archived pre-merge failures only", () => {
+    const onBypassReview = vi.fn();
+    const archivedFailure = {
+      workflowStepId: "plan-review",
+      phase: "pre-merge" as const,
+      status: "skipped" as const,
+      remediationArchivedAt: "2026-09-02T00:00:00.000Z",
+      remediationArchivedFromStatus: "failed" as const,
+    };
+    const withBypass = (workflowStepResults: Task["workflowStepResults"], overrides: Partial<Task> = {}) => actionIds(
+      makeTask({ column: "in-review", workflowStepResults, ...overrides }),
+      { onBypassReview },
+    );
+
+    expect(withBypass([archivedFailure])).toContain("bypass-review");
+    expect(withBypass([{ ...archivedFailure, status: "failed", remediationArchivedAt: undefined }])).toContain("bypass-review");
+    expect(withBypass([{ ...archivedFailure, bypassedBy: "operator" }])).not.toContain("bypass-review");
+    expect(withBypass([{ ...archivedFailure, remediationArchivedFromStatus: "passed" }])).not.toContain("bypass-review");
+    expect(withBypass([{ ...archivedFailure, phase: "post-merge" }])).not.toContain("bypass-review");
+    expect(withBypass([archivedFailure], { column: "in-progress" })).not.toContain("bypass-review");
+    expect(actionIds(makeTask({ column: "in-review", workflowStepResults: [archivedFailure] }))).not.toContain("bypass-review");
   });
 
   it("offers exactly the supported recovery actions", () => {
@@ -41,6 +143,7 @@ describe("TaskContextMenu shared task action model", () => {
       t,
       onRetry: vi.fn(),
       onReset: vi.fn(),
+      onTogglePause: vi.fn(),
     });
     expect(supported.actions.map((action) => action.id)).toEqual(["retry", "pause", "reset", "delete"]);
   });
@@ -48,43 +151,42 @@ describe("TaskContextMenu shared task action model", () => {
   it("offers Retry for every mutable live column, including pending recovery", () => {
     const onRetry = vi.fn();
     const onReset = vi.fn();
+    const onTogglePause = vi.fn();
     for (const task of [makeTask(), makeTask({ status: null as any, nextRecoveryAt: new Date(Date.now() + 60_000).toISOString() })]) {
-      expect(actionIds(task, { onRetry, onReset })).toEqual(["retry", "pause", "reset", "delete"]);
+      expect(actionIds(task, { onRetry, onReset, onTogglePause })).toEqual(["retry", "pause", "reset", "delete"]);
     }
     expect(actionIds(makeTask({ column: "done" }), { onRetry, onReset })).toEqual(["delete"]);
-    expect(actionIds(makeTask({ column: "archived" }), { onRetry, onReset, currentColumnFlags: { archived: true } })).toEqual(["delete"]);
   });
 
-  it("exposes Plan only for pre-execution hold columns with a host callback", () => {
-    const onPlan = vi.fn();
-    const eligibleCases: Array<[string, Partial<Parameters<typeof buildTaskActionMenuModel>[0]>]> = [
-      ["triage", {}],
-      ["custom intake", { currentColumnFlags: { intake: true } }],
-      ["custom hold", { currentColumnFlags: { hold: true } }],
+  /*
+  FNXC:TaskContextMenu 2026-09-15-10:40:
+  FN-417: the engine plans automatically, so NO column shape produces a `plan` descriptor any more.
+  Replaces "exposes Plan only for pre-execution hold columns with a host callback", whose subject
+  (the `plan` descriptor and its `isPreExecutionHoldColumn` gate) was deleted with the affordance.
+  The previously eligible shapes are enumerated here so a re-added descriptor fails loudly, and each
+  case is anchored positively so the assertion cannot pass by producing an empty menu.
+  */
+  it("never produces a Plan action, for any column shape", () => {
+    const shapes: Array<[string, string, Record<string, boolean> | undefined]> = [
+      ["legacy intake id", "triage", undefined],
+      ["no resolved flags yet (first paint)", "backlog", undefined],
+      ["renamed intake lane", "ideas", { intake: true }],
+      ["renamed hold lane", "backlog", { hold: true }],
+      ["merged planning lane", "todo", { intake: true, hold: true }],
+      ["mid-flight column NAMED triage", "triage", { intake: false, hold: false, countsTowardWip: true }],
     ];
 
-    for (const [label, overrides] of eligibleCases) {
-      const column = label === "triage" ? "triage" : label;
-      const model = buildTaskActionMenuModel({
-        task: makeTask({ column: column as any }),
+    for (const [label, column, flags] of shapes) {
+      const ids = buildTaskActionMenuModel({
+        task: makeTask({ column: column as never }),
         t,
-
-        onPlan,
-        ...overrides,
-      });
-      expect(model.actions.map((action) => action.id), label).toContain("plan");
-      expect(model.actions.find((action) => action.id === "plan")?.label).toBe("Plan");
+        currentColumnFlags: flags as never,
+        onDelete: vi.fn(),
+      } as never).actions.map((action: { id: string }) => action.id);
+      expect(ids, label).not.toContain("plan");
+      // Positive anchor: the menu is genuinely built for this shape, not empty.
+      expect(ids, label).toContain("delete");
     }
-
-    for (const column of ["todo", "in-progress", "in-review", "done"] as const) {
-      expect(actionIds(makeTask({ column }), { onPlan })).not.toContain("plan");
-    }
-    expect(actionIds(makeTask({ column: "complete" as any }), { onPlan, currentColumnFlags: { hold: true, complete: true } })).not.toContain("plan");
-    expect(actionIds(makeTask({ column: "cold-storage" as any }), { onPlan, currentColumnFlags: { hold: true, archived: true } })).not.toContain("plan");
-    expect(actionIds(makeTask({ column: "triage" }))).not.toContain("plan");
-
-    buildTaskActionMenuModel({ task: makeTask({ column: "triage" }), t, onPlan }).actions.find((action) => action.id === "plan")?.onSelect?.();
-    expect(onPlan).toHaveBeenCalledTimes(1);
   });
 
   it("exposes GitHub tracking enablement only for untracked tasks with a host callback", () => {
@@ -116,7 +218,7 @@ describe("TaskContextMenu shared task action model", () => {
     const noCallback = buildTaskActionMenuModel({ task: makeTask(), t });
 
     expect(untracked.actions.find((action) => action.id === "enable-github-tracking")?.label).toBe("Enable GitHub tracking");
-    expect(untracked.actions.map((action) => action.id)).toEqual(["enable-github-tracking", "pause", "delete"]);
+    expect(untracked.actions.map((action) => action.id)).toEqual(["enable-github-tracking", "delete"]);
     expect(disabled.actions.map((action) => action.id)).toContain("enable-github-tracking");
     expect(enabled.actions.map((action) => action.id)).not.toContain("enable-github-tracking");
     expect(linked.actions.map((action) => action.id)).not.toContain("enable-github-tracking");
@@ -126,15 +228,16 @@ describe("TaskContextMenu shared task action model", () => {
     expect(onEnableGithubTracking).toHaveBeenCalledTimes(1);
   });
 
-  it("exposes pause, unpause, and paused-by-agent note with detail labels", () => {
-    const active = buildTaskActionMenuModel({ task: makeTask(), t });
+  it("exposes wired pause, unpause, and paused-by-agent note with detail labels", () => {
+    const onTogglePause = vi.fn();
+    const active = buildTaskActionMenuModel({ task: makeTask(), t, onTogglePause });
     expect(active.actions.map((action) => action.id)).toEqual(["pause", "delete"]);
     expect(active.actions.find((action) => action.id === "pause")?.label).toBe("Pause");
 
     const paused = buildTaskActionMenuModel({
       task: makeTask({ paused: true, pausedByAgentId: "agent-1" } as Partial<Task>),
       t,
-
+      onTogglePause,
     });
     expect(paused.actions.map((action) => [action.id, action.label, action.tone])).toContainEqual([
       "unpause",
@@ -156,12 +259,45 @@ describe("TaskContextMenu shared task action model", () => {
     }
   });
 
-  it("mirrors in-review merge and manual PR status actions", () => {
-    expect(buildTaskActionMenuModel({ task: makeTask({ column: "in-review" }), t }).reviewAction).toMatchObject({
-      id: "merge",
-      label: "Merge & Close",
-    });
+  /*
+  FNXC:TaskContextMenu 2026-09-15-10:40:
+  FN-417: merge completion is OPT-IN. Without `includeMergeCompletionAction` — the shape every task
+  context menu host uses — an in-review card yields no review action at all; Task Detail opts in and
+  gets the unchanged footer descriptor. The PR-flow verdicts are unaffected either way.
+  */
+  it("withholds merge completion unless the host opts in", () => {
+    // Auto-merge lane: "Merge & Close" is withheld.
+    expect(buildTaskActionMenuModel({
+      task: makeTask({ column: "in-review" }),
+      t,
+      onMerge: vi.fn(),
+    }).reviewAction).toBeUndefined();
 
+    // Manual-PR lane with an already-merged PR: "Finish & Close" is withheld.
+    expect(buildTaskActionMenuModel({
+      task: makeTask({ column: "in-review", prInfo: { status: "merged" } as any }),
+      t,
+      mergeStrategy: "pull-request",
+      autoMergeEnabled: false,
+      onMerge: vi.fn(),
+    }).reviewAction).toBeUndefined();
+
+    expect(buildTaskActionMenuModel({
+      task: makeTask({ column: "in-review" }),
+      t,
+      includeMergeCompletionAction: true,
+    }).reviewAction).toMatchObject({ id: "merge", label: "Merge & Close" });
+
+    expect(buildTaskActionMenuModel({
+      task: makeTask({ column: "in-review", prInfo: { status: "merged" } as any }),
+      t,
+      includeMergeCompletionAction: true,
+      mergeStrategy: "pull-request",
+      autoMergeEnabled: false,
+    }).reviewAction).toMatchObject({ id: "merge", label: "Finish & Close" });
+  });
+
+  it("mirrors in-review manual PR status actions without opting into merge completion", () => {
     const onMerge = vi.fn();
     const onStartPrReview = vi.fn();
     const startPrReviewAction = buildTaskActionMenuModel({
@@ -195,25 +331,6 @@ describe("TaskContextMenu shared task action model", () => {
     }).reviewAction).toMatchObject({ id: "pr-automation", label: "Merging PR…", disabled: true });
   });
 
-  it("keeps archived delete available without live-only destructive shells", () => {
-    const onDelete = vi.fn();
-    const archivedModel = buildTaskActionMenuModel({
-      task: makeTask({ column: "archived" }),
-      t,
-
-      hasResetHandler: true,
-      onReset: vi.fn(),
-      onTogglePause: vi.fn(),
-      onDelete,
-    });
-
-    expect(archivedModel.actions.map((action) => action.id)).toEqual(["delete"]);
-    expect(archivedModel.actions.map((action) => action.id)).not.toContain("pause");
-    expect(archivedModel.actions.map((action) => action.id)).not.toContain("reset");
-    archivedModel.actions.find((action) => action.id === "delete")?.onSelect?.();
-    expect(onDelete).toHaveBeenCalledTimes(1);
-  });
-
   it("renders descriptors and delegates selection to injected host handlers", () => {
     const onDelete = vi.fn();
     const onActionSelect = vi.fn();
@@ -227,6 +344,51 @@ describe("TaskContextMenu shared task action model", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(onActionSelect).toHaveBeenCalledWith(expect.objectContaining({ id: "delete" }));
     expect(onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps action markup unchanged when optional test and pressed metadata is absent", () => {
+    render(<TaskContextMenu actions={[{ id: "plain", label: "Plain action" }]} />);
+
+    const action = screen.getByRole("menuitem", { name: "Plain action" });
+    expect(action).not.toHaveAttribute("data-testid");
+    expect(action).not.toHaveAttribute("aria-pressed");
+  });
+
+  it("forwards test ids to action and note items without making notes selectable", () => {
+    const onActionSelect = vi.fn();
+    const onNoteSelect = vi.fn();
+    render(
+      <TaskContextMenu
+        actions={[
+          { id: "action", label: "Action", testId: "menu-action" },
+          { id: "note", label: "Section heading", tone: "note", testId: "menu-note", onSelect: onNoteSelect },
+        ]}
+        onActionSelect={onActionSelect}
+      />,
+    );
+
+    expect(screen.getByTestId("menu-action")).toHaveRole("menuitem", { name: "Action" });
+    const note = screen.getByTestId("menu-note");
+    expect(note).toHaveRole("note");
+    fireEvent.click(note);
+    expect(onActionSelect).not.toHaveBeenCalled();
+    expect(onNoteSelect).not.toHaveBeenCalled();
+  });
+
+  it("renders aria-pressed only when an action descriptor defines pressed", () => {
+    render(
+      <TaskContextMenu
+        actions={[
+          { id: "on", label: "On", pressed: true },
+          { id: "off", label: "Off", pressed: false },
+          { id: "unset", label: "Unset" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("menuitem", { name: "On" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("menuitem", { name: "Off" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("menuitem", { name: "Unset" })).not.toHaveAttribute("aria-pressed");
   });
 
   it("selects enabled touch menu items on pointer release exactly once", () => {
@@ -280,6 +442,24 @@ describe("TaskContextMenu shared task action model", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Nested" }));
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
+
+  it("uses one navigable Alpha menu with a native homemade Alpha submenu", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<><><TaskContextMenu actions={[{ id: "pause", label: "Pause" }, { id: "delete", label: "Delete" }, { id: "more", label: "More", items: [{ id: "nested", label: "Nested", onSelect }] }]} /></></>);
+    const pause = screen.getByRole("menuitem", { name: "Pause" });
+    const del = screen.getByRole("menuitem", { name: "Delete" });
+    pause.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(del).toHaveFocus();
+    const more = screen.getByRole("menuitem", { name: "More" });
+    more.focus();
+    await user.keyboard("{ArrowRight}");
+    const nested = await screen.findByRole("menuitem", { name: "Nested" });
+    expect(nested.closest('[data-ui="menu"]')?.querySelector('[data-ui="menu"]')).toBeNull();
+    await user.click(nested);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
 });
 
 /*
@@ -318,53 +498,3 @@ describe("shouldShowActionsMenu by workflow shape (not by column id)", () => {
   });
 });
 
-/*
-FNXC:WorkflowLifecycleColumns 2026-07-30-08:00 (U12 — the last `triage` column guard):
-THE INVERSION. `isPreExecutionHoldColumn` ORed the legacy id with the traits unconditionally, so a
-resolved column merely NAMED `triage` answered true even when its own traits said work was underway
-— offering Plan, which re-plans, on a card that is already executing.
-
-The existing cases here all pass a column with no flags or with hold/intake set, so every one of them
-agrees under both the old and new form. That is why this defect survived the file's earlier
-conversion: nothing exercised a resolved column whose name and traits disagree.
-
-REVERT CHECK: restore the `column === "triage" ||` prefix and the first case fails — Plan reappears
-on a mid-flight card.
-*/
-describe("pre-execution hold resolves traits, not the column's name", () => {
-  it("does NOT treat a mid-flight column NAMED `triage` as a planning target", () => {
-    const model = buildTaskActionMenuModel({
-      task: makeTask({ column: "triage" }),
-      t,
-
-      currentColumnFlags: { intake: false, hold: false, countsTowardWip: true } as any,
-      onPlan: vi.fn(),
-    } as never);
-    expect(model.actions.map((a: { id: string }) => a.id)).not.toContain("plan");
-  });
-
-  it("still offers Plan on a RENAMED hold column", () => {
-    // The narrowing guard: traits decide, so a board that never uses the legacy name still works.
-    const model = buildTaskActionMenuModel({
-      task: makeTask({ column: "backlog" as never }),
-      t,
-
-      currentColumnFlags: { intake: true, hold: true } as any,
-      onPlan: vi.fn(),
-    } as never);
-    expect(model.actions.map((a: { id: string }) => a.id)).toContain("plan");
-  });
-
-  it("keeps the flagless degraded answer for `triage` and withholds it for flagless `todo`", () => {
-    /*
-    The asymmetry the file documents: with no flags, `triage` is the only pre-execution hold. A
-    flagless `todo` must NOT offer Plan, because re-planning an already-planned card is not
-    recoverable by the operator.
-    */
-    const forColumn = (column: string) =>
-      buildTaskActionMenuModel({ task: makeTask({ column: column as never }), t, onPlan: vi.fn() } as never)
-        .actions.map((a: { id: string }) => a.id);
-    expect(forColumn("triage")).toContain("plan");
-    expect(forColumn("todo")).not.toContain("plan");
-  });
-});

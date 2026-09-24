@@ -62,7 +62,6 @@ const workflowPayload: BoardWorkflowsPayload = {
       columns: [
         { id: "todo", name: "Todo", flags: { intake: true } },
         { id: "done", name: "Done", flags: { complete: true } },
-        { id: "archived", name: "Archived", flags: { archived: true } },
       ],
     },
     {
@@ -122,7 +121,6 @@ const boardProps = {
   addToast: vi.fn(),
   onNewTask: vi.fn(),
   autoMerge: true,
-  onToggleAutoMerge: vi.fn(),
 };
 
 const listProps = {
@@ -132,7 +130,6 @@ const listProps = {
   onMergeTask: vi.fn(async () => ({} as never)),
   onOpenDetail: vi.fn(),
   addToast: vi.fn(),
-  onCreateWorkflow: vi.fn(),
 };
 
 type Surface = "Board" | "ListView";

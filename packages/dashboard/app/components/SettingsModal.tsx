@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from "react";
+import { ViewHeader } from "./ViewHeader";
+import { ViewSidebar } from "./ViewSidebar";
+import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from "react";
 import { Globe, Folder, GitBranch, Power, RefreshCw, Star, Settings as SettingsIcon, Search, X as SearchToggleCloseIcon } from "lucide-react";
 import {
   getErrorMessage,
@@ -6,7 +8,7 @@ import {
   normalizeMergeIntegrationWorktreeMode,
   normalizeMergeAdvanceAutoSyncMode,
 } from "@fusion/core";
-import type { Settings, GlobalSettings, ThemeMode, ColorTheme, ModelPreset } from "@fusion/core";
+import type { Settings, GlobalSettings, ThemeMode, ColorTheme, UiStyle, ModelPreset } from "@fusion/core";
 import { DEFAULT_GLOBAL_SETTINGS } from "@fusion/core";
 import { fetchSettings, fetchSettingsByScope, updateSettings, updateGlobalSettings, fetchAuthStatus, loginProvider, logoutProvider, cancelProviderLogin, saveApiKey, clearApiKey, fetchModels, testNotification, fetchBackups, createBackup, exportSettings, importSettings, fetchMemoryFile, fetchMemoryFiles, saveMemoryFile, compactMemory, installQmd, testMemoryRetrieval, triggerMemoryDreams, fetchGitRemotes, fetchGitRemotesDetailed, fetchGitBranches, fetchProjects, fetchDashboardHealth, checkForUpdates, installUpdate, fetchSystemInfo, requestSystemRestart, fetchRemoteSettings, fetchRemoteStatus, installCloudflared, fetchRemoteQr, fetchRemoteUrl, submitProviderManualCode, fetchPlugins, formatProviderInstanceKey } from "../api";
 import type { AuthProvider, ManualOAuthCodeInfo, ModelInfo, BackupListResponse, SettingsExportData, MemoryFileInfo, MemoryRetrievalTestResult, GitRemote, GitRemoteDetailed, ProjectInfo, RemoteStatus, UpdateCheckResponse, UpdateInstallResponse, OAuthDeviceCodeInfo } from "../api";
@@ -25,9 +27,9 @@ import {
   type DashboardShortcutAction,
 } from "../utils/keyboardShortcuts";
 import type { DashboardKeyboardShortcutMap } from "../utils/keyboardShortcuts";
-import { normalizeChatMessageLayout, type ChatMessageLayout } from "../hooks/useAppSettings";
+import { normalizeChatMessageLayout, normalizeTaskDetailDefaultTab, type ChatMessageLayout, type TaskDetailDefaultTab } from "../hooks/useAppSettings";
+import { normalizeNavigationPlacement, type NavigationPlacement } from "../utils/navigationPlacement";
 import { SettingsHelpTip } from "./settings/SettingsHelpTip";
-import type { SectionSaveHandler } from "./settings/sections/context";
 import { AppearanceSection } from "./settings/sections/AppearanceSection";
 import { ExperimentalSection } from "./settings/sections/ExperimentalSection";
 import { NodeSyncSection } from "./settings/sections/NodeSyncSection";
@@ -47,7 +49,7 @@ import {
 import { SecretsSection } from "./settings/sections/SecretsSection";
 import { PromptsSection } from "./settings/sections/PromptsSection";
 import { GeneralSection } from "./settings/sections/GeneralSection";
-import { ProjectModelsSection, WorkflowLaneFlushRejection } from "./settings/sections/ProjectModelsSection";
+import { ProjectModelsSection } from "./settings/sections/ProjectModelsSection";
 import { SchedulingSection } from "./settings/sections/SchedulingSection";
 import { CliBinarySection } from "./settings/sections/CliBinarySection";
 import { ScheduledEvalsSection } from "./settings/sections/ScheduledEvalsSection";
@@ -84,6 +86,7 @@ import { appendTokenQuery, OAUTH_RELOGIN_SUCCESS_EVENT } from "../auth";
 import { openExternalUrl } from "../utils/open-external";
 import { useConfirm } from "../hooks/useConfirm";
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
+import { useKeyboardViewportOwnedByAncestor } from "../hooks/useKeyboardViewportSurface";
 import { useMobileScrollLock } from "../hooks/useMobileScrollLock";
 import { useEmbeddedPresentation, type ModalPresentation } from "../hooks/useEmbeddedPresentation";
 import { useNodes } from "../hooks/useNodes";
@@ -303,11 +306,6 @@ function settingsSearchScrollBehavior(): ScrollBehavior {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 }
 
-const SETTINGS_NAV_WIDTH_STORAGE_KEY = "fusion:settings-nav-width";
-const SETTINGS_NAV_DEFAULT_WIDTH = 248;
-const SETTINGS_NAV_MIN_WIDTH = 200;
-const SETTINGS_NAV_MAX_WIDTH = 420;
-
 /*
 FNXC:SettingsSimplification 2026-07-10-23:24:
 Settings opens in a focused mode that omits specialist integration, runtime, diagnostics, and infrastructure sections. The Advanced settings switch restores every section, applies consistently to desktop navigation, mobile navigation, and search, and persists only as a browser-local display preference so it never changes or exports project settings.
@@ -332,20 +330,6 @@ function readAdvancedSettingsPreference(): boolean {
     return localStorage.getItem(ADVANCED_SETTINGS_STORAGE_KEY) === "true";
   } catch {
     return false;
-  }
-}
-
-function clampSettingsNavWidth(width: number): number {
-  if (!Number.isFinite(width)) return SETTINGS_NAV_DEFAULT_WIDTH;
-  return Math.min(SETTINGS_NAV_MAX_WIDTH, Math.max(SETTINGS_NAV_MIN_WIDTH, Math.round(width)));
-}
-
-function readSettingsNavWidthPreference(): number {
-  try {
-    const stored = Number.parseFloat(localStorage.getItem(SETTINGS_NAV_WIDTH_STORAGE_KEY) ?? "");
-    return clampSettingsNavWidth(stored);
-  } catch {
-    return SETTINGS_NAV_DEFAULT_WIDTH;
   }
 }
 
@@ -501,6 +485,8 @@ export const SETTINGS_SECTIONS: SettingsSection[] = SETTINGS_SECTION_METADATA.ma
  *  IMPORTANT: Dev Server is canonically keyed by `devServerView`; `devServer`
  *  is treated as a legacy alias and must never render as a second row. */
 const KNOWN_EXPERIMENTAL_FEATURES: Record<string, string> = {
+  /* FNXC:WhiteboardAlpha 2026-09-10-05:42: The workspace has its own explicit global default-off toggle so enabling unrelated Alpha chrome never exposes Whiteboard. */
+  whiteboardView: "Whiteboard Alpha",
   insights: "Insights",
   memoryView: "Memory Editor",
   skillsView: "Skills View",
@@ -543,7 +529,9 @@ Chat Rooms, Goals, Memory, Insights, Skills, and Todo graduated from Experimenta
 FNXC:SettingsExperimental 2026-06-26-00:00:
 Remote Access graduated from Experimental — section is always available; stale persisted `remoteAccess` flags are hidden so upgrades cannot disable it.
 */
+/* FNXC:OfficialDashboardDesign 2026-09-13-00:38: Alpha chrome is Fusion's official dashboard design. Keep stale alphaUpdates values persisted but hidden and inert while Whiteboard remains an independent experiment. */
 const HIDDEN_EXPERIMENTAL_FEATURE_KEYS = new Set<string>([
+  "alphaUpdates",
   "chatRooms",
   "goalsView",
   "insights",
@@ -651,6 +639,10 @@ interface SettingsModalProps {
   onThemeModeChange?: (mode: ThemeMode) => void;
   /** Called when color theme changes */
   onColorThemeChange?: (theme: ColorTheme) => void;
+  /** FNXC:UiStyleAxis 2026-09-15-00:20: current interface style, the second independent appearance axis. */
+  uiStyle?: UiStyle;
+  /** Called when the interface style changes. */
+  onUiStyleChange?: (style: UiStyle) => void;
   /** Current dashboard font scale percentage */
   dashboardFontScalePct?: number;
   /** Current shadcn-custom color overrides */
@@ -661,24 +653,25 @@ interface SettingsModalProps {
   onDashboardFontScaleChange?: (scalePct: number) => void;
   /** Called when shadcn-custom color overrides change */
   onShadcnCustomColorsChange?: (colors: Record<string, string>) => void;
-  /** Mirrors pending Quick Chat launcher changes into the app shell immediately. */
-  onQuickChatButtonModeChange?: (mode: "floating" | "footer" | "off") => void;
   /** Mirrors the pending project conversation layout into mounted chat surfaces immediately. */
   chatMessageLayout?: ChatMessageLayout;
   onChatMessageLayoutChange?: (layout: ChatMessageLayout) => void;
+  /** FN-419: mirrors the pending project navigation placement into the shell immediately. */
+  navigationPlacement?: NavigationPlacement;
+  onNavigationPlacementChange?: (placement: NavigationPlacement) => void;
+  /** FN-426: mirrors the pending right-dock availability into the shell immediately. */
+  rightSidebarEnabled?: boolean;
+  onRightSidebarEnabledChange?: (enabled: boolean) => void;
   /** Current App-shell values and optimistic callbacks for mounted Appearance consumers. */
-  openTasksInRightSidebar?: boolean;
-  onOpenTasksInRightSidebarChange?: (enabled: boolean) => void;
-  openMobileTasksInPopup?: boolean;
-  onOpenMobileTasksInPopupChange?: (enabled: boolean) => void;
-  taskPopupsBoardListOnly?: boolean;
-  onTaskPopupsBoardListOnlyChange?: (enabled: boolean) => void;
   showCostBadgeOnCards?: boolean;
   onShowCostBadgeOnCardsChange?: (enabled: boolean) => void;
-  taskDetailChatFirst?: boolean;
-  onTaskDetailChatFirstChange?: (enabled: boolean) => void;
+  /* FNXC:TaskDetailDefaultTab 2026-09-16-02:53: FN-442 — three-value project choice replacing the Chat-first opt-in. */
+  taskDetailDefaultTab?: TaskDetailDefaultTab;
+  onTaskDetailDefaultTabChange?: (tab: TaskDetailDefaultTab) => void;
   /** Mirrors pending mobile quick-action changes into the app shell immediately. */
   onMobileNavPrimaryItemsChange?: (items: string[]) => void;
+  /* FN-511 : miroir immédiat de l'option mobile de tiroir gestuel dans le shell, avant sauvegarde. */
+  onMobileNavMenuSwipeGestureChange?: (enabled: boolean) => void;
   /** Optional callback when user wants to reopen the onboarding guide */
   onReopenOnboarding?: () => void;
   /** Optional callback to open approvals/mailbox view. */
@@ -936,25 +929,25 @@ export function SettingsModal({
   colorTheme = "shadcn-ember",
   onThemeModeChange,
   onColorThemeChange,
+  uiStyle,
+  onUiStyleChange,
   dashboardFontScalePct = 100,
   shadcnCustomColors = {},
   resolvedThemeMode,
   onDashboardFontScaleChange,
   onShadcnCustomColorsChange,
-  onQuickChatButtonModeChange,
   chatMessageLayout = "bubbles",
   onChatMessageLayoutChange,
-  openTasksInRightSidebar,
-  onOpenTasksInRightSidebarChange,
-  openMobileTasksInPopup,
-  onOpenMobileTasksInPopupChange,
-  taskPopupsBoardListOnly,
-  onTaskPopupsBoardListOnlyChange,
+  navigationPlacement = "footer",
+  onNavigationPlacementChange,
+  rightSidebarEnabled,
+  onRightSidebarEnabledChange,
   showCostBadgeOnCards,
   onShowCostBadgeOnCardsChange,
-  taskDetailChatFirst,
-  onTaskDetailChatFirstChange,
+  taskDetailDefaultTab,
+  onTaskDetailDefaultTabChange,
   onMobileNavPrimaryItemsChange,
+  onMobileNavMenuSwipeGestureChange,
   onReopenOnboarding,
   onOpenApprovals,
   onOpenWorkflowSettings,
@@ -969,7 +962,9 @@ export function SettingsModal({
   const { keyboardOverlap, viewportHeight, viewportOffsetTop, keyboardOpen } = useMobileKeyboard({
     enabled: viewportMode === "mobile",
   });
-  const keyboardStyle: CSSProperties = keyboardOpen
+  // FNXC:MobileKeyboardViewport 2026-09-17-15:32: FN-512 single-owner rule — a drawer/window host that already adapted its bottom edge must not be compensated again from inside.
+  const keyboardOwnedByAncestor = useKeyboardViewportOwnedByAncestor();
+  const keyboardStyle: CSSProperties = keyboardOpen && !keyboardOwnedByAncestor
     ? ({
         "--keyboard-overlap": `${keyboardOverlap}px`,
         "--vv-offset-top": `${viewportOffsetTop}px`,
@@ -977,28 +972,6 @@ export function SettingsModal({
       } as CSSProperties)
     : {};
   const settingsContentRef = useRef<HTMLDivElement>(null);
-  const workflowLaneSaverRef = useRef<SectionSaveHandler | null>(null);
-  /*
-  FNXC:SettingsAutoSave 2026-07-20-01:00:
-  Workflow lane edits live outside the shared Settings form. Track their revision
-  alongside form dirtiness so Option 1 auto-save and every close path flush them
-  too; a completion only clears the revision it actually persisted.
-  */
-  const workflowLaneRevisionRef = useRef(0);
-  const [workflowLanesDirty, setWorkflowLanesDirty] = useState(false);
-  const markWorkflowLanesDirty = useCallback(() => {
-    workflowLaneRevisionRef.current += 1;
-    setWorkflowLanesDirty(true);
-  }, []);
-  const registerWorkflowLaneSaver = useCallback((saver: SectionSaveHandler | null) => {
-    /*
-    FNXC:ProjectModelsWorkflowLanes 2026-07-14-09:07:
-    Project Models workflow lane edits are workflow setting-values, not normal project settings. Keep the latest saver registered across section unmounts so auto-save and close flushing retain project-scoped workflow overrides after navigation.
-    */
-    if (saver) {
-      workflowLaneSaverRef.current = saver;
-    }
-  }, []);
   // FNXC:ModalTouchGeometry 2026-07-26-14:10: FloatingWindow owns movable, clamped geometry for the modal branch; the embedded Settings view remains an inline, chrome-free destination.
   const sessionBannersHidden = useSessionBannersHidden();
   const [form, setForm] = useState<SettingsFormState>({
@@ -1031,12 +1004,12 @@ export function SettingsModal({
     mergeAdvanceAutoSync: "stash-and-ff",
     merger: { mode: "ai", maxReviewPasses: 3, allowDirtyLocalCheckoutSync: true },
     showWorktreeGrouping: false,
-    openTasksInRightSidebar: false,
-    openMobileTasksInPopup: false,
-    taskPopupsBoardListOnly: true,
     showCostBadgeOnCards: false,
-    taskDetailChatFirst: false,
+    taskDetailDefaultTab: "activity",
     chatMessageLayout: "bubbles",
+    navigationPlacement: "footer",
+    /* FNXC:RightSidebarOptional 2026-09-15-16:04: FN-426 — pre-hydration form value matches the default-off schema. */
+    rightSidebarEnabled: false,
     executorAllowSiblingBranchRename: false,
     worktreeCopyFiles: [],
     worktreesDir: "",
@@ -1199,12 +1172,6 @@ export function SettingsModal({
       ? window.matchMedia(MOBILE_SETTINGS_MEDIA_QUERY)?.matches === true
       : false),
   );
-  /**
-   * FNXC:Settings 2026-07-11-18:52:
-   * FN-7825 makes the desktop/tablet Settings rail resizable and persists the chosen width locally. Mobile remains stacked and ignores this inline CSS variable so a desktop-saved width cannot leak into the top-bar layout.
-   */
-  const [settingsNavWidth, setSettingsNavWidth] = useState(() => readSettingsNavWidthPreference());
-  const settingsNavDragRef = useRef<{ startX: number; startWidth: number; previousUserSelect: string } | null>(null);
   const [settingsSearchQuery, setSettingsSearchQuery] = useState("");
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(() => {
     const requestedSection = initialSection === "pi-extensions" ? "plugins" : initialSection;
@@ -1221,16 +1188,6 @@ export function SettingsModal({
     } catch {
       // Storage can be unavailable in private/locked-down browser contexts; the in-session preference still works.
     }
-  }, []);
-  const persistSettingsNavWidth = useCallback((width: number) => {
-    const nextWidth = clampSettingsNavWidth(width);
-    setSettingsNavWidth(nextWidth);
-    try {
-      localStorage.setItem(SETTINGS_NAV_WIDTH_STORAGE_KEY, String(nextWidth));
-    } catch {
-      // Storage can be unavailable in private/locked-down browser contexts; the in-session width still works.
-    }
-    return nextWidth;
   }, []);
   /*
    * FNXC:Settings 2026-07-09-00:00:
@@ -1580,74 +1537,6 @@ export function SettingsModal({
     enabled: activeSection === "memory",
   });
 
-  const settingsNavResizeEnabled = !showMobileSectionPicker;
-  const settingsNavigationStyle = settingsNavResizeEnabled
-    ? ({ "--settings-nav-width": `${settingsNavWidth}px` } as CSSProperties)
-    : undefined;
-
-  const endSettingsNavResize = useCallback((pointerId?: number, target?: EventTarget | null) => {
-    const dragState = settingsNavDragRef.current;
-    if (!dragState) return;
-    document.body.style.userSelect = dragState.previousUserSelect;
-    settingsNavDragRef.current = null;
-    if (typeof pointerId === "number" && target instanceof HTMLElement && typeof target.releasePointerCapture === "function") {
-      try {
-        target.releasePointerCapture(pointerId);
-      } catch {
-        // Pointer capture may already be released by the browser; cleanup is still complete.
-      }
-    }
-  }, []);
-
-  const handleSettingsNavResizePointerMove = useCallback((event: PointerEvent) => {
-    const dragState = settingsNavDragRef.current;
-    if (!dragState) return;
-    event.preventDefault();
-    persistSettingsNavWidth(dragState.startWidth + event.clientX - dragState.startX);
-  }, [persistSettingsNavWidth]);
-
-  const handleSettingsNavResizePointerUp = useCallback((event: PointerEvent) => {
-    endSettingsNavResize(event.pointerId, event.target);
-  }, [endSettingsNavResize]);
-
-  const handleSettingsNavResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!settingsNavResizeEnabled) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (typeof event.currentTarget.setPointerCapture === "function") {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    }
-    settingsNavDragRef.current = {
-      startX: event.clientX,
-      startWidth: settingsNavWidth,
-      previousUserSelect: document.body.style.userSelect,
-    };
-    document.body.style.userSelect = "none";
-  }, [settingsNavResizeEnabled, settingsNavWidth]);
-
-  const handleSettingsNavResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!settingsNavResizeEnabled) return;
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    persistSettingsNavWidth(settingsNavWidth + (event.key === "ArrowRight" ? 16 : -16));
-  }, [persistSettingsNavWidth, settingsNavResizeEnabled, settingsNavWidth]);
-
-  useEffect(() => {
-    if (!settingsNavResizeEnabled) {
-      endSettingsNavResize();
-      return;
-    }
-    document.addEventListener("pointermove", handleSettingsNavResizePointerMove);
-    document.addEventListener("pointerup", handleSettingsNavResizePointerUp);
-    document.addEventListener("pointercancel", handleSettingsNavResizePointerUp);
-    return () => {
-      document.removeEventListener("pointermove", handleSettingsNavResizePointerMove);
-      document.removeEventListener("pointerup", handleSettingsNavResizePointerUp);
-      document.removeEventListener("pointercancel", handleSettingsNavResizePointerUp);
-      endSettingsNavResize();
-    };
-  }, [endSettingsNavResize, handleSettingsNavResizePointerMove, handleSettingsNavResizePointerUp, settingsNavResizeEnabled]);
-
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
       return;
@@ -1688,15 +1577,30 @@ export function SettingsModal({
           */
           showCostBadgeOnCards: s.showCostBadgeOnCards === true,
           /*
-          FNXC:TaskDetailActivityFirst 2026-06-30-23:59:
-          The Settings form normalizes missing taskDetailChatFirst to false so new and upgraded projects show the Activity-first default until an operator explicitly opts into Chat-first.
+          FNXC:TaskDetailDefaultTab 2026-09-16-02:53:
+          FN-442: the Settings form normalizes missing or malformed values to the historical `activity` landing tab, and
+          reads a legacy persisted `taskDetailChatFirst === true` as `chat` so an operator who had opted into Chat-first
+          finds the form pre-filled on Chat rather than silently reset. The explicit cast is deliberate: the legacy key is
+          no longer in the type but can still be present in a persisted value.
           */
-          taskDetailChatFirst: s.taskDetailChatFirst === true,
+          taskDetailDefaultTab: normalizeTaskDetailDefaultTab(s.taskDetailDefaultTab, (s as Record<string, unknown>).taskDetailChatFirst),
           /*
           FNXC:ChatMessageLayout 2026-08-18-20:27:
           Normalize legacy or malformed project values before they enter the form so the selector always has exactly its two valid choices and defaults to Bubbles.
           */
           chatMessageLayout: normalizeChatMessageLayout(s.chatMessageLayout),
+          /*
+          FNXC:Navigation 2026-09-15-14:41:
+          FN-419: normalize a legacy or malformed persisted placement before it enters the form so the selector always
+          has exactly its two valid choices and falls back to the bottom bar.
+          */
+          navigationPlacement: normalizeNavigationPlacement(s.navigationPlacement),
+          /*
+          FNXC:RightSidebarOptional 2026-09-15-16:04:
+          FN-426: only the exact boolean true enters the form, so a legacy or malformed persisted value renders the
+          toggle off and saves the same default-off value the shell already applied.
+          */
+          rightSidebarEnabled: s.rightSidebarEnabled === true,
           /*
           FNXC:GithubImportTracking 2026-07-01-00:00:
           Missing githubLinkImportedIssuesToTracking must render as unchecked and save as project-scoped false only after operator interaction; this keeps upgraded projects on legacy import behavior by default.
@@ -2964,10 +2868,10 @@ export function SettingsModal({
   const handleExport = useCallback(async () => {
     try {
       // Default scope based on active section
-      const scope = activeSectionScope === "global" ? "global" : 
+      const scope = activeSectionScope === "global" ? "global" :
                     activeSectionScope === "project" ? "project" : "both";
       const data = await exportSettings(scope, projectId);
-      
+
       // Create and download the JSON file
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -2979,7 +2883,7 @@ export function SettingsModal({
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      
+
       const scopeLabel = scope === "global"
         ? t("settings.importExport.scopeLabel.global", "global")
         : scope === "project"
@@ -2994,10 +2898,10 @@ export function SettingsModal({
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    
+
     setImportFile(file);
     setImportLoading(true);
-    
+
     try {
       const text = await file.text();
       const data = JSON.parse(text) as SettingsExportData;
@@ -3013,7 +2917,7 @@ export function SettingsModal({
 
   const handleImport = useCallback(async () => {
     if (!importPreview) return;
-    
+
     setImportLoading(true);
     try {
       const result = await importSettings(importPreview, { scope: importScope, merge: importMerge }, projectId);
@@ -3093,16 +2997,22 @@ export function SettingsModal({
     globalProviderKey: keyof GlobalSettings;
     globalModelKey: keyof GlobalSettings;
     globalThinkingKey?: keyof GlobalSettings;
+    globalFallbackProviderKey?: keyof GlobalSettings;
+    globalFallbackModelKey?: keyof GlobalSettings;
+    globalFallbackThinkingKey?: keyof GlobalSettings;
     projectProviderKey: keyof Settings;
     projectModelKey: keyof Settings;
     projectThinkingKey?: keyof Settings;
+    projectFallbackProviderKey?: keyof Settings;
+    projectFallbackModelKey?: keyof Settings;
+    projectFallbackThinkingKey?: keyof Settings;
     helperText: string;
     fallbackOrder: string;
   }
 
   /*
-  FNXC:Settings-MergerModel 2026-07-13-07:52:
-  MODEL_LANES drives Global Models + Project Models pickers. Merger is a sixth dedicated lane (project-scoped like summarization, not workflow-moved) so conflict/merge agents can use a different model from executor/planner/reviewer without a separate settings surface.
+  FNXC:Settings-MergerModel 2026-09-14-19:06:
+  MODEL_LANES orders Global and Project Models as Default, Planner, Executor, Reviewer, Merger. Each role has an independent scoped primary/fallback block; workflow overrides are edited on the workflow itself.
   */
   /** All model lanes with their global and project override keys */
   const MODEL_LANES: ModelLane[] = [
@@ -3114,19 +3024,80 @@ export function SettingsModal({
       projectProviderKey: "defaultProviderOverride",
       projectModelKey: "defaultModelIdOverride",
       projectThinkingKey: "defaultThinkingLevelOverride",
-      helperText: "Default AI model used for task execution when no per-task override is set.",
+      helperText: "Default AI model used when no task, workflow, project or global role model is configured.",
       fallbackOrder: "Project override → Global default lane → Automatic resolution",
     },
     {
+      laneId: "planning",
+      label: "Planner Model",
+      globalProviderKey: "planningGlobalProvider",
+      globalModelKey: "planningGlobalModelId",
+      globalThinkingKey: "planningGlobalThinkingLevel",
+      globalFallbackProviderKey: "planningGlobalFallbackProvider",
+      globalFallbackModelKey: "planningGlobalFallbackModelId",
+      globalFallbackThinkingKey: "planningGlobalFallbackThinkingLevel",
+      projectProviderKey: "planningProvider",
+      projectModelKey: "planningModelId",
+      projectThinkingKey: "planningThinkingLevel",
+      projectFallbackProviderKey: "planningFallbackProvider",
+      projectFallbackModelKey: "planningFallbackModelId",
+      projectFallbackThinkingKey: "planningFallbackThinkingLevel",
+      helperText: "AI model used for task planning.",
+      fallbackOrder: "Task → Workflow lane → Project override → Global Planner → Project Default → Global Default",
+    },
+    {
       laneId: "execution",
-      label: "Execution Model",
+      label: "Executor Model",
       globalProviderKey: "executionGlobalProvider",
       globalModelKey: "executionGlobalModelId",
       globalThinkingKey: "executionGlobalThinkingLevel",
+      globalFallbackProviderKey: "executionGlobalFallbackProvider",
+      globalFallbackModelKey: "executionGlobalFallbackModelId",
+      globalFallbackThinkingKey: "executionGlobalFallbackThinkingLevel",
       projectProviderKey: "executionProvider",
       projectModelKey: "executionModelId",
+      projectThinkingKey: "executionThinkingLevel",
+      projectFallbackProviderKey: "executionFallbackProvider",
+      projectFallbackModelKey: "executionFallbackModelId",
+      projectFallbackThinkingKey: "executionFallbackThinkingLevel",
       helperText: "AI model used for task implementation (executor agent).",
-      fallbackOrder: "Project override → Global execution lane → Global default lane → Automatic resolution",
+      fallbackOrder: "Task → Workflow lane → Project override → Global Executor → Project Default → Global Default",
+    },
+    {
+      laneId: "validator",
+      label: "Reviewer Model",
+      globalProviderKey: "validatorGlobalProvider",
+      globalModelKey: "validatorGlobalModelId",
+      globalThinkingKey: "validatorGlobalThinkingLevel",
+      globalFallbackProviderKey: "validatorGlobalFallbackProvider",
+      globalFallbackModelKey: "validatorGlobalFallbackModelId",
+      globalFallbackThinkingKey: "validatorGlobalFallbackThinkingLevel",
+      projectProviderKey: "validatorProvider",
+      projectModelKey: "validatorModelId",
+      projectThinkingKey: "validatorThinkingLevel",
+      projectFallbackProviderKey: "validatorFallbackProvider",
+      projectFallbackModelKey: "validatorFallbackModelId",
+      projectFallbackThinkingKey: "validatorFallbackThinkingLevel",
+      helperText: "AI model used for code and specification review.",
+      fallbackOrder: "Task → Workflow lane → Project override → Global Reviewer → Project Default → Global Default",
+    },
+    {
+      laneId: "merger",
+      label: "Merger Model",
+      globalProviderKey: "mergerGlobalProvider",
+      globalModelKey: "mergerGlobalModelId",
+      globalThinkingKey: "mergerGlobalThinkingLevel",
+      globalFallbackProviderKey: "mergerGlobalFallbackProvider",
+      globalFallbackModelKey: "mergerGlobalFallbackModelId",
+      globalFallbackThinkingKey: "mergerGlobalFallbackThinkingLevel",
+      projectProviderKey: "mergerProvider",
+      projectModelKey: "mergerModelId",
+      projectThinkingKey: "mergerThinkingLevel",
+      projectFallbackProviderKey: "mergerFallbackProvider",
+      projectFallbackModelKey: "mergerFallbackModelId",
+      projectFallbackThinkingKey: "mergerFallbackThinkingLevel",
+      helperText: "AI model used for merger sessions.",
+      fallbackOrder: "Task → Workflow lane → Project override → Global Merger → Project Default → Global Default",
     },
     /*
     FNXC:FastModeModel 2026-08-29-02:43:
@@ -3143,40 +3114,6 @@ export function SettingsModal({
       projectThinkingKey: "fastCheapThinkingLevel",
       helperText: t("settings.globalModels.fastAndCheapModelHelp", "Select a cheap model here for quick edits. It is used for Fast Mode when creating a task."),
       fallbackOrder: "Project override → Global Fast & Cheap lane → Execution lane → Project default lane → Global default lane → Automatic resolution",
-    },
-    {
-      laneId: "planning",
-      label: "Planning Model",
-      globalProviderKey: "planningGlobalProvider",
-      globalModelKey: "planningGlobalModelId",
-      globalThinkingKey: "planningGlobalThinkingLevel",
-      projectProviderKey: "planningProvider",
-      projectModelKey: "planningModelId",
-      helperText: "AI model used for task planning.",
-      fallbackOrder: "Project override → Global planning lane → Global default lane → Automatic resolution",
-    },
-    {
-      laneId: "validator",
-      label: "Reviewer Model",
-      globalProviderKey: "validatorGlobalProvider",
-      globalModelKey: "validatorGlobalModelId",
-      globalThinkingKey: "validatorGlobalThinkingLevel",
-      projectProviderKey: "validatorProvider",
-      projectModelKey: "validatorModelId",
-      helperText: "AI model used for code and specification review.",
-      fallbackOrder: "Project override → Global reviewer lane → Global default lane → Automatic resolution",
-    },
-    {
-      laneId: "merger",
-      label: "Merger Model",
-      globalProviderKey: "mergerGlobalProvider",
-      globalModelKey: "mergerGlobalModelId",
-      globalThinkingKey: "mergerGlobalThinkingLevel",
-      projectProviderKey: "mergerProvider",
-      projectModelKey: "mergerModelId",
-      projectThinkingKey: "mergerThinkingLevel",
-      helperText: "AI model used for merge conflict resolution, clean-room merge, stash-conflict recovery, and related merger agent sessions.",
-      fallbackOrder: "Project override → Global merger lane → Project default lane → Global default lane → Automatic resolution",
     },
     {
       laneId: "summarization",
@@ -3510,7 +3447,6 @@ export function SettingsModal({
     const initialScopedValuesSnapshot = initialScopedValues;
     const activeSectionSnapshot = activeSection;
     const globalGitlabSettingsSnapshot = globalGitlabSettings;
-    const workflowLaneRevisionSnapshot = workflowLaneRevisionRef.current;
     const limits = formSnapshot.researchSettings?.limits;
     if (limits?.maxConcurrentRuns !== undefined && (!Number.isFinite(limits.maxConcurrentRuns) || limits.maxConcurrentRuns < 1)) {
       setResearchLimitError("Research max concurrent runs must be at least 1.");
@@ -3589,7 +3525,7 @@ export function SettingsModal({
         githubTrackingDefaultRepo: formSnapshot.githubTrackingDefaultRepo?.trim() || undefined,
         /*
         FNXC:DashboardShortcuts 2026-07-04-00:00:
-        FN-7553 normalizes every declared shortcut action (derived from resolveDashboardKeyboardShortcuts' key set) on save, not just quickChat/terminal, so newly-added actions get the same trim/normalize-before-persist treatment.
+        Normalize every declared shortcut action from the resolver's key set on save so newly added actions receive the same trim-before-persist treatment.
         */
         dashboardKeyboardShortcuts: Object.fromEntries(
           (Object.entries(resolveDashboardKeyboardShortcuts(formSnapshot.dashboardKeyboardShortcuts)) as [DashboardShortcutAction, string][])
@@ -3674,8 +3610,6 @@ export function SettingsModal({
         Object.keys(projectPatch).length > 0 ? updateSettings(projectPatch, projectId) : Promise.resolve(),
       ]);
 
-      await workflowLaneSaverRef.current?.();
-
       /*
       FNXC:SettingsBackups 2026-08-13-23:51:
       Saving database-backup settings can register or reschedule the central
@@ -3684,11 +3618,6 @@ export function SettingsModal({
       */
       if (Object.keys(globalPatch).some((key) => key.startsWith("autoBackup"))) {
         void fetchBackups(projectId).then(setBackupInfo).catch(() => setBackupInfo(null));
-      }
-
-      // Only clear workflow-lane dirtiness when no newer lane edit arrived.
-      if (workflowLaneRevisionRef.current === workflowLaneRevisionSnapshot) {
-        setWorkflowLanesDirty(false);
       }
 
       // Quiet state feedback avoids a toast for each debounced edit.
@@ -3725,7 +3654,6 @@ export function SettingsModal({
       return true;
     } catch (err) {
       lastPersistSucceededRef.current = false;
-      if (err instanceof WorkflowLaneFlushRejection) return false;
       setAutoSaveStatus("error");
       addToast(getErrorMessage(err), "error");
       return false;
@@ -3754,11 +3682,10 @@ export function SettingsModal({
         project: resolveScopedMcpSettings("project", scopedSettings),
       } : undefined,
     });
-    return Object.keys(globalPatch).length > 0 || Object.keys(projectPatch).length > 0
-      || workflowLanesDirty;
-  }, [form, globalGitlabSettings, initialScopedValues, initialValues, scopedSettings, activeSection, workflowLanesDirty]);
+    return Object.keys(globalPatch).length > 0 || Object.keys(projectPatch).length > 0;
+  }, [form, globalGitlabSettings, initialScopedValues, initialValues, scopedSettings, activeSection]);
 
-  const autoSaveSnapshot = useMemo(() => JSON.stringify({ form, scopedSettings, globalGitlabSettings, workflowLaneRevision: workflowLaneRevisionRef.current }), [form, globalGitlabSettings, scopedSettings, workflowLanesDirty]);
+  const autoSaveSnapshot = useMemo(() => JSON.stringify({ form, scopedSettings, globalGitlabSettings }), [form, globalGitlabSettings, scopedSettings]);
   const hasAutoSaveChange = autoSaveActivationSnapshotRef.current !== null
     && autoSaveActivationSnapshotRef.current !== autoSaveSnapshot;
   latestAutoSaveStateRef.current = { dirty: settingsDirty, changed: hasAutoSaveChange };
@@ -3791,7 +3718,7 @@ export function SettingsModal({
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [loading, autoSaveReady, hasAutoSaveChange, settingsDirty, prefixError, presetDraft, form, scopedSettings, globalGitlabSettings, workflowLanesDirty, activeSection]);
+  }, [loading, autoSaveReady, hasAutoSaveChange, settingsDirty, prefixError, presetDraft, form, scopedSettings, globalGitlabSettings, activeSection]);
 
   const requestClose = useCallback(async () => {
     if (autoSaveTimerRef.current) {
@@ -4159,8 +4086,8 @@ export function SettingsModal({
             addToast={addToast}
             prefixError={prefixError}
             setPrefixError={setPrefixError}
-            onQuickChatButtonModeChange={onQuickChatButtonModeChange}
             onMobileNavPrimaryItemsChange={onMobileNavPrimaryItemsChange}
+            onMobileNavMenuSwipeGestureChange={onMobileNavMenuSwipeGestureChange}
           />
         );
       case "source-control":
@@ -4264,10 +4191,6 @@ export function SettingsModal({
             form={form}
             setForm={setForm}
             projectId={projectId}
-            addToast={addToast}
-            onOpenWorkflowSettings={onOpenWorkflowSettings}
-            registerWorkflowLaneSaver={registerWorkflowLaneSaver}
-            onWorkflowLanesChange={markWorkflowLanesDirty}
             models={{
               modelLanes: MODEL_LANES,
               getLaneStatus,
@@ -4304,20 +4227,20 @@ export function SettingsModal({
             resolvedThemeMode={resolvedThemeMode}
             onThemeModeChange={onThemeModeChange}
             onColorThemeChange={onColorThemeChange}
+            uiStyle={uiStyle}
+            onUiStyleChange={onUiStyleChange}
             onDashboardFontScaleChange={onDashboardFontScaleChange}
             onShadcnCustomColorsChange={onShadcnCustomColorsChange}
             chatMessageLayout={chatMessageLayout}
             onChatMessageLayoutChange={onChatMessageLayoutChange}
-            openTasksInRightSidebar={openTasksInRightSidebar}
-            onOpenTasksInRightSidebarChange={onOpenTasksInRightSidebarChange}
-            openMobileTasksInPopup={openMobileTasksInPopup}
-            onOpenMobileTasksInPopupChange={onOpenMobileTasksInPopupChange}
-            taskPopupsBoardListOnly={taskPopupsBoardListOnly}
-            onTaskPopupsBoardListOnlyChange={onTaskPopupsBoardListOnlyChange}
+            navigationPlacement={navigationPlacement}
+            onNavigationPlacementChange={onNavigationPlacementChange}
+            rightSidebarEnabled={rightSidebarEnabled}
+            onRightSidebarEnabledChange={onRightSidebarEnabledChange}
             showCostBadgeOnCards={showCostBadgeOnCards}
             onShowCostBadgeOnCardsChange={onShowCostBadgeOnCardsChange}
-            taskDetailChatFirst={taskDetailChatFirst}
-            onTaskDetailChatFirstChange={onTaskDetailChatFirstChange}
+            taskDetailDefaultTab={taskDetailDefaultTab}
+            onTaskDetailDefaultTabChange={onTaskDetailDefaultTabChange}
             sessionBannersHidden={sessionBannersHidden}
             setSessionBannersHidden={setSessionBannersHidden}
           />
@@ -4626,7 +4549,6 @@ export function SettingsModal({
       className="floating-window--settings"
       defaultSize={{ width: 1100, height: 720 }}
       minSize={{ width: 520, height: 480 }}
-      persistGeometryKey="floating-window:settings"
       suspendGeometryPersistenceOnMobile
       suspendGeometryPersistenceOnShortViewport
       closeOnOutsidePointerDown={overlayDismissEnabled}
@@ -4698,81 +4620,70 @@ export function SettingsModal({
         className={isEmbedded ? "modal modal-lg settings-modal settings-modal--embedded" : "modal modal-lg settings-modal"}
         style={isEmbedded ? undefined : keyboardStyle}
       >
-        <div className={isEmbedded ? "modal-header modal-header--embedded" : "modal-header"}>
-          {/* FNXC:Settings 2026-06-22-01:00: Embedded title gains a Settings icon (size 20, matching the sidebar nav and shared ViewHeader) so the embedded settings panel reads consistently with other main-content destinations; title is already 1.125rem. */}
-          <div className="settings-modal-heading">
-            <h3>
-              {isEmbedded && <SettingsIcon size={20} aria-hidden="true" />}
-              <span>{t("settings.title", "Settings")}</span>
-            </h3>
-          </div>
-          <div className="settings-header-actions">
-            <a
-              href="https://github.com/Runfusion/Fusion"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="settings-github-star-btn"
-              aria-label={t("settings.header.starFusion", "Star Fusion on GitHub")}
-              title={t("settings.header.starFusion", "Star Fusion on GitHub")}
-              onClick={markStarClicked}
-              data-clicked={starClicked ? "true" : "false"}
-            >
-              <span className="settings-github-star-btn__action">
-                <ProviderIcon provider="github" size="sm" />
-                <Star size={11} aria-hidden="true" />
-                {t("settings.header.star", "Star")}
-              </span>
-              {gitHubStarCount !== null && (
-                <span className="settings-github-star-btn__count" aria-label={`${gitHubStarCount.toLocaleString()} stars`}>
-                  {gitHubStarCount >= 1000
-                    ? `${(gitHubStarCount / 1000).toFixed(1)}k`
-                    : gitHubStarCount.toLocaleString()}
+        <ViewHeader
+          className={isEmbedded ? "modal-header modal-header--embedded" : "modal-header"}
+          icon={SettingsIcon}
+          title={t("settings.title", "Settings")}
+          actions={(
+            <div className="settings-header-actions">
+              <a
+                href="https://github.com/Runfusion/Fusion"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="settings-github-star-btn"
+                aria-label={t("settings.header.starFusion", "Star Fusion on GitHub")}
+                title={t("settings.header.starFusion", "Star Fusion on GitHub")}
+                onClick={markStarClicked}
+                data-clicked={starClicked ? "true" : "false"}
+              >
+                <span className="settings-github-star-btn__action">
+                  <ProviderIcon provider="github" size="sm" />
+                  <Star size={11} aria-hidden="true" />
+                  {t("settings.header.star", "Star")}
                 </span>
-              )}
-            </a>
-            <a
-              href="https://discord.gg/ksrfuy7WYR"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn btn-sm settings-header-discord-btn"
-              aria-label={t("settings.header.joinDiscord", "Join our Discord")}
-              title={t("settings.header.joinDiscord", "Join our Discord")}
-            >
-              <DiscordIcon size={13} />
-              {t("settings.header.discord", "Discord")}
-            </a>
-          </div>
-          {!isEmbedded && (
-            <button className="modal-close" onClick={() => void requestClose()} aria-label={t("actions.close", "Close")}>
-              &times;
-            </button>
+                {gitHubStarCount !== null ? (
+                  <span className="settings-github-star-btn__count" aria-label={`${gitHubStarCount.toLocaleString()} stars`}>
+                    {gitHubStarCount >= 1000
+                      ? `${(gitHubStarCount / 1000).toFixed(1)}k`
+                      : gitHubStarCount.toLocaleString()}
+                  </span>
+                ) : null}
+              </a>
+              <a
+                href="https://discord.gg/ksrfuy7WYR"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-sm settings-header-discord-btn"
+                aria-label={t("settings.header.joinDiscord", "Join our Discord")}
+                title={t("settings.header.joinDiscord", "Join our Discord")}
+              >
+                <DiscordIcon size={13} />
+                {t("settings.header.discord", "Discord")}
+              </a>
+            </div>
           )}
-          {/*
-            FNXC:Settings 2026-07-07-00:00:
-            Mobile embedded Settings (taskView === "settings", presentation="embedded") has no left sidebar to exit
-            through — only the bottom MobileNavBar — so the header needs an explicit close affordance calling the
-            existing onClose prop (wired to closeSettingsView: modalManager.closeSettings() + back to board + refresh
-            app settings). Desktop/tablet embedded still exit via the sidebar (no button here), and the standalone
-            modal presentation keeps its own `!isEmbedded` `modal-close` button above, untouched and byte-identical.
-          */}
-          {isEmbedded && viewportMode === "mobile" && (
-            <button
-              className="modal-close settings-embedded-mobile-close"
-              onClick={() => void requestClose()}
-              aria-label={t("actions.close", "Close")}
-            >
-              &times;
-            </button>
-          )}
-        </div>
+          onClose={!isEmbedded || viewportMode === "mobile" ? () => void requestClose() : undefined}
+          closeButtonProps={{
+            ...(isEmbedded ? { className: "settings-embedded-mobile-close" } : {}),
+            "aria-label": t("actions.close", "Close"),
+          }}
+        />
         {loading ? (
           <div className="settings-empty-state settings-loading"><LoadingSpinner label={t("settings.loading", "Loading…")} /></div>
         ) : (
           <div className="settings-layout">
-            <aside
+            {/*
+            FNXC:StandardizedViewLayout 2026-09-13-21:43:
+            Settings keeps its existing section/search controller while its desktop and tablet rail uses the same project-scoped width and resize lifecycle as every other full dashboard view. Mobile remains a stacked section picker and cannot persist a competing width.
+            */}
+            <ViewSidebar
+              ariaLabel={t("settings.search.navigationLabel", "Settings navigation")}
+              resizeLabel={t("settings.nav.resize", "Resize settings navigation")}
+              hostIdentity="settings"
+              mobile={showMobileSectionPicker}
               className="settings-navigation"
-              aria-label={t("settings.search.navigationLabel", "Settings navigation")}
-              style={settingsNavigationStyle}
+              panelClassName="settings-navigation__panel"
+              separatorTestId="settings-nav-resize-handle"
             >
               {showMobileSectionPicker && (
                 <div className="settings-mobile-section-picker">
@@ -4995,21 +4906,7 @@ export function SettingsModal({
                   </div>
                 )}
               </nav>
-            </aside>
-            {settingsNavResizeEnabled && (
-              <div
-                className="settings-nav-resize-handle"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label={t("settings.nav.resize", "Resize settings navigation")}
-                aria-valuemin={SETTINGS_NAV_MIN_WIDTH}
-                aria-valuemax={SETTINGS_NAV_MAX_WIDTH}
-                aria-valuenow={settingsNavWidth}
-                tabIndex={0}
-                onPointerDown={handleSettingsNavResizePointerDown}
-                onKeyDown={handleSettingsNavResizeKeyDown}
-              />
-            )}
+            </ViewSidebar>
             <div
               className="settings-content"
               ref={settingsContentRef}
@@ -5146,12 +5043,14 @@ export function SettingsModal({
           aria-label={t("settings.scheduling.browseWorkspacePath", "Browse workspace path")}
         >
           <div className="modal modal-lg settings-overlap-path-picker-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <h3>{t("settings.scheduling.selectIgnoredOverlapPath", "Select ignored overlap path")}</h3>
-              <button className="modal-close" onClick={closeOverlapPathPicker} aria-label={t("actions.close", "Close")}>
-                &times;
-              </button>
-            </div>
+            {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Settings' nested pickers and confirmations share the canonical header. */}
+            <ViewHeader
+              className="modal-header"
+              headingLevel={3}
+              title={t("settings.scheduling.selectIgnoredOverlapPath", "Select ignored overlap path")}
+              onClose={closeOverlapPathPicker}
+              closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+            />
             <div className="modal-body settings-overlap-path-picker-body">
               <p className="settings-overlap-path-picker-note">
                 {t("settings.scheduling.overlapPickerNote", "Choose a file to ignore directly, or navigate into a folder and select the current directory.")}
@@ -5200,12 +5099,13 @@ export function SettingsModal({
           aria-label={t("settings.worktrees.browseWorktreesDirectory", "Browse worktrees directory")}
         >
           <div className="modal modal-lg settings-overlap-path-picker-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <h3>{t("settings.worktrees.selectWorktreesDir", "Select worktrees directory")}</h3>
-              <button className="modal-close" onClick={closeWorktreesDirPicker} aria-label={t("actions.close", "Close")}>
-                &times;
-              </button>
-            </div>
+            <ViewHeader
+              className="modal-header"
+              headingLevel={3}
+              title={t("settings.worktrees.selectWorktreesDir", "Select worktrees directory")}
+              onClose={closeWorktreesDirPicker}
+              closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+            />
             <div className="modal-body settings-overlap-path-picker-body">
               <p className="settings-overlap-path-picker-note">
                 {t("settings.worktrees.worktreesPickerNote", "Navigate to the folder where Fusion should create task worktrees, then select the current directory.")}
@@ -5250,12 +5150,13 @@ export function SettingsModal({
           aria-label={t("settings.worktrees.browseCopyFile", "Browse file to copy into new worktrees")}
         >
           <div className="modal modal-lg settings-overlap-path-picker-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <h3>{t("settings.worktrees.selectCopyFile", "Select file to copy")}</h3>
-              <button className="modal-close" onClick={closeWorktreeCopyFilePicker} aria-label={t("actions.close", "Close")}>
-                &times;
-              </button>
-            </div>
+            <ViewHeader
+              className="modal-header"
+              headingLevel={3}
+              title={t("settings.worktrees.selectCopyFile", "Select file to copy")}
+              onClose={closeWorktreeCopyFilePicker}
+              closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+            />
             <div className="modal-body settings-overlap-path-picker-body">
               <p className="settings-overlap-path-picker-note">
                 {t("settings.worktrees.copyFilePickerNote", "Choose a repository file to copy into each newly assigned task worktree. Directories are not selected from this picker.")}
@@ -5287,20 +5188,21 @@ export function SettingsModal({
           </div>
         </div>
       )}
-      
+
       {/* Import Confirmation Dialog */}
       {importDialogOpen && importPreview && (
         <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && setImportDialogOpen(false)} role="dialog" aria-modal="true">
           <div className="modal modal-md">
-            <div className="modal-header">
-              <h3>{t("settings.importExport.importTitle", "Import Settings")}</h3>
-              <button className="modal-close" onClick={() => setImportDialogOpen(false)} aria-label={t("actions.close", "Close")}>
-                &times;
-              </button>
-            </div>
+            <ViewHeader
+              className="modal-header"
+              headingLevel={3}
+              title={t("settings.importExport.importTitle", "Import Settings")}
+              onClose={() => setImportDialogOpen(false)}
+              closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+            />
             <div className="modal-body">
               <p>{t("settings.importExport.reviewPrompt", "Review the settings to be imported:")}</p>
-              
+
               {importPreview.global && Object.keys(importPreview.global).length > 0 && (
                 <div className="form-group">
                   <strong>{t("settings.importExport.globalSettings", "Global Settings:")}</strong>
@@ -5313,7 +5215,7 @@ export function SettingsModal({
                   </ul>
                 </div>
               )}
-              
+
               {importPreview.project && Object.keys(importPreview.project).length > 0 && (
                 <div className="form-group">
                   <strong>{t("settings.importExport.projectSettings", "Project Settings:")}</strong>
@@ -5326,7 +5228,7 @@ export function SettingsModal({
                   </ul>
                 </div>
               )}
-              
+
               <div className="form-group">
                 <label htmlFor="import-scope">{t("settings.importExport.importScope", "Import Scope:")}</label>
                 <select
@@ -5339,7 +5241,7 @@ export function SettingsModal({
                   <option value="project">{t("settings.importExport.scopeProject", "Project settings only")}</option>
                 </select>
               </div>
-              
+
               <div className="form-group">
                 {/* FNXC:SettingsHelp 2026-07-16-12:45: Inline help moved behind the shared "?" affordance — operator requirement: no inline description paragraphs in Settings. */}
                 <div className="settings-field-label-row">
@@ -5390,12 +5292,13 @@ export function SettingsModal({
           data-testid="settings-reset-dialog"
         >
           <div className="modal modal-md settings-reset-dialog" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <h3>{t("settings.reset.dialogTitle", "Reset Settings")}</h3>
-              <button className="modal-close" onClick={closeResetDialog} aria-label={t("actions.close", "Close")}>
-                &times;
-              </button>
-            </div>
+            <ViewHeader
+              className="modal-header"
+              headingLevel={3}
+              title={t("settings.reset.dialogTitle", "Reset Settings")}
+              onClose={closeResetDialog}
+              closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+            />
             <div className="modal-body">
               <p>{t("settings.reset.dialogBody", "Choose what to reset to its defaults. This cannot be undone.")}</p>
               <div className="settings-reset-dialog__choice">

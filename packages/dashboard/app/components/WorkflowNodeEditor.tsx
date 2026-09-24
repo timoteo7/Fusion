@@ -1,3 +1,8 @@
+
+import { ViewActionButton } from "./ViewActionButton";
+import { ViewHeader } from "./ViewHeader";
+import { ViewLayout } from "./ViewLayout";
+import { ViewSidebar } from "./ViewSidebar";
 import "@xyflow/react/dist/style.css";
 import "./WorkflowNodeEditor.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -16,9 +21,8 @@ import {
   type Edge as FlowEdge,
   type EdgeChange,
 } from "@xyflow/react";
-import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { X, Plus, Trash2, Save, MessageSquare, Terminal, Shield, GitMerge, Loader2, HelpCircle, PauseCircle, Split, Merge, Repeat, ToggleRight, ClipboardCheck, ListChecks, Code2, Bell, LayoutGrid, Workflow, Download, Upload, ChevronDown, ChevronRight, ChevronLeft, Library, Sparkles, Maximize2, Minimize2, DoorOpen } from "lucide-react";
+import { Plus, Trash2, Save, MessageSquare, Terminal, Shield, GitMerge, Loader2, HelpCircle, PauseCircle, Split, Merge, Repeat, ToggleRight, ClipboardCheck, ListChecks, Code2, Bell, LayoutGrid, Workflow, Download, Upload, ChevronDown, ChevronRight, Library, Sparkles, Maximize2, Minimize2, DoorOpen } from "lucide-react";
 import type { WorkflowDefinition, WorkflowIrColumn, TraitViolation, WorkflowStepTemplate, WorkflowIrNodeKind } from "@fusion/core";
 import { getErrorMessage, analyzeWorkflowLifecycle } from "@fusion/core";
 import type { WorkflowLifecycleWarning, WorkflowLifecycleWarningCode } from "@fusion/core";
@@ -53,7 +57,7 @@ import { subscribeSse } from "../sse-bus";
 FNXC:i18n-Localize 2026-06-20-00:00:
 FN-6770 localizes this workflow surface through t() and authored en catalog keys so hardcoded user-facing copy does not need a lint.ignore deferral.
 */
-import { useEmbeddedPresentation, type ModalPresentation } from "../hooks/useEmbeddedPresentation";
+
 import { isMobileViewport, useViewportMode } from "../hooks/useViewportMode";
 import { WorkflowIcon } from "./WorkflowIcon";
 import { workflowNodeTypes, type WorkflowFlowNodeData, type WorkflowEditorNodeKind } from "./nodes/WorkflowNodeTypes";
@@ -108,7 +112,6 @@ import { WorkflowSettingsPanel } from "./WorkflowSettingsPanel";
 import type { WorkflowFieldDefinition, WorkflowSettingDefinition } from "../api";
 import { CustomModelDropdown } from "./CustomModelDropdown";
 import { FloatingWindow } from "./FloatingWindow";
-import { nextFloatingZ } from "./floatingWindowStack";
 import { MobileWorkflowGraphView } from "./MobileWorkflowGraphView";
 import {
   buildMobileWorkflowGraph,
@@ -254,17 +257,6 @@ interface WorkflowNodeEditorProps {
   initialAction?: "create";
   /** Workflow id to preselect when the editor opens from workflow-aware surfaces. */
   initialWorkflowId?: string;
-  /*
-  FNXC:WorkflowEditorEmbedding 2026-06-22-00:00:
-  The workflow editor can render either as a fixed modal overlay ("modal", the
-  default and historical behavior) or inline as a main-content-area view
-  ("embedded") that fills the right-dock panel like a Command Center view.
-  In embedded mode the editor drops the .modal-overlay shell, the X close
-  button, native resize, and all modal-only dismiss paths (Escape, overlay
-  click) so it reads as a persistent view rather than a dismissible dialog.
-  The modal path stays byte-identical when presentation is "modal"/undefined.
-  */
-  presentation?: ModalPresentation;
 }
 
 let nodeSeq = 0;
@@ -598,13 +590,27 @@ function CreateWorkflowDialog({
   const firstYoursIndex = templates.findIndex((tmpl) => tmpl.id !== null && !tmpl.builtin);
 
   return (
-    <div className="modal-overlay open wf-create-overlay" {...overlayProps}>
+    /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: FN-394 hosts workflow creation in the shared window, like every other dashboard dialog. */
+    <FloatingWindow
+      windowKey="workflow-create"
+      modal
+      hideHeader
+      surfaceGroup="dialog"
+      title={t("workflows.createTitle", "New workflow")}
+      ariaLabel={t("workflows.createTitle", "New workflow")}
+      onClose={onClose}
+      dragHandleSelector=".wf-create-modal .modal-header"
+      className="floating-window--dialog floating-window--workflow-create"
+      overlayClassName="wf-create-overlay"
+      defaultSize={{ width: 720, height: 600 }}
+      minSize={{ width: 320, height: 280 }}
+      suspendGeometryPersistenceOnMobile
+      suspendGeometryPersistenceOnShortViewport
+      backdropMouseHandlers={overlayProps}
+    >
       <div
         className="modal wf-create-modal"
         data-testid="wf-create-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("workflows.createTitle", "New workflow")}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
@@ -613,17 +619,14 @@ function CreateWorkflowDialog({
           }
         }}
       >
-        <div className="modal-header">
-          <h3>{t("workflows.createTitle", "New workflow")}</h3>
-          <button
-            type="button"
-            className="modal-close"
-            onClick={onClose}
-            aria-label={t("actions.close", "Close")}
-          >
-            <X size={16} />
-          </button>
-        </div>
+        {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: The nested create-workflow dialog shares the canonical header. */}
+        <ViewHeader
+          className="modal-header"
+          headingLevel={3}
+          title={t("workflows.createTitle", "New workflow")}
+          onClose={onClose}
+          closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+        />
         <form onSubmit={handleSubmit}>
           <div className="modal-body">
             {/* U10/R11: AI-design disclosure. Toggling reveals a prompt textarea
@@ -803,7 +806,7 @@ function CreateWorkflowDialog({
           </div>
         </form>
       </div>
-    </div>
+    </FloatingWindow>
   );
 }
 
@@ -815,10 +818,8 @@ function InnerEditor({
   initialAction,
   initialWorkflowId,
   modalRef,
-  isEmbedded = false,
-}: Omit<WorkflowNodeEditorProps, "isOpen" | "presentation"> & {
+}: Omit<WorkflowNodeEditorProps, "isOpen"> & {
   modalRef: React.RefObject<HTMLDivElement | null>;
-  isEmbedded?: boolean;
 }) {
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -945,27 +946,13 @@ function InnerEditor({
   const [templateConflict, setTemplateConflict] = useState<string | null>(null);
   const canvasNodesMaterializedRef = useRef(false);
 
+  // FNXC:StandardizedViewSidebar 2026-09-13-21:43: The workflow rail remains present on desktop/tablet; only its internal authoring disclosures may collapse, so navigation and the shared resize authority never disappear.
   // U12: the columns/fields authoring panels live in the left sidebar (below the
   // workflow list) as collapsible disclosure sections. Each section's collapsed
   // state persists in localStorage; default expanded.
-  /*
-  FNXC:WorkflowSidebar 2026-06-22-12:00:
-  The workflow view needs the entire left sidebar collapsible, not only its
-  internal column/field/settings groups, so graph editing can use the full
-  canvas width. Persist the shell state and keep a visible restore control in
-  the canvas area when the sidebar is hidden.
-  */
-  const sidebarCollapsedStorageKey = "fusion:wf-left-sidebar-collapsed";
   const columnsCollapsedStorageKey = "fusion:wf-sidebar-columns-collapsed";
   const fieldsCollapsedStorageKey = "fusion:wf-sidebar-fields-collapsed";
   const settingsCollapsedStorageKey = "fusion:wf-sidebar-settings-collapsed";
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(sidebarCollapsedStorageKey) === "1";
-    } catch {
-      return false;
-    }
-  });
   const [columnsCollapsed, setColumnsCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(columnsCollapsedStorageKey) === "1";
@@ -987,13 +974,6 @@ function InnerEditor({
       return false;
     }
   });
-  useEffect(() => {
-    try {
-      localStorage.setItem(sidebarCollapsedStorageKey, sidebarCollapsed ? "1" : "0");
-    } catch {
-      // localStorage unavailable (private mode / SSR): non-fatal.
-    }
-  }, [sidebarCollapsed]);
   useEffect(() => {
     try {
       localStorage.setItem(columnsCollapsedStorageKey, columnsCollapsed ? "1" : "0");
@@ -2422,29 +2402,15 @@ function InnerEditor({
   const mobileNodeDetailStage = isMobileMode && selectedNodeHasInspector && !inspectorCollapsed;
   const mobileEdgeDetailStage = isMobileMode && selectedEdge !== null;
   const [isPromptExpanded, setIsPromptExpanded] = useState(false);
-  const [promptFullscreenZ, setPromptFullscreenZ] = useState<number | null>(null);
+  /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: the shared window now claims the stack order for the expanded prompt editor, so no local z-index state remains. */
   const handleTogglePromptExpand = useCallback(() => {
-    if (isPromptExpanded) {
-      setIsPromptExpanded(false);
-      setPromptFullscreenZ(null);
-      return;
-    }
-    setPromptFullscreenZ(nextFloatingZ());
-    setIsPromptExpanded(true);
-  }, [isPromptExpanded]);
-  useEffect(() => {
-    if (!isPromptExpanded) {
-      if (promptFullscreenZ !== null) setPromptFullscreenZ(null);
-      return;
-    }
-    if (promptFullscreenZ === null) setPromptFullscreenZ(nextFloatingZ());
-  }, [isPromptExpanded, promptFullscreenZ]);
+    setIsPromptExpanded((expanded) => !expanded);
+  }, []);
   const handlePromptFullscreenKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!isPromptExpanded || e.key !== "Escape") return;
     e.preventDefault();
     e.stopPropagation();
     setIsPromptExpanded(false);
-    setPromptFullscreenZ(null);
   }, [isPromptExpanded]);
   const selectedNodePromptValue =
     selectedNode && (selectedNode.data.kind === "prompt" || selectedNode.data.kind === "gate")
@@ -2752,14 +2718,33 @@ function InnerEditor({
 
   /*
   FNXC:WorkflowEditor 2026-07-12-00:00:
-  The fullscreen prompt editor is portaled beside the FloatingWindow that launched it, so it must claim a fresh shared floating-stack z-index when opened. A static z-index of 10000 is below the workflow editor's 10100+ full-screen mobile FloatingWindow sheet and makes the mobile Expand button appear inert because the sheet covers the overlay.
+  The expanded prompt editor opens beside the FloatingWindow that launched it and must sit above it.
+
+  FNXC:FloatingWindowDialogHosts 2026-09-14-22:36:
+  FN-394 hosts it in the shared FloatingWindow, which owns the body portal and raises a newly opened window above
+  every other window regardless of type. The expanded editor therefore snaps and restores like any other dialog
+  instead of being a fixed full-screen overlay.
   */
   const promptFullscreenOverlay =
     isPromptExpanded && (selectedNode?.data.kind === "prompt" || selectedNode?.data.kind === "gate")
-      ? createPortal(
+      ? (
+          <FloatingWindow
+            windowKey="workflow-prompt-fullscreen"
+            modal
+            hideHeader
+            surfaceGroup="dialog"
+            title={t("workflowEditor.editingPrompt", "Editing Prompt")}
+            ariaLabel={t("workflowEditor.editingPrompt", "Editing Prompt")}
+            onClose={handleTogglePromptExpand}
+            dragHandleSelector=".wf-prompt-editor--fullscreen .wf-prompt-fullscreen-header"
+            className="floating-window--dialog floating-window--workflow-prompt"
+            defaultSize={{ width: 900, height: 660 }}
+            minSize={{ width: 320, height: 280 }}
+            suspendGeometryPersistenceOnMobile
+            suspendGeometryPersistenceOnShortViewport
+          >
           <div
             className="wf-prompt-editor wf-prompt-editor--fullscreen"
-            style={promptFullscreenZ !== null ? { zIndex: promptFullscreenZ } : undefined}
             onKeyDown={handlePromptFullscreenKeyDown}
           >
             <div className="wf-prompt-fullscreen-header">
@@ -2804,84 +2789,79 @@ function InnerEditor({
                 </button>
               </div>
             ) : null}
-          </div>,
-          document.body,
+          </div>
+          </FloatingWindow>
         )
       : null;
 
   /*
-  FNXC:WorkflowEditorFloating 2026-06-24-00:00:
-  Dropdown-launched workflow editing must use the shared movable/resizable FloatingWindow so workflow modals participate in drag, resize, viewport clamping, geometry persistence, and shared z-index stacking. The embedded Workflows destination remains fixed in its host panel and bypasses all floating chrome.
+  FNXC:WorkflowEditorFloating 2026-09-15-05:29:
+  FN-407 deleted the editor's floating/modal presentation. There is no FloatingWindow host, no overlay, no X close
+  affordance, and no Escape-to-dismiss: the workflow editor is the persistent Workflows VIEW, reached identically
+  from the sidebar, the header, mobile More, a task's Edit workflow, and the Settings referral. Two competing
+  presentations for one surface is exactly what this removed. `onClose` survives as the view's return-to-board.
   */
   const modalElement = (
       <div
-        className={`modal wf-editor-modal${isEmbedded ? " wf-editor-modal--embedded" : ""}`}
+        className="modal wf-editor-modal wf-editor-modal--embedded"
         ref={modalRef}
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          // Dedicated Escape handler (useOverlayDismiss does not cover Escape).
-          // Ignore Escape originating from inputs/textareas/selects so inline
-          // editors (name/description) keep their own Escape-to-cancel behavior.
-          if (e.key !== "Escape") return;
-          // Embedded views are persistent; Escape must not dismiss them.
-          if (isEmbedded) return;
-          // The create dialog (rendered as a child) owns its own Escape; if it's
-          // open, let it handle the event (it stops propagation already).
-          if (createOpen) return;
-          const target = e.target as HTMLElement;
-          const tag = target.tagName;
-          if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-          e.stopPropagation();
-          requestClose();
-        }}
       >
-        <header className="wf-editor-header">
-          {/* FNXC:WorkflowEditorEmbedding 2026-06-22-01:00: Title row aligned to the shared ViewHeader/Command Center metric — a Workflow icon (size 20) + 1.125rem title — so the embedded workflows view reads consistently with other main-content destinations. */}
-          <h2>
-            <Workflow size={20} aria-hidden="true" />
-            <span>{t("workflows.title", "Workflows")}</span>
-          </h2>
-          {/* FNXC:WorkflowEditorEmbedding 2026-06-22-00:00: embedded views keep a
-              Command Center-style header title but drop the modal X close button. */}
-          {!isEmbedded ? (
-            <button className="wf-editor-close" onClick={requestClose} aria-label={t("workflows.closeEditor", "Close workflow editor")}>
-              <X size={18} />
-            </button>
-          ) : null}
-        </header>
-
-
-        <div
+        <ViewLayout
           className={`wf-editor-body${workflowListStageOpen ? " wf-editor-body--list-stage" : " wf-editor-body--editor-stage"}${
             simpleLayoutEnabled ? " wf-editor-body--simple-layout" : ""
           }${simpleViewEnabled ? " wf-editor-body--simple-view" : ""}${mobileNodeDetailStage ? " wf-editor-body--mobile-node-detail" : ""}${
             mobileEdgeDetailStage ? " wf-editor-body--mobile-edge-detail" : ""
-          }${sidebarCollapsed ? " wf-editor-body--sidebar-collapsed" : ""}`}
-        >
-          <aside className="wf-editor-sidebar">
-            <div className="wf-editor-sidebar-head">
-              <button
-                className="wf-editor-new"
-                ref={newWorkflowBtnRef}
-                data-testid="wf-new-workflow"
-                onClick={() => setCreateOpen(true)}
-              >
-                <Plus size={14} /> {t("workflows.newWorkflow", "New workflow")}
-              </button>
-              {!isMobileMode && (
-                <button
-                  type="button"
-                  className="wf-sidebar-shell-toggle"
-                  data-testid="wf-sidebar-collapse"
-                  aria-expanded={!sidebarCollapsed}
-                  aria-label={t("workflows.collapseSidebar", "Collapse workflow sidebar")}
-                  title={t("workflows.collapseSidebar", "Collapse workflow sidebar")}
-                  onClick={() => setSidebarCollapsed(true)}
-                >
-                  <ChevronLeft size={14} aria-hidden />
-                </button>
+          }`}
+          contentOwnsScroll
+          mobilePane={workflowListStageOpen ? "list" : "detail"}
+          header={(
+            <ViewHeader
+              className="wf-editor-header"
+              icon={Workflow}
+              title={t("workflows.title", "Workflows")}
+              /*
+              FNXC:WorkflowEditorEmbedding 2026-09-15-05:29:
+              FN-407 removed the editor's close affordance with its modal presentation. On mobile the header back
+              control is the only in-view exit, so it now completes its own chain: editor stage steps back to the
+              workflow list, and the list stage returns to the board through `onClose`. Desktop and tablet already
+              exit through the sidebar/header navigation and keep no back control.
+              */
+              backAction={isMobileMode ? (workflowListStageOpen ? {
+                label: t("workflows.backToBoard", "Back to board"),
+                onClick: requestClose,
+              } : {
+                label: t("workflows.backToWorkflowList", "Back to workflows"),
+                onClick: () => setWorkflowListStageOpen(true),
+              }) : undefined}
+              actions={(
+                <>
+                  <ViewActionButton
+                    className="wf-editor-new"
+                    ref={newWorkflowBtnRef}
+                    data-testid="wf-new-workflow"
+                    kind="create"
+                    label={t("workflows.newWorkflow", "New workflow")}
+                    onClick={() => setCreateOpen(true)}
+                  />
+                  {/*
+                  FNXC:StandardizedDrawers 2026-09-15-05:29:
+                  FN-407: the editor no longer renders a close affordance at all — it is a persistent view, not a
+                  dismissible dialog — so the FN-406 HideInDrawer wrapper around its ModalCloseButton is gone with it.
+                  Creation stays here as the view's primary header action.
+                  */}
+                </>
               )}
-            </div>
+            />
+          )}
+          sidebar={(
+            <ViewSidebar
+              ariaLabel={t("workflows.workflowList", "Workflows")}
+              resizeLabel={t("workflows.resizeSidebar", "Resize workflow sidebar")}
+              hostIdentity="workflow-editor"
+              mobile={isMobileMode}
+              panelClassName="wf-editor-sidebar"
+            >
             {/* U5/R10: keyboard-accessible import affordance triggering a hidden
                 file input; validation failures render in the persistent inline
                 region below (role="alert"), not a toast. */}
@@ -3031,37 +3011,16 @@ function InnerEditor({
                     are authored as graph-native `optional-group` nodes on the canvas. */}
               </div>
             )}
-          </aside>
-
+            </ViewSidebar>
+          )}
+        >
           <section className="wf-editor-canvas-wrap">
-            <button
-              type="button"
-              className="wf-editor-mobile-back"
-              onClick={() => setWorkflowListStageOpen(true)}
-              aria-label={t("workflows.backToWorkflowList", "Back to workflows")}
-            >
-              <ChevronLeft size={16} />
-              <span>{t("common.back", "Back")}</span>
-            </button>
             {activeWorkflow ? (
               <>
                 {/* Inline name + description strip (KTD-10). Built-ins render as
                     plain text (no click affordance); user-owned workflows are
                     click-to-edit (Enter commits, Escape cancels, blur commits). */}
                 <div className="wf-name-strip">
-                  {sidebarCollapsed && !isMobileMode && (
-                    <button
-                      type="button"
-                      className="wf-sidebar-shell-restore"
-                      data-testid="wf-sidebar-restore"
-                      aria-expanded="false"
-                      aria-label={t("workflows.showSidebar", "Show workflow sidebar")}
-                      title={t("workflows.showSidebar", "Show workflow sidebar")}
-                      onClick={() => setSidebarCollapsed(false)}
-                    >
-                      <ChevronRight size={14} aria-hidden />
-                    </button>
-                  )}
                   <WorkflowIcon workflowId={activeWorkflow.id} icon={icon} decorative />
                   {isBuiltin ? (
                     <span className="wf-workflow-name wf-workflow-name--readonly" data-testid="wf-workflow-name">
@@ -5651,7 +5610,7 @@ function InnerEditor({
               )}
             </aside>
           )}
-        </div>
+        </ViewLayout>
         {createOpen && (
           <CreateWorkflowDialog
             workflows={workflows}
@@ -5683,29 +5642,14 @@ function InnerEditor({
   );
   return (
     <>
-      {isEmbedded ? (
-        // FNXC:WorkflowEditorEmbedding 2026-06-22-00:00: inline main-content
-        // wrapper (no fixed overlay, no overlayProps overlay-click dismiss).
-        <div className="workflow-editor-embedded right-dock-embedded-view">
-          {modalElement}
-        </div>
-      ) : (
-        <FloatingWindow
-          title={t("workflows.title", "Workflows")}
-          onClose={requestClose}
-          windowKey="workflow-node-editor"
-          className="floating-window--workflow-editor"
-          hideHeader
-          dragHandleSelector=".wf-editor-header"
-          defaultSize={{ width: 1200, height: 820 }}
-          minSize={{ width: 640, height: 480 }}
-          /* FNXC:ModalGeometryPersistence 2026-07-15-19:30: The workflow editor becomes a ≤768px full-screen sheet, so retain desktop geometry without replaying or writing it on the sheet. */
-          suspendGeometryPersistenceOnMobile
-          persistGeometryKey="fusion:workflow-node-editor-floating-geometry"
-        >
-          {modalElement}
-        </FloatingWindow>
-      )}
+      {/*
+      FNXC:WorkflowEditorEmbedding 2026-09-15-05:29:
+      FN-407: the inline main-content wrapper is now the ONLY wrapper. No fixed overlay, no floating window, no
+      overlay-click dismiss — so a workflow entry point can never produce a second, competing presentation.
+      */}
+      <div className="workflow-editor-embedded right-dock-embedded-view">
+        {modalElement}
+      </div>
       {promptFullscreenOverlay}
     </>
   );
@@ -5719,10 +5663,8 @@ export function WorkflowNodeEditor({
   initialPanel,
   initialAction,
   initialWorkflowId,
-  presentation = "modal",
 }: WorkflowNodeEditorProps) {
   const modalRef = useRef<HTMLDivElement>(null);
-  const { isEmbedded } = useEmbeddedPresentation(presentation);
   if (!isOpen) return null;
   return (
     <ReactFlowProvider>
@@ -5734,7 +5676,6 @@ export function WorkflowNodeEditor({
         initialAction={initialAction}
         initialWorkflowId={initialWorkflowId}
         modalRef={modalRef}
-        isEmbedded={isEmbedded}
       />
     </ReactFlowProvider>
   );

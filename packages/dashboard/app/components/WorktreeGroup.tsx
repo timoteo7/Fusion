@@ -6,7 +6,7 @@ import { isNearDuplicateCanonicalInactive } from "../../../core/src/duplicates/n
 import { ClipboardList, GitBranch } from "lucide-react";
 import { TaskCard } from "./TaskCard";
 import type { ToastType } from "../hooks/useToast";
-import type { RevertTaskOptions, RevertTaskResult } from "../api";
+import type { RestoreTaskRevertOptions, RestoreTaskRevertResult, RevertTaskOptions, RevertTaskResult } from "../api";
 import type { BlockerFanoutEntry } from "../hooks/useBlockerFanout";
 import type { TaskContextMenuColumnMetadata } from "./TaskContextMenu";
 
@@ -19,9 +19,9 @@ interface WorktreeGroupProps {
   allTasks?: Task[];
   projectId?: string;
   onOpenDetail: (task: Task | TaskDetail) => void;
-  onPlanningMode?: (initialPlan: string, workflowId?: string | null) => void;
   workflowId?: string | null;
-  onOpenRefine?: (task: Task | TaskDetail) => void;
+  /** App-owned ingestion seam for a refinement created from a card's own Refine dialog. */
+  onRefinementCreated?: (task: Task) => void;
   onMoveTask?: (id: string, column: ColumnId, optionsOrPosition?: { preserveProgress?: boolean; expectedColumn?: string } | number) => Promise<Task>;
   addToast: (message: string, type?: ToastType) => void;
   globalPaused?: boolean;
@@ -29,6 +29,9 @@ interface WorktreeGroupProps {
     id: string,
     updates: { title?: string; description?: string; dependencies?: string[] }
   ) => Promise<Task>;
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 — every host that renders a LIVE card forwards Boost,
+     so the affordance is not tied to one surface. Omitting it withholds the button. */
+  onBoostTask?: (id: string, scope: { expectedColumn: string; expectedColumnEntryAt: string }) => Promise<Task>;
   onPauseTask?: (id: string) => Promise<Task>;
   onRetryTask?: (id: string) => Promise<Task>;
   onOpenChatWithPrefill?: (prefillText: string) => void;
@@ -36,10 +39,9 @@ interface WorktreeGroupProps {
   onResetTask?: (id: string, options?: { description?: string }) => Promise<Task>;
   onDuplicateTask?: (id: string, options?: { workflowId?: string }) => Promise<Task>;
   onMergeTask?: (id: string) => Promise<MergeResult>;
-  onArchiveTask?: (id: string, options?: { removeLineageReferences?: boolean }) => Promise<Task>;
-  onUnarchiveTask?: (id: string) => Promise<Task>;
-  /* FNXC:TaskRevert 2026-07-05-00:00 (FN-7525): threaded alongside onArchiveTask/onUnarchiveTask. */
   onRevertTask?: (id: string, body?: RevertTaskOptions) => Promise<RevertTaskResult>;
+  /* FNXC:TaskRevert 2026-09-15-10:00 (FN-416): restore-the-revert reaches the in-column card. */
+  onRestoreRevertTask?: (id: string, body?: RestoreTaskRevertOptions) => Promise<RestoreTaskRevertResult>;
   onDeleteTask?: (id: string, options?: {
     removeDependencyReferences?: boolean;
     removeLineageReferences?: boolean;
@@ -77,13 +79,13 @@ function WorktreeGroupComponent({
   allTasks,
   projectId,
   onOpenDetail,
-  onPlanningMode,
   workflowId,
-  onOpenRefine,
+  onRefinementCreated,
   onMoveTask,
   addToast,
   globalPaused,
   onUpdateTask,
+  onBoostTask,
   onPauseTask,
   onRetryTask,
   onOpenChatWithPrefill,
@@ -91,9 +93,8 @@ function WorktreeGroupComponent({
   onResetTask,
     onDuplicateTask,
   onMergeTask,
-  onArchiveTask,
-  onUnarchiveTask,
   onRevertTask,
+  onRestoreRevertTask,
   onDeleteTask,
   onOpenDetailWithTab,
   onOpenMission,
@@ -148,15 +149,15 @@ function WorktreeGroupComponent({
           task={task}
           projectId={projectId}
           onOpenDetail={onOpenDetail}
-          onPlanningMode={onPlanningMode}
           planningWorkflowId={getTaskPlanningWorkflowId(task)}
-          onOpenRefine={onOpenRefine}
+          onRefinementCreated={onRefinementCreated}
           onMoveTask={onMoveTask}
           taskColumnFlags={getTaskColumnFlags(task)}
           taskMoveColumns={getTaskContextMenuColumns(task)}
           addToast={addToast}
           globalPaused={globalPaused}
           onUpdateTask={onUpdateTask}
+          onBoostTask={onBoostTask}
           onPauseTask={onPauseTask}
           onRetryTask={onRetryTask}
           onOpenChatWithPrefill={onOpenChatWithPrefill}
@@ -164,9 +165,8 @@ function WorktreeGroupComponent({
                   onResetTask={onResetTask}
           onDuplicateTask={onDuplicateTask}
           onMergeTask={onMergeTask}
-          onArchiveTask={onArchiveTask}
-          onUnarchiveTask={onUnarchiveTask}
           onRevertTask={onRevertTask}
+          onRestoreRevertTask={onRestoreRevertTask}
           onDeleteTask={onDeleteTask}
           onOpenDetailWithTab={onOpenDetailWithTab}
           onOpenMission={onOpenMission}
@@ -187,15 +187,15 @@ function WorktreeGroupComponent({
           projectId={projectId}
           queued
           onOpenDetail={onOpenDetail}
-          onPlanningMode={onPlanningMode}
           planningWorkflowId={getTaskPlanningWorkflowId(task)}
-          onOpenRefine={onOpenRefine}
+          onRefinementCreated={onRefinementCreated}
           onMoveTask={onMoveTask}
           taskColumnFlags={getTaskColumnFlags(task)}
           taskMoveColumns={getTaskContextMenuColumns(task)}
           addToast={addToast}
           globalPaused={globalPaused}
           onUpdateTask={onUpdateTask}
+          onBoostTask={onBoostTask}
           onPauseTask={onPauseTask}
           onRetryTask={onRetryTask}
           onOpenChatWithPrefill={onOpenChatWithPrefill}
@@ -203,9 +203,8 @@ function WorktreeGroupComponent({
                   onResetTask={onResetTask}
           onDuplicateTask={onDuplicateTask}
           onMergeTask={onMergeTask}
-          onArchiveTask={onArchiveTask}
-          onUnarchiveTask={onUnarchiveTask}
           onRevertTask={onRevertTask}
+          onRestoreRevertTask={onRestoreRevertTask}
           onDeleteTask={onDeleteTask}
           onOpenDetailWithTab={onOpenDetailWithTab}
           onOpenMission={onOpenMission}

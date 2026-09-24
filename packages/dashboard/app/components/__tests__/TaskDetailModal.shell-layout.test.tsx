@@ -1,0 +1,287 @@
+import React from "react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  makeTask,
+  noop,
+  noopDelete,
+  noopMerge,
+  noopOpenDetail,
+  resetTaskDetailFetchMock,
+  setupTaskDetailModalHooks,
+} from "./TaskDetailModal.test-helpers";
+import { TaskDetailContent, TaskDetailModal } from "../TaskDetailModal";
+import { loadAllAppCss } from "../../test/cssFixture";
+import {
+  AppTaskPopoutContent,
+  AppTaskPopoutWindow,
+  ListSplitTaskDetailHost,
+  MainPanelTaskDetailHost,
+  RightDockTaskDetailHost,
+} from "../TaskDetailHostBoundaries";
+
+setupTaskDetailModalHooks();
+
+const sharedProps = {
+  task: makeTask({ column: "in-progress", title: "Shared task title" }),
+  initialTab: "definition" as const,
+  onDeleteTask: noopDelete,
+  onMergeTask: noopMerge,
+  onOpenDetail: noopOpenDetail,
+  addToast: noop,
+};
+
+const titleFreeHostCases = [
+  {
+    name: "Board overlay",
+    dialog: true,
+    renderHost: (task: ReturnType<typeof makeTask>) => <TaskDetailModal {...sharedProps} task={task} onClose={noop} />,
+  },
+  {
+    name: "main panel",
+    dialog: false,
+    renderHost: (task: ReturnType<typeof makeTask>) => <MainPanelTaskDetailHost {...sharedProps} task={task} onNavigateToBoard={noop} />,
+  },
+  {
+    name: "List split",
+    dialog: false,
+    renderHost: (task: ReturnType<typeof makeTask>) => <ListSplitTaskDetailHost {...sharedProps} task={task} onClearSelection={noop} />,
+  },
+  {
+    name: "right dock",
+    dialog: false,
+    renderHost: (task: ReturnType<typeof makeTask>) => <RightDockTaskDetailHost {...sharedProps} task={task} onCloseDock={noop} />,
+  },
+  {
+    name: "Alpha mobile drawer",
+    dialog: true,
+    renderHost: (task: ReturnType<typeof makeTask>) => <TaskDetailModal {...sharedProps} task={task} onClose={noop} mobileDrawer />,
+  },
+  {
+    name: "task pop-out",
+    dialog: true,
+    renderHost: (task: ReturnType<typeof makeTask>) => (
+      <AppTaskPopoutWindow
+        {...sharedProps}
+        task={task}
+        hidden={false}
+        onRemoveWindow={noop}
+      />
+    ),
+  },
+] as const;
+
+const titleStateCases = [
+  { name: "title and description", title: "Canonical editable title", description: "Canonical visible description" },
+  { name: "description only", title: undefined, description: "Description without a title" },
+  { name: "empty title and description", title: undefined, description: undefined },
+] as const;
+
+function expectCanonicalShell(container: HTMLElement, footerExpected = false, tabsExpected = true) {
+  const surface = container.querySelector<HTMLElement>(".task-detail-content")!;
+  const zones = Array.from(surface.children).filter((child) =>
+    child.matches(".modal-header, .detail-tabs, .detail-body, .modal-actions"),
+  );
+  expect(zones.map((zone) => zone.classList.contains("modal-header")
+    ? "header"
+    : zone.classList.contains("detail-tabs")
+      ? "tabs"
+      : zone.classList.contains("detail-body")
+        ? "content"
+        : "footer")).toEqual([
+          "header",
+          ...(tabsExpected ? ["tabs"] : []),
+          "content",
+          ...(footerExpected ? ["footer"] : []),
+        ]);
+  expect(surface.querySelectorAll(":scope > .modal-header")).toHaveLength(1);
+  expect(surface.querySelectorAll(":scope > .detail-tabs")).toHaveLength(tabsExpected ? 1 : 0);
+  expect(surface.querySelectorAll(":scope > .detail-body")).toHaveLength(1);
+}
+
+describe("Task Detail canonical shell", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await resetTaskDetailFetchMock();
+  });
+
+  it("keeps Header → Tabs → Content without an empty footer in every embedded host", () => {
+    const hosts = [
+      <TaskDetailContent key="content" {...sharedProps} embedded onRequestClose={noop} />,
+      <MainPanelTaskDetailHost key="main" {...sharedProps} onNavigateToBoard={noop} />,
+      <ListSplitTaskDetailHost key="list" {...sharedProps} onClearSelection={noop} />,
+      <RightDockTaskDetailHost key="dock" {...sharedProps} onCloseDock={noop} />,
+      <AppTaskPopoutContent key="popout" {...sharedProps} onRemoveWindow={noop} />,
+    ];
+
+    for (const host of hosts) {
+      const view = render(host);
+      expectCanonicalShell(view.container);
+      view.unmount();
+    }
+  });
+
+  it.each(titleFreeHostCases)("keeps $name title-free across populated, description-only, and empty states", ({ dialog, renderHost }) => {
+    for (const state of titleStateCases) {
+      const task = makeTask({
+        id: `FN-TITLE-FREE-${state.name.replaceAll(" ", "-")}`,
+        column: "todo",
+        title: state.title,
+        description: state.description,
+      });
+      const view = render(renderHost(task));
+      const surface = view.baseElement.querySelector<HTMLElement>(".task-detail-content");
+      expect(surface).toBeInTheDocument();
+      const header = surface!.querySelector<HTMLElement>(":scope > .modal-header");
+      expect(header).toBeInTheDocument();
+      expect(header?.querySelector("h1, h2, h3, h4, h5, h6")).toBeNull();
+      expect(header?.querySelector(".detail-heading-row, .detail-title, .detail-title-control, .detail-title-measurement")).toBeNull();
+      if (state.title) expect(header).not.toHaveTextContent(state.title);
+      if (state.description) {
+        expect(within(surface!).getByTestId("task-detail-definition-description")).toHaveTextContent(state.description);
+      } else {
+        expect(within(surface!).getByText("(no description)")).toBeInTheDocument();
+      }
+      if (dialog) expect(screen.getByRole("dialog", { name: "Task detail" })).toBeInTheDocument();
+
+      fireEvent.click(within(surface!).getByRole("button", { name: "Activity" }));
+      expect(header?.querySelector("h1, h2, h3, h4, h5, h6")).toBeNull();
+      if (state.title) expect(header).not.toHaveTextContent(state.title);
+      fireEvent.click(within(surface!).getByRole("button", { name: "Plan" }));
+      fireEvent.click(within(surface!).getByRole("button", { name: "Actions" }));
+      fireEvent.click(within(document.body).getByTestId("task-detail-header-action-edit"));
+      /*
+      FNXC:TaskDescriptionEditing 2026-09-14-19:25:
+      FN-391 removed the title field from the edit form, so the host is title-free in edit mode too —
+      a stronger version of what this case always asserted. The description remains the one editable
+      text field, readonly outside manual intake.
+      */
+      expect(within(surface!).queryByLabelText("Title")).toBeNull();
+      expect(within(surface!).getByLabelText("Description")).toHaveValue(state.description ?? "");
+      expect(header?.querySelector("h1, h2, h3, h4, h5, h6")).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("garde l’en-tête sans titre et le compositeur au footer direct de Chat", () => {
+    const view = render(<TaskDetailContent {...sharedProps} embedded onRequestClose={noop} initialTab="planner-chat" />);
+    const surface = view.container.querySelector<HTMLElement>(".task-detail-content")!;
+    const content = screen.getByTestId("task-detail-tab-content");
+    const chatFooter = screen.getByTestId("task-detail-chat-footer");
+
+    expect(surface.querySelector(":scope > .task-detail-chat-footer")).toBe(chatFooter);
+    expect(chatFooter.querySelector(".task-planner-chat-composer")).toBeInTheDocument();
+    expect(content.querySelector(".task-planner-chat-composer")).toBeNull();
+    expect(content.querySelector(".detail-body-content")).toBeNull();
+    expect(surface.querySelector(".modal-header h1, .modal-header h2, .modal-header h3")).toBeNull();
+    expect(surface.querySelector(".modal-header")).not.toHaveTextContent(sharedProps.task.title ?? "");
+
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    expect(screen.queryByTestId("task-detail-chat-footer")).toBeNull();
+    expect(surface.querySelector(".modal-header h1, .modal-header h2, .modal-header h3")).toBeNull();
+    expect(surface.querySelector(".modal-header")).not.toHaveTextContent(sharedProps.task.title ?? "");
+  });
+
+  /*
+  Le footer de Chat empile ses enfants. `.modal-actions` (styles.css) est `display: flex` en direction ligne et est
+  injecté APRèS les feuilles de composants, donc une règle à une seule classe perd la cascade et la file des messages
+  en attente se retrouve à GAUCHE du compositeur au lieu d'être au-dessus. La règle gagnante doit donc porter les deux
+  classes et déclarer explicitement la colonne.
+  */
+  it("empile la file d'attente au-dessus du compositeur dans le footer de Chat", () => {
+    const css = loadAllAppCss();
+    const footerRule = css.match(/\.modal-actions\.task-detail-chat-footer\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(footerRule).toContain("display: flex");
+    expect(footerRule).toContain("flex-direction: column");
+    expect(footerRule).toContain("align-items: stretch");
+
+    // Une règle à classe unique ne suffit pas : elle serait écrasée par .modal-actions.
+    const singleClassRule = css.match(/(?<![.\w-])\.task-detail-chat-footer\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(singleClassRule).not.toContain("display: block");
+
+    const view = render(<TaskDetailContent {...sharedProps} embedded onRequestClose={noop} initialTab="planner-chat" />);
+    const chatFooter = screen.getByTestId("task-detail-chat-footer");
+    expect(chatFooter).toHaveClass("modal-actions", "task-detail-chat-footer");
+    view.unmount();
+  });
+
+  it("laisse Chat direct même lorsque Définition possède des données globales", () => {
+    const task = makeTask({
+      id: "FN-355-populated",
+      column: "in-progress",
+      customFields: { owner: "alice" },
+    });
+    render(
+      <TaskDetailContent
+        {...sharedProps}
+        task={task}
+        embedded
+        onRequestClose={noop}
+        initialTab="planner-chat"
+        workflowFieldDefs={[{ id: "owner", name: "Owner", type: "string", render: { placement: "detail" } }]}
+      />,
+    );
+
+    const content = screen.getByTestId("task-detail-tab-content");
+    const plannerSurface = screen.getByTestId("planner-chat-keep-alive");
+    expect(plannerSurface.parentElement).toBe(content);
+    expect(content.querySelector(".detail-content, .detail-body-content")).toBeNull();
+    expect(screen.queryByTestId("task-fields-section")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    expect(screen.getByTestId("task-fields-section")).toBeInTheDocument();
+  });
+
+  it("monte le footer uniquement pour Activity Live, jamais pour Feed", () => {
+    render(<TaskDetailContent {...sharedProps} embedded onRequestClose={noop} initialTab="chat" />);
+    const content = screen.getByTestId("task-detail-tab-content");
+    const liveFooter = screen.getByTestId("task-detail-chat-footer");
+    expect(liveFooter.querySelector(".task-chat-composer")).toBeInTheDocument();
+    expect(content.querySelector(".task-chat-composer")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Activity" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Feed" }));
+    expect(screen.queryByTestId("task-detail-chat-footer")).toBeNull();
+    expect(content.querySelector(".task-chat-composer")).toBeNull();
+  });
+
+  it("ouvre le plan intégral puis revient à Définition dans chaque hôte partagé", () => {
+    const task = makeTask({ title: "Titre partagé", description: "Description opérateur", prompt: "# Plan intégral\n\nContenu du plan." });
+    const hosts = [
+      <TaskDetailContent key="content" {...sharedProps} task={task} embedded onRequestClose={noop} />,
+      <MainPanelTaskDetailHost key="main" {...sharedProps} task={task} onNavigateToBoard={noop} />,
+      <ListSplitTaskDetailHost key="list" {...sharedProps} task={task} onClearSelection={noop} />,
+      <RightDockTaskDetailHost key="dock" {...sharedProps} task={task} onCloseDock={noop} />,
+      <AppTaskPopoutContent key="popout" {...sharedProps} task={task} onRemoveWindow={noop} />,
+    ];
+
+    for (const host of hosts) {
+      const view = render(host);
+      expect(screen.getByText("Description opérateur")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Read plan" }));
+      expectCanonicalShell(view.container, false, false);
+      expect(screen.getByTestId("task-detail-plan-full")).toHaveTextContent("Plan intégral");
+      expect(screen.queryByText("Description opérateur")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Back to definition" }));
+      expectCanonicalShell(view.container);
+      expect(screen.getByText("Description opérateur")).toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it("keeps the edit footer fixed as the final shell zone", () => {
+    const view = render(<TaskDetailModal {...sharedProps} task={makeTask({ column: "todo" })} onClose={noop} />);
+    fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+    fireEvent.click(screen.getByTestId("task-detail-header-action-edit"));
+    expectCanonicalShell(view.baseElement, true, false);
+    expect(screen.getByTestId("task-detail-contextual-footer")).toContainElement(screen.getByRole("button", { name: "Save" }));
+  });
+
+  it("keeps the plan-approval footer as the final shell zone", () => {
+    const task = makeTask({ column: "todo", status: "awaiting-approval", prompt: "# Plan" });
+    const view = render(<TaskDetailContent {...sharedProps} task={task} embedded onRequestClose={noop} />);
+    expectCanonicalShell(view.container, true);
+    expect(screen.getByTestId("detail-plan-approval-footer-approve")).toBeInTheDocument();
+  });
+});

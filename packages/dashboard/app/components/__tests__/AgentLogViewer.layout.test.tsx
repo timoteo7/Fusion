@@ -4,6 +4,7 @@ import { AgentLogViewer } from "../AgentLogViewer";
 import { makeEntry, getScrollContainer } from "./AgentLogViewer.test-helpers";
 import "../../styles.css";
 import "../TaskDetailModal.css";
+import { readAppFile } from "../../test/cssFixture";
 
 // Mock lucide-react icons used by AgentLogViewer and ProviderIcon
 vi.mock("lucide-react", () => ({
@@ -18,6 +19,27 @@ vi.mock("lucide-react", () => ({
 describe("AgentLogViewer", () => {
   beforeEach(() => {
     window.localStorage.clear();
+  });
+
+  describe("scannable card layout", () => {
+    it("uses tokenized card chrome and semantic warning/error colors across desktop and mobile", () => {
+      const css = readAppFile("components/AgentLogViewer.css");
+      const cardStart = css.indexOf(".agent-log-entry-card {");
+      const cardRule = css.slice(cardStart, css.indexOf("}", cardStart) + 1);
+      const thinkingStart = css.indexOf(".agent-log-thinking {");
+      const thinkingRule = css.slice(thinkingStart, css.indexOf("}", thinkingStart) + 1);
+      const errorStart = css.indexOf(".agent-log-tool-error {");
+      const errorRule = css.slice(errorStart, css.indexOf("}", errorStart) + 1);
+      const mobileCss = css.slice(css.indexOf("@media (max-width: 768px)"));
+
+      expect(cardRule).toContain("border: var(--btn-border-width) solid var(--border);");
+      expect(cardRule).toContain("border-radius: var(--radius-md);");
+      expect(cardRule).toContain("box-shadow: var(--shadow-sm);");
+      expect(thinkingRule).toContain("var(--color-warning)");
+      expect(errorRule).toContain("color: var(--color-error);");
+      expect(mobileCss).toContain(".agent-log-entry-card");
+      expect(mobileCss).toContain("padding: var(--space-sm);");
+    });
   });
 
   describe("horizontal overflow prevention", () => {
@@ -118,7 +140,7 @@ describe("AgentLogViewer", () => {
       expect(scrollContainer.querySelector(".agent-log-tool")).toBeTruthy();
     });
 
-    it("renders pagination summary and load-more controls inside the scroll container", () => {
+    it("renders pagination summary and the automatic sentinel inside the scroll container", () => {
       const entries = [makeEntry({ text: "hello" })];
       const { container } = render(
         <AgentLogViewer
@@ -132,7 +154,8 @@ describe("AgentLogViewer", () => {
       const scrollContainer = getScrollContainer(container);
 
       expect(scrollContainer.querySelector("[data-testid='agent-log-summary']")).toBeTruthy();
-      expect(scrollContainer.querySelector("[data-testid='agent-log-load-more']")).toBeTruthy();
+      expect(scrollContainer.querySelector("[data-testid='agent-log-auto-pagination-sentinel']")).toBeTruthy();
+      expect(scrollContainer.querySelector("button[data-testid='agent-log-load-more-button']")).toBeNull();
     });
 
     it("renders the return-to-live button inside the scroll container", () => {
@@ -398,7 +421,7 @@ describe("AgentLogViewer", () => {
   });
 
   describe("pagination placement", () => {
-    it("renders the load-more control above the first log entry", () => {
+    it("renders the history sentinel above the first log entry", () => {
       const entries = [
         makeEntry({ text: "oldest", timestamp: "2026-01-01T00:00:00Z" }),
         makeEntry({ text: "newest", timestamp: "2026-01-01T00:00:01Z" }),
@@ -413,7 +436,7 @@ describe("AgentLogViewer", () => {
         />,
       );
 
-      const loadMore = screen.getByTestId("agent-log-load-more");
+      const loadMore = screen.getByTestId("agent-log-auto-pagination-sentinel");
       const firstRow = container.querySelector(".agent-log-text") as HTMLElement;
       expect(firstRow).toBeTruthy();
 

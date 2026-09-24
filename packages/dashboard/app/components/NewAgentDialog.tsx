@@ -1,6 +1,5 @@
 import "./NewAgentDialog.css";
 import { useState, useEffect, useCallback } from "react";
-import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { Agent, AgentCapability, ModelInfo, AgentGenerationSpec, PluginRuntimeInfo, AgentOnboardingSummary } from "../api";
 import { createAgent, fetchAgents, fetchModels } from "../api";
@@ -9,6 +8,7 @@ import { CustomModelDropdown } from "./CustomModelDropdown";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { ProviderIcon } from "./ProviderIcon";
 import { AgentGenerationModal } from "./AgentGenerationModal";
+import { ViewHeader } from "./ViewHeader";
 import { AGENT_PRESETS, type AgentPreset } from "./agent-presets";
 import {
   buildAgentCreatePayload,
@@ -22,6 +22,7 @@ import { SkillMultiselect } from "./SkillMultiselect";
 import { AgentAvatar } from "./AgentAvatar";
 import { ExperimentalAgentOnboardingModal } from "./ExperimentalAgentOnboardingModal";
 import { useFavorites } from "../hooks/useFavorites";
+import { FloatingWindow } from "./FloatingWindow";
 import { useOverlayDismiss } from "../hooks/useOverlayDismiss";
 
 export interface NewAgentDialogProps {
@@ -423,20 +424,37 @@ export function NewAgentDialog({
   // dialog rendered with its top hidden behind the in-page Agents header on
   // mobile (the header isn't taller than the dialog top — it's just stacked
   // above it because the dialog couldn't escape its container).
-  return createPortal(
-    <div className="agent-dialog-overlay" {...overlayDismiss}>
-      <div className="agent-dialog" role="dialog" aria-modal="true" aria-label={t("agents.dialogAriaLabel", "Create new agent")}>
-        {/* Header */}
-        <div className="agent-dialog-header">
-          <span className="agent-dialog-header-title">{t("agents.dialogTitle", "New Agent")}</span>
-          <button
-            className="btn-icon"
-            onClick={handleClose}
-            aria-label={t("agents.closeAriaLabel", "Close")}
-          >
-            ×
-          </button>
-        </div>
+  /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: FN-394 hosts agent creation in the shared window, which owns the body portal, the standard centred opening, snapping, and restore. The draft form is never remounted by a mode change. */
+  return (
+    <FloatingWindow
+      windowKey="new-agent"
+      modal
+      hideHeader
+      surfaceGroup="dialog"
+      title={t("agents.dialogTitle", "New Agent")}
+      ariaLabel={t("agents.dialogAriaLabel", "Create new agent")}
+      onClose={handleClose}
+      dragHandleSelector=".agent-dialog .agent-dialog-header"
+      className="floating-window--dialog floating-window--new-agent"
+      overlayClassName="agent-dialog-overlay"
+      defaultSize={{ width: 760, height: 640 }}
+      minSize={{ width: 320, height: 280 }}
+      suspendGeometryPersistenceOnMobile
+      suspendGeometryPersistenceOnShortViewport
+      backdropMouseHandlers={overlayDismiss}
+    >
+      <div className="agent-dialog">
+        {/*
+        FNXC:StandardizedViewLayout 2026-09-13-22:40:
+        FN-379 remediation: agent creation shares the canonical header instead of its own title row.
+        */}
+        <ViewHeader
+          className="agent-dialog-header"
+          headingLevel={3}
+          title={t("agents.dialogTitle", "New Agent")}
+          onClose={handleClose}
+          closeButtonProps={{ "aria-label": t("agents.closeAriaLabel", "Close") }}
+        />
 
         {/* Step indicator */}
         <div className="agent-dialog-steps">
@@ -929,7 +947,6 @@ export function NewAgentDialog({
         existingAgents={existingAgents}
         mode="create"
       />
-    </div>,
-    document.body,
+    </FloatingWindow>
   );
 }

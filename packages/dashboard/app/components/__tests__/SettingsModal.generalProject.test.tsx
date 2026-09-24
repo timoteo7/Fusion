@@ -296,34 +296,107 @@ describe("SettingsModal", () => {
       });
     });
 
-    it("reports Quick Chat launcher changes immediately before save", async () => {
-      const onQuickChatButtonModeChange = vi.fn();
-      renderModal({ initialSection: "general", onQuickChatButtonModeChange });
-      await waitForSettingsModalReady();
-
-      await settingsModalUser.selectOptions(screen.getByLabelText("Quick Chat launcher"), "footer");
-
-      expect(onQuickChatButtonModeChange).toHaveBeenCalledWith("footer");
-    });
-
-    it("reorders, adds, and removes mobile quick actions before save", async () => {
+    /*
+     * FN-446 : le contrôle pilote désormais les accès rapides de la barre de navigation partagée, et le libellé du
+     * groupe n'est plus « mobile ».
+     * FN-511 : le défaut vaut CINQ destinations terminées par le Chat, qui est une destination ORDINAIRE du sélecteur ;
+     * l'ajout se désactive dès cinq sélections.
+     */
+    it("reorders, adds, and removes navigation quick access before save", async () => {
       const onMobileNavPrimaryItemsChange = vi.fn();
       renderModal({ initialSection: "general", onMobileNavPrimaryItemsChange });
       await waitForSettingsModalReady();
 
+      const group = screen.getByRole("group", { name: "Navigation quick access" });
+      expect(Array.from(group.querySelectorAll(".settings-field-label-row")).map((row) => row.textContent)).toEqual([
+        expect.stringContaining("command-center"),
+        expect.stringContaining("tasks"),
+        expect.stringContaining("planning"),
+        expect.stringContaining("missions"),
+        expect.stringContaining("chat"),
+      ]);
+      /* FN-511 : cinq destinations déjà sélectionnées → l'ajout est fermé. */
+      const addSelect = screen.getByLabelText("Add quick action") as HTMLSelectElement;
+      expect(addSelect).toBeDisabled();
+
       fireEvent.click(screen.getAllByRole("button", { name: /later$/i })[0]);
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "agents", "missions", "chat", "mailbox"]);
-      const rows = Array.from(screen.getByRole("group", { name: "Mobile footer quick actions" }).querySelectorAll(".settings-field-label-row"));
+      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "planning", "missions", "chat"]);
+      const rows = Array.from(screen.getByRole("group", { name: "Navigation quick access" }).querySelectorAll(".settings-field-label-row"));
       expect(rows[0].textContent).toContain("tasks");
 
-      fireEvent.click(screen.getByLabelText("Remove chat"));
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "agents", "missions", "mailbox"]);
+      fireEvent.click(screen.getByLabelText("Remove planning"));
+      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "missions", "chat"]);
 
       await settingsModalUser.selectOptions(screen.getByLabelText("Add quick action"), "git");
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "agents", "missions", "mailbox", "git"]);
+      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["tasks", "command-center", "missions", "chat", "git"]);
 
       fireEvent.click(screen.getByLabelText("Remove tasks"));
-      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["command-center", "agents", "missions", "mailbox", "git"]);
+      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["command-center", "missions", "chat", "git"]);
+    });
+
+    /*
+     * FN-511 : une valeur persistée de SIX identifiants éligibles n'affiche que CINQ lignes de destination — la sixième
+     * n'apparaît pas avec des flèches inertes, puisque aucun hôte de navigation ne la rendrait.
+     */
+    it("tronque à cinq lignes une sélection persistée de six destinations", async () => {
+      const oversizedSelection = ["command-center", "tasks", "planning", "missions", "agents", "mailbox"];
+      mockFetchSettings.mockResolvedValueOnce({ ...defaultSettings, mobileNavPrimaryItems: oversizedSelection });
+      mockFetchSettingsByScope.mockResolvedValueOnce({
+        global: defaultSettings,
+        project: { mobileNavPrimaryItems: oversizedSelection },
+      });
+
+      renderModal({ initialSection: "general" });
+      await waitForSettingsModalReady();
+
+      const group = screen.getByRole("group", { name: "Navigation quick access" });
+      const rows = Array.from(group.querySelectorAll(".settings-field-label-row")).map((row) => row.textContent);
+      expect(rows).toHaveLength(5);
+      expect(rows.some((row) => row?.includes("mailbox"))).toBe(false);
+      expect(screen.getByLabelText("Add quick action")).toBeDisabled();
+    });
+
+    /*
+     * FN-511 : le plafond est de CINQ accès rapides plus « More », et `chat` est une destination ordinaire du sélecteur —
+     * elle réapparaît donc comme option dès qu'elle est retirée de la sélection.
+     */
+    it("disables the quick-access picker once five destinations are selected", async () => {
+      const onMobileNavPrimaryItemsChange = vi.fn();
+      renderModal({ initialSection: "general", onMobileNavPrimaryItemsChange });
+      await waitForSettingsModalReady();
+
+      const picker = screen.getByLabelText("Add quick action") as HTMLSelectElement;
+      expect(picker.disabled).toBe(true);
+
+      fireEvent.click(screen.getByLabelText("Remove chat"));
+      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["command-center", "tasks", "planning", "missions"]);
+      const reopened = screen.getByLabelText("Add quick action") as HTMLSelectElement;
+      expect(reopened.disabled).toBe(false);
+      expect(Array.from(reopened.options).map((option) => option.value)).toContain("chat");
+
+      await settingsModalUser.selectOptions(screen.getByLabelText("Add quick action"), "agents");
+      expect(onMobileNavPrimaryItemsChange).toHaveBeenLastCalledWith(["command-center", "tasks", "planning", "missions", "agents"]);
+      expect((screen.getByLabelText("Add quick action") as HTMLSelectElement).disabled).toBe(true);
+    });
+
+    /*
+     * FN-511 : la nouvelle option mobile est désactivée par défaut et, une fois basculée, met à jour l'aperçu du shell
+     * AVANT sauvegarde — même motif de miroir live que les accès rapides.
+     */
+    it("met à jour l'aperçu du shell quand l'option de geste mobile est basculée", async () => {
+      const onMobileNavMenuSwipeGestureChange = vi.fn();
+      renderModal({ initialSection: "general", onMobileNavMenuSwipeGestureChange });
+      await waitForSettingsModalReady();
+
+      const toggle = screen.getByLabelText("Open the mobile menu with a swipe") as HTMLInputElement;
+      expect(toggle.checked).toBe(false);
+
+      fireEvent.click(toggle);
+      expect(onMobileNavMenuSwipeGestureChange).toHaveBeenLastCalledWith(true);
+      expect((screen.getByLabelText("Open the mobile menu with a swipe") as HTMLInputElement).checked).toBe(true);
+
+      fireEvent.click(screen.getByLabelText("Open the mobile menu with a swipe"));
+      expect(onMobileNavMenuSwipeGestureChange).toHaveBeenLastCalledWith(false);
     });
 
     it("defaults task chats common-feed opt-in to unchecked", async () => {
@@ -359,14 +432,6 @@ describe("SettingsModal", () => {
         value: 14,
         scope: "project",
         expectedKey: "chatAutoCleanupDays",
-      },
-      {
-        section: "General · Project",
-        label: "Close Quick Chat on outside click",
-        kind: "checkbox",
-        value: false,
-        scope: "project",
-        expectedKey: "quickChatCloseOnOutsideClick",
       },
       {
         section: "General · Project",
@@ -792,24 +857,13 @@ describe("SettingsModal", () => {
       expect(screen.queryByText("Title, commit message, and GitHub tracking issue summarization model")).not.toBeInTheDocument();
     });
 
-    it("does not show a moved-to-workflow note for the summarizer model when GitHub tracking defaults are on", async () => {
-      mockFetchSettings.mockResolvedValueOnce({
-        ...defaultSettings,
-        githubTrackingEnabledByDefault: true,
-      });
-
-      renderModal({ initialSection: "models" });
+    it("keeps workflow-owned model controls off the Project Models page", async () => {
+      renderModal({ initialSection: "project-models" });
       await waitForSettingsModalReady();
 
-      await settingsModalUser.click(screen.getByRole("button", { name: "Models · Project" }));
-
-      expect(screen.queryByText(/model used for summarization now lives on the workflow/i)).not.toBeInTheDocument();
-      // FNXC:ProjectModels 2026-07-24-03:10: #2400 (e514e134d) replaced the
-      // per-phase moved-to-workflow NOTE with a real editable "Project workflow
-      // model lanes" section; assert the editor heading instead of the old copy.
-      /* FNXC:ProjectModels 2026-08-23-21:20: the editor's heading is now "Workflow lanes" inside the stable `project-models-workflow-lanes` region. */
-      expect(screen.getByTestId("project-models-workflow-lanes")).toBeInTheDocument();
-      expect(screen.getByRole("heading", { name: "Workflow lanes" })).toBeInTheDocument();
+      expect(screen.queryByTestId("project-models-workflow-lanes")).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Workflow lanes" })).not.toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Token Cap" })).toBeInTheDocument();
     });
 
     it("picks a project repo suggestion and preserves label association", async () => {

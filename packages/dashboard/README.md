@@ -70,7 +70,7 @@ AI-guided interactive planning for creating well-specified tasks from high-level
    - Suggested dependencies from existing tasks
    - Key deliverables checklist
 5. Create the task directly from the summary
-6. Or use **Break into Tasks** to generate multiple subtasks where each description starts with subtask-specific implementation guidance, followed by a separate larger-plan context section (including planning interview context when available); each subtask also supports per-subtask priority selection (`low`, `normal`, `high`, `urgent`) before creation, and final task creation submits a compact payload that only includes edited subtask fields while keeping unchanged generated descriptions server-side
+6. Or use **Break into Tasks** to generate multiple subtasks where each description starts with subtask-specific implementation guidance, followed by a separate larger-plan context section (including planning interview context when available); subtasks carry no priority selection — tasks run in arrival order and an operator raises one with **Boost** on its card — and final task creation submits a compact payload that only includes edited subtask fields while keeping unchanged generated descriptions server-side
 
 **Features**:
 - **Rate Limiting**: Maximum 5 planning sessions per hour per IP
@@ -637,7 +637,7 @@ The dashboard includes several runtime safeguards to stay responsive during long
 
 - **Agent log cap**: The UI keeps only the most recent **500 agent log entries per task** in memory. Historical log fetches and live SSE appends are both capped to this window. Tool-oriented `detail` payloads may be clipped server-side before they reach the dashboard so oversized command output does not stall the shared engine/dashboard event loop. The 500-entry limit is still a whole-list in-memory cap only.
 - **Memoized task rendering**: `TaskCard`, `Column`, and worktree grouping are memoized so unrelated SSE updates do not force the whole board to repaint. The board also preserves stable per-column task arrays for unchanged columns.
-- **Large-column pagination**: Columns with more than **100 tasks** use incremental client-side pagination, rendering **50 tasks initially** and loading **25 more** at a time. This is applied to active non-archived, non-`in-progress` columns to avoid breaking worktree grouping and archived browsing behavior.
+- **Large-column pagination**: Large columns use incremental client-side windowing, rendering **50 tasks initially** and revealing **25 more** at a time. Done additionally uses server pagination in pages of 50 with an exact independent total, so completed history stays bounded without undercounting the column header.
 - **Badge update isolation**: Live GitHub PR/issue badge websocket updates are rendered through a dedicated child component so badge freshness is preserved even when task cards are memoized.
 - **SSE cleanup and reconnects**: Task and log streaming hooks explicitly clean up EventSource listeners/connections, automatically refetch the task snapshot after a stream reconnect, and avoid duplicate stream setup during rerenders.
 - **Foreground recovery refresh**: The task board refreshes its task snapshot when the browser tab becomes visible again so long-lived hidden tabs do not keep showing stale board/list data after missed live events.
@@ -699,7 +699,8 @@ This works by configuring packages to resolve their workspace dependencies via T
 The dashboard server exposes a REST API at `/api`:
 
 ### Tasks
-- `GET /api/tasks` - List all tasks
+- `GET /api/tasks` - List live, non-completed tasks
+- `GET /api/tasks/done` - List completed tasks with server pagination and an exact total
 - `GET /api/tasks/:id` - Get task details
 - `POST /api/tasks` - Create new task
 - `PATCH /api/tasks/:id` - Update task
@@ -712,10 +713,6 @@ The dashboard server exposes a REST API at `/api`:
   - To explicitly remove incoming dependency references and then delete, call `DELETE /api/tasks/:id?removeDependencyReferences=true`.
   - To explicitly remove incoming lineage references and then delete, call `DELETE /api/tasks/:id?removeLineageReferences=true`.
   - Both opt-in paths rewrite the referencing tasks atomically before deleting the target task, so no live task is left pointing at a missing task ID.
-- `POST /api/tasks/:id/archive` - Archive a done task.
-  - Default mode is safe: if live lineage children still reference this task as `sourceParentTaskId`, the route returns `409` with `{ error, details: { code: "TASK_HAS_LINEAGE_CHILDREN", taskId, lineageChildIds } }`.
-  - To unlink those lineage references first, call `POST /api/tasks/:id/archive?removeLineageReferences=true`.
-
 ### Git Operations
 - `GET /api/git/status` - Current branch and status
 - `GET /api/git/commits` - Recent commits (with optional `?limit=`)  
@@ -948,7 +945,7 @@ Plugin management endpoints with multi-project scoping support via `projectId` q
 
 - **Frontend**: React + Vite, TypeScript, xterm.js for terminal emulation, CSS custom properties for theming
 - **Backend**: Express server with REST API, badge WebSocket at `/api/ws`, terminal WebSocket at `/api/terminal/ws`, and Server-Sent Events (SSE) for task/log updates
-- **Terminal**: @homebridge/node-pty-prebuilt-multiarch (aliased as node-pty) for PTY spawning, WebSocket for bidirectional I/O
+- **Terminal**: @lydell/node-pty (aliased as node-pty) for PTY spawning, WebSocket for bidirectional I/O
 - **Badge Updates**: `useBadgeWebSocket()` shares a single browser socket and subscribes per visible GitHub-linked task card
 - **State Management**: Custom hooks with EventSource for real-time task updates plus a dedicated WebSocket store for badge snapshots
 - **Git Integration**: Server-side git command execution with validation

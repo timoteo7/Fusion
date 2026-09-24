@@ -8,7 +8,7 @@ import path from "node:path";
 const requireFromEngine = createRequire(new URL("../../../engine/package.json", import.meta.url));
 const { chromium } = requireFromEngine("playwright-core") as { chromium: { launch(options: { executablePath: string; headless: boolean; args?: string[] }): Promise<Browser> } };
 type Browser = { newPage(options: { viewport: { width: number; height: number } }): Promise<Page>; close(): Promise<void> };
-type Page = { goto(url: string): Promise<unknown>; evaluate<T, Arg = undefined>(fn: (arg: Arg) => T, arg?: Arg): Promise<T>; locator(selector: string): Locator; mouse: { move(x: number, y: number): Promise<void>; down(): Promise<void>; up(): Promise<void> }; waitForTimeout(ms: number): Promise<void>; screenshot(options: { path: string }): Promise<void>; close(): Promise<void>; context(): { newCDPSession(page: Page): Promise<Cdp> }; on(event: "console" | "pageerror", listener: (message: { text?(): string; message?: string }) => void): void };
+type Page = { goto(url: string): Promise<unknown>; evaluate<T, Arg = undefined>(fn: (arg: Arg) => T, arg?: Arg): Promise<T>; locator(selector: string): Locator; waitForSelector(selector: string, options?: { timeout?: number }): Promise<unknown>; mouse: { move(x: number, y: number): Promise<void>; down(): Promise<void>; up(): Promise<void> }; waitForTimeout(ms: number): Promise<void>; setViewportSize(viewport: { width: number; height: number }): Promise<void>; screenshot(options: { path: string }): Promise<void>; close(): Promise<void>; context(): { newCDPSession(page: Page): Promise<Cdp> }; on(event: "console" | "pageerror", listener: (message: { text?(): string; message?: string }) => void): void };
 type Locator = { boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null> };
 type Cdp = { send(method: string, params: Record<string, unknown>): Promise<unknown> };
 type Point = { x: number; y: number };
@@ -19,10 +19,8 @@ const browserCandidates = process.platform === "darwin"
   : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
 const executablePath = [process.env.FUSION_BROWSER_SMOKE_BROWSER, process.env.CHROME_BIN, ...browserCandidates].find((candidate): candidate is string => Boolean(candidate) && existsSync(candidate));
 /*
-FNXC:TaskDetailTitle 2026-08-05-19:18:
-FN-8806's acceptance evidence is real Chromium geometry across production hosts. A skipped browser
-lane can neither observe ResizeObserver delivery nor reject the original flicker, so fail discovery
-explicitly instead of allowing a green suite without this required rendering-engine regression.
+FNXC:TaskDetailTitleRemoval 2026-09-13-11:59:
+Task Detail's required rendering evidence uses real Chromium across production hosts, states, and breakpoints. A skipped required-browser lane cannot prove the title and its former click target stay absent while the shared header, Definition description, and editable title remain usable.
 
 FNXC:TaskDetailTitle 2026-08-16-05:07:
 The hard failure applies only where the dedicated dashboard-browser-touch lane is required to run:
@@ -34,14 +32,23 @@ failing discovery — the module-load throw was breaking unrelated local runs th
 const browserRequired = Boolean(process.env.CI) || process.env.FUSION_BROWSER_SMOKE_REQUIRE === "1";
 if (!executablePath && browserRequired) {
   throw new Error(
-    "[task-modal-touch-resize] Chromium is required for task-title stability coverage; set FUSION_BROWSER_SMOKE_BROWSER or CHROME_BIN.",
+    "[task-modal-touch-resize] Chromium is required for Task Detail title-removal coverage; set FUSION_BROWSER_SMOKE_BROWSER or CHROME_BIN.",
   );
 }
 const screenshots = path.resolve(process.cwd(), "e2e/__screenshots__/fn-8602");
 const floatingWindowScreenshots = path.resolve(process.cwd(), "e2e/__screenshots__/fn-8605");
 const fn8607Screenshots = path.resolve(process.cwd(), "e2e/__screenshots__/fn-8607");
-const fn8806Screenshots = path.resolve(process.cwd(), "e2e/__screenshots__/fn-8806");
+const fn376Artifacts = path.resolve(process.cwd(), "../../artifacts/FN-376");
+/*
+FNXC:TaskDetailDefinition 2026-09-14-20:40:
+FN-391 visual evidence of the restructured Definition view, captured from the real Chromium render
+of the canonical modal host at desktop and mobile widths. The assertions above are the contract;
+these images are operator-facing proof of the same run, never a substitute for it.
+*/
+const fn391Artifacts = path.resolve(process.cwd(), "../../artifacts/FN-391");
 const fn115Screenshots = path.resolve(process.cwd(), "e2e/__screenshots__/fn-115");
+const fn349Screenshots = path.resolve(process.cwd(), "e2e/__screenshots__/fn-349");
+const fn367Artifacts = path.resolve(process.cwd(), "../../artifacts/FN-367");
 
 async function touchDrag(cdp: Cdp, point: Point, delta = { x: 48, y: 36 }) {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: point.x, y: point.y, id: 1 }] });
@@ -138,18 +145,25 @@ async function openProductionTitleHost(page: Page, name: string, hostTestId: str
     };
     await nextFrames();
     if (name === "list-split") {
-      document.querySelector<HTMLElement>("tr[data-id]")?.click();
+      /*
+      FNXC:TaskDetailPresentation 2026-09-17-00:48:
+      List cards now route to their standalone TaskDetailModal through the production pop-out
+      callback. List markup can retain a hidden detail-content descendant, so it is not a valid
+      readiness signal; always activate the live row before sampling the selected tab.
+      */
+      document.querySelector<HTMLElement>(":is(.list-card, .list-row)")?.click();
       await nextFrames();
     }
     if (name === "floating-window") {
       for (let frame = 0; frame < 6 && !document.querySelector("[data-id]"); frame++) await nextFrames();
       const taskCard = document.querySelector<HTMLElement>("[data-id]");
-      if (!taskCard) throw new Error("App fixture did not render its live board task before opening the production pop-out path");
+      if (!taskCard) throw new Error(`App fixture did not render its live board task before opening Task Detail: ${document.body.textContent?.slice(0, 500) ?? "empty body"}`);
       taskCard.click();
-      for (let frame = 0; frame < 6 && !document.querySelector("[data-testid='task-detail-pop-out']"); frame++) await nextFrames();
-      const popOut = document.querySelector<HTMLButtonElement>("[data-testid='task-detail-pop-out']");
-      if (!popOut) throw new Error("App board detail did not expose its production Pop out control");
-      popOut.click();
+      /*
+      FNXC:TaskDetailPresentation 2026-09-17-00:21 (FN-442):
+      Board selection now opens the canonical task FloatingWindow directly. Pop out remains an overflow action for
+      embedded non-phone hosts, but the already-floating App route must not require an impossible second pop out.
+      */
       await nextFrames();
     }
     let host: HTMLElement | null = null;
@@ -164,6 +178,43 @@ async function openProductionTitleHost(page: Page, name: string, hostTestId: str
       if (!host || !detailContent) await nextFrames();
     }
     if (!host || !detailContent) throw new Error(`${name} did not render its intended production host and TaskDetailContent (host=${Boolean(host)} content=${Boolean(detailContent)} body=${document.body.textContent?.slice(0, 500) ?? ""})`);
+  }, { name, hostTestId });
+}
+
+async function activateProductionDefinition(page: Page, name: string, hostTestId: string) {
+  await page.evaluate(async ({ name, hostTestId }) => {
+    const nextFrames = async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    };
+    let diagnostics = "";
+    let listClickAttempted = false;
+    for (let frame = 0; frame < 12; frame++) {
+      const host = name === "floating-window"
+        ? document.querySelector<HTMLElement>(`[data-testid^='${hostTestId}']`)
+        : document.querySelector<HTMLElement>(`[data-testid='${hostTestId}']`);
+      const detailContent = name === "floating-window"
+        ? host?.querySelector<HTMLElement>(".task-detail-content") ?? null
+        : host?.querySelector<HTMLElement>(".task-detail-content")
+          ?? document.querySelector<HTMLElement>(".task-detail-content")
+          ?? null;
+      const buttons = [...(detailContent?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+      const planButton = buttons.find((button) => button.getAttribute("aria-label") === "Plan" || button.textContent?.trim() === "Plan");
+      if (detailContent && planButton) {
+        planButton.click();
+        await nextFrames();
+        return;
+      }
+      if (name === "list-split" && !detailContent && !listClickAttempted) {
+        const row = document.querySelector<HTMLElement>(":is(.list-card, .list-row)[data-id]");
+        if (row) {
+          row.click();
+          listClickAttempted = true;
+        }
+      }
+      diagnostics = `host=${Boolean(host)} content=${Boolean(detailContent)} buttons=${buttons.map((button) => button.getAttribute("aria-label") || button.textContent?.trim()).join("|")}`;
+      await nextFrames();
+    }
+    throw new Error(`${name} did not expose its production Definition tab (${diagnostics})`);
   }, { name, hostTestId });
 }
 
@@ -215,20 +266,22 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
       expect(detailAfter.height).toBeGreaterThan(detailBefore.height);
       expect(detailAfter.width).toBeLessThanOrEqual(width - 32);
       expect(detailAfter.height).toBeLessThanOrEqual(height - 32);
-      const persistedTaskDetailGeometry = await page.evaluate(() => {
-        const raw = localStorage.getItem("floating-window:task-detail");
-        return raw ? JSON.parse(raw) : null;
-      });
-      expect(persistedTaskDetailGeometry?.size.width).toBeCloseTo(detailAfter.width);
-      expect(persistedTaskDetailGeometry?.size.height).toBeCloseTo(detailAfter.height);
+      // FNXC:FloatingWindowGeometry 2026-09-17-00:21: FN-394 retired durable geometry, so the rendered resize is the user-visible contract.
 
       await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=new-task`);
       await page.waitForTimeout(350);
       expect(await page.evaluate(() => document.querySelectorAll("[data-resize-hit-target='true']").length)).toBe(9);
       const newTaskPanel = ".new-task-modal";
+      /*
+      FNXC:ModalTouchGeometry 2026-09-17-00:49:
+      A tablet window at its clamp cannot translate, so retract it before proving header drag.
+      This keeps the gesture assertion about dragging rather than accidental edge snap behavior.
+      */
+      await touchDrag(cdp, await targetCenter(page, "[data-testid='floating-window-resize-nw']"), { x: 96, y: 0 });
+      await page.waitForTimeout(100);
       const headerPoint = await targetCenter(page, "[data-testid='new-task-drag-handle']");
       const newTaskBeforeHeaderDrag = await rect(page, newTaskPanel);
-      await touchDrag(cdp, headerPoint, { x: 32, y: 28 });
+      await touchDrag(cdp, headerPoint, { x: -32, y: 28 });
       await page.waitForTimeout(100);
       const newTaskAfterHeaderDrag = await rect(page, newTaskPanel);
       expect(newTaskAfterHeaderDrag.x).not.toBe(newTaskBeforeHeaderDrag.x);
@@ -247,16 +300,7 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
       expect(newTaskAfterResize.height).toBeGreaterThan(newTaskBeforeResize.height);
       expect(newTaskAfterResize.width).toBeLessThanOrEqual(width - 32);
       expect(newTaskAfterResize.height).toBeLessThanOrEqual(height - 32);
-      /*
-      FNXC:ModalTouchGeometry 2026-07-26-19:51:
-      The browser regression must prove FloatingWindow persisted usable resized geometry, not merely created the storage key.
-      */
-      const persistedNewTaskGeometry = await page.evaluate(() => {
-        const raw = localStorage.getItem("fusion:new-task-modal-geometry");
-        return raw ? JSON.parse(raw) : null;
-      });
-      expect(persistedNewTaskGeometry?.size.width).toBeCloseTo(newTaskAfterResize.width);
-      expect(persistedNewTaskGeometry?.size.height).toBeCloseTo(newTaskAfterResize.height);
+      // FNXC:FloatingWindowGeometry 2026-09-17-00:21: FN-394 retired durable geometry, so the rendered resize is the user-visible contract.
       if (width === 820) await page.screenshot({ path: path.join(screenshots, "tablet-after.png") });
       await page.close();
     }, 30_000);
@@ -287,11 +331,15 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
       expect(afterResize.y).toBeGreaterThanOrEqual(0);
       expect(afterResize.width).toBeLessThanOrEqual(width - 32);
       expect(afterResize.height).toBeLessThanOrEqual(height - 32);
-      expect(await page.evaluate(() => localStorage.getItem("fusion:fn-8605-floating"))).not.toBeNull();
+      // FNXC:FloatingWindowGeometry 2026-09-17-00:21: Geometry is intentionally session-local after FN-394; no storage write is expected.
+      expect(await page.evaluate(() => localStorage.getItem("fusion:fn-8605-floating"))).toBeNull();
 
+      // FNXC:ModalTouchGeometry 2026-09-17-00:49: A tablet-clamped window has no free translation range, so make room before testing its header drag.
+      await touchDrag(cdp, await targetCenter(page, "[data-testid='floating-window-resize-nw']"), { x: 96, y: 72 });
+      await page.waitForTimeout(100);
       const headerPoint = await targetCenter(page, "[data-testid='floating-window-drag-handle-fn-8605-floating']");
       const beforeDrag = await rect(page, "[data-testid='floating-window-fn-8605-floating']");
-      await touchDrag(cdp, headerPoint, { x: 28, y: 24 });
+      await touchDrag(cdp, headerPoint, { x: -28, y: 24 });
       await page.waitForTimeout(100);
       const afterDrag = await rect(page, "[data-testid='floating-window-fn-8605-floating']");
       expect(afterDrag.x).not.toBe(beforeDrag.x);
@@ -324,7 +372,8 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
       expect(await rect(page, panelSelector)).toEqual(beforeAction);
 
       const beforeDrag = await rect(page, panelSelector);
-      await touchDrag(cdp, headerPoint, { x: 28, y: 24 });
+      // FNXC:ModalTouchGeometry 2026-09-17-00:49: Pull away from the right clamp so this remains a drag rather than a snap-zone assertion.
+      await touchDrag(cdp, headerPoint, { x: -28, y: 24 });
       await page.waitForTimeout(100);
       const afterDrag = await rect(page, panelSelector);
       expect(afterDrag.x).not.toBe(beforeDrag.x);
@@ -409,10 +458,9 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
     expect(tabletNewTask.body.paddingBlockEnd).toBe(desktopNewTask.body.paddingBlockEnd);
     expect(tabletNewTask.overlay.paddingBlockStart).toBe(desktopNewTask.overlay.paddingBlockStart);
     expect(tabletNewTask.overlay.paddingBlockEnd).toBe(desktopNewTask.overlay.paddingBlockEnd);
-    expect(tabletNewTask.panel.width).toBe(desktopNewTask.panel.width);
-    // Floating New Task repositions into the tablet viewport; its panel width and zero overlay
-    // inset remain the desktop-density contract rather than inheriting task-detail placement.
-    expect(tabletNewTask.panel.x).toBeGreaterThanOrEqual(0);
+    // FNXC:ModalTouchGeometry 2026-09-17-00:49: A clamped New Task panel reserves the corner-target inset, remaining narrower than desktop while its southeast target stays tappable.
+    expect(tabletNewTask.panel.width).toBeLessThanOrEqual(768 - 32);
+    expect(tabletNewTask.panel.x).toBeGreaterThanOrEqual(16);
     expect(tabletNewTask.panel.x).toBeLessThan(desktopNewTask.panel.x);
     expect(tabletNewTask.handle.width).toBe(44);
     expect(tabletNewTask.handle.height).toBe(44);
@@ -427,8 +475,8 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
     const genericPanel = await boxMetrics(tablet, "[data-testid='floating-window-fn-8612-generic-floating']");
     const genericHeader = await boxMetrics(tablet, ".fn-8612-generic-drag-handle");
     const genericHandle = await boxMetrics(tablet, "[data-testid='floating-window-resize-se']");
-    expect(genericPanel.width).toBe(560);
-    expect(genericPanel.height).toBe(480);
+    expect(genericPanel.width).toBe(672);
+    expect(genericPanel.height).toBe(470);
     expect(genericHeader.minBlockSize).toBe("44px");
     expect(genericHandle.width).toBe(44);
     expect(genericHandle.height).toBe(44);
@@ -489,11 +537,23 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
       }
       const resizeSelector = `${modal.panelSelector} [data-testid='floating-window-resize-se']`;
       let resizePoint = await targetCenter(page, resizeSelector);
-      expect(await page.evaluate((point) => document.elementFromPoint(point.x, point.y)?.getAttribute("data-resize-hit-target"), resizePoint)).toBe("true");
+      const resizeHit = await page.evaluate((point) => {
+        const element = document.elementFromPoint(point.x, point.y);
+        return {
+          marker: element?.getAttribute("data-resize-hit-target"),
+          tag: element?.tagName,
+          className: element instanceof HTMLElement ? element.className : "",
+          testId: element instanceof HTMLElement ? element.dataset.testid ?? "" : "",
+          point,
+        };
+      }, resizePoint);
+      expect(resizeHit.marker, JSON.stringify(resizeHit)).toBe("true");
       let beforeResize = await rect(page, modal.panelSelector);
       // AgentListModal's production default reaches the tablet width clamp. Retract it through the
       // existing northwest control first, then prove the required southeast gesture grows it again.
-      if (beforeResize.width >= width - 32 || beforeResize.height >= height - 32) {
+      // The shared 44px corner target reserves its own viewport clearance, so a visually
+      // clamped panel must first retract even when it is below the older 32px shell inset.
+      if (beforeResize.width >= width - 44 || beforeResize.height >= height - 44) {
         await touchDrag(cdp, await targetCenter(page, `${modal.panelSelector} [data-testid='floating-window-resize-nw']`), { x: 96, y: 72 });
         await page.waitForTimeout(100);
         beforeResize = await rect(page, modal.panelSelector);
@@ -518,7 +578,8 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
       expect(afterDrag.y).not.toBe(beforeDrag.y);
       expect(afterDrag.width).toBe(beforeDrag.width);
       expect(afterDrag.height).toBe(beforeDrag.height);
-      expect(await page.evaluate((key) => localStorage.getItem(key), modal.persistGeometryKey)).not.toBeNull();
+      // FNXC:FloatingWindowGeometry 2026-09-17-00:21: Geometry is intentionally session-local after FN-394; no storage write is expected.
+      expect(await page.evaluate((key) => localStorage.getItem(key), modal.persistGeometryKey)).toBeNull();
 
       await mkdir(fn8607Screenshots, { recursive: true });
       await page.screenshot({ path: path.join(fn8607Screenshots, modal.screenshot) });
@@ -563,222 +624,321 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
   }, 30_000);
 
   /*
-  FNXC:TaskDetailTitle 2026-08-05-17:54:
-  Chromium samples real TaskDetailModal and embedded TaskDetailContent after multiple animation
-  frames. Browser layout—not jsdom's fixed geometry—is the regression authority for a title whose
-  control used to change the same clamp geometry that decided whether the control existed.
+  FNXC:TaskDetailTitleRemoval 2026-09-13-11:59:
+  Real Chromium must prove the title-free Task Detail invariant in all six production hosts at desktop and narrow widths. The same matrix covers title-plus-description, description-only, and empty data, then moves through Activity and edit mode so a hidden legacy heading or click target cannot survive in one state or breakpoint.
+
+  FNXC:TaskDetailHeaderActions 2026-09-13-14:21:
+  The same production-host matrix compares direct, overflow, edit, pop-out, and close rectangles at desktop, tablet, and mobile widths. All icon controls remain compact above the mobile breakpoint and grow together to the shared Alpha touch minimum at or below it; semantic Back may be wider but must keep the same height.
   */
+  const titleRemovalHostRows = [
+    ["modal", "title-host-modal", "task-detail-title-modal", true, 1200, "desktop"],
+    ["modal", "title-host-modal", "task-detail-title-modal", true, 768, "tablet"],
+    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel", false, 1024, "desktop"],
+    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel", false, 768, "tablet"],
+    ["list-split", "title-host-list", "task-detail-title-list", true, 1200, "desktop"],
+    ["list-split", "title-host-list", "task-detail-title-list", true, 820, "tablet"],
+    ["right-dock", "title-host-dock", "task-detail-title-dock", false, 1024, "desktop"],
+    ["right-dock", "title-host-dock", "task-detail-title-dock", false, 820, "tablet"],
+    ["mobile-drawer", "mobile-drawer-task-detail", "task-detail-title-native-drawer", true, 390, "mobile"],
+    ["floating-window", "floating-window-task-detail", "task-detail-title-app-floating", true, 1200, "desktop"],
+    ["floating-window", "floating-window-task-detail", "task-detail-title-app-floating", true, 768, "tablet"],
+  ] as const;
+
   /*
-  FNXC:TaskDetailTitle 2026-08-05-19:01:
-  Each row enters the actual modal orchestration, board main panel, List split pane, right-dock
-  controller, or App task pop-out path. The floating row renders App, opens a live board task, and
-  activates its production Pop out control before sampling. Sample both desktop and constrained widths:
-  a title control must not change its own overflow eligibility after an operator expands or collapses.
+  FNXC:TaskDetailHeaderActions 2026-09-17-01:27:
+  Chromium must exercise the eligible embedded host's Actions → Pop out path, not only App's direct board-click window route. The production callback closes the source panel before AppTaskPopoutWindow opens, leaving exactly one canonical Task Detail surface; phone presentation deliberately retains no Pop out entry.
   */
-  it.each([
-    ["modal", "title-host-modal", "task-detail-title-modal", 1024],
-    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel", 1024],
-    ["list-split", "title-host-list", "task-detail-title-list", 1024],
-    ["right-dock", "title-host-dock", "task-detail-title-dock", 1024],
-    ["floating-window", "floating-window-overlay-task-detail-", "task-detail-title-app-floating", 1024],
-    ["modal", "title-host-modal", "task-detail-title-modal", 720],
-    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel", 720],
-    ["list-split", "title-host-list", "task-detail-title-list", 820],
-    ["right-dock", "title-host-dock", "task-detail-title-dock", 820],
-    ["floating-window", "floating-window-overlay-task-detail-", "task-detail-title-app-floating", 720],
-  ] as const)("keeps the %s production title host %s via %s stable at %dpx after one activation", async (name, hostTestId, surface, width) => {
-    const page = await browser.newPage({ viewport: { width, height: 844 } });
-    page.on("pageerror", (message) => console.error(`[task-title-${name}] ${message.message ?? ""}\n${(message as { stack?: string }).stack ?? ""}`));
-    await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=${surface}&reset=1${name === "floating-window" ? "&project=fixture" : ""}`);
-    const samples = await page.evaluate(async ({ hostTestId, name }) => {
+  it("routes an embedded Task Detail Actions Pop out entry into one canonical floating window", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 844 } });
+    await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=task-detail-pop-out-overflow&reset=1`);
+    await page.waitForSelector("[data-testid='title-host-pop-out-overflow'] .task-detail-content", { timeout: 3_000 });
+    const result = await page.evaluate(async () => {
       const nextFrames = async () => {
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       };
+      const detail = document.querySelector<HTMLElement>("[data-testid='title-host-pop-out-overflow'] .task-detail-content");
+      const actions = detail?.querySelector<HTMLButtonElement>("button[aria-label='Actions']");
+      if (!detail || !actions) throw new Error("Embedded production Task Detail did not render its Actions trigger");
+      actions.click();
       await nextFrames();
-      if (name === "list-split") {
-        document.querySelector<HTMLElement>("tr[data-id='FN-TITLE-FLICKER']")?.click();
-        await nextFrames();
-      }
-      if (name === "floating-window") {
-        // The fixture hydrates App's production project/task caches, then awaits its React commit
-        // through animation frames rather than a wall-clock delay.
-        for (let frame = 0; frame < 6 && !document.querySelector("[data-id='FN-TITLE-FLICKER']"); frame++) await nextFrames();
-        const taskCard = document.querySelector<HTMLElement>("[data-id='FN-TITLE-FLICKER']");
-        if (!taskCard) throw new Error("App fixture did not render its live board task before opening the production pop-out path");
-        taskCard.click();
-        for (let frame = 0; frame < 6 && !document.querySelector("[data-testid='task-detail-pop-out']"); frame++) await nextFrames();
-        const popOut = document.querySelector<HTMLButtonElement>("[data-testid='task-detail-pop-out']");
-        if (!popOut) throw new Error(`App board detail did not expose its production Pop out control; title:${document.querySelector("h2.detail-title")?.textContent ?? "missing"}`);
-        popOut.click();
-        await nextFrames();
-      }
-      const host = name === "floating-window"
-        ? document.querySelector(`[data-testid^='${hostTestId}']`)
-        : document.querySelector(`[data-testid='${hostTestId}']`);
-      const title = name === "floating-window"
-        ? host?.querySelector<HTMLHeadingElement>("h2.detail-title") ?? null
-        : document.querySelector<HTMLHeadingElement>("h2.detail-title");
-      const control = name === "floating-window"
-        ? host?.querySelector<HTMLButtonElement>(".detail-title-control") ?? null
-        : document.querySelector<HTMLButtonElement>(".detail-title-control");
-      const detailContent = title?.closest<HTMLElement>(".task-detail-content") ?? null;
-      if (!host || !title || !control || !detailContent) throw new Error(`${name} did not render its production title host, TaskDetailContent, and overflow control (host=${Boolean(host)} title=${Boolean(title)} content=${Boolean(detailContent)} control=${Boolean(control)} aria-hidden=${host?.getAttribute("aria-hidden")}): ${document.querySelector("[data-testid='list-split-detail-content']") ? "split-detail-without-title" : document.querySelector("[data-testid='list-view-body']") ? "list-without-split-detail" : "host-missing"}`);
-      const controlIdentity = control;
-      const sample = () => {
-        const liveTitle = name === "floating-window"
-          ? host.querySelector<HTMLHeadingElement>("h2.detail-title")
-          : document.querySelector<HTMLHeadingElement>("h2.detail-title");
-        const liveControl = name === "floating-window"
-          ? host.querySelector<HTMLButtonElement>(".detail-title-control")
-          : document.querySelector<HTMLButtonElement>(".detail-title-control");
-        return {
-          collapsed: liveTitle?.classList.contains("detail-title--collapsed") ?? true,
-          expanded: liveControl?.getAttribute("aria-expanded") ?? null,
-          controls: document.querySelectorAll(".detail-title-control").length,
-          sameControl: liveControl === controlIdentity,
-          height: liveTitle?.getBoundingClientRect().height ?? 0,
-        };
+      const menu = document.querySelector<HTMLElement>(".detail-actions-menu");
+      const entries = [...(menu?.querySelectorAll<HTMLElement>("[data-testid]") ?? [])]
+        .map((entry) => entry.dataset.testid ?? "");
+      const popOut = menu?.querySelector<HTMLButtonElement>("[data-testid='task-detail-pop-out']");
+      if (!menu || !popOut) throw new Error(`Embedded production Actions menu did not expose task-detail-pop-out (${entries.join(", ")})`);
+      const popOutIsLast = entries.at(-1) === "task-detail-pop-out";
+      popOut.click();
+      await nextFrames();
+      const windows = [...document.querySelectorAll<HTMLElement>(".floating-window--task-detail")];
+      return {
+        entries,
+        popOutIsLast,
+        floatingWindowCount: windows.length,
+        taskDetailSurfaceCount: document.querySelectorAll("[data-task-detail-surface='true']").length,
+        floatingWindowHasSurface: windows[0]?.querySelector("[data-task-detail-surface='true']") !== null,
+        sourcePanelPresent: document.querySelector(".task-detail-main-panel") !== null,
       };
-      control.click();
-      const expanded = [];
-      for (let frame = 0; frame < 6; frame++) { await nextFrames(); expanded.push(sample()); }
-
-      // Resize the live production heading row, then yield native ResizeObserver delivery frames.
-      // This is intentionally not a fixed jsdom geometry stub: Chromium recomputes the real host's
-      // flex and clamp layout while the operator-owned expansion remains selected.
-      const headingRow = title.parentElement;
-      const originalInlineSize = headingRow?.style.inlineSize ?? "";
-      const widthBeforeResize = title.getBoundingClientRect().width;
-      if (headingRow) headingRow.style.inlineSize = "75%";
-      window.dispatchEvent(new Event("resize"));
-      const expandedAfterResize = [];
-      for (let frame = 0; frame < 6; frame++) { await nextFrames(); expandedAfterResize.push(sample()); }
-      const widthAfterResize = title.getBoundingClientRect().width;
-
-      (name === "floating-window"
-        ? host.querySelector<HTMLButtonElement>(".detail-title-control")
-        : document.querySelector<HTMLButtonElement>(".detail-title-control"))?.click();
-      const collapsed = [];
-      for (let frame = 0; frame < 6; frame++) { await nextFrames(); collapsed.push(sample()); }
-      if (headingRow) headingRow.style.inlineSize = originalInlineSize;
-      return { expanded, expandedAfterResize, collapsed, widthBeforeResize, widthAfterResize };
-    }, { hostTestId, name });
-    expect(samples.expanded.every((sample) => !sample.collapsed && sample.expanded === "true" && sample.controls === 1 && sample.sameControl)).toBe(true);
-    expect(new Set(samples.expanded.map((sample) => sample.height))).toHaveLength(1);
-    expect(samples.widthAfterResize).toBeLessThan(samples.widthBeforeResize);
-    expect(samples.expandedAfterResize.every((sample) => !sample.collapsed && sample.expanded === "true" && sample.controls === 1 && sample.sameControl)).toBe(true);
-    expect(new Set(samples.expandedAfterResize.map((sample) => sample.height))).toHaveLength(1);
-    expect(samples.collapsed.every((sample) => sample.collapsed && sample.expanded === "false" && sample.controls === 1 && sample.sameControl)).toBe(true);
-    expect(new Set(samples.collapsed.map((sample) => sample.height))).toHaveLength(1);
-    if (name === "modal" && (width === 1024 || width === 720)) {
-      await mkdir(fn8806Screenshots, { recursive: true });
-      await page.screenshot({
-        path: path.join(fn8806Screenshots, width === 1024 ? "task-title-stable-modal-desktop.png" : "task-title-stable-modal-narrow.png"),
-      });
-    }
+    });
+    expect(result.entries).toContain("task-detail-pop-out");
+    expect(result.popOutIsLast, JSON.stringify(result.entries)).toBe(true);
+    expect(result.floatingWindowCount).toBe(1);
+    expect(result.taskDetailSurfaceCount).toBe(1);
+    expect(result.floatingWindowHasSurface).toBe(true);
+    expect(result.sourcePanelPresent).toBe(false);
     await page.close();
   }, 30_000);
 
-  /*
-  FNXC:TaskDetailTitle 2026-08-05-19:39:
-  FN-8806 requires Chromium—not fixed jsdom dimensions—to prove the no-control fitting state, both
-  display fallbacks, and a real host-width threshold transition. Every production host and viewport
-  must keep the control absent when fitting, render exactly one accessible control when overflowing,
-  and update only eligibility when native ResizeObserver geometry crosses the clamp boundary.
-  */
-  const titleHostRows = [
-    ["modal", "title-host-modal", "task-detail-title-modal", 1024],
-    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel", 1024],
-    ["list-split", "title-host-list", "task-detail-title-list", 1024],
-    ["right-dock", "title-host-dock", "task-detail-title-dock", 1024],
-    ["floating-window", "floating-window-overlay-task-detail-", "task-detail-title-app-floating", 1024],
-    ["modal", "title-host-modal", "task-detail-title-modal", 720],
-    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel", 720],
-    ["list-split", "title-host-list", "task-detail-title-list", 820],
-    ["right-dock", "title-host-dock", "task-detail-title-dock", 820],
-    ["floating-window", "floating-window-overlay-task-detail-", "task-detail-title-app-floating", 720],
+  it("omits Pop out from the phone Actions overflow", async () => {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, screenWidth: 390, screenHeight: 844, deviceScaleFactor: 1, mobile: true });
+    await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+    await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=task-detail-pop-out-overflow&reset=1`);
+    await page.waitForSelector("[data-testid='title-host-pop-out-overflow'] .task-detail-content", { timeout: 3_000 });
+    const popOutPresent = await page.evaluate(async () => {
+      const actions = document.querySelector<HTMLButtonElement>("[data-testid='title-host-pop-out-overflow'] .task-detail-content button[aria-label='Actions']");
+      if (!actions) throw new Error("Phone production Task Detail did not render its Actions trigger");
+      actions.click();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      return document.querySelector(".detail-actions-menu [data-testid='task-detail-pop-out']") !== null;
+    });
+    expect(popOutPresent).toBe(false);
+    await page.close();
+  }, 30_000);
+
+  const titleRemovalStates = [
+    ["fit", "Fitting browser title", "Fixture description"],
+    ["description", "", "A browser description without a title"],
+    ["id", "", ""],
   ] as const;
 
-  for (const [titleMode, expectedText, expectsControl] of [
-    ["fit", "Fitting browser title", false],
-    ["description", "A browser measured description fallback", true],
-    ["id", "FN-8806", false],
-  ] as const) {
-    it.each(titleHostRows)("renders %s host %s via %s at %dpx with title fallback state", async (name, hostTestId, surface, width) => {
-      const page = await browser.newPage({ viewport: { width, height: 844 } });
-      page.on("pageerror", (message) => console.error(`[task-title-${name}-${titleMode}] ${message.message ?? ""}`));
-      await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=${surface}&titleMode=${titleMode}&reset=1${name === "floating-window" ? "&project=fixture" : ""}`);
+  for (const [titleMode, expectedTitle, expectedDescription] of titleRemovalStates) {
+    it.each(titleRemovalHostRows)(`keeps the %s production host (%s via %s, dialog=%s) title-free at %dpx %s for ${titleMode} data`, async (name, hostTestId, surface, expectsDialogName, width, viewportName) => {
+      const opensAtDesktopBeforeNarrowing = (name === "floating-window" && width <= 768)
+        || (name === "right-dock" && width <= 820);
+      const page = await browser.newPage({ viewport: { width: opensAtDesktopBeforeNarrowing ? 1024 : width, height: 844 } });
+      page.on("pageerror", (message) => console.error(`[task-title-removal-${name}-${titleMode}] ${message.message ?? ""}`));
+      const preserveDesktopHost = opensAtDesktopBeforeNarrowing ? "&preserveDesktopHost=true" : "";
+      await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=${surface}&titleMode=${titleMode}&reset=1${preserveDesktopHost}${name === "floating-window" ? "&project=fixture" : ""}`);
       await openProductionTitleHost(page, name, hostTestId);
-      const state = await page.evaluate(({ name, hostTestId }) => {
+      if (opensAtDesktopBeforeNarrowing) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.evaluate(async (name) => {
+          if (name === "right-dock") {
+            const dock = document.querySelector<HTMLElement>(".right-dock");
+            if (!dock) throw new Error("Cannot preserve the mounted right-dock host");
+            dock.style.display = "flex";
+            dock.style.inlineSize = "100vw";
+            dock.style.minInlineSize = "0";
+            dock.style.maxInlineSize = "100vw";
+          }
+          await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        }, name);
+      }
+      await activateProductionDefinition(page, name, hostTestId);
+
+      const sample = async () => page.evaluate(({ name, hostTestId, expectedTitle }) => {
         const host = name === "floating-window"
           ? document.querySelector<HTMLElement>(`[data-testid^='${hostTestId}']`)
           : document.querySelector<HTMLElement>(`[data-testid='${hostTestId}']`);
-        const title = name === "floating-window"
-          ? host?.querySelector<HTMLHeadingElement>("h2.detail-title") ?? null
-          : document.querySelector<HTMLHeadingElement>("h2.detail-title");
-        const controls = name === "floating-window"
-          ? host?.querySelectorAll<HTMLButtonElement>(".detail-title-control") ?? []
-          : document.querySelectorAll<HTMLButtonElement>(".detail-title-control");
+        const detailContent = name === "floating-window"
+          ? host?.querySelector<HTMLElement>(".task-detail-content") ?? null
+          : host?.querySelector<HTMLElement>(".task-detail-content") ?? document.querySelector<HTMLElement>(".task-detail-content");
+        const header = detailContent?.querySelector<HTMLElement>(":scope > .modal-header") ?? null;
+        if (!host || !detailContent || !header) throw new Error(`${name} did not retain its production host, TaskDetailContent, and shared header`);
+        const dialog = detailContent.closest<HTMLElement>("[role='dialog']");
+        const definitionSection = detailContent.querySelector<HTMLElement>(".detail-definition-description");
+        /*
+        FNXC:TaskDetailDefinition 2026-09-14-20:35:
+        FN-391 replaced the Summarize action with the restructured Definition view. This probe now
+        measures what the operator actually reads: section ORDER (progress, description, outcome),
+        the collapsed step disclosure, and the bounded description's internal scrolling.
+        */
+        const progressSection = detailContent.querySelector<HTMLElement>(".detail-step-progress");
+        const outcomeSection = detailContent.querySelector<HTMLElement>(".detail-definition-outcome");
+        const descriptionBody = detailContent.querySelector<HTMLElement>("[data-testid='task-detail-definition-description']");
+        const stepToggle = detailContent.querySelector<HTMLButtonElement>("[data-testid='detail-step-list-toggle']");
+        const readPlanButton = [...detailContent.querySelectorAll<HTMLButtonElement>(".detail-read-plan")][0] ?? null;
+        const definitionRect = definitionSection?.getBoundingClientRect();
+        const outcomeRect = outcomeSection?.getBoundingClientRect();
+        const readPlanRect = readPlanButton?.getBoundingClientRect();
+        const labelledBy = dialog?.getAttribute("aria-labelledby")?.trim();
+        const labelledName = labelledBy
+          ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent?.trim() ?? "").filter(Boolean).join(" ")
+          : "";
+        const iconActionMetrics = [...header.querySelectorAll<HTMLButtonElement>(
+          ".modal-header-actions button.task-detail-header-action, .modal-header-actions button.modal-close:not(.task-detail-mobile-back)",
+        )].map((button) => {
+          const actionRect = button.getBoundingClientRect();
+          return {
+            name: button.getAttribute("aria-label") ?? button.dataset.testid ?? "unnamed",
+            testId: button.dataset.testid ?? "",
+            width: actionRect.width,
+            height: actionRect.height,
+            hasCompactClasses: ["btn", "btn-icon", "btn-sm"].every((className) => button.classList.contains(className)),
+          };
+        });
+        const semanticBackMetrics = [...header.querySelectorAll<HTMLButtonElement>(
+          ".modal-header-actions button:is(.task-detail-header-back-btn, .task-detail-mobile-back)",
+        )].map((button) => {
+          const actionRect = button.getBoundingClientRect();
+          return { width: actionRect.width, height: actionRect.height };
+        });
         return {
-          text: title?.textContent ?? "",
-          collapsed: title?.classList.contains("detail-title--collapsed") ?? false,
-          controls: controls.length,
-          ariaLabels: [...controls].map((control) => control.getAttribute("aria-label")),
-          expanded: [...controls].map((control) => control.getAttribute("aria-expanded")),
+          headingCount: header.querySelectorAll("h1, h2, h3, h4, h5, h6").length,
+          legacyTitleCount: detailContent.querySelectorAll(".detail-heading-row, .detail-title, .detail-title-control, .detail-title-measurement").length,
+          headerHasTitle: Boolean(expectedTitle) && (header.textContent ?? "").includes(expectedTitle),
+          taskId: detailContent.querySelector(".detail-id")?.textContent?.trim() ?? "",
+          description: (detailContent.querySelector("[data-testid='task-detail-definition-description']")
+            ?? detailContent.querySelector(".detail-definition-description"))?.textContent?.trim() ?? "",
+          headerHeight: header.getBoundingClientRect().height,
+          dialogName: dialog?.getAttribute("aria-label")?.trim() || labelledName,
+          iconActionMetrics,
+          semanticBackMetrics,
+          summarizePresent: Boolean(detailContent.querySelector("[data-testid='summarize-title-btn']")),
+          titleInputPresent: Boolean(detailContent.querySelector("#task-form-title")),
+          emptyHeaderShellCount: [...detailContent.querySelectorAll<HTMLElement>(".detail-definition-header button")]
+            .filter((button) => (button.textContent ?? "").trim().length === 0 && button.querySelectorAll("svg").length === 0).length,
+          definitionOrder: {
+            progressTop: progressSection?.getBoundingClientRect().top ?? null,
+            descriptionTop: definitionRect?.top ?? null,
+            outcomeTop: outcomeRect?.top ?? null,
+          },
+          stepToggle: stepToggle ? {
+            expanded: stepToggle.getAttribute("aria-expanded"),
+            controls: stepToggle.getAttribute("aria-controls") ?? "",
+            listPresent: Boolean(detailContent.querySelector(".detail-step-list")),
+            counterVisible: Boolean(detailContent.querySelector(".step-progress-label")?.textContent?.trim()),
+            barVisible: Boolean(detailContent.querySelector(".step-progress-track")),
+          } : null,
+          descriptionBounded: descriptionBody ? {
+            scrollHeight: descriptionBody.scrollHeight,
+            clientHeight: descriptionBody.clientHeight,
+            overflowsHost: descriptionBody.getBoundingClientRect().bottom > window.innerHeight + 1,
+          } : null,
+          readPlanFitsOutcome: Boolean(outcomeRect && readPlanRect
+            && readPlanRect.left >= outcomeRect.left - 1
+            && readPlanRect.right <= outcomeRect.right + 1
+            && readPlanRect.right <= window.innerWidth + 1),
+        };
+      }, { name, hostTestId, expectedTitle });
+
+      const state = await sample();
+      if (titleMode === "fit") {
+        await mkdir(fn376Artifacts, { recursive: true });
+        await page.screenshot({ path: path.join(fn376Artifacts, `${name}-${viewportName}.png`) });
+      }
+      if (titleMode === "fit" && name === "modal" && viewportName === "desktop") {
+        await mkdir(fn391Artifacts, { recursive: true });
+        await page.screenshot({ path: path.join(fn391Artifacts, "task-definition-desktop.png") });
+      }
+      if (titleMode === "fit" && name === "mobile-drawer") {
+        await mkdir(fn391Artifacts, { recursive: true });
+        await page.screenshot({ path: path.join(fn391Artifacts, "task-definition-mobile.png") });
+      }
+
+      const expectedTaskId = titleMode === "id" ? "FN-8806" : "FN-TITLE-FLICKER";
+      expect(state.headingCount).toBe(0);
+      expect(state.legacyTitleCount).toBe(0);
+      expect(state.headerHasTitle).toBe(false);
+      expect(state.taskId).toBe(expectedTaskId);
+      expect(state.headerHeight).toBeGreaterThan(0);
+      /*
+      FNXC:TaskDetailHeaderActions 2026-09-16-18:07 (FN-470):
+      The header keeps at most two icon controls: the Actions overflow and the close control. A phone host renders
+      no close at all, so the floor is one rather than the desktop pair; the old floor of three described the
+      removed direct lifecycle icons.
+      */
+      expect(state.iconActionMetrics.length, JSON.stringify(state.iconActionMetrics)).toBeGreaterThanOrEqual(1);
+      expect(state.iconActionMetrics.length, JSON.stringify(state.iconActionMetrics)).toBeLessThanOrEqual(2);
+      expect(state.iconActionMetrics.every((action) => action.hasCompactClasses), JSON.stringify(state.iconActionMetrics)).toBe(true);
+      expect(state.iconActionMetrics.every((action) => ["Actions", "Close"].includes(action.name)), JSON.stringify(state.iconActionMetrics)).toBe(true);
+      expect(state.iconActionMetrics.some((action) => action.name === "Actions"), JSON.stringify(state.iconActionMetrics)).toBe(true);
+      const iconActionWidths = state.iconActionMetrics.map((action) => action.width);
+      const iconActionHeights = state.iconActionMetrics.map((action) => action.height);
+      expect(Math.max(...iconActionWidths) - Math.min(...iconActionWidths), JSON.stringify(state.iconActionMetrics)).toBeLessThanOrEqual(1);
+      expect(Math.max(...iconActionHeights) - Math.min(...iconActionHeights), JSON.stringify(state.iconActionMetrics)).toBeLessThanOrEqual(1);
+      for (const backAction of state.semanticBackMetrics) {
+        expect(Math.abs(backAction.height - iconActionHeights[0]!), JSON.stringify({ backAction, iconActionHeights })).toBeLessThanOrEqual(1);
+      }
+      // FNXC:TaskDetailHeaderActions 2026-09-17-00:21: Rebuilt hosts use compact 28px or canonical 36px icon controls; 44px remains exclusive to tablet resize targets.
+      expect(Math.min(...iconActionWidths), JSON.stringify(state.iconActionMetrics)).toBeGreaterThanOrEqual(27.5);
+      expect(Math.min(...iconActionHeights), JSON.stringify(state.iconActionMetrics)).toBeGreaterThanOrEqual(27.5);
+      expect(Math.max(...iconActionHeights), JSON.stringify(state.iconActionMetrics)).toBeLessThanOrEqual(36.5);
+      if (expectedDescription) {
+        expect(state.description).toContain(expectedDescription);
+      } else {
+        expect(state.description).toContain("(no description)");
+      }
+      /*
+      FNXC:TaskDetailDefinition 2026-09-14-20:35:
+      The FN-391 contract, on the real rendered geometry of every canonical host at every breakpoint:
+      no removed title affordance, no empty action shell, Progress above Description above the
+      product outcome, a collapsed-but-counted step list, a description bounded inside its own
+      scroll region, and Read plan inside the outcome section rather than spilling off screen.
+      */
+      expect(state.summarizePresent).toBe(false);
+      expect(state.titleInputPresent).toBe(false);
+      expect(state.emptyHeaderShellCount, JSON.stringify(state)).toBe(0);
+      expect(state.definitionOrder.progressTop, JSON.stringify(state.definitionOrder)).not.toBeNull();
+      expect(state.definitionOrder.descriptionTop, JSON.stringify(state.definitionOrder)).not.toBeNull();
+      expect(state.definitionOrder.outcomeTop, JSON.stringify(state.definitionOrder)).not.toBeNull();
+      expect(state.definitionOrder.progressTop!, JSON.stringify(state.definitionOrder)).toBeLessThan(state.definitionOrder.descriptionTop!);
+      expect(state.definitionOrder.descriptionTop!, JSON.stringify(state.definitionOrder)).toBeLessThan(state.definitionOrder.outcomeTop!);
+      expect(state.readPlanFitsOutcome, JSON.stringify(state)).toBe(true);
+      if (state.stepToggle) {
+        expect(state.stepToggle.expanded).toBe("false");
+        expect(state.stepToggle.listPresent).toBe(false);
+        expect(state.stepToggle.counterVisible).toBe(true);
+        expect(state.stepToggle.barVisible).toBe(true);
+        expect(state.stepToggle.controls.length).toBeGreaterThan(0);
+      }
+      if (state.descriptionBounded) {
+        expect(state.descriptionBounded.overflowsHost, JSON.stringify(state.descriptionBounded)).toBe(false);
+      }
+      expect(state.dialogName).toBe(expectsDialogName ? "Task detail" : "");
+
+      const interaction = await page.evaluate(async ({ name, hostTestId }) => {
+        const nextFrames = async () => {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        };
+        const host = name === "floating-window"
+          ? document.querySelector<HTMLElement>(`[data-testid^='${hostTestId}']`)
+          : document.querySelector<HTMLElement>(`[data-testid='${hostTestId}']`);
+        const detailContent = name === "floating-window"
+          ? host?.querySelector<HTMLElement>(".task-detail-content") ?? null
+          : host?.querySelector<HTMLElement>(".task-detail-content") ?? document.querySelector<HTMLElement>(".task-detail-content");
+        if (!detailContent) throw new Error(`${name} lost TaskDetailContent before state transitions`);
+        const buttonByName = (label: string) => [...detailContent.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.getAttribute("aria-label") === label || button.textContent?.trim() === label);
+        buttonByName("Activity")?.click();
+        await nextFrames();
+        const activityHeaderHeadingCount = detailContent.querySelectorAll(":scope > .modal-header h1, :scope > .modal-header h2, :scope > .modal-header h3").length;
+        buttonByName("Plan")?.click();
+        await nextFrames();
+        // FNXC:TaskDetailHeaderActions 2026-09-17-00:21: FN-470 moved Edit task into the sole Actions overflow rather than retaining a direct header control.
+        buttonByName("Actions")?.click();
+        await nextFrames();
+        buttonByName("Edit task")?.click();
+        await nextFrames();
+        return {
+          activityHeaderHeadingCount,
+          editHeaderHeadingCount: detailContent.querySelectorAll(":scope > .modal-header h1, :scope > .modal-header h2, :scope > .modal-header h3").length,
+          legacyTitleCount: detailContent.querySelectorAll(".detail-heading-row, .detail-title, .detail-title-control, .detail-title-measurement").length,
+          // FNXC:TaskDetailDefinition 2026-09-14-20:35: FN-391 removed the title input entirely; the description is the only editable text field.
+          titleInputPresent: Boolean(detailContent.querySelector("#task-form-title")),
+          descriptionValue: detailContent.querySelector<HTMLTextAreaElement>("#task-form-description")?.value,
         };
       }, { name, hostTestId });
-      expect(state.text).toContain(expectedText);
-      expect(state.collapsed).toBe(true);
-      expect(state.controls).toBe(expectsControl ? 1 : 0);
-      expect(state.ariaLabels).toEqual(expectsControl ? ["Expand task title"] : []);
-      expect(state.expanded).toEqual(expectsControl ? ["false"] : []);
+      expect(interaction.activityHeaderHeadingCount).toBe(0);
+      expect(interaction.editHeaderHeadingCount).toBe(0);
+      expect(interaction.legacyTitleCount).toBe(0);
+      expect(interaction.titleInputPresent).toBe(false);
+      if (expectedDescription) expect(interaction.descriptionValue).toContain(expectedDescription);
+      else expect(interaction.descriptionValue).toBe("");
       await page.close();
     }, 30_000);
   }
-
-  it.each(titleHostRows)("crosses the clamp threshold in real Chromium for %s host %s via %s at %dpx", async (name, hostTestId, surface, width) => {
-    const page = await browser.newPage({ viewport: { width, height: 844 } });
-    await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=${surface}&titleMode=threshold&reset=1${name === "floating-window" ? "&project=fixture" : ""}`);
-    await openProductionTitleHost(page, name, hostTestId);
-    const state = await page.evaluate(async ({ name, hostTestId }) => {
-      const nextFrames = async () => {
-        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      };
-      const host = name === "floating-window"
-        ? document.querySelector<HTMLElement>(`[data-testid^='${hostTestId}']`)
-        : document.querySelector<HTMLElement>(`[data-testid='${hostTestId}']`);
-      const title = name === "floating-window"
-        ? host?.querySelector<HTMLHeadingElement>("h2.detail-title")
-        : document.querySelector<HTMLHeadingElement>("h2.detail-title");
-      const headingRow = title?.parentElement as HTMLElement | null;
-      if (!title || !headingRow) throw new Error(`${name} did not retain its production title heading row`);
-      const sample = () => ({
-        width: title.getBoundingClientRect().width,
-        controls: name === "floating-window"
-          ? host?.querySelectorAll(".detail-title-control").length ?? 0
-          : document.querySelectorAll(".detail-title-control").length,
-        collapsed: title.classList.contains("detail-title--collapsed"),
-      });
-      headingRow.style.inlineSize = "100rem";
-      window.dispatchEvent(new Event("resize"));
-      for (let frame = 0; frame < 6; frame++) await nextFrames();
-      const fitting = sample();
-      headingRow.style.inlineSize = "12rem";
-      window.dispatchEvent(new Event("resize"));
-      for (let frame = 0; frame < 6; frame++) await nextFrames();
-      const overflowing = sample();
-      headingRow.style.inlineSize = "100rem";
-      window.dispatchEvent(new Event("resize"));
-      for (let frame = 0; frame < 6; frame++) await nextFrames();
-      const fittingAgain = sample();
-      return { fitting, overflowing, fittingAgain };
-    }, { name, hostTestId });
-    expect(state.fitting.width).toBeGreaterThan(state.overflowing.width);
-    expect(state.fitting).toEqual({ width: state.fitting.width, controls: 0, collapsed: true });
-    expect(state.overflowing).toEqual({ width: state.overflowing.width, controls: 1, collapsed: true });
-    expect(state.fittingAgain).toEqual({ width: state.fittingAgain.width, controls: 0, collapsed: true });
-    await page.close();
-  }, 30_000);
 
   /*
   FNXC:BoardNavigation 2026-08-21-18:12:
@@ -791,7 +951,7 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
       const page = await browser.newPage({ viewport: { width, height } });
       const cdp = await page.context().newCDPSession(page);
       await setDesktopMetrics(cdp, width, height);
-      await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=board-card-click-app&openMobileTasksInPopup=true&reset=1`);
+      await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=board-card-click-app&reset=1`);
       await page.waitForTimeout(350);
       const cardSelector = ".card[data-id='FN-TITLE-FLICKER'] .card-title";
       const boardSelector = "main.board-workflow-columns";
@@ -838,19 +998,236 @@ describe.runIf(executablePath)("Task modal tablet touch resize browser regressio
     }, 30_000);
   }
 
+  /*
+  FNXC:TaskDetailPresentation 2026-09-11-03:20:
+  The Alpha rollout is credible only when the production modal, mobile drawer, main panel, List split, right dock, and App pop-out each expose one canonical Task Detail surface with usable navigation and no horizontal overflow at their representative breakpoints.
+  */
+  it.each([
+    ["modal", "title-host-modal", "task-detail-title-modal", 1200],
+    ["mobile-drawer", "title-host-modal", "task-detail-title-modal", 390],
+    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel", 768],
+    ["list-split", "title-host-list", "task-detail-title-list", 1200],
+    ["right-dock", "title-host-dock", "task-detail-title-dock", 768],
+    ["floating-window", "floating-window-task-detail", "task-detail-title-app-floating", 1200],
+  ] as const)("renders one responsive Alpha Task Detail in the %s production host", async (name, hostTestId, surface, width) => {
+    const page = await browser.newPage({ viewport: { width, height: 844 } });
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width, height: 844, screenWidth: width, screenHeight: 844, deviceScaleFactor: 1, mobile: width === 390 });
+    await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: width <= 768, maxTouchPoints: 1 });
+    await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=${surface}&alpha=true&reset=1${name === "floating-window" ? "&project=fixture" : ""}`);
+    await openProductionTitleHost(page, name === "mobile-drawer" ? "modal" : name, hostTestId);
+    const result = await page.evaluate(() => {
+      const detail = document.querySelector<HTMLElement>("[data-task-detail-surface='true']");
+      const tabs = detail?.querySelector<HTMLElement>(".detail-tabs");
+      const body = detail?.querySelector<HTMLElement>(".detail-body");
+      if (!detail || !tabs || !body) return null;
+      body.scrollTop = body.scrollHeight;
+      return {
+        boundaries: document.querySelectorAll("[data-task-detail-surface='true']").length,
+        headers: detail.querySelectorAll(".modal-header").length,
+        tabSets: detail.querySelectorAll(".detail-tabs").length,
+        footers: detail.querySelectorAll(".modal-actions").length,
+        bodyFillsRemainder: body.getBoundingClientRect().bottom <= detail.getBoundingClientRect().bottom + 1,
+        // The rebuilt tab strip intentionally scrolls independently; task content itself must not overflow.
+        noHorizontalContentOverflow: body.scrollWidth <= body.clientWidth + 1,
+        tabsScrollable: tabs.scrollWidth >= tabs.clientWidth,
+      };
+    });
+    expect(result?.boundaries).toBe(1);
+    expect(result?.headers).toBe(1);
+    expect(result?.tabSets).toBe(1);
+    // FNXC:TaskDetailPresentation 2026-09-17-01:18: The rebuilt List route opens the shared Task Detail FloatingWindow, whose canonical surface retains one action footer like every other owner.
+    expect(result?.footers).toBe(1);
+    expect(result?.bodyFillsRemainder).toBe(true);
+    expect(result?.noHorizontalContentOverflow).toBe(true);
+    expect(result?.tabsScrollable).toBe(true);
+    if (name === "modal" || name === "mobile-drawer") {
+      await mkdir(fn349Screenshots, { recursive: true });
+      await page.screenshot({ path: path.join(fn349Screenshots, name === "modal" ? "task-detail-desktop.png" : "task-detail-mobile.png") });
+    }
+    await page.close();
+  }, 30_000);
+
+  /*
+  FNXC:TaskDetailChatGeometry 2026-09-11-18:16:
+  Activity Live and Planner Chat must preserve one flex-owned transcript and an in-flow composer at the usable body edge in every production Task Detail host. Exercise empty, loading, populated, and streaming-shaped data while the viewport matrix reaches the 320px minimum; alternate the real plan-approval footer so both shell endings are measured without multiplying equivalent browser cases.
+
+  FNXC:TaskDetailChatGeometry 2026-09-11-18:42:
+  Every host must be opened under the viewport being asserted so its real media queries participate in the geometry proof. The chat panel must fill the entire body and its composer must meet that body's usable lower edge; containment alone cannot reject a short panel with a mid-body composer.
+  */
+  for (const [name, hostTestId, surface] of [
+    ["modal", "title-host-modal", "task-detail-title-modal"],
+    ["mobile-drawer", "title-host-modal", "task-detail-title-modal"],
+    ["main-panel", "title-host-main-panel", "task-detail-title-main-panel"],
+    ["list-split", "title-host-list", "task-detail-title-list"],
+    ["right-dock", "title-host-dock", "task-detail-title-dock"],
+    ["floating-window", "floating-window-task-detail", "task-detail-title-app-floating"],
+  ] as const) {
+    for (const chatKind of ["activity", "planner"] as const) {
+      it(`keeps ${chatKind} transcript and composer geometry in the ${name} production host`, async () => {
+        for (const [width, chatState, footer] of [
+          [1200, "empty", false],
+          [768, "loading", true],
+          [390, "populated", false],
+          [320, "streaming", true],
+        ] as const) {
+          const preservesDesktopOnlyHost = name === "floating-window" || name === "list-split" || name === "right-dock";
+          const admissionWidth = preservesDesktopOnlyHost ? 1200 : width;
+          const page = await browser.newPage({ viewport: { width: admissionWidth, height: 844 } });
+          const cdp = await page.context().newCDPSession(page);
+          await cdp.send("Emulation.setDeviceMetricsOverride", { width: admissionWidth, height: 844, screenWidth: admissionWidth, screenHeight: 844, deviceScaleFactor: 1, mobile: admissionWidth <= 390 });
+          await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: admissionWidth <= 768, maxTouchPoints: 1 });
+          const query = new URLSearchParams({
+            surface,
+            alpha: "true",
+            reset: "1",
+            chatKind,
+            chatState,
+            footer: String(footer),
+            ...(preservesDesktopOnlyHost ? { preserveDesktopHost: "true" } : {}),
+            ...(name === "floating-window" ? { project: "fixture" } : {}),
+          });
+          await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?${query.toString()}`);
+          await openProductionTitleHost(page, name === "mobile-drawer" ? "modal" : name, hostTestId);
+          await page.evaluate(async ({ name, chatKind }) => {
+            const detail = name === "list-split"
+              ? document.querySelector<HTMLElement>(".floating-window--task-detail [data-task-detail-surface='true']")
+              : document.querySelector<HTMLElement>("[data-task-detail-surface='true']");
+            const label = chatKind === "planner" ? "Chat" : "Activity";
+            const tab = [...(detail?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+              .find((button) => button.textContent?.trim() === label);
+            if (!tab) throw new Error(`${name} did not expose its ${label} tab on the production Task Detail surface`);
+            tab.click();
+            await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+          }, { name, chatKind });
+          if (admissionWidth !== width) {
+            await cdp.send("Emulation.setDeviceMetricsOverride", { width, height: 844, screenWidth: width, screenHeight: 844, deviceScaleFactor: 1, mobile: false });
+            await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+            await page.evaluate(({ name, width }) => {
+              if (name === "right-dock") {
+                const dock = document.querySelector<HTMLElement>(".right-dock");
+                if (!dock) throw new Error("Cannot preserve the mounted right dock host");
+                dock.style.display = "flex";
+                dock.style.inlineSize = `${width}px`;
+                dock.style.minInlineSize = "0";
+                dock.style.maxInlineSize = "100vw";
+              }
+            }, { name, width });
+          }
+          await page.waitForTimeout(chatState === "loading" && chatKind === "activity" ? 400 : 100);
+          const result = await page.evaluate(({ name, chatKind, chatState, footer }) => {
+            // List retains its split-pane detail subtree while the current desktop contract opens the
+            // selected task in a FloatingWindow. Measure that visible owner, not the dormant split shell.
+            const detail = name === "list-split"
+              ? document.querySelector<HTMLElement>(".floating-window--task-detail [data-task-detail-surface='true']")
+              : document.querySelector<HTMLElement>("[data-task-detail-surface='true']");
+            const body = detail?.querySelector<HTMLElement>(chatKind === "planner" ? ".detail-body--planner-chat" : ".detail-body--chat");
+            /*
+            FNXC:TaskDetailStructure 2026-09-12-23:45:
+            La refonte rend le contenu actif directement dans detail-body afin que Définition et la sous-vue PROMPT.md partagent le même propriétaire de défilement. La preuve géométrique Chat mesure donc ce conteneur canonique plutôt qu’un ancien wrapper supprimé.
+            */
+            const bodyContent = body;
+            const panel = bodyContent?.querySelector<HTMLElement>(chatKind === "planner" ? ".task-planner-chat" : ".task-chat-tab");
+            const transcript = panel?.querySelector<HTMLElement>(chatKind === "planner" ? ".task-planner-chat-transcript" : ".task-chat-transcript");
+            const composerSelector = chatKind === "planner" ? ".task-planner-chat-composer" : ".task-chat-composer";
+            const composer = panel?.querySelector<HTMLElement>(composerSelector) ?? detail?.querySelector<HTMLElement>(composerSelector);
+            const header = detail?.querySelector<HTMLElement>(":scope > .modal-header");
+            const tabs = detail?.querySelector<HTMLElement>(":scope > .detail-tabs");
+            const contextualFooter = detail?.querySelector<HTMLElement>(":scope > .modal-actions");
+            if (!detail || !body || !bodyContent || !panel || !transcript || !composer || !header || !tabs) return {
+              missingGeometry: { detail: Boolean(detail), body: Boolean(body), bodyContent: Boolean(bodyContent), panel: Boolean(panel), transcript: Boolean(transcript), composer: Boolean(composer), header: Boolean(header), tabs: Boolean(tabs), viewportMode: document.documentElement.dataset.viewportMode ?? null, innerWidth: window.innerWidth, mobileQuery: window.matchMedia("(max-width: 768px)").matches },
+            };
+            const before = { header: header.getBoundingClientRect().top, tabs: tabs.getBoundingClientRect().top, footer: contextualFooter?.getBoundingClientRect().top ?? null };
+            transcript.scrollTop = transcript.scrollHeight;
+            const after = { header: header.getBoundingClientRect().top, tabs: tabs.getBoundingClientRect().top, footer: contextualFooter?.getBoundingClientRect().top ?? null };
+            const bodyRect = body.getBoundingClientRect();
+            const bodyContentRect = bodyContent.getBoundingClientRect();
+            const bodyContentStyle = getComputedStyle(bodyContent);
+            const paddedBodyBottom = bodyContentRect.bottom - Number.parseFloat(bodyContentStyle.paddingBlockEnd);
+            const usableBodyBottomCandidates = [paddedBodyBottom, bodyContentRect.bottom];
+            const reachesUsableBodyBottom = (bottom: number) => usableBodyBottomCandidates.some((candidate) => Math.abs(bottom - candidate) <= 1);
+            const panelRect = panel.getBoundingClientRect();
+            const transcriptRect = transcript.getBoundingClientRect();
+            const composerRect = composer.getBoundingClientRect();
+            return {
+              stateRendered: chatState === "loading"
+                ? Boolean(panel.querySelector("[role='status']"))
+                : chatState === "empty"
+                  ? Boolean(panel.querySelector(chatKind === "planner" ? "[data-testid='task-planner-chat-empty']" : ".task-chat-empty"))
+                  : transcript.children.length > 0,
+              footerRendered: Boolean(contextualFooter),
+              expectedFooter: true,
+              contextualFooterRequested: footer,
+              shellStayedFixed: before.header === after.header && before.tabs === after.tabs && before.footer === after.footer,
+              transcriptBeforeComposer: transcript.compareDocumentPosition(composer) === Node.DOCUMENT_POSITION_FOLLOWING,
+              transcriptOwnsScroll: ["auto", "scroll"].includes(getComputedStyle(transcript).overflowY),
+              populatedTranscriptOverflows: chatState !== "populated" || transcript.scrollHeight > transcript.clientHeight,
+              transcriptScrollHeight: transcript.scrollHeight,
+              transcriptClientHeight: transcript.clientHeight,
+              bodyContentFillsBody: Math.abs(bodyContentRect.top - bodyRect.top) <= 1 && Math.abs(bodyContentRect.bottom - bodyRect.bottom) <= 1,
+              panelFillsBodyToBottom: reachesUsableBodyBottom(panelRect.bottom),
+              composerAtUsableBodyBottom: contextualFooter
+                ? Math.abs(contextualFooter.getBoundingClientRect().top - bodyRect.bottom) <= 1
+                  && composerRect.top >= contextualFooter.getBoundingClientRect().top - 1
+                  && composerRect.bottom <= contextualFooter.getBoundingClientRect().bottom + 1
+                : reachesUsableBodyBottom(composerRect.bottom),
+              transcriptWithinPanel: transcriptRect.top >= panelRect.top - 1 && transcriptRect.bottom <= panelRect.bottom + 1,
+              // Tab labels may scroll in their own strip; transcript and composer content must remain contained.
+              noHorizontalContentOverflow: body.scrollWidth <= body.clientWidth + 1,
+            };
+          }, { name, chatKind, chatState, footer });
+          expect(result, `${name}/${chatKind}/${width}/${chatState}`).not.toBeNull();
+          expect(result?.stateRendered, `${name}/${chatKind}/${width}/${chatState} geometry ${JSON.stringify(result)}`).toBe(true);
+          expect(result?.footerRendered).toBe(result?.expectedFooter);
+          expect(result?.shellStayedFixed).toBe(true);
+          expect(result?.transcriptBeforeComposer).toBe(true);
+          expect(result?.transcriptOwnsScroll).toBe(true);
+          expect(result?.populatedTranscriptOverflows, `${name}/${chatKind}/${width}/${chatState} geometry ${JSON.stringify(result)}`).toBe(true);
+          expect(result?.bodyContentFillsBody, `${name}/${chatKind}/${width}/${chatState} geometry ${JSON.stringify(result)}`).toBe(true);
+          expect(result?.panelFillsBodyToBottom, `${name}/${chatKind}/${width}/${chatState} geometry ${JSON.stringify(result)}`).toBe(true);
+          expect(result?.composerAtUsableBodyBottom, `${name}/${chatKind}/${width}/${chatState} geometry ${JSON.stringify(result)}`).toBe(true);
+          expect(result?.transcriptWithinPanel).toBe(true);
+          expect(result?.noHorizontalContentOverflow, `${name}/${chatKind}/${width}/${chatState} geometry ${JSON.stringify(result)}`).toBe(true);
+          await page.close();
+        }
+      }, 60_000);
+    }
+  }
+
   it("keeps mobile task-card touch activation outside the desktop pan owner", async () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, screenWidth: 390, screenHeight: 844, deviceScaleFactor: 1, mobile: true });
     await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
-    await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=board-card-click-app&openMobileTasksInPopup=true&reset=1`);
+    await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=board-card-click-app&reset=1`);
     await page.waitForTimeout(350);
     const card = await targetCenter(page, ".card[data-id='FN-TITLE-FLICKER'] .card-title");
     await touchTap(cdp, card);
-    await page.waitForTimeout(100);
-    expect(await page.evaluate(() => Boolean(document.querySelector(".floating-window--task-detail")))).toBe(true);
+    await page.waitForSelector(".task-detail-content", { timeout: 3_000 });
+    expect(await page.evaluate(() => ({
+      detail: Boolean(document.querySelector(".task-detail-content")),
+      floating: Boolean(document.querySelector(".floating-window--task-detail")),
+    }))).toEqual({ detail: true, floating: false });
     await page.close();
   }, 30_000);
+
+  it("captures the official desktop and mobile Settings experience", async () => {
+    await mkdir(fn367Artifacts, { recursive: true });
+    for (const [name, width, height] of [["desktop", 1280, 900], ["mobile", 390, 844]] as const) {
+      const page = await browser.newPage({ viewport: { width, height } });
+      await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=settings-official&reset=1`);
+      await page.evaluate(() => localStorage.setItem("fusion:settings:show-advanced", "true"));
+      await page.goto(`${baseUrl}app/task-modal-touch-resize-e2e-fixture.html?surface=settings-official`);
+      await page.waitForSelector("body");
+      await page.waitForTimeout(2_000);
+      expect(await page.evaluate(() => ({
+        alpha: document.body.textContent?.includes("Alpha Updates") ?? false,
+        whiteboard: document.body.textContent?.includes("Whiteboard Alpha") ?? false,
+      }))).toEqual({ alpha: false, whiteboard: true });
+      await page.screenshot({ path: path.join(fn367Artifacts, `official-design-${name}.png`) });
+      await page.close();
+    }
+  }, 60_000);
 
   it("keeps the true-phone sheet free of active resize targets", async () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 } });

@@ -34,7 +34,9 @@ export type {
 
 export {
   fetchTasks,
-  fetchArchivedTasks,
+  fetchTaskPage,
+  fetchTaskQueuePage,
+  fetchCompletedTasks,
   fetchTaskRecommendations,
   fetchTaskDetail,
   fetchTaskPrompt,
@@ -51,7 +53,7 @@ export {
 } from "./tasks/tasks.js";
 import type {
   DeleteTaskOptions,
-  ArchiveTaskOptions,
+  CompletedTaskPageResponse,
   TaskRecommendationsResponse,
   TaskRuntimeFallbackResponse,
   TaskPromptResponse,
@@ -70,7 +72,7 @@ import type {
 } from "./tasks/tasks.js";
 export type {
   DeleteTaskOptions,
-  ArchiveTaskOptions,
+  CompletedTaskPageResponse,
   TaskRecommendationsResponse,
   TaskRuntimeFallbackResponse,
   TaskPromptResponse,
@@ -108,16 +110,16 @@ export {
   recoverBranchBinding,
   resetTask,
   duplicateTask,
+  boostTask,
   pauseTask,
   unpauseTask,
   nudgeOverseer,
   stopOverseer,
   explainOverseer,
   fetchPlannerInterventionTimeline,
-  archiveTask,
-  unarchiveTask,
   revertTask,
-  archiveAllDone,
+  // FN-416: restore a reverted task's revert.
+  restoreTaskRevert,
   approvePlan,
   rejectPlan,
 } from "./tasks/tasks-lifecycle.js";
@@ -126,12 +128,17 @@ export type {
   BranchGroupSummary,
   PromoteBranchGroupResult,
   RecoverBranchBindingOutcome,
+  TaskRetryOptions,
   OverseerControlResult,
   RevertTaskWorkspaceRepoResult,
   RevertTaskGitResult,
   RevertTaskAiResult,
   RevertTaskResult,
   RevertTaskOptions,
+  RestoreTaskRevertGitResult,
+  RestoreTaskRevertAiResult,
+  RestoreTaskRevertResult,
+  RestoreTaskRevertOptions,
 } from "./tasks/tasks-lifecycle.js";
 
 export {
@@ -321,6 +328,8 @@ export {
   requestSpecRevision,
   rebuildTaskSpec,
   refineTask,
+  // FNXC:TaskFollowUp 2026-09-17-17:30: FN-513's follow-up composer reaches the client through the same barrel.
+  followUpTask,
 } from "./tasks/task-steer.js";
 
 /*
@@ -758,6 +767,7 @@ export {
   fetchWorkflowStepTemplates,
   fetchWorkflows,
   importWorkflow,
+  normalizeScriptCatalog,
   removeScript,
   runScript,
   selectTaskWorkflow,

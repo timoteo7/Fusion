@@ -67,42 +67,27 @@ pgTest("VAL-CROSS-001: End-to-end task lifecycle (PostgreSQL)", () => {
     expect(done.column).toBe("done");
   });
 
-  it("archives and lists tasks", async () => {
-    const store = h.store();
-    const task = await store.createTask({ description: "Archive target task" });
-    await store.moveTask(task.id, "todo", { moveSource: "user" });
-    await store.moveTask(task.id, "in-progress", { moveSource: "user" });
-    await store.moveTask(task.id, "in-review", {
-      moveSource: "user",
-      allowDirectInReviewMove: true,
-    });
-    const done = await store.moveTask(task.id, "done", { moveSource: "engine", skipMergeBlocker: true });
-    expect(done.column).toBe("done");
-
-    const archived = await store.archiveTask(task.id, { cleanup: false });
-    expect(archived.id).toBe(task.id);
-
-    // FNXC:PostgresArchiveReads 2026-07-14-17:10: Active-only callers opt out of cold storage explicitly; listTasks keeps its backward-compatible includeArchived default.
-    const live = await store.listTasks({ includeArchived: false });
-    expect(live.find((t) => t.id === task.id)).toBeUndefined();
-  });
-
   it("updates task fields and they persist", async () => {
     const store = h.store();
     const task = await store.createTask({ description: "Update test" });
 
+    /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 retired the task priority field, so this
+       lifecycle case updates a field that still exists. The retired one is asserted inert here so
+       a generic update cannot quietly bring it back. */
     const updated = await store.updateTask(task.id, {
       title: "Updated Title",
-      priority: "high",
+      size: "L",
     });
 
     expect(updated.title).toBe("Updated Title");
-    expect(updated.priority).toBe("high");
+    expect(updated.size).toBe("L");
+    expect((updated as { priority?: unknown }).priority).toBeUndefined();
 
     // Verify persistence
     const fetched = await store.getTask(task.id);
     expect(fetched.title).toBe("Updated Title");
-    expect(fetched.priority).toBe("high");
+    expect(fetched.size).toBe("L");
+    expect((fetched as { priority?: unknown }).priority).toBeUndefined();
   });
 
   it("searches tasks by description", async () => {

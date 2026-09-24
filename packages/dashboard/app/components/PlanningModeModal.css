@@ -107,13 +107,21 @@ The embedded planning header must be a visual SIBLING of MissionManager's inline
 - gap icon<->title: var(--space-sm) (= 8px), identical to .mission-manager__header-title. Scoped to the embedded planning header so the shared .detail-title-row (TaskDetailModal) keeps its own 10px gap.
 */
 /* FNXC:ViewHeader 2026-06-23-04:15: Pin canonical --view-header-min-height (≈61px border-box) + box-sizing + vertical centering so embedded Planning's header matches the shared ViewHeader/Missions height exactly. */
+/*
+FNXC:UniversalViewChrome 2026-09-16-21:44:
+FN-476 removes the local `.planning-modal-body > .view-header` divider rule. Planning was the reference for the
+separation every other destination lacked, so the rule moved onto `.view-header` itself in `ViewHeader.css` and is now
+universal. Re-adding it here would be a per-view copy of shared chrome; the surface background is already the shared
+default. The embedded modal header below is a DIFFERENT element (`.modal-header--embedded`) and keeps its own bar.
+*/
+
 .planning-modal--embedded .modal-header--embedded {
   box-sizing: border-box;
   align-items: center;
   min-height: var(--view-header-min-height);
   padding: var(--space-lg) var(--space-xl);
   background: var(--surface);
-  border-bottom: none;
+  border-bottom: var(--btn-border-width) solid var(--border);
 }
 
 .planning-modal--embedded .modal-header--embedded .detail-title-row {
@@ -204,32 +212,26 @@ The embedded planning header must be a visual SIBLING of MissionManager's inline
   border-bottom: solid var(--btn-border-width) var(--border);
 }
 
+/*
+FNXC:StandardizedViewLayout 2026-09-13-22:40:
+FN-379: the shared header owns the history title row; only its stacked hint keeps local metrics.
+*/
+.planning-history-header .view-header__title-content {
+  overflow: visible;
+  white-space: normal;
+}
+
 .planning-history-heading {
   display: flex;
-  align-items: flex-start;
-  gap: var(--space-md);
+  flex-direction: column;
   min-width: 0;
 }
 
-.planning-history-heading > svg {
-  flex-shrink: 0;
-  margin-top: var(--space-xs);
-  color: var(--todo);
-}
-
-.planning-history-heading h4,
-.planning-history-heading p {
-  margin: 0;
-}
-
-.planning-history-heading h4 {
-  text-wrap: balance;
-}
-
-.planning-history-heading p {
+.planning-history-hint {
   margin-top: var(--space-xs);
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+  font-weight: 400;
   line-height: 1.5;
   text-wrap: pretty;
 }
@@ -282,8 +284,18 @@ The embedded planning header must be a visual SIBLING of MissionManager's inline
   text-wrap: pretty;
 }
 
-.planning-modal-body--split {
-  flex-direction: row;
+/*
+FNXC:StandardizedPlanningLayout 2026-09-13-16:30:
+ViewLayout owns the outer column and its body owns the list/detail row. Planning's business panes fill those shared slots without retaining a second width, divider, or resize authority.
+*/
+.planning-modal-body--split .view-layout__content {
+  position: relative;
+}
+
+.planning-modal-body--split .view-sidebar__panel > .planning-sidebar {
+  width: 100%;
+  height: 100%;
+  border-right: 0;
 }
 
 .planning-detail {
@@ -297,87 +309,17 @@ The embedded planning header must be a visual SIBLING of MissionManager's inline
 }
 
 /*
-FNXC:Planning 2026-08-16-14:48:
-Embedded Planning is a real two-pane view mirroring Missions (mission-manager__split): the left sidebar is a full-height flex column (list scrolls, footer pinned to bottom) and the right detail pane fills the remaining width AND height. The sidebar surface/border/width treatment matches mission-manager__sidebar — var(--surface) background, a single border-right divider — so the two views read consistently. The flex chain planning-view -> planning-modal--embedded -> planning-modal-body keeps the whole layout filling the main-content pane to the bottom.
+FNXC:StandardizedViewSidebar 2026-09-13-21:43:
+Planning's session rail is a full-height flex column inside the shared sidebar: the list owns the full scrollable height while the detail pane fills the remaining width and height. Width, separator, and persistence belong to the shared rail authority, so no local geometry, archive filter bar, or bottom creation footer remains (FN-465 removed the archive filter).
 */
 .planning-sidebar {
-  width: calc(var(--space-lg) * 18.75);
-  flex-shrink: 0;
-  border-right: var(--btn-border-width) solid var(--border);
+  flex: 1 1 auto;
+  inline-size: 100%;
   background: var(--surface);
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-}
-
-/*
-FNXC:Planning 2026-08-16-14:48:
-Sidebar resize handle — identical treatment to MissionManager's mission-manager__sidebar-resize-handle: a thin (var(--space-sm)) col-resize strip whose ::before center bar tints with var(--todo) on hover/active, plus a focus ring for keyboard resize. touch-action:none keeps the pointer drag from scrolling on trackpads.
-*/
-.planning-sidebar-resize-handle {
-  position: relative;
-  width: var(--space-sm);
-  flex-shrink: 0;
-  cursor: col-resize;
-  background: transparent;
-  touch-action: none;
-  transition: background var(--transition-fast);
-}
-
-.planning-sidebar-resize-handle::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: var(--space-xs);
-  transform: translateX(-50%);
-}
-
-.planning-sidebar-resize-handle:hover::before,
-.planning-sidebar-resize-handle:active::before {
-  background: color-mix(in srgb, var(--todo) 30%, transparent);
-}
-
-.planning-sidebar-resize-handle:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring-strong);
-}
-
-/*
-FNXC:Planning 2026-08-16-14:48:
-Planning intentionally retains this bottom-pinned session footer at its current metrics. Missions now uses a top-anchored sidebar CTA, so this footer preserves its own padding, border-top, gap, and column layout for the archived-session link.
-*/
-.planning-sidebar-footer {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  border-top: var(--btn-border-width) solid var(--border);
-  flex-shrink: 0;
-}
-
-.planning-sidebar-toggle-archived-link {
-  align-self: center;
-  font-size: calc(var(--space-sm) + var(--space-xs) * 0.75);
-  color: var(--text-muted);
-  text-decoration: none;
-  cursor: pointer;
-  transition: color var(--transition-fast), box-shadow var(--transition-fast);
-  border-radius: var(--radius-sm);
-}
-
-.planning-sidebar-toggle-archived-link:hover {
-  color: var(--text);
-  text-decoration: underline;
-}
-
-.planning-sidebar-toggle-archived-link:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring-strong);
 }
 
 /*
@@ -533,54 +475,22 @@ Planning intentionally retains this bottom-pinned New session button at its curr
 .planning-sidebar-status-complete { color: var(--color-success); }
 .planning-sidebar-status-error { color: var(--color-error); }
 
-.planning-sidebar-item-actions {
-  display: flex;
-  align-items: stretch;
-}
+/*
+FNXC:PlanningSessionRowActions 2026-09-17-03:18:
+FN-486 : les commandes permanentes de ligne (leur conteneur d'actions, le crayon et la corbeille) sont
+SUPPRIMÉES avec leurs règles, et non simplement masquées : Renommer et Supprimer passent par le menu
+contextuel partagé. Aucune coquille de bouton ni conteneur réservant leur place ne subsiste, ni sur bureau
+(où elles apparaissaient au survol) ni sur téléphone (où elles étaient toujours visibles).
+*/
 
-.planning-sidebar-item-delete,
-.planning-sidebar-item-archive {
-  flex-shrink: 0;
-  width: calc(var(--space-lg) + var(--space-xl));
-  min-width: calc(var(--space-lg) + var(--space-xl));
-  height: calc(var(--space-lg) + var(--space-xl));
-  min-height: calc(var(--space-lg) + var(--space-xl));
-  display: none;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
+/* Inline row rename editor: shares the row's typography and the shared `.input` primitive. */
+.planning-sidebar-item-title-input {
+  flex: 1;
+  min-width: 0;
+  margin: var(--space-xs) var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-sm);
   border-radius: var(--radius-sm);
-  transition: color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.planning-sidebar-item:hover .planning-sidebar-item-delete,
-.planning-sidebar-item:focus-within .planning-sidebar-item-delete,
-.planning-sidebar-item:hover .planning-sidebar-item-archive,
-.planning-sidebar-item:focus-within .planning-sidebar-item-archive {
-  display: flex;
-}
-
-.planning-sidebar-item-delete:hover {
-  color: var(--color-error);
-  background: color-mix(in srgb, var(--color-error) 15%, transparent);
-}
-
-.planning-sidebar-item-archive:hover {
-  color: var(--todo);
-  background: color-mix(in srgb, var(--todo) 15%, transparent);
-}
-
-.planning-sidebar-item-delete:focus-visible,
-.planning-sidebar-item-archive:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring-strong);
-}
-
-.planning-sidebar-item.archived .planning-sidebar-item-button {
-  opacity: 0.6;
 }
 
 .planning-sidebar-confirm {
@@ -590,30 +500,13 @@ Planning intentionally retains this bottom-pinned New session button at its curr
   padding: 0 8px;
 }
 
-.planning-session-back {
-  display: inline-flex;
-  min-width: calc(var(--space-md) * 2.25);
-  min-height: calc(var(--space-md) * 2.25);
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  color: var(--text);
-  cursor: pointer;
-  padding: var(--space-xs);
-  border-radius: var(--radius-sm);
-  flex-shrink: 0;
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.planning-session-back:hover {
-  background: var(--card-hover);
-}
-
-.planning-session-back:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring-strong);
-}
+/*
+FNXC:ViewBackIconParity 2026-09-17-03:18:
+FN-486 : Planning ne redeclare plus de boîte, de padding ni de fond pour son retour. Cette géométrie locale
+contredisait la boîte canonique partagée — son plancher était plus petit que celui de l'action de création —
+et faisait donc diverger deux boutons censés être identiques. Le primitif `ViewBackButton` est désormais la
+seule autorité ; seul le comportement de survol/focus propre à `btn-icon` subsiste, hérité du primitif.
+*/
 
 /* Mobile: stack — only one pane visible at a time.
    FNXC:PlanningMode 2026-06-22-15:30 covers both the landscape phone case
@@ -700,9 +593,6 @@ Planning intentionally retains this bottom-pinned New session button at its curr
   .planning-sidebar-skeleton-row {
     padding-inline: var(--space-md);
   }
-  .planning-modal-body--show-list .planning-sidebar-footer {
-    flex-shrink: 0;
-  }
   .planning-modal-body--show-detail .planning-sidebar {
     display: none;
   }
@@ -710,15 +600,10 @@ Planning intentionally retains this bottom-pinned New session button at its curr
   FNXC:PlanningModeMobile 2026-07-20-10:30:
   FN-8427 gives session-list mode exclusive ownership of the compact body. JS unmounts
   RunningPlanPane; this selector is a layout backstop for future render paths so session
-  rows stay scrollable above the New session footer instead of sharing height with a plan.
+  rows keep the full compact height instead of sharing it with a plan.
   */
   .planning-modal-body--show-list .planning-detail {
     display: none;
-  }
-  /* Always keep action buttons visible on mobile (no hover) */
-  .planning-sidebar-item-delete,
-  .planning-sidebar-item-archive {
-    display: flex;
   }
 }
 
@@ -1401,6 +1286,20 @@ margins so paragraphs and lists do not create unintended gaps.
   margin-left: auto;
 }
 
+/*
+FNXC:StandardizedViewActions 2026-09-14-02:47:
+History sits immediately left of the primary Next action rather than in the view header. The trigger owns the free
+space so the pair stays right-aligned as one cluster, and the primary drops its own auto margin so no gap opens
+between them.
+*/
+.planning-actions .planning-history-trigger {
+  margin-left: auto;
+}
+
+.planning-actions .planning-history-trigger + .planning-actions-primary {
+  margin-left: 0;
+}
+
 .planning-back-btn {
   display: inline-flex;
   align-items: center;
@@ -1700,8 +1599,28 @@ Desktop Planning panes already own their framed surfaces, so their scroll conten
 
 FNXC:PlanningMode 2026-07-21-18:41:
 Tablet (769–1024) keeps the same two-pane shell as desktop but previously fell below the 1025px flush gate, so the right plan pane still stacked scroll padding + card chrome. Lower the gate to 769px so tablet inherits the flush pane treatment; phone (≤768) keeps its own mobile flush block.
+
+FNXC:PlanningSidebar 2026-09-12-05:41:
+Desktop and tablet keep the session sidebar, resize handle, and detail pane visible together even in a short viewport. These width-gated rules override the short-shell phone paint without removing compact internal form adaptations.
 */
 @media (min-width: 769px) {
+  /*
+  FNXC:StandardizedViewLayout 2026-09-14-06:12:
+  This class used to sit on the split CONTAINER that held the session rail beside the interview, so forcing a row was
+  right. It now sits on the shared ViewLayout SHELL, which must stay a column: header on top, then the body that owns
+  the rail/content row. Forcing a row here laid the header beside the body, so Planning showed neither a full-width
+  header nor a left rail. The shell keeps its own direction; only the body is a row.
+  */
+
+  .planning-modal-body--show-detail .planning-sidebar,
+  .planning-modal-body--show-list .planning-sidebar {
+    display: flex;
+  }
+
+  .planning-modal-body--show-list .planning-detail {
+    display: flex;
+  }
+
   .planning-question-pane .planning-question-scroll,
   .planning-plan-pane .planning-plan-scroll {
     padding: 0;
@@ -2006,34 +1925,6 @@ plan actions, and a token-sized bottom inset keep all three controls inline with
 }
 
 @media (min-width: 769px) and (max-width: 1024px) {
-  /* FNXC:PlanningModeMobile 2026-07-20-10:30: tablet uses the same compact list destination as phone and short shells, so summary/compose detail cannot remain beside saved session rows. */
-  .planning-modal-body--show-list {
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .planning-modal-body--show-list .planning-sidebar {
-    flex: 1 1 auto;
-    height: 100%;
-    min-height: 0;
-    max-height: 100%;
-  }
-
-  .planning-modal-body--show-list .planning-sidebar-list {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .planning-modal-body--show-list .planning-sidebar-footer {
-    flex-shrink: 0;
-  }
-
-  .planning-modal-body--show-list .planning-detail {
-    display: none;
-  }
-
   .planning-summary-actions {
     flex-wrap: wrap;
     align-items: flex-start;
@@ -2316,10 +2207,6 @@ mobile and desktop offer the same View task / Return to sessions choices.
     flex: 0 0 auto;
   }
 
-  .planning-modal--embedded .modal-header--embedded .planning-session-title-input {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
 
   .planning-header-controls {
     display: grid;

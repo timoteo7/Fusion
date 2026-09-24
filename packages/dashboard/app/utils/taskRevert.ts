@@ -30,8 +30,30 @@ import { isTerminalColumnRole, type ColumnRoleTraitFlags } from "@fusion/core/co
  * Keep this defensive predicate shared so every card/detail consumer applies the
  * same provenance contract to untyped historical source metadata.
  */
+/**
+ * FNXC:TaskRevert 2026-09-15-10:00:
+ * FN-416 makes the revert marker REVOCABLE. `POST /tasks/:id/revert/restore` stamps an
+ * ADDITIVE `sourceMetadata.restoredAt` (and never deletes `revertedAt`), so the Patchnode
+ * history of the cancellation episode stays readable and no schema migration is needed.
+ * A task is therefore reverted only while no restore marker at-or-after the revert exists.
+ *
+ * Fail-safe comparison, deliberately: any doubtful restore datum (absent, non-string, blank,
+ * unparsable, or EARLIER than `revertedAt`) leaves the task reverted, and an unparsable
+ * `revertedAt` also keeps it reverted. Erasing a "Reverted" badge on bad data would claim
+ * shipped work is live again; keeping it is the honest degraded answer.
+ */
 export function isTaskReverted(sourceMetadata: Task["sourceMetadata"] | undefined): boolean {
-  return typeof sourceMetadata?.revertedAt === "string" && sourceMetadata.revertedAt.trim().length > 0;
+  const revertedAt = typeof sourceMetadata?.revertedAt === "string" ? sourceMetadata.revertedAt.trim() : "";
+  if (revertedAt.length === 0) return false;
+
+  const restoredAt = typeof sourceMetadata?.restoredAt === "string" ? sourceMetadata.restoredAt.trim() : "";
+  if (restoredAt.length === 0) return true;
+
+  const revertedMs = new Date(revertedAt).getTime();
+  const restoredMs = new Date(restoredAt).getTime();
+  if (!Number.isFinite(revertedMs) || !Number.isFinite(restoredMs)) return true;
+
+  return restoredMs < revertedMs;
 }
 
 /**
@@ -78,7 +100,7 @@ export function getRevertOfId(
  * Reverse lookup: given the full loaded `tasks` list and a source task id, find the
  * most recently created OPEN undo task that points back at it via `revertOf`. This
  * mirrors `TaskStore.findOpenRevertTaskForSource` (packages/core/src/store.ts)
- * client-side: `done`/`archived`/soft-deleted undo tasks are intentionally excluded
+ * client-side: Complete and soft-deleted undo tasks are intentionally excluded
  * so a completed or discarded undo attempt never renders as an active "Undo task"
  * link (no stale/leftover affordance). When multiple open undo tasks exist (should
  * not normally happen given the route's own dedup guard, but the UI must stay
@@ -86,8 +108,7 @@ export function getRevertOfId(
  */
 /*
 FNXC:WorkflowResolvedColumns 2026-07-30-11:30 (batch-dashboard-app):
-`columnFlags` is a per-task lookup supplied by the caller; omitted -> the legacy pair, i.e. today's
-behaviour. This searches for an OPEN undo task, so a finished one must be skipped. Keyed on the
+`columnFlags` is a per-task lookup supplied by the caller; omitted -> the legacy `done` fallback. This searches for an OPEN undo task, so a finished one must be skipped. Keyed on the
 literals, a renamed board never skipped anything: a completed undo task counted as still open, and
 the UI offered to resume work that had already landed.
 */

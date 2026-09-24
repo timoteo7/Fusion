@@ -3,6 +3,8 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import { SkillsView } from "../SkillsView";
 import * as apiModule from "../../api";
 import type { DiscoveredSkill, CatalogEntry, SkillContent } from "@fusion/dashboard";
+import type { ChatSnippet, GlobalSettings, Settings } from "@fusion/core";
+import { __test_resetChatSnippetsCache } from "../../hooks/useChatSnippetsCache";
 
 // Mock the API module
 vi.mock("../../api", () => ({
@@ -12,6 +14,8 @@ vi.mock("../../api", () => ({
   fetchSkillsCatalog: vi.fn(),
   fetchSkillContent: vi.fn(),
   fetchSkillFileContent: vi.fn(),
+  fetchGlobalSettings: vi.fn(),
+  updateGlobalSettings: vi.fn(),
 }));
 
 const mockFetchDiscoveredSkills = vi.mocked(apiModule.fetchDiscoveredSkills);
@@ -20,11 +24,14 @@ const mockInstallSkill = vi.mocked(apiModule.installSkill);
 const mockFetchSkillsCatalog = vi.mocked(apiModule.fetchSkillsCatalog);
 const mockFetchSkillContent = vi.mocked(apiModule.fetchSkillContent);
 const mockFetchSkillFileContent = vi.mocked(apiModule.fetchSkillFileContent);
+const mockFetchGlobalSettings = vi.mocked(apiModule.fetchGlobalSettings);
+const mockUpdateGlobalSettings = vi.mocked(apiModule.updateGlobalSettings);
 
 describe("SkillsView", () => {
   const mockAddToast = vi.fn();
   const projectId = "proj_123";
   const onClose = vi.fn();
+  let chatSnippets: ChatSnippet[];
 
   const mockDiscoveredSkills: DiscoveredSkill[] = [
     {
@@ -98,7 +105,9 @@ describe("SkillsView", () => {
   ];
 
   beforeEach(() => {
+    __test_resetChatSnippetsCache();
     vi.clearAllMocks();
+    chatSnippets = [];
     mockFetchDiscoveredSkills.mockResolvedValue(mockDiscoveredSkills);
     mockToggleExecutionSkill.mockResolvedValue({
       settingsPath: "skills",
@@ -106,6 +115,11 @@ describe("SkillsView", () => {
       targetFile: "/project/.fusion/settings.json",
     });
     mockInstallSkill.mockResolvedValue({ success: true });
+    mockFetchGlobalSettings.mockImplementation(async () => ({ chatSnippets: chatSnippets.map((snippet) => ({ ...snippet })) }));
+    mockUpdateGlobalSettings.mockImplementation(async (patch: Partial<GlobalSettings>) => {
+      chatSnippets = (patch.chatSnippets ?? []).map((snippet) => ({ ...snippet }));
+      return { chatSnippets: chatSnippets.map((snippet) => ({ ...snippet })) } as Settings;
+    });
     mockFetchSkillsCatalog.mockResolvedValue({
       entries: mockCatalogEntries,
       auth: {
@@ -550,11 +564,11 @@ describe("SkillsView", () => {
       render(<SkillsView addToast={mockAddToast} onClose={onClose} />);
 
       await waitFor(() => {
-        expect(screen.getByLabelText("Close skills view")).toBeTruthy();
+        expect(screen.getByLabelText("Close Skills view")).toBeTruthy();
       });
 
       await act(async () => {
-        fireEvent.click(screen.getByLabelText("Close skills view"));
+        fireEvent.click(screen.getByLabelText("Close Skills view"));
       });
 
       expect(onClose).toHaveBeenCalled();
@@ -1133,7 +1147,7 @@ describe("SkillsView", () => {
     it("returns to the list via the narrow-mode back button (master→detail flow)", async () => {
       // FNXC:Skills 2026-06-23-01:45: NARROW single-panel master→detail flow.
       // Selecting a skill shows the detail ON TOP; the BACK affordance
-      // (data-testid="skills-detail-back") clears the selection and returns to
+      // (the shared header chevron labelled "Back to skills") clears the selection and returns to
       // the list. Asserts the back control exists and restores the empty-state.
       render(<SkillsView addToast={mockAddToast} onClose={onClose} />);
 
@@ -1151,8 +1165,8 @@ describe("SkillsView", () => {
         expect(screen.getByTestId("skills-view").getAttribute("data-selected")).toBe("true");
       });
 
-      const backButton = screen.getByTestId("skills-detail-back");
-      expect(backButton).toBeTruthy();
+      const backButton = screen.getByRole("button", { name: "Back to skills" });
+      expect(backButton).toHaveClass("view-back-button");
 
       await act(async () => {
         fireEvent.click(backButton);

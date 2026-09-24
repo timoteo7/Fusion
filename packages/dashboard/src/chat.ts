@@ -55,9 +55,14 @@ import {
   formatChatImageAttachmentHints,
   readChatAttachmentContents,
 } from "./chat-attachment-content.js";
+import { buildProvisionalChatTitle } from "./chat-title.js";
 import { buildTaskPlannerChatContext, TASK_PLANNER_CHAT_CONTEXT_PROMPT_GUIDANCE } from "./task-planner-chat-context.js";
 import { formatTaskPlannerChatMetrics } from "./task-planner-chat-metrics.js";
 import { emitWorkflowSseEvent, type WorkflowSseEventType } from "./sse.js";
+import {
+  buildConversationReferenceContext,
+  createChatConversationTools,
+} from "./chat-conversation-references.js";
 
 import {
   createFnAgent as engineCreateFnAgent,
@@ -77,7 +82,7 @@ import {
   createTaskListTool,
   createTaskShowTool,
   createTaskSearchTool,
-  createPatchnodeReadTool,
+  createHistoryReadTool,
   createListAgentsTool,
   createDelegateTaskTool,
   createTaskAssignTool,
@@ -91,8 +96,6 @@ import {
   resolveMcpServersForStore,
   resolveExecutorThinkingLevel,
   wrapToolsWithActionGate,
-  createTaskArchiveTool,
-  createTaskUnarchiveTool,
   createTaskDeleteTool,
   createTaskRetryTool,
   createTaskPauseTool,
@@ -520,6 +523,9 @@ export interface ChatFusionToolsetOptions {
   until operators opt in; enabled sessions still scope fn_memory_search at the backend.
   */
   focus?: string;
+  chatStore?: ChatStore;
+  currentChatSessionId?: string;
+  currentProjectId?: string | null;
 }
 
 const CHAT_MISSION_READ_TOOL_NAMES = new Set(["fn_mission_list", "fn_mission_show"]);
@@ -676,8 +682,30 @@ function createTaskVerificationTools(taskStore: TaskStore, actionGateContext?: A
 }
 
 export async function createChatFusionToolset(options: ChatFusionToolsetOptions): Promise<ChatCustomTool[]> {
-  const { taskStore, agentStore, rootDir, agentId, missionMutationGated = false, actionGateContext, focus } = options;
+  const {
+    taskStore,
+    agentStore,
+    rootDir,
+    agentId,
+    missionMutationGated = false,
+    actionGateContext,
+    focus,
+    chatStore,
+    currentChatSessionId,
+    currentProjectId,
+  } = options;
   const tools: ChatCustomTool[] = [];
+
+  /*
+  FNXC:ChatConversationReferences 2026-09-04-09:58:
+  Cross-conversation read tools require a current Direct chat identity and its store. Room responders and explicitly mentioned-agent responders deliberately omit both, matching the existing Direct-only file-reference context path.
+  */
+  if (chatStore && currentChatSessionId) {
+    tools.push(...createChatConversationTools(chatStore, {
+      currentSessionId: currentChatSessionId,
+      projectId: currentProjectId ?? null,
+    }));
+  }
 
   if (taskStore) {
     const settings = await taskStore.getSettings?.();
@@ -685,7 +713,7 @@ export async function createChatFusionToolset(options: ChatFusionToolsetOptions)
       createTaskListTool(taskStore),
       createTaskShowTool(taskStore),
       createTaskSearchTool(taskStore),
-      createPatchnodeReadTool(taskStore),
+      createHistoryReadTool(taskStore),
       ...createTaskVerificationTools(taskStore, options.actionGateContext),
       createTaskCreateTool(taskStore, { sourceType: "api" }, { rootDir }),
     );
@@ -704,8 +732,6 @@ export async function createChatFusionToolset(options: ChatFusionToolsetOptions)
     */
     if (actionGateContext) {
       tools.push(
-        createTaskArchiveTool(taskStore),
-        createTaskUnarchiveTool(taskStore),
         createTaskDeleteTool(taskStore),
         createTaskRetryTool(taskStore),
         createTaskPauseTool(taskStore),
@@ -839,8 +865,8 @@ function createTaskPlannerRefinementTool(taskStore: TaskStore, taskId: string) {
         const sourceTask = await taskStore.getTask(taskId);
         /*
         FNXC:WorkflowResolvedColumns 2026-07-30-05:05 (batch-core):
-        Refinement is for FINISHED work — complete only, not the landed set: an archived task is off
-        the board and is not a refinement source. Paired with the tool-registration guard in
+        Refinement is for workflow Complete work only. Deleted tasks are absent from the live task
+        model and are not refinement sources. Paired with the tool-registration guard in
         `createSession`; if only one of the two resolved, the tool would either be offered and then
         refuse, or be withheld from tasks it would have accepted. Both move together.
         */
@@ -1148,6 +1174,23 @@ export interface ChatFailureInfo {
   reference?: ChatFailureReference;
 }
 
+/**
+ * FNXC:ChatMessageEdit 2026-09-16-05:58:
+ * Wire shape of the persisted user row carried by the in-band `user_message` stream event. It is the
+ * `ChatMessage` structure narrowed to `role: "user"`; `ChatStore.addMessage` returns the persisted
+ * `msg-<uuid8>` id that the client uses to retire its optimistic `temp-<ts>` bubble.
+ */
+export interface ChatStreamUserMessagePayload {
+  id: string;
+  sessionId: string;
+  role: "user";
+  content: string;
+  thinkingOutput: string | null;
+  metadata: Record<string, unknown> | null;
+  attachments?: ChatAttachment[];
+  createdAt: string;
+}
+
 /** SSE event types for chat streaming */
 export type ChatStreamEvent =
   | { type: "thinking"; data: string }
@@ -1185,6 +1228,21 @@ export type ChatStreamEvent =
         dispatch?: "agents";
         failedAgentNames?: string[];
       };
+    }
+  /*
+  FNXC:ChatMessageEdit 2026-09-16-05:58:
+  The persisted identity of the user turn must travel in-band on the reply stream. The out-of-band
+  `chat:message:added` echo cannot be a correctness dependency for message identity: the `ChatStore`
+  instance resolved by `resolveProjectChatContext` on the send route is not necessarily the instance
+  subscribed by `createSSEHandler`, and `enrichChatMessageSsePayload` rejections are swallowed inside
+  a detached `void (async () => …)` in `sse.ts`. Without this event the optimistic `temp-<ts>` bubble
+  could keep its local id forever, and an edit saved against it produced a guaranteed 404
+  (`Message temp-… not found in session …`). The generic `writeSSEEvent(res, event.type, …)` bridge in
+  `register-chat-routes.ts` forwards this variant with no route change.
+  */
+  | {
+      type: "user_message";
+      data: { message: ChatStreamUserMessagePayload };
     }
   | {
       type: "agent_message";
@@ -2641,6 +2699,107 @@ export class ChatManager {
    * @param modelProvider - Optional model provider override
    * @param modelId - Optional model ID override
    */
+  /*
+  FNXC:ChatTitleGeneration 2026-09-16-05:27:
+  Automatic chat-title generation is a SINGLE shared seam reached by both `sendMessage` paths.
+  The CLI-agent-backed branch returns before the model loop, so when the generation block lived
+  inline after the agent-model resolution those conversations stayed "Untitled" forever.
+  The store write is AWAITED inside the detached task because `ChatStore.updateSession` is what
+  emits `chat:session:updated`. The task itself is never awaited by the caller: message sending
+  and response generation must never wait on the summary.
+  Only `{ title }` is written — no other session field is touched on the way through.
+
+  FNXC:ChatTitleGeneration 2026-09-17-11:42:
+  FN-505 splits naming into two stages because this seam alone could never satisfy the operator
+  requirement "the conversation is named before the agent replies": `summarizeTitle` builds a full
+  pi agent session before emitting a character, so its write structurally landed after the main
+  response had begun. Stage one is now `applyProvisionalSessionTitle`, AWAITED before any model
+  work on all three `sendMessage` paths (model loop, CLI agent, and the `mentions` dispatch that
+  previously returned before the title was ever scheduled, leaving those conversations unnamed
+  forever). This detached stage two only REFINES that name.
+  Because the provisional title is already persisted, the refinement writes CONDITIONALLY: it
+  re-reads the session immediately before writing and keeps quiet unless the stored title is still
+  exactly the provisional one (or still empty). That compare-and-set is what keeps a manual rename
+  landing mid-generation authoritative. For the same reason the old "retry with the truncated
+  fallback" branch is REMOVED: the truncated title is now written up front, so retrying it here
+  would only emit a second, redundant `chat:session:updated`.
+  */
+  private scheduleSessionTitleGeneration(
+    sessionId: string,
+    content: string,
+    modelProvider?: string,
+    modelId?: string,
+    provisionalTitle: string | null = null,
+  ): void {
+    const titleSettingsPromise = this.getChatModelSettings();
+    /*
+    FNXC:ChatTitleLanguage 2026-09-01-21:25:
+    Chat titles follow the resolved taskOutputLanguage policy just like task titles. Resolve the
+    settings only inside this detached title operation so message sending never waits on title work.
+    */
+    void (async () => {
+      let title: string | null = null;
+      try {
+        const titleLanguageTarget = resolveTaskOutputLanguage(await titleSettingsPromise, content.trim());
+        // The summarizer always receives the RAW first message, never the provisional title.
+        title = await summarizeTitle(
+          content.trim(),
+          this.rootDir,
+          modelProvider,
+          modelId,
+          titleLanguageTarget,
+        );
+      } catch {
+        // A failed summary keeps the already-persisted provisional title.
+        return;
+      }
+      const refined = title?.trim();
+      if (!refined || refined === provisionalTitle) return;
+      try {
+        // Compare-and-set: never clobber a title the user (or anything else) wrote meanwhile.
+        const current = await this.chatStore.getSession(sessionId);
+        const storedTitle = current?.title ?? null;
+        const storedIsProvisional = provisionalTitle !== null && storedTitle === provisionalTitle;
+        if (!storedIsProvisional && !this.sessionNeedsGeneratedTitle(storedTitle)) return;
+        await this.chatStore.updateSession(sessionId, { title: refined });
+      } catch {
+        // Swallow: title refinement is best-effort and never blocks the conversation.
+      }
+    })();
+  }
+
+  /*
+  FNXC:ChatTitleGeneration 2026-09-17-11:42:
+  Stage one of FN-505's two-stage naming: a deterministic title derived from the first user message,
+  written and broadcast BEFORE any model work so the header never shows "Untitled conversation"
+  while the assistant is already replying. The store write is awaited (it is what emits
+  `chat:session:updated`), but a failing write is swallowed: naming is a nicety and must never fail
+  an accepted send. Only `{ title }` is written, and only when the session has no usable title yet.
+  The current title is passed in rather than re-read: `sendMessage` already holds the session, and
+  this write sits on the latency-critical path that must complete before any model work starts.
+  */
+  private async applyProvisionalSessionTitle(
+    sessionId: string,
+    content: string,
+    currentTitle: string | null | undefined,
+  ): Promise<string | null> {
+    try {
+      if (!this.sessionNeedsGeneratedTitle(currentTitle)) return null;
+      const title = buildProvisionalChatTitle(content);
+      if (!title) return null;
+      await this.chatStore.updateSession(sessionId, { title });
+      return title;
+    } catch {
+      // Swallow: an unnamed conversation is preferable to a rejected send.
+      return null;
+    }
+  }
+
+  /** True when a session carries no usable title yet and should be auto-named. */
+  private sessionNeedsGeneratedTitle(title: string | null | undefined): boolean {
+    return title === null || title === undefined || title.trim() === "";
+  }
+
   async sendMessage(
     sessionId: string,
     content: string,
@@ -2685,6 +2844,25 @@ export class ChatManager {
     */
     if (session?.cliExecutorAdapterId && this.cliChatRunner) {
       const runner = this.cliChatRunner;
+      /*
+      FNXC:ChatTitleGeneration 2026-09-16-05:27:
+      CLI-agent-backed chat returns before the model loop, so it must reach the shared title seam
+      here or the conversation is never named. `summarizeTitle` already supports an absent model.
+
+      FNXC:ChatTitleGeneration 2026-09-17-11:42:
+      FN-505: the provisional name is awaited BEFORE `runner.ensureSession`, so the PTY handshake
+      (and everything it waits on) can no longer delay the conversation getting a readable name.
+      */
+      if (this.sessionNeedsGeneratedTitle(session.title)) {
+        const provisionalTitle = await this.applyProvisionalSessionTitle(sessionId, content, session.title);
+        this.scheduleSessionTitleGeneration(
+          sessionId,
+          content,
+          session.modelProvider ?? undefined,
+          session.modelId ?? undefined,
+          provisionalTitle,
+        );
+      }
       try {
         await runner.ensureSession(sessionId, {
           projectId: this.cliChatProjectId ?? session.projectId ?? "",
@@ -2805,6 +2983,19 @@ export class ChatManager {
         });
         persistedUserMessageId = persistedUserMessage.id;
         /*
+        FNXC:ChatMessageEdit 2026-09-16-05:58:
+        Broadcast the persisted user row on the reply stream as soon as it exists, BEFORE any early
+        return (the mentions dispatch path returns here), so the client can replace its optimistic
+        `temp-<ts>` bubble by exact temp id. Identity telemetry is best-effort and must never enter
+        the message-save failure path, exactly like the usage event below.
+        */
+        try {
+          chatStreamManager.broadcast(sessionId, {
+            type: "user_message",
+            data: { message: persistedUserMessage as ChatStreamUserMessagePayload },
+          }, broadcastOptions);
+        } catch { /* best-effort identity echo; never fail the accepted send */ }
+        /*
         FNXC:CommandCenterActivity 2026-08-09-10:46:
         A persisted human chat turn contributes one content-free usage event. Analytics must never enter
         the message-save error path because the chat record is the user-facing source of truth.
@@ -2830,7 +3021,29 @@ export class ChatManager {
         return;
       }
 
+      /*
+      FNXC:ChatTitleGeneration 2026-09-17-11:42:
+      FN-505: write the provisional title here — after the user message is persisted and echoed, and
+      before ANY model work on either remaining path. Placing it above the `mentions` dispatch is
+      what closes the real hole: that branch returns before the title was ever scheduled, so a first
+      message mentioning an agent left the conversation permanently unnamed.
+      */
+      const needsTitle = this.sessionNeedsGeneratedTitle(session.title);
+      const provisionalTitle = needsTitle
+        ? await this.applyProvisionalSessionTitle(sessionId, content, session.title)
+        : null;
+
       if (mentions.length > 0 && this.activeGenerations.get(sessionId)?.generationId === generationId) {
+        if (needsTitle) {
+          // The mentions path has no resolved chat model of its own; use the session's own pair.
+          this.scheduleSessionTitleGeneration(
+            sessionId,
+            content,
+            session.modelProvider ?? undefined,
+            session.modelId ?? undefined,
+            provisionalTitle,
+          );
+        }
         await this.dispatchMentionedAgentReplies({
           session,
           sessionId,
@@ -2851,8 +3064,6 @@ export class ChatManager {
       failureContextProvider = effectiveModelProvider;
       failureContextModelId = effectiveModelId;
       let hasExplicitAgentRuntimeModel = false;
-
-      const needsTitle = session.title === null || session.title === undefined || session.title.trim() === "";
 
       // Ensure engine is loaded
       await ensureEngineReady();
@@ -2940,38 +3151,16 @@ export class ChatManager {
         failureContextModelId = effectiveModelId;
       }
 
-      // Auto-generate chat title on first message if session has no title.
+      // Refine the already-persisted provisional chat title in the background.
       // Run after the agent fetch so the title-summarizer uses the agent's model.
       if (needsTitle) {
-        const titleSettingsPromise = this.getChatModelSettings();
-        /*
-        FNXC:ChatTitleLanguage 2026-09-01-21:25:
-        Chat titles follow the resolved taskOutputLanguage policy just like task titles. Resolve the
-        settings only inside this detached title operation so message sending never waits on title work.
-        */
-        // Fire-and-forget title generation (non-blocking)
-        (async () => {
-          try {
-            const titleLanguageTarget = resolveTaskOutputLanguage(await titleSettingsPromise, content.trim());
-            const generated = await summarizeTitle(
-              content.trim(),
-              this.rootDir,
-              effectiveModelProvider,
-              effectiveModelId,
-              titleLanguageTarget,
-            );
-            const title = generated ?? content.trim().slice(0, 60).trim();
-            if (title) {
-              this.chatStore.updateSession(sessionId, { title });
-            }
-          } catch {
-            // Fallback on any error
-            const fallback = content.trim().slice(0, 60).trim();
-            if (fallback) {
-              this.chatStore.updateSession(sessionId, { title: fallback });
-            }
-          }
-        })();
+        this.scheduleSessionTitleGeneration(
+          sessionId,
+          content,
+          effectiveModelProvider,
+          effectiveModelId,
+          provisionalTitle,
+        );
       }
 
       if (mentions.length > 0) {
@@ -2981,8 +3170,17 @@ export class ChatManager {
         }
       }
 
-      // Resolve #file references in the current message before sending to AI
-      const resolvedContent = await resolveFileReferences(parsedSkillCommands.strippedContent, this.rootDir);
+      // Resolve bounded #file and #chat references in the current message before sending to AI.
+      const fileResolvedContent = await resolveFileReferences(parsedSkillCommands.strippedContent, this.rootDir);
+      const conversationReferenceContext = await buildConversationReferenceContext({
+        chatStore: this.chatStore,
+        content: parsedSkillCommands.strippedContent,
+        currentSessionId: sessionId,
+        currentProjectId: session.projectId ?? null,
+      });
+      const resolvedContent = conversationReferenceContext
+        ? `${fileResolvedContent}\n\n${conversationReferenceContext}`
+        : fileResolvedContent;
 
       const attachmentSummary = attachments && attachments.length > 0
         ? `[User attached: ${attachments
@@ -3150,6 +3348,9 @@ export class ChatManager {
         value is inert and both direct and room chat recall remain whole-project.
         */
         focus: session?.memoryFocus ?? undefined,
+        chatStore: this.chatStore,
+        currentChatSessionId: sessionId,
+        currentProjectId: session?.projectId ?? null,
       });
       const customTools = dedupeChatTools([
         createAskQuestionTool(),
@@ -3208,6 +3409,13 @@ export class ChatManager {
             data: delta,
           }, broadcastOptions);
           persistInFlightSnapshot();
+        },
+        onTextBlockBoundary: () => {
+          if (accumulatedText && !accumulatedText.endsWith("\n")) {
+            accumulatedText += "\n\n";
+            lastStreamEventId = chatStreamManager.broadcast(sessionId, { type: "text", data: "\n\n" }, broadcastOptions);
+            persistInFlightSnapshot();
+          }
         },
         onToolStart: (name: string, args?: Record<string, unknown>) => {
           const pendingForTool = pendingToolStarts.get(name) ?? [];
@@ -3348,8 +3556,24 @@ export class ChatManager {
         }
       }
 
-      // Use accumulated text from streaming (most reliable) with extraction fallback
-      const finalResponseText = accumulatedText || responseText;
+      const lastUserIndex = agentMessages.map((message) => message.role).lastIndexOf("user");
+      const turnMessages = lastUserIndex >= 0 ? agentMessages.slice(lastUserIndex + 1) : agentMessages;
+      const authoritativeText = turnMessages
+        .filter((message) => message.role === "assistant")
+        .map((message) => typeof message.content === "string"
+          ? message.content
+          : Array.isArray(message.content)
+            ? message.content.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("")
+            : "")
+        .filter(Boolean)
+        .join("\n\n");
+      /*
+       FNXC:AssistantTextCapture 2026-09-08-14:13:
+       FN-9277 reconciles a complete turn because the former last-assistant fallback silently saved only a final trailer when earlier blocks had no deltas.
+       */
+      const finalResponseText = authoritativeText.trim().length > accumulatedText.trim().length
+        ? authoritativeText
+        : accumulatedText || responseText;
 
       // Persist assistant message
       const assistantMetadata: Record<string, unknown> = {};

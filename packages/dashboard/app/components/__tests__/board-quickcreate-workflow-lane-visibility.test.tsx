@@ -52,18 +52,6 @@ vi.mock("../Column", () => ({
   ),
 }));
 
-vi.mock("../QuickEntryBox", () => ({
-  QuickEntryBox: ({ onCreate }: { onCreate?: (input: TaskCreateInput) => Promise<Task | void> }) => (
-    <button
-      type="button"
-      data-testid="list-quick-create"
-      onClick={() => void onCreate?.({ title: "Created from list", description: "Created from list" })}
-    >
-      Create list task
-    </button>
-  ),
-}));
-
 vi.mock("../TaskDetailModal", () => ({
   TaskDetailContent: () => <div data-testid="task-detail-content" />,
 }));
@@ -81,7 +69,6 @@ const DEFAULT_WORKFLOW = {
     { id: "triage", name: "Triage", flags: { intake: true } },
     { id: "todo", name: "Todo", flags: { hold: true } },
     { id: "done", name: "Done", flags: { complete: true } },
-    { id: "archived", name: "Archived", flags: { archived: true } },
   ],
 };
 
@@ -106,7 +93,6 @@ const CODING_IDEAS_WORKFLOW = {
     { id: "ideas", name: "Ideas", flags: { intake: true } },
     { id: "todo", name: "Todo", flags: { hold: true } },
     { id: "done", name: "Done", flags: { complete: true } },
-    { id: "archived", name: "Archived", flags: { archived: true } },
   ],
 };
 
@@ -182,43 +168,9 @@ function BoardHarness({ createdTaskId = "FN-new", createReturnsTask = true, onCr
       onQuickCreate={onQuickCreate}
       onNewTask={vi.fn()}
       autoMerge
-      onToggleAutoMerge={vi.fn()}
       showWorktreeGrouping={false}
       planAutoApproveEnabled={false}
       onTogglePlanAutoApprove={vi.fn()}
-    />
-  );
-}
-
-function ListHarness({ createdTaskId = "FN-new", createReturnsTask = true, onCreateInput }: {
-  createdTaskId?: string;
-  createReturnsTask?: boolean;
-  onCreateInput?: (input: TaskCreateInput) => void;
-}) {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const onQuickCreate = vi.fn(async (input: TaskCreateInput) => {
-    onCreateInput?.(input);
-    if (!createReturnsTask) return undefined;
-    const task = mkTask({
-      id: createdTaskId,
-      title: input.title ?? input.description ?? createdTaskId,
-      description: input.description ?? "Task",
-      column: input.column ?? "triage",
-    });
-    setTasks((current) => [...current, task]);
-    return task;
-  });
-
-  return (
-    <ListView
-      tasks={tasks}
-      projectId={PROJECT_ID}
-      onMoveTask={vi.fn()}
-      onDeleteTask={vi.fn()}
-      onMergeTask={vi.fn()}
-      onOpenDetail={vi.fn()}
-      addToast={vi.fn()}
-      onQuickCreate={onQuickCreate}
     />
   );
 }
@@ -238,9 +190,24 @@ afterEach(() => {
 });
 
 describe("workflow lane quick-create visibility", () => {
+  /* FNXC:ListNoQuickEntry 2026-09-14-19:06:
+  The inline List composer was removed; its three quick-create cases are replaced by the
+  current shared New Task entry, preserving selected-workflow routing rather than restoring it.
+  */
+  it("ListView opens shared creation for its selected workflow without an inline composer", async () => {
+    fetchBoardWorkflowsMock.mockResolvedValue(workflowPayload({}));
+    const onNewTask = vi.fn();
+    render(<ListView tasks={[]} projectId={PROJECT_ID} onMoveTask={vi.fn()} onDeleteTask={vi.fn()}
+      onMergeTask={vi.fn()} onOpenDetail={vi.fn()} addToast={vi.fn()} onNewTask={onNewTask} />);
+    await screen.findByTestId("workflow-switcher");
+    selectWorkflow(CUSTOM_WORKFLOW.id);
+    fireEvent.click(screen.getByRole("button", { name: "New Task" }));
+    expect(onNewTask).toHaveBeenCalledWith(CUSTOM_WORKFLOW.id);
+    expect(screen.queryByTestId("list-quick-create")).toBeNull();
+  });
+
   it.each([
     ["Board", BoardHarness, () => fireEvent.click(screen.getByTestId("quick-create-intake")), "Created wf-custom"],
-    ["ListView", ListHarness, () => fireEvent.click(screen.getByTestId("list-quick-create")), "Created from list"],
   ] as const)("%s shows a task created in a non-default workflow lane before the board-workflows refetch resolves", async (_surface, Harness, create, title) => {
     const refetch = deferred<BoardWorkflowsPayload>();
     fetchBoardWorkflowsMock
@@ -270,7 +237,6 @@ describe("workflow lane quick-create visibility", () => {
 
   it.each([
     ["Board", BoardHarness, () => fireEvent.click(screen.getByTestId("quick-create-triage")), "Created builtin:coding"],
-    ["ListView", ListHarness, () => fireEvent.click(screen.getByTestId("list-quick-create")), "Created from list"],
   ] as const)("%s keeps default workflow quick-create visible immediately", async (_surface, Harness, create, title) => {
     fetchBoardWorkflowsMock.mockResolvedValue(workflowPayload({}));
 
@@ -320,7 +286,6 @@ describe("workflow lane quick-create visibility", () => {
   */
   it.each([
     ["Board", BoardHarness, () => fireEvent.click(screen.getByTestId("quick-create-intake"))],
-    ["ListView", ListHarness, () => fireEvent.click(screen.getByTestId("list-quick-create"))],
   ] as const)("%s does not crash or merge when quick-create resolves void", async (_surface, Harness, create) => {
     fetchBoardWorkflowsMock.mockResolvedValue(workflowPayload({}));
 
@@ -371,7 +336,6 @@ function boardProps(tasks: Task[]) {
     onQuickCreate: vi.fn(),
     onNewTask: vi.fn(),
     autoMerge: true,
-    onToggleAutoMerge: vi.fn(),
     showWorktreeGrouping: false,
     planAutoApproveEnabled: false,
     onTogglePlanAutoApprove: vi.fn(),

@@ -104,9 +104,10 @@ function getMissionForm(control: HTMLElement) {
 }
 
 async function findManualMissionCreateLink() {
+  fireEvent.click(await screen.findByRole("button", { name: "Plan New Mission" }));
   return waitFor(() => {
-    const link = document.querySelector<HTMLAnchorElement>(".mission-list__manual-create-link");
-    if (!link) throw new Error("Production mission list must expose manual creation beside planning");
+    const link = document.querySelector<HTMLButtonElement>(".mission-list__manual-create-link");
+    if (!link) throw new Error("The canonical header creation menu must preserve manual mission creation");
     return link;
   });
 }
@@ -142,9 +143,16 @@ describe("MissionManager auto-merge override", () => {
 
     render(<MissionManager isInline isOpen onClose={() => {}} addToast={() => {}} projectId="project-1" />);
     fireEvent.click(await screen.findByText("Single PR Mission"));
+    /*
+    FNXC:MissionRowActions 2026-09-17-03:18:
+    FN-486 : « Edit mission » n'est plus un bouton permanent de la ligne. L'entrée passe par le menu
+    contextuel de la LIGNE, et l'édition vise toujours la mission touchée — pas la mission sélectionnée.
+    */
     const listItem = screen.getByText("List Edit Mission").closest(".mission-list__item");
     if (!listItem) throw new Error("List edit mission row must be rendered");
-    fireEvent.click(within(listItem).getByRole("button", { name: "Edit mission" }));
+    expect(within(listItem).queryByRole("button", { name: "Edit mission" })).toBeNull();
+    fireEvent.contextMenu(listItem, { clientX: 12, clientY: 12 });
+    fireEvent.click(within(screen.getByTestId("mission-row-context-menu")).getByTestId("mission-menu-edit-M-002"));
 
     const listControl = await screen.findByLabelText("Mission auto-merge override") as HTMLSelectElement;
     expect(listControl.value).toBe(expected);
@@ -185,7 +193,7 @@ describe("MissionManager auto-merge override", () => {
     } });
 
     const { unmount } = render(<MissionManager isInline isOpen onClose={() => {}} addToast={() => {}} projectId="project-1" />);
-    expect(screen.getByTestId("mission-manager-dialog").querySelector(".mission-manager__body--stacked")).not.toBeNull();
+    expect(screen.getByTestId("mission-manager-dialog").querySelector(".view-layout[data-mobile-pane='list']")).not.toBeNull();
     await screen.findByText("Single PR Mission");
     fireEvent.click(await findManualMissionCreateLink());
     const createControl = await screen.findByLabelText("Mission auto-merge override") as HTMLSelectElement;
@@ -205,12 +213,9 @@ describe("MissionManager auto-merge override", () => {
     mockFetchMissions.mockResolvedValue([mission()]);
 
     render(<MissionManager isInline isOpen onClose={() => {}} addToast={() => {}} projectId="project-1" />);
-    const sidebarCreate = await waitFor(() => {
-      const button = document.querySelector<HTMLButtonElement>(".mission-manager__sidebar-cta");
-      if (!button) throw new Error("Mission sidebar planning CTA must be rendered");
-      return button;
-    });
-    fireEvent.click(sidebarCreate);
+    const headerCreate = await screen.findByRole("button", { name: "Plan New Mission" });
+    fireEvent.click(headerCreate);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Plan New Mission" }));
 
     await waitFor(() => expect(screen.queryByLabelText("Mission auto-merge override")).toBeNull());
   });
@@ -361,7 +366,9 @@ describe("MissionManager auto-merge override", () => {
     expect(screen.queryByRole("heading", { name: "Single PR Mission" })).toBeNull();
   });
 
+  // FN-402: the Missions Back control exists only on the phone viewport, so this deselect path renders mobile.
   it("does not allow a delayed detail request to reopen a mission after returning to the list", async () => {
+    setMobileViewport();
     const detail = mission(false);
     let resolveRefresh!: (value: typeof detail) => void;
     const delayedRefresh = new Promise<typeof detail>((resolve) => { resolveRefresh = resolve; });
@@ -370,7 +377,8 @@ describe("MissionManager auto-merge override", () => {
 
     render(<MissionManager isInline isOpen onClose={() => {}} addToast={() => {}} projectId="project-1" />);
     fireEvent.click(await screen.findByText("Single PR Mission"));
-    await screen.findByRole("heading", { name: "Single PR Mission" });
+    // On the phone viewport the header title mirrors the open mission, so the detail heading is one of several matches.
+    await screen.findAllByRole("heading", { name: "Single PR Mission" });
     fireEvent.click(screen.getByRole("button", { name: "Open mission Single PR Mission" }));
     fireEvent.click(screen.getByTestId("mission-back-btn"));
 

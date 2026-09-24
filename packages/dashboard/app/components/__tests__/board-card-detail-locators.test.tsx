@@ -21,7 +21,6 @@ const workflowPayload = {
       { id: "in-progress", name: "In progress", flags: { countsTowardWip: true } },
       { id: "in-review", name: "In review", flags: { mergeBlocker: true } },
       { id: "done", name: "Done", flags: { complete: true } },
-      { id: "archived", name: "Archived", flags: { archived: true } },
     ],
   }],
   taskWorkflowIds: { "FN-TITLE-FLICKER": "builtin:coding" },
@@ -65,7 +64,6 @@ describe("Board card-detail Chromium locator contract", () => {
         onQuickCreate={noopAsync}
         onNewTask={noop}
         autoMerge
-        onToggleAutoMerge={noop}
         planAutoApproveEnabled={false}
         onTogglePlanAutoApprove={noop}
         globalPaused={false}

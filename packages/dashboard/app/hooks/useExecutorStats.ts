@@ -72,7 +72,7 @@ export function deriveExecutorState(
  * FNXC:ExecutorStatusBar 2026-07-21-19:00:
  * Do not require task.sessionFile for Running — it is not on board/listTasks rows.
  */
-export type ExecutorColumnFlags = Pick<TraitFlags, "complete" | "archived" | "intake" | "hold" | "countsTowardWip" | "mergeOrchestration" | "mergeBlocker">;
+export type ExecutorColumnFlags = Pick<TraitFlags, "complete" | "intake" | "hold" | "countsTowardWip" | "mergeOrchestration" | "mergeBlocker">;
 
 /*
 FNXC:StuckTagRemoval 2026-08-17-22:30: Operator removed stuck-task tagging from the dashboard; engine recovery sweeps still consume taskStuckTimeoutMs server-side.
@@ -138,15 +138,15 @@ function hasActionableBlockedBy(blockedBy: Task["blockedBy"] | string[] | null):
  * - Derives executorState from globalPause and enginePaused flags, with globalPause mapping to "stopped" and enginePaused to "paused" at any running count
  * - Returns ExecutorStats object with reactive updates
  */
-const DEFAULT_API_DATA: Pick<ExecutorStats, "maxConcurrent" | "effectiveMaxConcurrent" | "concurrencyBindingKnob" | "lastActivityAt"> & {
+const DEFAULT_API_DATA: Pick<ExecutorStats, "maxConcurrent" | "maxWorktrees" | "worktreeLimitEnabled" | "lastActivityAt"> & {
   globalPause: boolean;
   enginePaused: boolean;
 } = {
   globalPause: false,
   enginePaused: false,
   maxConcurrent: DEFAULT_PROJECT_SETTINGS.maxConcurrent,
-  effectiveMaxConcurrent: DEFAULT_PROJECT_SETTINGS.maxConcurrent,
-  concurrencyBindingKnob: "maxConcurrent",
+  maxWorktrees: DEFAULT_PROJECT_SETTINGS.maxWorktrees,
+  worktreeLimitEnabled: true,
 };
 
 export function useExecutorStats(tasks: Task[], projectId?: string, columnFlagsByTaskId?: ReadonlyMap<string, ExecutorColumnFlags>): UseExecutorStatsResult {
@@ -262,8 +262,8 @@ export function useExecutorStats(tasks: Task[], projectId?: string, columnFlagsB
     ...taskStats,
     executorState,
     maxConcurrent: apiData.maxConcurrent,
-    effectiveMaxConcurrent: apiData.effectiveMaxConcurrent,
-    concurrencyBindingKnob: apiData.concurrencyBindingKnob,
+    maxWorktrees: apiData.maxWorktrees,
+    worktreeLimitEnabled: apiData.worktreeLimitEnabled,
     lastActivityAt: apiData.lastActivityAt,
   };
 

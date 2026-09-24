@@ -1,7 +1,9 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useAutosizeTextarea } from "../hooks/useAutosizeTextarea";
-import { X, Send, Loader2, Bot, AlertCircle } from "lucide-react";
+import { scrollFocusedControlWithin } from "../utils/scrollFocusedControlWithin";
+import { getKeyboardViewportFrame } from "../utils/mobileKeyboardViewport";
+import { Send, Loader2, Bot, AlertCircle } from "lucide-react";
 import type { DragEvent } from "react";
 import type { NativeStructureEmbed, NativeStructureRef, ParticipantType, MessageType } from "@fusion/core";
 import { getErrorMessage } from "@fusion/core";
@@ -47,6 +49,8 @@ export interface MessageComposerProps {
 }
 
 const MAX_CONTENT_LENGTH = 2000;
+// FNXC:MailboxSubject 2026-09-15-04:40: mirrors the core validateMessageMetadata subject bound.
+const MAX_SUBJECT_LENGTH = 200;
 
 /**
  * FNXC:NativeStructureProjectIsolation 2026-08-09-05:13:
@@ -85,6 +89,13 @@ export function MessageComposer({
   const [reportTitle, setReportTitle] = useState(initialReportTitle);
   const sectionIdRef = useRef(0);
   const [sections, setSections] = useState<Array<{ id: number; heading: string; body: string }>>([]);
+  /*
+  FNXC:MailboxSubject 2026-09-15-04:40:
+  Every mail must carry an author AND a subject. The author can state one here; leaving it empty is
+  still valid because the mailbox derives a display subject from the body, so no mail is ever
+  subject-less. An empty value is never sent, since the shared validator rejects a blank subject.
+  */
+  const [subject, setSubject] = useState("");
   const [wakeRecipient, setWakeRecipient] = useState(false);
   const [nativeStructures, setNativeStructures] = useState<NativeStructureEmbed[]>([]);
   const [isSending, setIsSending] = useState(false);
@@ -118,6 +129,10 @@ export function MessageComposer({
     if (!isValid || isSending) return;
 
     setError(null);
+    if (subject.trim().length > MAX_SUBJECT_LENGTH) {
+      setError(t("composer.subjectTooLong", "Subject must be at most 200 characters"));
+      return;
+    }
     const reportSections = sections.filter((section) => section.heading.trim() || section.body.trim());
     if (mode === "report") {
       if (!reportTitle.trim()) { setError("A report needs a title"); return; }
@@ -132,6 +147,7 @@ export function MessageComposer({
       const metadata = {
         ...(replyContext ? { replyTo: { messageId: replyContext.messageId } } : {}),
         ...(nativeStructures.length > 0 ? { nativeStructures } : {}),
+        ...(subject.trim() ? { subject: subject.trim() } : {}),
         ...(mode === "report" ? { mailKind: "report" as const, report: { title: reportTitle.trim(), sections: reportSections.map(({ heading, body }) => ({ heading: heading.trim(), body: body.trim() })) } } : {}),
       };
       const hasMetadata = Object.keys(metadata).length > 0;
@@ -155,7 +171,7 @@ export function MessageComposer({
     } finally {
       setIsSending(false);
     }
-  }, [isValid, isSending, toId, toType, content, wakeImmediately, replyContext, nativeStructures, projectId, onSend, addToast, mode, reportTitle, sections]);
+  }, [isValid, isSending, toId, toType, content, subject, wakeImmediately, replyContext, nativeStructures, projectId, onSend, addToast, mode, reportTitle, sections, t]);
 
   const handleAgentSelect = useCallback((agentId: string) => {
     setToId(agentId);
@@ -212,11 +228,20 @@ export function MessageComposer({
     if (ref) addNativeStructure(ref);
   }, [addNativeStructure, projectId]);
 
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+  FN-512: reveal the composer inside ITS OWN scroller instead of `scrollIntoView({block:"center"})`.
+  That call scrolled every scrollable ancestor up to the document, so a composer in one surface could
+  shift the whole page; on WebKit a programmatic document scroll during the keyboard raise can also
+  abort the raise. It also re-centred an already-visible composer on every viewport event.
+
+  The helper refuses unless this textarea is still the focused, connected control, so a viewport
+  event arriving after the user moved to another field cannot move the surface they are now using.
+  */
   const scrollTextareaIntoView = useCallback(() => {
-    if (typeof textareaRef.current?.scrollIntoView !== "function") {
-      return;
-    }
-    textareaRef.current.scrollIntoView({ block: "center", behavior: "auto" });
+    scrollFocusedControlWithin(textareaRef.current, {
+      visibleBottom: getKeyboardViewportFrame()?.visibleBottom,
+    });
   }, []);
 
   useEffect(() => {
@@ -247,18 +272,13 @@ export function MessageComposer({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div className="message-composer-header">
-        <span>{replyContext ? t("composer.replyTitle", "Reply") : t("composer.newMessageTitle", "New Message")}</span>
-        <button
-          className="btn-icon"
-          onClick={onCancel}
-          aria-label={t("actions.cancel", "Cancel")}
-          data-testid="message-composer-cancel"
-        >
-          <X size={16} />
-        </button>
-      </div>
-
+      {/*
+      FNXC:StandardizedMailboxLayout 2026-09-14-10:24:
+      FN-379 remediation: the composer is hosted content, never a second chrome owner. Its dynamic identity
+      ("New Message"/"Reply") and its abandon action belong to the owning ViewHeader of Mailbox (destination and
+      floating window alike), so the composer no longer renders a local header row or a local close control. The
+      contextual footer Cancel remains a form command of the open form.
+      */}
       <div className="message-composer-body">
         {/* FNXC:StructuralMail 2026-08-09-12:41: Quick mail remains the default and never adds metadata; report validation stays at send time so recipient gating remains independent. FN-8870 requires at least one complete section for structural reports. */}
         <div className="message-composer-mode" role="group" aria-label={t("composer.mode", "Message mode")}>
@@ -320,6 +340,21 @@ export function MessageComposer({
           </div>)}
           <button type="button" className="btn btn-sm btn-secondary" onClick={() => setSections((current) => [...current, { id: sectionIdRef.current++, heading: "", body: "" }])} data-testid="report-section-add">{t("composer.addSection", "Add section")}</button>
         </div>}
+
+        {/* FNXC:MailboxSubject 2026-09-15-04:40: Optional author-written subject; when blank the mailbox derives one from the body. */}
+        <div className="message-composer-field">
+          <label className="message-composer-label" htmlFor="message-subject">
+            {t("composer.subject", "Subject")}
+          </label>
+          <input
+            id="message-subject"
+            className="input"
+            value={subject}
+            placeholder={t("composer.subjectPlaceholder", "Short subject (optional)")}
+            onChange={(event) => setSubject(event.target.value)}
+            data-testid="message-composer-subject"
+          />
+        </div>
 
         {/* Content */}
         <div className="message-composer-field message-composer-field--content">

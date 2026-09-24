@@ -23,16 +23,11 @@
   flex-shrink: 0;
 }
 
-.usage-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.usage-header-icon {
-  color: var(--in-progress);
-}
-
+/*
+FNXC:StandardizedViewLayout 2026-09-13-21:49:
+FN-379 removed the local title cluster: the shared header owns Usage's icon and title, so only the header action
+group keeps local styling.
+*/
 /* Header actions with view toggle */
 .usage-header-actions {
   display: flex;
@@ -597,12 +592,19 @@
 
 
 /* Desktop popover presentation */
-.usage-popover-backdrop {
-  position: fixed;
-  inset: 0;
-  background: transparent;
-  z-index: 100;
-}
+/*
+FNXC:PopoverLayering 2026-09-15-09:31:
+FN-413: while the header-anchored Usage popover is OPEN it must stay above every dashboard-managed
+window, including one opened AFTER it. The legacy static 100/101 pair sat far below the shared window
+stack (10100+), so any modal painted over it. Both surfaces now derive from the live `--fusion-max-z`
+ceiling published by floatingWindowStack.ts, per the transient-surface scale documented in styles.css.
+
+FNXC:UsageIndicator 2026-09-17-05:48:
+FN-491 : la règle `.usage-popover-backdrop` disparaît avec l'élément qu'elle habillait. Ce calque plein écran ne
+servait qu'à capter le clic extérieur et gelait le tableau derrière la popover ; la fermeture appartient désormais au
+hook partagé `useOutsidePointerDismiss`, qui ne monte aucun élément. `.usage-modal--popover` garde sa couche dérivée
+du plafond vivant, seule surface encore peinte par cette branche.
+*/
 
 .usage-modal--popover {
   width: 420px;
@@ -614,7 +616,7 @@
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   background: var(--surface);
-  z-index: 101;
+  z-index: calc(var(--fusion-max-z) + 3);
   overflow: hidden;
   display: flex;
   flex-direction: column;

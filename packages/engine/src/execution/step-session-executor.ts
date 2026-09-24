@@ -19,7 +19,10 @@ import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentHeartbeatRun, AgentStore, MessageStore, PermanentAgentGatingContext, ProviderInstanceRef, ResolvedMcpServerDefinition, TaskDetail, Settings, SteeringComment, TaskStore, TaskStep } from "@fusion/core";
-import { isFastExecutionMode, isValidProviderInstanceId, resolvePersistAgentThinkingLog, resolveExecutorFallbackModel, resolveTrailingVerificationStepIndex } from "@fusion/core";
+/* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 shares one note formatter across the standard, Fast, per-step, and reduced-step prompts. */
+import { formatApprovedHumanPlanNoteSection, isFastExecutionMode, isValidProviderInstanceId, resolvePersistAgentThinkingLog, resolveExecutorFallbackModel, resolveTrailingVerificationStepIndex, resolveAuthoredStepHeadingOffset, matchStepHeadings } from "@fusion/core";
+
+export { resolveAuthoredStepHeadingOffset };
 
 import {
   createResolvedAgentSession,
@@ -56,6 +59,8 @@ import {
   createTaskLogsReadTool,
 } from "../agent-tools.js";
 import { RemovalReason, removeWorktree } from "../worktree/worktree-backend.js";
+import { resolveWorkflowStepRunAgentId } from "./resolve-activity-run-agent-id.js";
+import { acknowledgeOverlapResumeContext, readOverlapResumeContextDelivery } from "./overlap-resume-context.js";
 import { pruneWorktreeAdminEntries } from "../worktree/worktree-prune.js";
 import { activeSessionRegistry } from "../agents/active-session-registry.js";
 
@@ -171,9 +176,9 @@ export interface StepSessionExecutorOptions {
    * binds an agent that supersedes the task's `assignedAgentId` (override, or
    * defer with no own settings), the executor passes the column agent's id here so
    * the per-step run auditor attributes the session to who actually ran — not
-   * `taskDetail.assignedAgentId`. Absent → attribution falls back to
-   * `taskDetail.assignedAgentId ?? "executor"` (byte-identical legacy path). The
-   * column agent's MODEL flows separately via {@link assignedAgentRuntimeConfig}
+   * `taskDetail.assignedAgentId`. Otherwise it carries the authoritative assigned
+   * agent; absent means the run must be proven through the Executor role roster.
+   * The column agent's MODEL flows separately via {@link assignedAgentRuntimeConfig}
    * (the executor swaps it to the column agent's `runtimeConfig` at the seam).
    */
   effectiveAgentId?: string;
@@ -202,14 +207,8 @@ export function parseStepFileScopes(prompt: string): Map<number, string[]> {
 
   if (!prompt) return result;
 
-  // Split by step headings: ### Step 0: ..., ### Step 1: ..., etc.
-  const stepRegex = /^### Step (\d+):.*/gm;
-  const splits: { index: number; stepNum: number }[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = stepRegex.exec(prompt)) !== null) {
-    splits.push({ index: match.index, stepNum: parseInt(match[1], 10) });
-  }
+  /* FNXC:WorkflowSteps 2026-09-05-22:06: FN-9260 requires annotated headings to share the canonical matcher. */
+  const splits = matchStepHeadings(prompt).map(({ index, headingNumber }) => ({ index, stepNum: headingNumber }));
 
   if (splits.length === 0) return result;
 
@@ -224,6 +223,30 @@ export function parseStepFileScopes(prompt: string): Map<number, string[]> {
   }
 
   return result;
+}
+
+/*
+FNXC:WorkflowStepControl 2026-09-04-01:38:
+PROMPT.md is model-authored and an out-of-range heading is never schedulable. Normalize the
+unambiguous 1-based legacy shape, clamp malformed keys, and retain every valid task index.
+*/
+export function normalizeAuthoredStepScopes(
+  scopes: Map<number, string[]>,
+  stepCount: number,
+): Map<number, string[]> {
+  if (stepCount === 0) return scopes;
+
+  const offset = resolveAuthoredStepHeadingOffset([...scopes.keys()]);
+  const normalized = new Map<number, string[]>();
+  for (const [heading, paths] of scopes) {
+    const index = heading - offset;
+    if (index >= 0 && index < stepCount) normalized.set(index, paths);
+  }
+  const complete = new Map<number, string[]>();
+  for (let index = 0; index < stepCount; index++) {
+    complete.set(index, normalized.get(index) ?? []);
+  }
+  return complete;
 }
 
 /**
@@ -428,9 +451,10 @@ export function buildStepPrompt(
   rootDir?: string,
   settings?: Settings,
   worktreePath?: string,
+  overlapResumeContext?: string,
 ): string {
   if (isFastExecutionMode(taskDetail)) {
-    return buildFastLanePrompt(taskDetail, rootDir, settings, worktreePath);
+    return buildFastLanePrompt(taskDetail, rootDir, settings, worktreePath, overlapResumeContext);
   }
   const { id, title, attachments } = taskDetail;
   const prompt = scopePromptToWorktree(taskDetail.prompt, rootDir, worktreePath);
@@ -515,8 +539,18 @@ export function buildStepPrompt(
     parts.push(attachmentsSection);
   }
 
+  if (overlapResumeContext) {
+    parts.push("## Overlap wait synchronization", "", overlapResumeContext, "");
+  }
+
   if (steeringSection) {
     parts.push(steeringSection, "");
+  }
+
+  /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 — every per-step session carries the note the operator attached when approving this plan. */
+  const stepApprovalNote = formatApprovedHumanPlanNoteSection(taskDetail);
+  if (stepApprovalNote) {
+    parts.push(stepApprovalNote, "");
   }
 
   if (isLastStep && completionSection) {
@@ -560,6 +594,7 @@ export function buildFastLanePrompt(
   rootDir?: string,
   settings?: Settings,
   worktreePath?: string,
+  overlapResumeContext?: string,
 ): string {
   const originalRequest = taskDetail.description || taskDetail.prompt || "";
   const parts = [
@@ -587,8 +622,12 @@ export function buildFastLanePrompt(
     if (settings.buildCommand) parts.push(`- **Build:** \`${settings.buildCommand}\``);
   }
 
+  if (overlapResumeContext) parts.push("", "## Overlap wait synchronization", "", overlapResumeContext);
   const steering = buildStepSteeringCommentsSection(taskDetail.steeringComments);
   if (steering) parts.push("", steering);
+  /* FNXC:HumanPlanApproval 2026-09-15-07:30: FN-408 — the Fast-lane prompt carries the approved operator note too. An armed card is never fast (arming neutralizes Fast), so this only ever fires for a legacy row, but the note formatter stays shared so no session shape can silently drop it. */
+  const fastLaneApprovalNote = formatApprovedHumanPlanNoteSection(taskDetail);
+  if (fastLaneApprovalNote) parts.push("", fastLaneApprovalNote);
 
   parts.push(
     "",
@@ -634,15 +673,11 @@ function scopePromptToWorktree(prompt: string, rootDir?: string, worktreePath?: 
  * Extract the content of a specific step from the PROMPT.md.
  */
 function extractStepSection(prompt: string, stepIndex: number): string {
-  const stepRegex = /^### Step (\d+):.*/gm;
-  const splits: { index: number; stepNum: number }[] = [];
-  let match: RegExpExecArray | null;
+  /* FNXC:WorkflowSteps 2026-09-05-22:06: FN-9260 requires annotated step bodies to be sliced by the canonical matcher. */
+  const splits = matchStepHeadings(prompt).map(({ index, headingNumber }) => ({ index, stepNum: headingNumber }));
 
-  while ((match = stepRegex.exec(prompt)) !== null) {
-    splits.push({ index: match.index, stepNum: parseInt(match[1], 10) });
-  }
-
-  const targetSplit = splits.find((s) => s.stepNum === stepIndex);
+  const offset = resolveAuthoredStepHeadingOffset(splits.map((split) => split.stepNum));
+  const targetSplit = splits.find((s) => s.stepNum === stepIndex + offset);
   if (!targetSplit) return "";
 
   const splitPos = splits.indexOf(targetSplit);
@@ -656,9 +691,8 @@ function extractStepSection(prompt: string, stepIndex: number): string {
  * Count the number of step headings in a PROMPT.md.
  */
 function countSteps(prompt: string): number {
-  const stepRegex = /^### Step \d+:/gm;
-  const matches = prompt.match(stepRegex);
-  return matches ? matches.length : 0;
+  /* FNXC:WorkflowSteps 2026-09-05-22:06: FN-9260 counts documented dependency-annotated headings as authored steps. */
+  return matchStepHeadings(prompt).length;
 }
 
 /*
@@ -745,7 +779,7 @@ function escapeRegex(str: string): string {
  * @param rootDir - Optional project root directory used to render absolute attachment paths.
  * @returns A reduced prompt string focused on the current step only.
  */
-export function buildReducedStepPrompt(taskDetail: TaskDetail, stepIndex: number, rootDir?: string): string {
+export function buildReducedStepPrompt(taskDetail: TaskDetail, stepIndex: number, rootDir?: string, overlapResumeContext?: string): string {
   const { prompt, id, title, attachments } = taskDetail;
 
   // Extract the step-specific section
@@ -753,9 +787,17 @@ export function buildReducedStepPrompt(taskDetail: TaskDetail, stepIndex: number
   const hasAttachments = Boolean(attachments && attachments.length > 0);
   const attachmentDir = rootDir ? `${rootDir}/.fusion/tasks/${id}/attachments/` : `.fusion/tasks/${id}/attachments/`;
   const steeringSection = buildStepSteeringCommentsSection(taskDetail.steeringComments);
+  /*
+  FNXC:HumanPlanApproval 2026-09-15-06:24:
+  FN-408 — the reduced prompt exists because the previous attempt hit the context limit, but the
+  operator's approval note is a deliberate human instruction about this exact implementation, so it
+  is preserved here exactly like the overlap-resume context.
+  */
+  const approvalNoteSection = formatApprovedHumanPlanNoteSection(taskDetail);
 
   // Build a minimal prompt that focuses on the step without excessive context
   const parts: string[] = [
+    ...(approvalNoteSection ? [approvalNoteSection, ""] : []),
     `You are executing step ${stepIndex} of task ${id}.`,
     title ? `Task: ${title}` : "",
     "",
@@ -766,6 +808,8 @@ export function buildReducedStepPrompt(taskDetail: TaskDetail, stepIndex: number
     hasAttachments
       ? `${attachments?.length ?? 0} attachment(s) available at \`${attachmentDir}\` — read the files there for context. They live at the project root and are readable even when working in a worktree.`
       : "",
+    "",
+    overlapResumeContext ? `OVERLAP WAIT SYNCHRONIZATION (must be preserved in reduced prompts):\n${overlapResumeContext}` : "",
     "",
     steeringSection,
     "",
@@ -864,6 +908,8 @@ export class StepSessionExecutor {
   private credentialInstanceId: string | undefined;
   private reusablePrimaryRetargetPending = false;
   private reusablePrimaryAttemptActive = false;
+  private workflowStepRunAgentId: Promise<string | null> | undefined;
+  private warnedUnattributableWorkflowStepRun = false;
 
   private registerActiveStepSession(stepIndex: number, handle: SessionHandle, worktreePath: string): void {
     this.activeSessions.set(stepIndex, handle);
@@ -978,17 +1024,9 @@ export class StepSessionExecutor {
     const { taskDetail } = this.options;
     const prompt = taskDetail.prompt ?? "";
 
-    // Parse file scopes and determine execution plan
-    const stepScopes = parseStepFileScopes(prompt);
-
-    // Add all step indices that don't appear in the prompt's step sections
-    // (e.g. if steps are defined in taskDetail.steps but not in the prompt)
+    // Parse file scopes and determine execution plan.
     const stepCount = taskDetail.steps?.length ?? 0;
-    for (let i = 0; i < stepCount; i++) {
-      if (!stepScopes.has(i)) {
-        stepScopes.set(i, []);
-      }
-    }
+    const stepScopes = normalizeAuthoredStepScopes(parseStepFileScopes(prompt), stepCount);
 
     /*
      * FNXC:WorkflowStepControl 2026-06-29-10:45:
@@ -1306,10 +1344,27 @@ export class StepSessionExecutor {
     };
   }
 
-  private createWorkflowStepActivityRun(stepIndex: number, startedAt: string): WorkflowStepActivityRun {
+  private async createWorkflowStepActivityRun(stepIndex: number, startedAt: string): Promise<WorkflowStepActivityRun | null> {
     const { taskDetail } = this.options;
     const step = taskDetail.steps?.[stepIndex];
-    const agentId = this.options.effectiveAgentId ?? taskDetail.assignedAgentId ?? "executor";
+    if (typeof this.options.agentStore?.saveRun !== "function") return null;
+
+    /*
+     * FNXC:CommandCenterActivity 2026-09-04-14:11:
+     * `executor` remains a role slug for the resolver, never a persistable agent id. Skipping an
+     * unattributable run is correct: a rejected FK insert persists nothing but logs its payload at
+     * every boundary. The memoized bounded lookup permits only one telemetry wait per executor.
+     */
+    const agentIdCandidate = this.options.effectiveAgentId ?? taskDetail.assignedAgentId ?? "executor";
+    this.workflowStepRunAgentId ??= resolveWorkflowStepRunAgentId(this.options.agentStore, agentIdCandidate);
+    const agentId = await this.workflowStepRunAgentId;
+    if (!agentId) {
+      if (!this.warnedUnattributableWorkflowStepRun) {
+        this.warnedUnattributableWorkflowStepRun = true;
+        stepExecLog.warn(`Skipping unattributable workflow-step activity runs for task ${taskDetail.id} (candidate: ${agentIdCandidate})`);
+      }
+      return null;
+    }
 
     /*
      * FNXC:CommandCenterActivity 2026-07-01-00:00:
@@ -1334,6 +1389,7 @@ export class StepSessionExecutor {
         taskTitle: taskDetail.title,
         assignedAgentId: taskDetail.assignedAgentId,
         effectiveAgentId: this.options.effectiveAgentId,
+        agentIdCandidate,
         agentId,
         stepIndex,
         stepName: step?.name ?? `Step ${stepIndex}`,
@@ -1348,7 +1404,8 @@ export class StepSessionExecutor {
     };
   }
 
-  private async saveWorkflowStepActivityRun(run: WorkflowStepActivityRun): Promise<void> {
+  private async saveWorkflowStepActivityRun(run: WorkflowStepActivityRun | null): Promise<void> {
+    if (!run) return;
     const saveRun = this.options.agentStore?.saveRun?.bind(this.options.agentStore);
     if (!saveRun) return;
 
@@ -1363,10 +1420,11 @@ export class StepSessionExecutor {
   }
 
   private async completeWorkflowStepActivityRun(
-    run: WorkflowStepActivityRun,
+    run: WorkflowStepActivityRun | null,
     status: Extract<AgentHeartbeatRun["status"], "completed" | "failed" | "terminated">,
     result: StepResult,
   ): Promise<void> {
+    if (!run) return;
     const terminalRun: WorkflowStepActivityRun = {
       ...run,
       endedAt: new Date().toISOString(),
@@ -1429,14 +1487,16 @@ export class StepSessionExecutor {
       }
     }
 
-    // Build step prompt
+    // Build step prompt from the latest durable overlap receipt. Constructing a prompt does not consume it.
     const promptTaskDetail = this.consumeTaskDetailForStepPrompt();
-    const stepPrompt = buildStepPrompt(promptTaskDetail, stepIndex, this.options.rootDir, settings, worktreePath);
+    const overlapResumeDelivery = await readOverlapResumeContextDelivery(this.store, promptTaskDetail.id).catch(() => ({ context: undefined, episodes: [] }));
+    const overlapResumeContext = overlapResumeDelivery.context;
+    const stepPrompt = buildStepPrompt(promptTaskDetail, stepIndex, this.options.rootDir, settings, worktreePath, overlapResumeContext);
 
     // Fast recovery stays in the same original-request lane instead of restoring step scaffolding.
     const reducedStepPrompt = isFastExecutionMode(promptTaskDetail)
-      ? buildFastLanePrompt(promptTaskDetail, this.options.rootDir, settings, worktreePath)
-      : buildReducedStepPrompt(promptTaskDetail, stepIndex, this.options.rootDir);
+      ? buildFastLanePrompt(promptTaskDetail, this.options.rootDir, settings, worktreePath, overlapResumeContext)
+      : buildReducedStepPrompt(promptTaskDetail, stepIndex, this.options.rootDir, overlapResumeContext);
     const reusePrimarySession = await this.shouldReusePrimarySession(worktreePath);
 
     // Acquire semaphore if provided
@@ -1444,7 +1504,7 @@ export class StepSessionExecutor {
       await semaphore.acquire();
     }
 
-    const activityRun = this.createWorkflowStepActivityRun(stepIndex, new Date().toISOString());
+    const activityRun = await this.createWorkflowStepActivityRun(stepIndex, new Date().toISOString());
     await this.saveWorkflowStepActivityRun(activityRun);
 
     const trackingKey = this.makeTrackingKey(stepIndex);
@@ -1728,6 +1788,7 @@ Follow instructions precisely and avoid unrelated changes.`,
           // session.prompt() resolves normally even when retries are exhausted —
           // the error is stored on session.state.error instead of being thrown.
           checkSessionError(session);
+          await acknowledgeOverlapResumeContext(this.store, taskDetail.id, overlapResumeDelivery);
 
           const result: StepResult = {
             stepIndex,
@@ -1764,6 +1825,7 @@ Follow instructions precisely and avoid unrelated changes.`,
               stuckTaskDetector?.recordActivity(trackingKey);
               await promptWithAutoRetry(session, reducedStepPrompt);
               checkSessionError(session);
+              await acknowledgeOverlapResumeContext(this.store, taskDetail.id, overlapResumeDelivery);
               stepExecLog.log(`Step ${stepIndex} reduced-prompt recovery succeeded`);
               await this.store.appendAgentLog(
                 taskDetail.id,

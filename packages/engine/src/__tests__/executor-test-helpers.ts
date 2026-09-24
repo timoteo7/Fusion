@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import type { Mock } from "vitest";
-import type { Task } from "@fusion/core";
+import { DEFAULT_MAX_POST_REVIEW_FIXES, type Task } from "@fusion/core";
 import { installTaskWorktreeIdentityGuard } from "../worktree/worktree-hooks.js";
 import type * as ReviewerModule from "../execution/reviewer.js";
 
@@ -252,6 +252,16 @@ vi.mock("../worktree/worktree-pool.js", async (importOriginal) => {
     RemovalReason: backend.RemovalReason,
     removeWorktree: vi.fn(actual.removeWorktree),
     classifyTaskWorktree: vi.fn().mockResolvedValue({ ok: true }),
+    /*
+    FNXC:ExecutorTests 2026-09-02-19:43:
+    Shared executor fixtures model FN-001's already-acquired pinned checkout. The acquisition boundary
+    now requires a non-empty registered branch probe in addition to classification, so provide matching
+    evidence rather than letting every session-oriented test fail before it opens an agent session.
+    */
+    getRegisteredWorktreeBranches: vi.fn().mockResolvedValue([{
+      worktreePath: "/tmp/test/.fusion/worktrees/fn-001",
+      branch: "fusion/fn-001",
+    }]),
     describeRegisteredWorktrees: vi.fn().mockResolvedValue({ rawOutput: "", canonicalized: [] }),
     isUsableTaskWorktree: vi.fn().mockResolvedValue(true),
   };
@@ -528,6 +538,16 @@ const withLegacyWorkflowFeatureDefaults = (settings: Record<string, unknown>) =>
   },
 });
 
+const LEGACY_MOCK_SETTINGS_DEFAULTS = {
+  maxConcurrent: 2,
+  maxWorktrees: 4,
+  pollIntervalMs: 15000,
+  groupOverlappingFiles: false,
+  autoMerge: false,
+  maxPostReviewFixes: DEFAULT_MAX_POST_REVIEW_FIXES,
+  worktreeInitCommand: undefined,
+};
+
 const createLegacySettingsMock = (initialSettings: Record<string, unknown>) => {
   const mock = vi.fn().mockResolvedValue(withLegacyWorkflowFeatureDefaults(initialSettings));
   const mockResolvedValue = mock.mockResolvedValue.bind(mock);
@@ -535,6 +555,19 @@ const createLegacySettingsMock = (initialSettings: Record<string, unknown>) => {
     mockResolvedValue(withLegacyWorkflowFeatureDefaults(settings))) as typeof mock.mockResolvedValue;
   return mock;
 };
+
+/*
+FNXC:EngineTests 2026-09-09-07:19:
+The legacy mockResolvedValue override intentionally replaces its settings object because existing
+callers use minimal settings fixtures to model incomplete configuration. Tests that need one setting
+while retaining the standard executor defaults must opt into this overlay helper instead.
+*/
+export function setMockSettings(
+  store: { getSettings: ReturnType<typeof createLegacySettingsMock> },
+  patch: Record<string, unknown>,
+): void {
+  store.getSettings.mockResolvedValue({ ...LEGACY_MOCK_SETTINGS_DEFAULTS, ...patch });
+}
 
 export function createMockStore() {
   const listeners = new Map<string, EventListener[]>();
@@ -679,6 +712,20 @@ export function createMockStore() {
       applyPatch(id, patch);
       return { ...(patches.get(id) ?? {}), id };
     }),
+    /*
+    FNXC:EngineTests 2026-09-04-03:21:
+    The shared executor store fake must model TaskStore's atomic reducer so terminal graph-failure
+    persistence can test its live-row fence without falling into production backoff retries.
+    */
+    updateTaskAtomic: vi.fn(async (
+      id: string,
+      updater: (current: Task) => Record<string, unknown> | null | Promise<Record<string, unknown> | null>,
+    ) => {
+      const current = await store.getTask(id) as Task;
+      const patch = await updater(current);
+      applyPatch(id, patch ?? undefined);
+      return store.getTask(id);
+    }),
     mergeWorkspaceWorktreeEntry: vi.fn((
       id: string,
       repoRelPath: string,
@@ -754,14 +801,7 @@ export function createMockStore() {
     parseStepsFromPrompt: vi.fn().mockResolvedValue([]),
     parseFileScopeFromPrompt: vi.fn().mockResolvedValue([]),
     updateSettings: vi.fn().mockResolvedValue({}),
-    getSettings: createLegacySettingsMock({
-      maxConcurrent: 2,
-      maxWorktrees: 4,
-      pollIntervalMs: 15000,
-      groupOverlappingFiles: false,
-      autoMerge: false,
-      worktreeInitCommand: undefined,
-    }),
+    getSettings: createLegacySettingsMock(LEGACY_MOCK_SETTINGS_DEFAULTS),
     /*
     FNXC:EngineTests 2026-07-19-14:20 (U10b):
     Write-through step state, for the same reason `updateTask` became write-through (U5g).

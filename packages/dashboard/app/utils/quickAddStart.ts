@@ -23,8 +23,9 @@ export function validateQuickAddStartWorkflow(value: unknown): ValidatedQuickAdd
   return workflow as ValidatedQuickAddWorkflow;
 }
 
+/* FNXC:TaskArchiveRemoval 2026-09-04-14:51: Workflow metadata has no Archived role; visibility is determined solely by the board-hidden contract. */
 function visibleColumns(workflow: ValidatedQuickAddWorkflow) {
-  return workflow.columns.filter((column) => !column.flags.archived && !column.flags.hiddenFromBoard);
+  return workflow.columns.filter((column) => !column.flags.hiddenFromBoard);
 }
 
 /*
@@ -49,7 +50,7 @@ export function workflowSupportsQuickAddStart(workflow: ValidatedQuickAddWorkflo
  * FNXC:QuickAddStart 2026-08-26-19:19:
  * The forward step is now the IMMEDIATELY following visible column, and a `hold` lane is a legal
  * destination rather than something to skip. Skipping holds produced a move the server always
- * refuses: column adjacency permits `intake -> hold | archived` only (ROLE_TRANSITIONS in
+ * refuses: column adjacency permits `intake -> hold` only (ROLE_TRANSITIONS in
  * packages/core/src/workflows/workflow-transitions.ts), and neighbour-derived adjacency for
  * genuinely custom shapes permits the next declared column only. Jumping over a Planning hold lane
  * into the WIP lane therefore returned 409 "Invalid transition: 'ideas' -> 'in-progress'", so Start
@@ -67,10 +68,8 @@ export function resolveQuickAddStartTargetColumn(workflow: ValidatedQuickAddWork
 }
 
 /*
-FNXC:QuickAddStart 2026-08-26-19:19:
-A DUPLICATED or hand-authored Ideas workflow ("Coding ideas V2") must start exactly like the
-built-in one. The atomic create-in-Planning path below keys on the literal `builtin:coding-ideas`
-id, so every copy fell through to the promotion path and its card stayed parked in Ideas.
+FNXC:QuickAddStart 2026-09-06-02:15:
+A duplicated or hand-authored Ideas workflow must start exactly like the built-in one. The atomic create-in-Planning path keys on the surviving `builtin:coding-ideas` identity; every other manual-intake workflow continues through trait resolution.
 
 The destination is derived from the SAME traits the server uses, not from a name: a create lands in
 the planning lane pre-planned only when `resolveWorkflowIntakeFacts` classifies it as an unplanned
@@ -104,6 +103,9 @@ FNXC:NewTaskWorkflowStart 2026-08-19-00:17:
 The modal and QuickEntryBox must hide Start when the metadata proves manual intake but no later
 working lane exists. Resolve that proof from the same ordered workflow snapshot used for the actual
 create or move, retaining the Coding (Ideas) atomic-column special case.
+
+FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
 */
 export function resolveQuickAddStartWorkflowTarget(workflow: ValidatedQuickAddWorkflow | null): string | null {
   if (!workflow || !workflowSupportsQuickAddStart(workflow)) return null;

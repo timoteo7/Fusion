@@ -8,7 +8,8 @@ import { TaskChatTab } from "../TaskChatTab";
 import { ChatMessageLayoutProvider } from "../../context/ChatMessageLayoutContext";
 import { isCliSessionLive, type CliSessionSummaryRecord } from "../TaskDetailModal";
 import { useAgentLogs } from "../../hooks/useAgentLogs";
-import { addSteeringComment, refineTask } from "../../api";
+import { addSteeringComment, fetchGlobalSettings, refineTask, updateGlobalSettings } from "../../api";
+import { __test_resetChatSnippetsCache } from "../../hooks/useChatSnippetsCache";
 import { readBoardWorkflowSelection, removeBoardWorkflowSelection, writeBoardWorkflowSelection } from "../../utils/boardWorkflowSelection";
 import { clampChatInputHeight, getChatInputAutomaticMaxHeight, getChatInputBoxMetrics } from "../../utils/chatInputAutosize";
 import { readAppFile } from "../../test/cssFixture";
@@ -20,11 +21,15 @@ vi.mock("../../hooks/useAgentLogs", () => ({
 vi.mock("../../api", () => ({
   addSteeringComment: vi.fn(),
   refineTask: vi.fn(),
+  fetchGlobalSettings: vi.fn(),
+  updateGlobalSettings: vi.fn(),
 }));
 
 const mockedUseAgentLogs = vi.mocked(useAgentLogs);
 const mockedAddSteeringComment = vi.mocked(addSteeringComment);
 const mockedRefineTask = vi.mocked(refineTask);
+const mockedFetchGlobalSettings = vi.mocked(fetchGlobalSettings);
+const mockedUpdateGlobalSettings = vi.mocked(updateGlobalSettings);
 const originalScrollTopDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTop");
 const originalScrollHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
 const originalClientHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
@@ -355,7 +360,10 @@ function mockRequestAnimationFrame() {
 
 describe("TaskChatTab", () => {
   beforeEach(() => {
+    __test_resetChatSnippetsCache();
     vi.clearAllMocks();
+    mockedFetchGlobalSettings.mockReturnValue(new Promise(() => {}));
+    mockedUpdateGlobalSettings.mockResolvedValue({ chatSnippets: [] } as never);
     mockLogs();
   });
 
@@ -380,6 +388,23 @@ describe("TaskChatTab", () => {
     } else {
       delete (window as Partial<Window>).matchMedia;
     }
+  });
+
+  it("renders its production composer with homemade Alpha only inside the Alpha surface", () => {
+    const view = render(
+      <>
+        <><TaskChatTab task={makeTask()} active addToast={vi.fn()} /></>
+      </>,
+    );
+    expect(screen.getByLabelText("Message active agent session")).toHaveAttribute("data-ui", "textarea");
+    expect(view.container.querySelector('[data-ui="button"]')).not.toBeNull();
+
+    view.rerender(
+      <>
+        <><TaskChatTab task={makeTask()} active addToast={vi.fn()} /></>
+      </>,
+    );
+    expect(screen.getByLabelText("Message active agent session")).not.toHaveAttribute("data-ui");
   });
 
   it("subscribes to live agent logs only when active", () => {
@@ -639,6 +664,137 @@ describe("TaskChatTab", () => {
     mockLogs([makeEntry({ agent: "executor", text: "executor output" })]);
     rerender(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
     expect(within(getRoleGroup("Executor")).getByLabelText("Executor: model provider unknown")).toBeInTheDocument();
+  });
+
+  /*
+  FNXC:TaskDetailChat 2026-09-15-08:46:
+  FN-410: the Live role icon must report the reasoning effort that actually ran, resolved from the
+  engine's marker annotation or the configured lane — and must report nothing at all when no source
+  provides one. The negative control below is the load-bearing half: it pins the pre-FN-410
+  accessible name byte for byte so an absent level can never become an invented one or an empty shell.
+  */
+  it("FN-410 shows the thinking effort from a runtime marker on the Executor icon", () => {
+    mockLogs([makeEntry({ agent: "executor", type: "status", text: "Executor using model: openai/gpt-4o (thinking effort: high)" })]);
+
+    render(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
+
+    const executorGroup = getRoleGroup("Executor");
+    expect(within(executorGroup).getByTestId("task-chat-provider-thinking")).toHaveTextContent("High");
+    expect(within(executorGroup).getByLabelText("Executor: openai/gpt-4o · thinking: High")).toBeInTheDocument();
+    expect(within(executorGroup).getByTestId("openai-icon")).toBeInTheDocument();
+  });
+
+  it("FN-410 reads the thinking effort among several parenthesized marker annotations", () => {
+    mockLogs([
+      makeEntry({ agent: "executor", type: "status", text: "Executor using model: openai/gpt-4o (workflow step override) (thinking effort: xhigh)" }),
+    ]);
+
+    render(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
+
+    const executorGroup = getRoleGroup("Executor");
+    expect(within(executorGroup).getByTestId("task-chat-provider-thinking")).toHaveTextContent("Very High");
+    expect(within(executorGroup).getByLabelText("Executor: openai/gpt-4o · thinking: Very High")).toBeInTheDocument();
+  });
+
+  it("FN-410 shows a thinking effort supplied only by the effective models, with no marker", () => {
+    mockLogs([makeEntry({ agent: "executor", text: "executor output" })]);
+
+    render(
+      <TaskChatTab
+        task={makeTask()}
+        active
+        addToast={vi.fn()}
+        effectiveModels={{ executor: { provider: "openai", modelId: "gpt-4o", thinkingLevel: "medium" } }}
+      />,
+    );
+
+    const executorGroup = getRoleGroup("Executor");
+    expect(within(executorGroup).getByTestId("task-chat-provider-thinking")).toHaveTextContent("Medium");
+    expect(within(executorGroup).getByLabelText("Executor: openai/gpt-4o · thinking: Medium")).toBeInTheDocument();
+  });
+
+  it("FN-410 backfills the lane thinking effort when the marker names a model without one", () => {
+    mockLogs([makeEntry({ agent: "executor", type: "status", text: "Executor using model: openai/gpt-4o" })]);
+
+    render(
+      <TaskChatTab
+        task={makeTask()}
+        active
+        addToast={vi.fn()}
+        effectiveModels={{ executor: { provider: "grok", modelId: "grok-4", thinkingLevel: "low" } }}
+      />,
+    );
+
+    const executorGroup = getRoleGroup("Executor");
+    // The marker still wins for the MODEL; only the missing level is filled in.
+    expect(within(executorGroup).getByTestId("openai-icon")).toBeInTheDocument();
+    expect(within(executorGroup).queryByTestId("xai-icon")).not.toBeInTheDocument();
+    expect(within(executorGroup).getByLabelText("Executor: openai/gpt-4o · thinking: Low")).toBeInTheDocument();
+  });
+
+  it("FN-410 renders no badge and leaves the accessible name unchanged when no level is known", () => {
+    mockLogs([
+      makeEntry({ agent: "executor", type: "status", text: "Executor using model: openai/gpt-4o" }),
+      makeEntry({ agent: "reviewer", text: "reviewer output" }),
+    ]);
+
+    render(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
+
+    expect(screen.queryByTestId("task-chat-provider-thinking")).not.toBeInTheDocument();
+    expect(within(getRoleGroup("Executor")).getByLabelText("Executor: openai/gpt-4o")).toBeInTheDocument();
+    expect(within(getRoleGroup("Reviewer")).getByLabelText("Reviewer: model provider unknown")).toBeInTheDocument();
+    expect(document.querySelectorAll(".task-chat-provider-thinking")).toHaveLength(0);
+  });
+
+  it("FN-410 keeps the CPU fallback while still announcing a known thinking effort", () => {
+    mockLogs([makeEntry({ agent: "executor", text: "executor output" })]);
+
+    render(
+      <TaskChatTab
+        task={makeTask()}
+        active
+        addToast={vi.fn()}
+        effectiveModels={{ executor: null }}
+      />,
+    );
+
+    const executorGroup = getRoleGroup("Executor");
+    expect(executorGroup.querySelector(".task-chat-provider-icon--fallback")).toBeTruthy();
+    expect(within(executorGroup).getByLabelText("Executor: model provider unknown")).toBeInTheDocument();
+    expect(within(executorGroup).queryByTestId("task-chat-provider-thinking")).not.toBeInTheDocument();
+  });
+
+  it("FN-410 serves all four roles at once with their own thinking efforts", () => {
+    mockLogs([
+      makeEntry({ agent: "triage", type: "status", text: "Planning using model: google/gemini-pro (thinking effort: minimal)" }),
+      makeEntry({ agent: "executor", type: "status", text: "Executor using model: openai/gpt-4o (thinking effort: high)" }),
+      makeEntry({ agent: "reviewer", type: "status", text: "Reviewer using model: anthropic/claude-sonnet-4-5 (thinking effort: max)" }),
+      makeEntry({ agent: "merger", text: "merger output" }),
+    ]);
+
+    render(
+      <TaskChatTab
+        task={makeTask()}
+        active
+        addToast={vi.fn()}
+        effectiveModels={{ merger: { provider: "anthropic", modelId: "claude-sonnet-4-5", thinkingLevel: "off" } }}
+      />,
+    );
+
+    expect(within(getRoleGroup("Planner")).getByLabelText("Planner: google/gemini-pro · thinking: Minimal")).toBeInTheDocument();
+    expect(within(getRoleGroup("Executor")).getByLabelText("Executor: openai/gpt-4o · thinking: High")).toBeInTheDocument();
+    expect(within(getRoleGroup("Reviewer")).getByLabelText("Reviewer: anthropic/claude-sonnet-4-5 · thinking: Max")).toBeInTheDocument();
+    expect(within(getRoleGroup("Merger")).getByLabelText("Merger: anthropic/claude-sonnet-4-5 · thinking: Off")).toBeInTheDocument();
+  });
+
+  it("FN-410 shows a non-canonical historical level verbatim instead of dropping it", () => {
+    mockLogs([makeEntry({ agent: "executor", type: "status", text: "Executor using model: openai/gpt-4o (thinking effort: ultra-legacy)" })]);
+
+    render(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
+
+    const executorGroup = getRoleGroup("Executor");
+    expect(within(executorGroup).getByTestId("task-chat-provider-thinking")).toHaveTextContent("ultra-legacy");
+    expect(within(executorGroup).getByLabelText("Executor: openai/gpt-4o · thinking: ultra-legacy")).toBeInTheDocument();
   });
 
   it("keeps List View split chat agent headers before text tool thinking and user output", () => {
@@ -1290,7 +1446,6 @@ describe("TaskChatTab", () => {
     ["idle", "todo"],
     ["planning", "triage"],
     ["terminal", "done"],
-    ["archived", "archived"],
   ] as const)("defaults thinking blocks collapsed for %s tasks", (_state, column) => {
     mockLogs([
       makeEntry({ agent: "executor", type: "thinking", text: "Immediately readable reasoning" }),
@@ -1638,7 +1793,14 @@ describe("TaskChatTab", () => {
     expect(metrics.scrollTop).toBe(25);
   });
 
-  it("continues following new entries when the user is near the bottom", () => {
+  /*
+  FNXC:StickyBottomScroll 2026-09-14-20:19:
+  FN-398 a remplacé la décision géométrique par l'intention : un défilement réel vers le haut désengage le suivi
+  MÊME s'il atterrit dans la fenêtre de 48 px. Ce cas affirmait l'inverse (un saut de 280 px vers le haut restait
+  « suivi » parce qu'il finissait à 40 px du bas), ce qui est exactement le raccrochage signalé. Il exprime
+  désormais la nouvelle vérité : remonter détache, redescendre dans la fenêtre réarme.
+  */
+  it("rearms following only when the reader scrolls back down into the bottom window", () => {
     const metrics = mockTranscriptMetrics({ scrollHeight: 1000, clientHeight: 240, initialScrollTop: 0 });
     const firstEntries = [makeEntry({ agent: "executor", text: "first output" })];
     const secondEntries = [...firstEntries, makeEntry({ agent: "executor", text: "second output", timestamp: "2026-06-12T00:00:01.000Z" })];
@@ -1649,12 +1811,30 @@ describe("TaskChatTab", () => {
     const { rerender } = render(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
     expect(metrics.scrollTop).toBe(1000);
 
+    // Scrolling UP is user intent: it detaches even though 720 + 240 lands inside the 48px window.
     metrics.scrollTop = 720;
     fireEvent.scroll(screen.getByTestId("task-chat-transcript"));
     metrics.scrollHeight = 1400;
     rerender(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
 
-    expect(metrics.scrollTop).toBe(1400);
+    expect(metrics.scrollTop).toBe(720);
+
+    // Scrolling back DOWN into the window rearms, so the next growth follows again.
+    metrics.scrollTop = 1160;
+    fireEvent.scroll(screen.getByTestId("task-chat-transcript"));
+    metrics.scrollHeight = 1600;
+    mockedUseAgentLogs.mockReturnValue({
+      entries: [...secondEntries, makeEntry({ agent: "executor", text: "third output", timestamp: "2026-06-12T00:00:02.000Z" })],
+      loading: false,
+      clear: vi.fn(),
+      loadMore: vi.fn(),
+      hasMore: false,
+      total: 3,
+      loadingMore: false,
+    });
+    rerender(<TaskChatTab task={makeTask()} active addToast={vi.fn()} />);
+
+    expect(metrics.scrollTop).toBe(1600);
   });
 
   it("does not yank a scrolled-up user when a new entry arrives", () => {
@@ -1830,7 +2010,12 @@ describe("TaskChatTab", () => {
     expect(screen.queryByTestId("task-chat-jump-to-bottom")).not.toBeInTheDocument();
   });
 
-  it("renders the jump-to-bottom button only after a populated transcript is scrolled up", () => {
+  /*
+  FNXC:StickyBottomScroll 2026-09-14-20:19:
+  FN-398 : le bouton de retour au bas suit l'état de suivi, et le suivi est désormais relâché dès le premier
+  défilement vers le haut. Ce cas exigeait auparavant de dépasser le seuil de 48 px avant de voir le bouton.
+  */
+  it("renders the jump-to-bottom button as soon as a populated transcript is scrolled up", () => {
     const metrics = mockTranscriptMetrics({ scrollHeight: 1200, clientHeight: 240, initialScrollTop: 0 });
     mockLogs([makeEntry({ agent: "executor", text: "latest output" })]);
 
@@ -1840,7 +2025,7 @@ describe("TaskChatTab", () => {
 
     metrics.scrollTop = 920;
     fireEvent.scroll(screen.getByTestId("task-chat-transcript"));
-    expect(screen.queryByTestId("task-chat-jump-to-bottom")).not.toBeInTheDocument();
+    expect(screen.getByTestId("task-chat-jump-to-bottom")).toBeVisible();
 
     metrics.scrollTop = 600;
     fireEvent.scroll(screen.getByTestId("task-chat-transcript"));
@@ -1904,6 +2089,51 @@ describe("TaskChatTab", () => {
     const sendButton = screen.getByRole("button", { name: "Send" });
     expect(sendButton).toHaveClass("task-chat-send");
     expect(sendButton).toHaveTextContent("");
+  });
+
+  it("offers chat snippets in the composer and inserts pointer and keyboard selections without sending", async () => {
+    const prompt = "lance toujours les tests avec chrome devtool mcp";
+    mockedFetchGlobalSettings.mockResolvedValue({ chatSnippets: [{ name: "test", prompt }] });
+    const user = userEvent.setup();
+    render(<TaskChatTab task={makeTask()} projectId="project-1" active addToast={vi.fn()} />);
+    const input = screen.getByLabelText("Message active agent session");
+
+    await user.type(input, "/te");
+    await user.click(await screen.findByRole("option", { name: /\/test/i }));
+    expect(input).toHaveValue(prompt);
+    expect(input).toHaveFocus();
+    expect(mockedAddSteeringComment).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "/test" } });
+    await screen.findByRole("option", { name: /\/test/i });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input).toHaveValue(prompt);
+    expect(mockedAddSteeringComment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["steering", makeTask({ column: "in-progress" }), mockedAddSteeringComment],
+    ["refinement", makeTask({ column: "done" }), mockedRefineTask],
+  ] as const)("expands a standalone snippet before optimistic %s submission", async (_label, task, submitMock) => {
+    const prompt = "lance toujours les tests avec chrome devtool mcp";
+    mockedFetchGlobalSettings.mockResolvedValue({ chatSnippets: [{ name: "test", prompt }] });
+    let resolveSubmit!: (value: Task) => void;
+    submitMock.mockReturnValue(new Promise<Task>((resolve) => { resolveSubmit = resolve; }) as never);
+    render(<TaskChatTab task={task} projectId="project-1" active addToast={vi.fn()} />);
+    const input = screen.getByLabelText("Message active agent session");
+    const send = screen.getByRole("button", { name: "Send" });
+
+    fireEvent.change(input, { target: { value: "/test" } });
+    await screen.findByRole("option", { name: /\/test/i });
+    fireEvent.click(send);
+    await waitFor(() => expect(input).toHaveValue(prompt));
+    expect(submitMock).not.toHaveBeenCalled();
+
+    fireEvent.click(send);
+    await waitFor(() => expect(submitMock).toHaveBeenCalledWith("FN-001", prompt, "project-1"));
+    expect(within(screen.getByTestId("task-chat-transcript")).getByText(prompt)).toBeInTheDocument();
+    resolveSubmit(makeTask());
+    await waitFor(() => expect(input).toHaveValue(""));
   });
 
   it.each([
@@ -2251,7 +2481,6 @@ describe("TaskChatTab", () => {
     ["in-review", makeTask({ column: "in-review", assignedAgentId: "agent-1", status: "reviewing" })],
     ["todo", makeTask({ column: "todo", assignedAgentId: undefined, checkedOutBy: undefined })],
     ["triage", makeTask({ column: "triage", assignedAgentId: undefined, checkedOutBy: undefined })],
-    ["archived", makeTask({ column: "archived", assignedAgentId: undefined, checkedOutBy: undefined })],
   ])("keeps %s sends routed to addSteeringComment", async (_label, task) => {
     const user = userEvent.setup();
     mockedAddSteeringComment.mockResolvedValue(task);
@@ -2821,7 +3050,6 @@ describe("TaskChatTab", () => {
     ["todo task", makeTask({ column: "todo", assignedAgentId: "agent-1", status: undefined }), false],
     ["triage task", makeTask({ column: "triage", assignedAgentId: "agent-1", status: undefined }), true],
     ["done task", makeTask({ column: "done", assignedAgentId: "agent-1", status: undefined }), false],
-    ["archived task", makeTask({ column: "archived", assignedAgentId: "agent-1", status: undefined }), false],
   ])("keeps the composer sendable for %s column", (_label, task, _previouslyShowedActiveCopy) => {
     render(<TaskChatTab task={task} active addToast={vi.fn()} sessionLive={false} />);
 
@@ -3282,12 +3510,15 @@ describe("TaskChatTab", () => {
   it("keeps List View as the only split-pane host for compact task chat", () => {
     const listSource = readFileSync(resolve(__dirname, "../ListView.tsx"), "utf8");
     const mainContentSource = readFileSync(resolve(__dirname, "../dashboard/MainContent.tsx"), "utf8");
+    const hostSource = readFileSync(resolve(__dirname, "../TaskDetailHostBoundaries.tsx"), "utf8");
 
-    expect(listSource).toContain('className="list-split-detail-content"');
-    expect(listSource).toContain("<TaskDetailContent");
-    expect(listSource).toContain("embedded");
-    expect(mainContentSource).toContain('className="task-detail-main-panel-body"');
-    expect(mainContentSource).toContain("<TaskDetailContent");
+    // FN-382: List delegates to its host's detail layer instead of mounting a split host of its own.
+    expect(listSource).not.toContain("<ListSplitTaskDetailHost");
+    expect(hostSource).toContain('className="list-split-detail-content"');
+    expect(hostSource).toContain("<TaskDetailContent");
+    expect(hostSource).toContain("embedded");
+    expect(mainContentSource).toContain("<MainPanelTaskDetailHost");
+    expect(hostSource).toContain('className="task-detail-main-panel-body"');
   });
 
   it("keeps task detail chat block inner padding tokenized across text, tool, and thinking surfaces", () => {

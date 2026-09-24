@@ -18,19 +18,25 @@ FINISHED canonical stops holding a near-duplicate flag open. Keyed on the litera
 canonical on a renamed board still read as ACTIVE, so the flag never cleared and the flagged task
 stayed parked behind a user decision that could never arrive — the exact stranding the FNXC note
 above says this function was written to prevent.
+
+DELIBERATE-LITERAL: the `column === "archived"` below is intentional — historical pre-reintegration
+rows in the sentinel column are inactive evidence, not a workflow terminal role, so they must be
+excluded by the literal sentinel id.
 */
 export function isActiveNearDuplicateColumn(
   column: ColumnId | null | undefined,
   columnFlags?: ColumnRoleTraitFlags,
 ): boolean {
   if (column === null || column === undefined) return true;
+  // Historical pre-reintegration rows are inactive evidence, not a workflow terminal role.
+  if (column === "archived") return false;
   return !isTerminalColumnRole(columnFlags, column);
 }
 
 /**
  * FNXC:NearDuplicateDetection 2026-06-14-12:00:
  * A near-duplicate flag is only actionable while its canonical task exists and remains active.
- * Treat missing, archived, done, and soft-deleted canonicals as inactive so stale persisted flags cannot strand executable work behind a false user-decision block.
+ * Treat missing, completed, and soft-deleted canonicals as inactive so stale persisted flags cannot strand executable work behind a false user-decision block.
  */
 export function isNearDuplicateCanonicalInactive(
   canonical: NearDuplicateCanonicalState | undefined,

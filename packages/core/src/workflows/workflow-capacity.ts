@@ -20,7 +20,10 @@
  * in-txn check arbitrates (two holds, one slot → one wins).
  */
 
-import { DEFAULT_PROJECT_SETTINGS, type Settings } from "../types.js";
+import {
+  DEFAULT_PROJECT_SETTINGS,
+  type Settings,
+} from "../types.js";
 import type { WorkflowIr, WorkflowIrV2, WorkflowIrColumn } from "./workflow-ir-types.js";
 import { DEFAULT_WORKFLOW_COLUMN_IDS } from "./workflow-ir.js";
 import { getTraitRegistry } from "./trait-registry.js";
@@ -111,22 +114,20 @@ export function resolveMaxConcurrentSetting(settings: ConcurrencySettingsInput):
 export interface EffectiveConcurrency {
   maxConcurrent: number;
   worktreeLimit: number | null;
-  effectiveLimit: number;
-  bindingKnob: "maxConcurrent" | "maxWorktrees";
 }
 
-/** Resolves the configured capacity and its visible, enforced effective ceiling. */
+/*
+FNXC:CapacityModel 2026-09-01-14:49:
+The two concurrency knobs are orthogonal. `maxConcurrent` bounds provider/LLM load across every
+AI-active task, including planning, while `maxWorktrees` bounds host build, memory, and disk load
+across execution checkouts only. Reintroducing one `Math.min(maxConcurrent, maxWorktrees)` ceiling
+would recreate FN-282: a small worktree cap would throttle checkout-free planning.
+*/
+/** Resolves the independent agent and worktree capacity dimensions. */
 export function resolveEffectiveConcurrency(settings: ConcurrencySettingsInput): EffectiveConcurrency {
-  const maxConcurrent = resolveMaxConcurrentSetting(settings);
-  const worktreeLimit = resolveWorktreeCapacityLimit(settings);
-  const bindingKnob = worktreeLimit !== null && worktreeLimit <= maxConcurrent
-    ? "maxWorktrees"
-    : "maxConcurrent";
   return {
-    maxConcurrent,
-    worktreeLimit,
-    effectiveLimit: worktreeLimit === null ? maxConcurrent : Math.min(maxConcurrent, worktreeLimit),
-    bindingKnob,
+    maxConcurrent: resolveMaxConcurrentSetting(settings),
+    worktreeLimit: resolveWorktreeCapacityLimit(settings),
   };
 }
 
@@ -157,9 +158,13 @@ resolvable workflow row id and is the correct fallback when the value is used to
 RESOLVE AN IR (as `scheduler.ts` does). This is a bucketing key that deliberately
 cannot collide with any workflow id. Using either one in the other's role is the
 bug this function exists to make unspellable.
+
+FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
 */
 export function resolveCapacityPoolId(selectionWorkflowId: string | null | undefined): string {
-  return selectionWorkflowId ?? DEFAULT_WORKFLOW_POOL_ID;
+  const poolId = selectionWorkflowId ?? DEFAULT_WORKFLOW_POOL_ID;
+  return poolId;
 }
 
 /** Resolved capacity configuration for a single column. */

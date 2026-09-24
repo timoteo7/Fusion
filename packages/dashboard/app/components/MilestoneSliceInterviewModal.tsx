@@ -1,3 +1,6 @@
+import { ViewActionButton } from "./ViewActionButton";
+import { ViewHeader } from "./ViewHeader";
+import { ViewLayout } from "./ViewLayout";
 import { useState, useCallback, useEffect, useRef, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import type { PlanningQuestion } from "@fusion/core";
@@ -32,6 +35,7 @@ import { ThinkingTrace } from "./ThinkingTrace";
 import { MailboxMessageContent } from "./MailboxMessageContent";
 import { useAiSessionSync } from "../hooks/useAiSessionSync";
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
+import { useKeyboardViewportOwnedByAncestor } from "../hooks/useKeyboardViewportSurface";
 import { useMobileScrollLock } from "../hooks/useMobileScrollLock";
 import { useViewportMode } from "../hooks/useViewportMode";
 import { FloatingWindow } from "./FloatingWindow";
@@ -88,7 +92,9 @@ export function MilestoneSliceInterviewModal({
   const { keyboardOverlap, viewportHeight, viewportOffsetTop, keyboardOpen } = useMobileKeyboard({
     enabled: viewportMode === "mobile",
   });
-  const keyboardStyle: CSSProperties = keyboardOpen
+  // FNXC:MobileKeyboardViewport 2026-09-17-15:32: FN-512 single-owner rule — a drawer/window host that already adapted its bottom edge must not be compensated again from inside.
+  const keyboardOwnedByAncestor = useKeyboardViewportOwnedByAncestor();
+  const keyboardStyle: CSSProperties = keyboardOpen && !keyboardOwnedByAncestor
     ? ({
         "--keyboard-overlap": `${keyboardOverlap}px`,
         "--vv-offset-top": `${viewportOffsetTop}px`,
@@ -408,33 +414,22 @@ export function MilestoneSliceInterviewModal({
   if (!isOpen) return null;
 
   return (
-    <FloatingWindow windowKey="milestone-slice-interview" modal testId="milestone-slice-interview-modal" title={t("missions.planTargetTitle", "Plan {{targetLabel}}: {{targetTitle}}", { targetLabel, targetTitle })} ariaLabel={t("missions.planTargetTitle", "Plan interview")} onClose={handleCancel} hideHeader dragHandleSelector=".planning-modal .modal-header" className="floating-window--milestone-slice-interview" defaultSize={{ width: 760, height: 640 }} minSize={{ width: 440, height: 320 }} persistGeometryKey="floating-window:milestone-slice-interview" suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport closeOnOutsidePointerDown>
+    <FloatingWindow windowKey="milestone-slice-interview" modal testId="milestone-slice-interview-modal" title={t("missions.planTargetTitle", "Plan {{targetLabel}}: {{targetTitle}}", { targetLabel, targetTitle })} ariaLabel={t("missions.planTargetTitle", "Plan interview")} onClose={handleCancel} hideHeader dragHandleSelector=".planning-modal .view-header" className="floating-window--milestone-slice-interview" defaultSize={{ width: 760, height: 640 }} minSize={{ width: 440, height: 320 }} suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport closeOnOutsidePointerDown>
       {/* FNXC:ModalTouchGeometry 2026-07-26-16:22: Interview dismissal still routes through handleCancel so confirmation semantics survive shared tablet geometry. */}
       <div className="modal modal-lg planning-modal" style={keyboardStyle}>
-        <div className="modal-header">
-          <div className="detail-title-row">
-            <Sparkles size={20} className="icon-triage" />
-            <h3>
-              {t("missions.planTargetTitle", "Plan {{targetLabel}}: {{targetTitle}}", { targetLabel, targetTitle })}
-            </h3>
-          </div>
-          <div className="modal-header-actions">
-            {showSendToBackgroundButton && (
-              <button
-                className="modal-send-to-background"
-                onClick={handleSendToBackground}
-                title={t("interview.sendToBackground", "Send to background")}
-                aria-label={t("interview.sendToBackground", "Send to background")}
-              >
-                <Minimize2 size={16} />
-              </button>
-            )}
-            <button className="modal-close" onClick={handleCancel} aria-label={t("actions.close", "Close")}>
-              <X size={20} />
-            </button>
-          </div>
-        </div>
-
+        {/* FNXC:StandardizedMissionInterviewLayout 2026-09-13-16:30: Milestone and slice interviews share the canonical header/content shell without changing cancel confirmation, backgrounding, or apply callbacks. */}
+        <ViewLayout
+          contentOwnsScroll
+          header={(
+            <ViewHeader
+              icon={Sparkles}
+              title={t("missions.planTargetTitle", "Plan {{targetLabel}}: {{targetTitle}}", { targetLabel, targetTitle })}
+              actions={showSendToBackgroundButton ? <ViewActionButton icon={Minimize2} label={t("interview.sendToBackground", "Send to background")} onClick={handleSendToBackground} /> : undefined}
+              onClose={handleCancel}
+              closeButtonProps={{ "aria-label": t("actions.close", "Close") }}
+            />
+          )}
+        >
         <div className="planning-modal-body">
           {error && <div className="form-error planning-error">{error}</div>}
           {/*
@@ -568,6 +563,7 @@ export function MilestoneSliceInterviewModal({
             </div>
           )}
         </div>
+        </ViewLayout>
       </div>
     </FloatingWindow>
   );

@@ -8,14 +8,16 @@
  */
 import type { Dispatch, LazyExoticComponent, SetStateAction } from "react";
 import type { TFunction } from "i18next";
+import type { ChatHost } from "../../utils/navigationPlacement";
+import type { TaskDetailDefaultTab } from "../../hooks/useAppSettings";
 import type {
   CapacityRiskSignal,
   ColorTheme,
+  UiStyle,
   ColumnId,
   GithubIssueAction,
   MergeResult,
   Task,
-  TaskColumnSortMode,
   TaskCreateInput,
   TaskDetail,
   ThemeMode,
@@ -31,13 +33,15 @@ import type {
   ProjectInfoWithSource,
   RevertTaskOptions,
   RevertTaskResult,
+  RestoreTaskRevertOptions,
+  RestoreTaskRevertResult,
   PluginDashboardViewEntry,
 } from "../../api";
 import type { FusionShellApi } from "../../types/native-shell";
 import type { DetailTaskOpenOptions, DetailTaskTab, ModalManager } from "../../hooks/useModalManager";
 import type { PluginTaskView, TaskView, ViewMode } from "../../hooks/useViewState";
 import type { ToastType } from "../../hooks/useToast";
-import type { QuickChatButtonMode } from "../../hooks/useAppSettings";
+import type { UseNotesController } from "../../hooks/useNotes";
 import type { UseRemoteNodeDataResult } from "../../hooks/useRemoteNodeData";
 import type { SectionId } from "../SettingsModal";
 import type { CliActionId } from "../SessionNotificationBanner";
@@ -52,11 +56,11 @@ import { ChatView } from "../ChatView";
 import type { ChatSessionInfo } from "../../hooks/useChat";
 import { CommandCenter } from "../command-center/CommandCenter";
 import { DevServerView } from "../DevServerView";
-import { DocumentsView } from "../DocumentsView";
+import { NotesView } from "../NotesView";
+import { WhiteboardView } from "../WhiteboardView";
 import { EvalsView } from "../EvalsView";
 import { GitHubImportModal } from "../GitHubImportModal";
 import { GoalsView } from "../GoalsView";
-import { PatchnodeView } from "../PatchnodeView";
 import { InsightsView } from "../InsightsView";
 import { MemoryView } from "../MemoryView";
 import { PullRequestView } from "../PullRequestView";
@@ -64,6 +68,7 @@ import { ResearchView } from "../ResearchView";
 import { ScheduledTasksModal } from "../ScheduledTasksModal";
 import { SecretsView } from "../SecretsView";
 import { SkillsView } from "../SkillsView";
+import { SnippetsView } from "../SnippetsView";
 import { WorkflowNodeEditor } from "../WorkflowNodeEditor";
 
 export interface MainContentProps {
@@ -89,20 +94,26 @@ export interface MainContentProps {
   pluginDashboardViews: PluginDashboardViewEntry[];
   modalManager: ModalManager;
   handleChangeTaskView: (newView: TaskView) => void;
+  /* FNXC:HistoryModalSurface 2026-09-15-04:29: FN-403: History is a modal surface, not a view. Board's complete-column action calls this nav-aware opener instead of navigating. */
+  openHistory: () => void;
   refreshAppSettings: () => Promise<void>;
   addToast: (message: string, type?: ToastType) => void;
   currentProject: ProjectInfo | null;
   themeMode: ThemeMode;
   setThemeMode: (mode: ThemeMode) => void;
   colorTheme: ColorTheme;
+  /* FNXC:UiStyleAxis 2026-09-15-00:20: second, independent appearance axis owned by the single useTheme instance in App. */
+  uiStyle: UiStyle;
+  setUiStyle: (style: UiStyle) => void;
   setColorTheme: (theme: ColorTheme) => void;
   dashboardFontScalePct: number;
   setDashboardFontScalePct: (scalePct: number) => void;
   shadcnCustomColors: Record<string, string>;
   setShadcnCustomColors: (colors: Record<string, string>) => void;
   resolvedThemeMode: "dark" | "light";
-  setQuickChatButtonModeImmediate: (mode: QuickChatButtonMode) => void;
   setMobileNavPrimaryItemsImmediate: (items: string[]) => void;
+  /* FN-511 : aperçu live de l'option mobile de tiroir gestuel depuis les Réglages embarqués. */
+  setMobileNavMenuSwipeGestureImmediate: (enabled: boolean) => void;
   reopenOnboardingWithNav: () => void;
   viewMode: ViewMode;
   projects: ProjectInfoWithSource[];
@@ -136,21 +147,18 @@ export interface MainContentProps {
   mergeStrategy: string;
   planAutoApproveEnabled: boolean;
   settingsLoaded: boolean;
-  openTasksInRightSidebar: boolean;
-  openMobileTasksInPopup: boolean;
-  taskPopupsBoardListOnly: boolean;
   showCostBadgeOnCards: boolean;
-  taskDetailChatFirst: boolean;
+  /* FNXC:TaskDetailDefaultTab 2026-09-16-02:53: FN-442 — project choice of the task-detail landing tab and tab-bar head order. */
+  taskDetailDefaultTab: TaskDetailDefaultTab;
   chatMessageLayout: "bubbles" | "full-width";
-  setOpenTasksInRightSidebarImmediate: (enabled: boolean) => void;
-  setOpenMobileTasksInPopupImmediate: (enabled: boolean) => void;
-  setTaskPopupsBoardListOnlyImmediate: (enabled: boolean) => void;
+  /* FNXC:RightSidebarOptional 2026-09-15-16:04: FN-426 — the embedded Settings host mirrors the same live opt-in as the modal one. */
+  rightSidebarEnabled: boolean;
+  setRightSidebarEnabledImmediate: (enabled: boolean) => void;
   setShowCostBadgeOnCardsImmediate: (enabled: boolean) => void;
-  setTaskDetailChatFirstImmediate: (enabled: boolean) => void;
+  setTaskDetailDefaultTabImmediate: (tab: TaskDetailDefaultTab) => void;
   setChatMessageLayoutImmediate: (layout: "bubbles" | "full-width") => void;
   skillsEnabled: boolean;
   experimentalFeatures: Record<string, boolean>;
-  setQuickChatOpen: Dispatch<SetStateAction<boolean>>;
   onOpenSessionInNewWindow?: (session: ChatSessionInfo) => void;
   /** Optional so existing MainContent callers preserve their unseeded Chat behavior. */
   chatComposerPrefill?: { text: string; nonce: number } | null;
@@ -174,6 +182,12 @@ export interface MainContentProps {
   handleOpenTaskLogs: (taskId: string) => Promise<void>;
   popOutTaskDetail: (task: Task | TaskDetail) => void;
   selectedPrId: string | undefined;
+  /*
+  FNXC:ToolSurfaces 2026-09-15-16:04:
+  FN-426: which Git Manager section the page should land on. App sets `pull-requests` when the request arrived through
+  a Pull Requests entry point or a legacy `?view=pull-requests` link.
+  */
+  gitManagerInitialSection?: import("../GitManagerModal").SectionId;
   insightsEnabled: boolean;
   handleInsightTaskCreate: (input: { insightId: string; title: string; description: string }) => Promise<void>;
   researchEnabled: boolean;
@@ -181,26 +195,28 @@ export interface MainContentProps {
   researchReadinessVersion: number;
   evalsEnabled: boolean;
   ideationEnabled: boolean;
+  whiteboardEnabled: boolean;
   memoryEnabled: boolean;
   goalsEnabled: boolean;
   handleOpenMission: (missionId: string) => void;
   openPlanningWithInitialPlanWithNav: (initialPlan: string, workflowId?: string | null, sourceIssue?: { provider: "github"; repository: string; issueNumber: number; url: string; title?: string }) => void;
   ingestCreatedTasks: (tasks: Task[]) => void;
   nodesEnabled: boolean;
-  openWorkflowEditorWithNav: (workflowId?: string) => void;
   handleGitHubImport: (task: Task) => void;
   devServerEnabled: boolean;
   mainPanelDetailTask: Task | TaskDetail | null;
   filteredBoardTasks: Task[];
   maxConcurrent: number;
-  /** Shared effective ceiling used by board previews and engine admission. */
-  effectiveMaxConcurrent: number;
+  /** Execution-worktree ceiling used by the board's Up Next worktree preview. */
+  maxWorktrees: number;
   showWorktreeGrouping: boolean;
   moveTask: (
     id: string,
     column: ColumnId,
     optionsOrPosition?: { preserveProgress?: boolean; expectedColumn?: string } | number,
   ) => Promise<Task>;
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509's durable move-to-head; see `useTasks.boostTask`. */
+  boostTask: (id: string, scope?: { expectedColumn?: string; expectedColumnEntryAt?: string }) => Promise<Task>;
   pauseTask: (id: string) => Promise<Task>;
   openBoardTaskDetail: (task: Task | TaskDetail, initialTab?: DetailTaskTab) => void;
   openTaskDetailInMainPanel: (task: Task | TaskDetail, initialTab?: DetailTaskTab) => void;
@@ -214,15 +230,11 @@ export interface MainContentProps {
     id: string,
     updates: { title?: string; description?: string; dependencies?: string[]; dismissNearDuplicate?: boolean },
   ) => Promise<Task>;
-  retryTask: (id: string) => Promise<Task>;
-  archiveTask: (id: string, options?: { removeLineageReferences?: boolean }) => Promise<Task>;
-  unarchiveTask: (id: string) => Promise<Task>;
-  /*
-  FNXC:TaskRevert 2026-07-05-00:00 (FN-7525):
-  Threaded alongside archiveTask/unarchiveTask; never mutates the source
-  task's column as a side effect (see route + client contract comments).
-  */
+  /* FNXC:ColumnRestart 2026-09-17-09:16 (FN-499): optional preserve-work choice; an option-free call keeps today's destructive restart. */
+  retryTask: (id: string, options?: { preserveWork?: boolean }) => Promise<Task>;
   revertTask: (id: string, body?: RevertTaskOptions) => Promise<RevertTaskResult>;
+  /* FNXC:TaskRevert 2026-09-15-10:00 (FN-416): restore-the-revert operation forwarded to board/list surfaces. */
+  restoreTaskRevert: (id: string, body?: RestoreTaskRevertOptions) => Promise<RestoreTaskRevertResult>;
   deleteTask: (
     id: string,
     options?: {
@@ -232,18 +244,26 @@ export interface MainContentProps {
       allowResurrection?: boolean;
     },
   ) => Promise<Task>;
-  archiveAllDone: () => Promise<Task[]>;
-  loadArchivedTasks: () => Promise<void>;
-  /** FNXC:ArchivePagination 2026-07-08-00:00: FN-7659 — fetch the next 100-item page of archived tasks (newest-first). */
-  loadMoreArchivedTasks: () => Promise<void>;
-  /** Board action callback that commits Archive order only after its first replacement page succeeds. */
-  changeArchivedSortMode: (mode: TaskColumnSortMode) => Promise<void>;
-  /** Committed server-backed Archive order. */
-  archivedSortMode: TaskColumnSortMode;
-  /** Whether another page of archived tasks is available beyond what is currently loaded. */
-  archivedHasMore: boolean;
-  /** True while a "Show more" archived page fetch is in flight. */
-  archivedLoadingMore: boolean;
+  loadMoreCurrentTasks: () => Promise<void>;
+  currentTasksTotal: number;
+  currentTasksHasMore: boolean;
+  currentTasksLoadingMore: boolean;
+  currentTasksPaginationError?: "timeout" | "invalid-continuation" | "request-failed" | null;
+  currentTasksProgressKey?: string;
+  retryCurrentTasksPagination?: () => Promise<void>;
+  loadMoreCompletedTasks: () => Promise<void>;
+  completedCounts: {
+    byColumn: Record<string, number>;
+    byWorkflow: Record<string, Record<string, number>>;
+  };
+  completedHasMore: boolean;
+  completedLoadingMore: boolean;
+  completedPaginationError?: "timeout" | "invalid-continuation" | "request-failed" | null;
+  completedProgressKey?: string;
+  retryCompletedTasksPagination?: () => Promise<void>;
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 removed the selectable Complete order with the
+     column "…" menu. Done is always most-recent-arrival first, so there is no mode to hold, thread,
+     or persist — and no stale cursor minted under a different order to replay. */
   searchQuery: string;
   availableModels: ModelInfo[];
   favoriteProviders: string[];
@@ -254,9 +274,17 @@ export interface MainContentProps {
   // FNXC:StuckTagRemoval 2026-08-17-22:30: stuck-task tagging removed from the dashboard; taskStuckTimeoutMs is engine-side only now.
   staleHighFanoutBlockerAgeThresholdMs: number;
   lastFetchTimeMs: number | undefined;
-  openCreateWorkflowWithNav: () => void;
   sidebarActive: boolean;
+  /*
+  FNXC:ChatSurfaceUnification 2026-09-15-14:41:
+  FN-419: the App-resolved primary Chat host. `"sidebar-page"` makes Chat an ordinary main-page destination (like
+  Notes) without any mobile drawer wrapper; omitted/`"dock"` preserves the wide dock hand-off.
+  */
+  chatPageHost?: ChatHost;
+  notesController?: UseNotesController;
+  registerNotesGuard?: (guard: () => boolean | Promise<boolean>, onAccepted?: () => void) => () => void;
   isMobile: boolean;
+  /** Whether the measured navigation pill is currently rendered and needs drawer clearance. */
   mainPanelDetailInitialTab: DetailTaskTab | undefined;
   closeTaskDetailMainPanel: () => void;
   setMainPanelDetailTask: Dispatch<SetStateAction<Task | TaskDetail | null>>;
@@ -273,16 +301,17 @@ export interface MainContentProps {
   ChatView: LazyExoticComponent<typeof ChatView>;
   CommandCenter: LazyExoticComponent<typeof CommandCenter>;
   DevServerView: LazyExoticComponent<typeof DevServerView>;
-  DocumentsView: LazyExoticComponent<typeof DocumentsView>;
+  NotesView: LazyExoticComponent<typeof NotesView>;
+  WhiteboardView: LazyExoticComponent<typeof WhiteboardView>;
   EvalsView: LazyExoticComponent<typeof EvalsView>;
   GoalsView: LazyExoticComponent<typeof GoalsView>;
-  PatchnodeView: LazyExoticComponent<typeof PatchnodeView>;
   InsightsView: LazyExoticComponent<typeof InsightsView>;
   MemoryView: LazyExoticComponent<typeof MemoryView>;
   PullRequestView: LazyExoticComponent<typeof PullRequestView>;
   ResearchView: LazyExoticComponent<typeof ResearchView>;
   SecretsView: LazyExoticComponent<typeof SecretsView>;
   SkillsView: LazyExoticComponent<typeof SkillsView>;
+  SnippetsView: LazyExoticComponent<typeof SnippetsView>;
   _AutomationsView: LazyExoticComponent<typeof ScheduledTasksModal>;
   _ImportTasksView: LazyExoticComponent<typeof GitHubImportModal>;
   _SettingsView: LazyExoticComponent<typeof SettingsView>;

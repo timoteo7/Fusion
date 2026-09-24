@@ -1,12 +1,9 @@
 import {
-  DEFAULT_TASK_PRIORITY,
   resolveEffectiveSettingsDetailedById,
   resolvePlanningSettingsModel,
   resolveTaskOutputLanguage,
-  TASK_PRIORITIES,
   THINKING_LEVELS,
   type PlanningSummary,
-  type TaskPriority,
   type TaskStore,
   type ThinkingLevel,
 } from "@fusion/core";
@@ -696,8 +693,7 @@ export function registerPlanningSubtaskRoutes(ctx: ApiRoutesContext, deps: Plann
     }
   });
 
-  const isTaskPriority = (value: unknown): value is TaskPriority =>
-    typeof value === "string" && (TASK_PRIORITIES as readonly string[]).includes(value);
+  /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 deleted the local priority guard with the field. */
 
   const parsePlanningSummaryOverride = (summaryInput: unknown): PlanningSummary | undefined => {
     if (summaryInput === undefined) {
@@ -941,7 +937,7 @@ export function registerPlanningSubtaskRoutes(ctx: ApiRoutesContext, deps: Plann
       let claimEpoch = session?.taskCreationEpoch ?? 0;
       const currentProposalClaimId = () => planningProposalClaimId(sessionId, claimEpoch);
       const findCreatedTask = async () =>
-        (await scopedStore.listTasks({ includeArchived: true })).find((candidate) => candidate.proposalClaimId === currentProposalClaimId());
+        (await scopedStore.listTasks({ includeArchived: false })).find((candidate) => candidate.proposalClaimId === currentProposalClaimId());
       /*
       FNXC:PlanningMode 2026-07-23-12:10 (updated FNXC:PlanningMultiTask 2026-07-24-01:40):
       The claim model allows exactly one task per creation EPOCH — a session can produce
@@ -977,12 +973,12 @@ export function registerPlanningSubtaskRoutes(ctx: ApiRoutesContext, deps: Plann
         Reported bug: deleting the task created from a plan left the session permanently
         dead-ended on PLANNING_CREATED_TASK_MISSING — Retry create replayed the same 409
         forever. Distinguish "task deleted" from "transient read failure" using the
-        include-archived task scan (the same crash-window authority findCreatedTask uses):
-        if the linked id is still LISTED but getTask failed, keep failing closed (never fork
+        live task scan (the same crash-window authority findCreatedTask uses): if the linked id is
+        still LISTED but getTask failed, keep failing closed (never fork
         on a flaky read); if it is absent from the full list, the linkage is stale — clear it
         so this request falls through and creates a fresh task under the current epoch key.
         */
-        const allTasks = await scopedStore.listTasks({ includeArchived: true }).catch(() => null);
+        const allTasks = await scopedStore.listTasks({ includeArchived: false }).catch(() => null);
         const stillListed = allTasks === null || allTasks.some((task) => task.id === candidate.createdTaskId);
         if (stillListed) throw conflict("PLANNING_CREATED_TASK_MISSING");
         const staleTaskId = candidate.createdTaskId;
@@ -1078,7 +1074,9 @@ export function registerPlanningSubtaskRoutes(ctx: ApiRoutesContext, deps: Plann
         title: summary.title,
         description: sourceContext ? appendSourceIssueBlock(planMd, sourceContext.markdown, sourceContext.sourceIssue.url ?? "") : planMd,
         dependencies: summary.suggestedDependencies.length > 0 ? summary.suggestedDependencies : undefined,
-        priority: isTaskPriority(summary.priority) ? summary.priority : DEFAULT_TASK_PRIORITY,
+        /* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 — a legacy saved summary may still carry a level in
+       its raw JSON. It is DROPPED here rather than converted into a rank, so resuming an old
+       planning session keeps working without reintroducing a priority. */
         ...(sourceContext ? { sourceIssue: sourceContext.sourceIssue, source: { sourceType: "github_import" as const, sourceMetadata: sourceContext.sourceMetadata }, ...(trackingDecision?.githubTracking ? { githubTracking: trackingDecision.githubTracking } : {}) } : { source: { sourceType: "api" as const } }),
         branch: resolvedBranch,
         ...(resolvedBranch !== undefined ? { branchWriteOrigin: "operator" as const } : {}),

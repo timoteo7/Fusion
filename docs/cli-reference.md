@@ -67,38 +67,7 @@ For safe publication, first call `fn_task_document_read`, then write with the re
 }
 ```
 
-Revision zero means create only if absent. On success the tool returns the new revision and content hash. A stale expectation returns an error result with code `TASK_DOCUMENT_PRECONDITION_FAILED` and current revision/hash; re-read, reconcile the newer content, and submit a deliberate rebased write. The tool never retries or overwrites automatically. Omitting both expectations retains the legacy unconditional contract. These ordinary tools reject archived parents; there is no `allowArchived` tool parameter.
-
-### Operator API: append to a retained archived document
-
-Archived correction publication is an authenticated HTTP API, not an `fn` binary subcommand or agent tool. It requires active daemon bearer authentication; Fusion launched with `--no-auth` returns `403`. First read the exact current revision/hash, then submit only the suffix:
-
-```bash
-BASE=http://127.0.0.1:4040/api
-TASK=FX-DISPOSABLE
-KEY=docs
-TOKEN="$FUSION_DAEMON_TOKEN"
-
-curl -fsS -H "Authorization: Bearer $TOKEN" \
-  "$BASE/tasks/$TASK/documents/$KEY" > /tmp/fusion-current-document.json
-
-REVISION=$(jq -r .revision /tmp/fusion-current-document.json)
-CONTENT_HASH=$(jq -r .contentHash /tmp/fusion-current-document.json)
-
-curl -fsS -X POST \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  "$BASE/tasks/$TASK/documents/$KEY/archived-publications" \
-  --data "$(jq -n \
-    --arg appendContent 'Correction text' \
-    --arg expectedContentHash "$CONTENT_HASH" \
-    --arg author 'operator' \
-    --arg reason 'Correct retained evidence' \
-    --argjson expectedRevision "$REVISION" \
-    '{appendContent, expectedRevision, expectedContentHash, author, reason}')"
-```
-
-Fusion constructs `existing content + "\n\n" + appendContent`; callers cannot send replacement `content` or metadata. Responses are `201` on committed append, `400` for malformed/unknown fields, `403` when the privileged capability is unavailable, `404` for a missing archived parent/document, and `409` for non-archived/inconsistent state or stale CAS. On `409 TASK_DOCUMENT_PRECONDITION_FAILED`, re-read current content/revision/hash, verify whether the correction is still needed, and submit a newly rebased append; never retry the stale body unchanged. In multi-project operation, use the same project selector as other task APIs so every read and publication resolves within one project.
+Revision zero means create only if absent. On success the tool returns the new revision and content hash. A stale expectation returns an error result with code `TASK_DOCUMENT_PRECONDITION_FAILED` and current revision/hash; re-read, reconcile the newer content, and submit a deliberate rebased write. The tool never retries or overwrites automatically. Omitting both expectations retains the legacy unconditional contract. These ordinary tools reject soft-deleted parents and historical sentinel rows; there is no task-archive publication path.
 
 ## Workflow commands
 
@@ -811,19 +780,15 @@ fn task steer FN-001 "Reuse existing auth middleware"
 ```bash
 fn task attach FN-001 ./trace.log
 fn task merge FN-001
+fn task reconcile FN-001
 fn task duplicate FN-001
 fn task refine FN-001 --feedback "Add rollback handling"
-fn task archive FN-001
-fn task archive FN-001 --force
-fn task unarchive FN-001
 fn task delete FN-001 --force
 ```
 
 Notes:
+- `fn task reconcile <id>` closes an in-review card only when its base branch carries an ownership-anchored landed commit. It refuses paused, leased, live, raced, or unproven cards and never bypasses review approval; use `fn task merge` for the normal live-branch path.
 - Interrupting `fn task merge` aborts its merge and clears its transient merge status: Ctrl-C (`SIGINT`) exits 130, `SIGTERM` exits 143, and a closed terminal (`SIGHUP`) exits 129. Unlike `fn serve`, `fn dashboard`, and the daemon, this one-shot foreground command deliberately does not survive terminal disconnects.
-- `fn task archive` accepts live-board tasks and preserves the original column for restore. It refuses tasks in a WIP lane or active merge pipeline to protect another process's worktrees; a human operator may use `--force` to override this destructive guard.
-- The agent-facing `fn_task_archive` tool returns a structured error for the same live-task refusal and deliberately has no force parameter.
-- `fn task unarchive` restores to the saved pre-archive column when available, with legacy archives falling back to `done`.
 
 ### Branch conflict handling
 
@@ -914,6 +879,30 @@ fn mesh status [--json]
 ```
 
 Subcommands: `status`.
+
+---
+
+## `fn cloud`
+
+Link a local Fusion engine to a cloud control plane. Set `FUSION_CLOUD_HTTP_URL` to the HTTPS control-plane base URL, or pass `--http <url>` to `pair-start` or `pair-complete`. Plain HTTP is accepted only for loopback development endpoints.
+
+```bash
+fn cloud pair-start --http https://cloud.example.com [--name <engine-name>]
+fn cloud pair-complete [--http https://cloud.example.com] [--code <pairing-code>]
+fn cloud heartbeat [--url <engine-origin>] [--port <port>] [--no-tunnel]
+fn cloud status [--json]
+fn cloud unlink
+```
+
+Subcommands: `pair-start`, `pair-complete`, `heartbeat`, `status`, `unlink`.
+
+- `pair-start` requests a pairing code and stores its pending pairing data in `~/.fusion/cloud-link-pending.json`.
+- `pair-complete` promotes a claimed pairing to `~/.fusion/cloud-link.json`. It refuses `--pending-secret` in both `--flag value` and `--flag=value` forms so a pairing password is never exposed in a process listing or shell history. It reads the password from the mode-`0600` pending file by default, or from `FUSION_CLOUD_PENDING_SECRET` when an override is necessary.
+- `heartbeat --url <engine-origin>` and `heartbeat --no-tunnel` each send one reachability update. A bare `heartbeat` starts a Cloudflare Quick Tunnel and publishes presence every 20 seconds until you press Ctrl+C. `fn serve` and `fn dashboard` use the same tunnel-and-publish behavior for their process lifetime when the engine is linked.
+- `status --json` prints `{ linked, engineId, name, httpBaseUrl, linkedAt }`; when unlinked it prints `{ "linked": false }`.
+- `unlink` removes both the linked credential file and the pending pairing file.
+
+The linked device credential and pending pairing files are written with mode `0600`, limiting access to the owning operating-system user. They are local credentials in the same threat class as `~/.fusion/auth.json`; they are not encrypted at rest because cloud pairing must work before Fusion's PostgreSQL-backed SecretsStore is available, and any same-user process that can read the file can also read a local wrapping key.
 
 ---
 
@@ -1303,14 +1292,41 @@ fn git push --yes
 
 ## `fn backup`
 
-Database backup lifecycle.
+PostgreSQL backup lifecycle.
 
 ```bash
 fn backup --create
 fn backup --list
-fn backup --restore .fusion/backups/fusion-2026-04-08.db
+fn backup --restore .fusion/backups/fusion-pg-20260831-120000.dump
+fn backup --restore .fusion/backups/fusion-central-pg-20260831-120000.dump
 fn backup --cleanup
 ```
+
+`--create` writes a same-stem `fusion-pg-<timestamp>.dump` containing the
+`project` and `archive` schemas, a `fusion-central-pg-<timestamp>.dump`
+containing the `central` schema, and a `fusion-migrations-pg-<timestamp>.dump`
+containing `public.fusion_schema_migrations`. Dumps are written through private in-progress
+artifacts and atomically published, so `--list` never offers an in-progress
+artifact; it shows complete pairs and either kind of orphan without treating
+legacy `.db` files as PostgreSQL backups. `--cleanup` also removes abandoned
+in-progress artifacts from a crashed backup, but never a live backup claim.
+
+Restoring a project/archive dump validates all available source archives, retains a
+new current-state `fusion-pre-restore-pg-*` + `fusion-central-pre-restore-pg-*` +
+`fusion-migrations-pre-restore-pg-*` stem, then restores project/archive, central,
+and migration bookkeeping in that order. Migration bookkeeping restoration is refused
+before mutation if a caller disables the pre-restore capture, because that capture is
+the rollback source. If bookkeeping restore fails, Fusion rolls every committed group
+back from the retained stem. Selecting a `fusion-central-pg-*` dump is the explicit
+central-only operation and leaves bookkeeping untouched. Legacy two-member stems remain
+restorable and report bookkeeping as unavailable; Fusion then rewinds
+`public.fusion_schema_migrations` from the earliest missing CREATE-TABLE sentinel
+and replays pending migrations so an older dump cannot skip later schema upgrades.
+
+Native backup commands do not provide cross-process locking or cluster-wide
+quiescence. Before list, create, cleanup, or especially restore, quiesce other
+Fusion writers and prevent competing native backup commands. Preserve every
+pre-restore dump after failure until recovery is reviewed.
 
 ---
 

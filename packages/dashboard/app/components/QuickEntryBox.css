@@ -88,24 +88,10 @@ smallest defined token, --space-xs (4px), instead of reintroducing --space-2xs.
 }
 
 /*
-FNXC:QuickEntry 2026-06-22-19:25:
-List view renders quick-add as a COMPACT single-line input so the box isn't tall.
-Clamp the textarea to exactly one line (min-height == max-height == one line), forbid auto-grow/manual resize, and scroll overflow instead of growing.
-Tighten container vertical padding so the overall box is just the one-line input height.
-Board/columns omit `.quick-entry--single-line`, keeping the tall 80px + auto-grow behavior.
+FNXC:QuickEntry 2026-09-14-03:31:
+The List-only one-line clamp rules are deleted with the prop they styled. List and Board render the same composer, so
+a host-specific compact textarea would reintroduce exactly the divergence this deletion closes.
 */
-.quick-entry--single-line {
-  padding-top: var(--space-xs);
-  padding-bottom: var(--space-xs);
-}
-
-.quick-entry-box.quick-entry--single-line .quick-entry-input,
-.quick-entry-box.quick-entry--single-line .quick-entry-input--expanded {
-  min-height: 36px;
-  max-height: 36px;
-  overflow-y: auto;
-  resize: none;
-}
 
 @media (max-width: 768px) {
   .quick-entry-input--expanded {
@@ -483,22 +469,10 @@ FN-7682 — the tokenized-CSS test forbids raw px in the workflow-selector rules
   position: relative;
 }
 
-.node-trigger-wrap,
-.priority-trigger-wrap {
+/* FNXC:TaskQueueOrder 2026-09-17-12:07: FN-509 removed Quick Add priority trigger and picker portal. */
+.node-trigger-wrap {
   position: relative;
   display: inline-flex;
-}
-
-.priority-picker-dropdown {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  background: var(--surface);
-  z-index: 1000;
-}
-
-.priority-picker-dropdown--portal {
-  position: fixed;
 }
 
 .node-picker-dropdown {
@@ -945,6 +919,200 @@ shared left/right edges and compact gaps. Keep the centered cluster desktop-only
 
   .quick-entry-primary-group .btn-icon {
     min-width: var(--space-2xl);
+  }
+}
+
+/*
+FNXC:NativeQuickEntry 2026-09-13-15:19:
+Quick Entry is input-first: the immediate attach/status/icon-only Save row remains visible, and routing options appear as a quiet second row only after disclosure. During the Start hold, a warning-colored mask rises from the bottom, covers the corresponding portion of Save, and reveals an undistorted Play icon. On mobile, every primary icon action shares the same `--ui-touch-height` square without imposing that fixed width on text option controls. Desktop/tablet metrics, the List host, legacy controls, and reduced-motion timing remain unchanged.
+*/
+.quick-entry-box {
+  padding: var(--ui-density-sm);
+  margin-bottom: var(--ui-density-sm);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.quick-entry-input {
+  min-height: calc(var(--ui-control-height) + var(--ui-density-sm));
+  max-height: calc(var(--ui-control-height) * 5);
+  padding: var(--ui-density-sm);
+  border: 0;
+  border-radius: var(--field-radius);
+  background: var(--bg);
+}
+
+.quick-entry-input--expanded {
+  min-height: calc(var(--ui-control-height) * 2);
+}
+
+.quick-entry-controls {
+  margin-top: var(--ui-density-sm);
+  gap: var(--ui-density-sm);
+}
+
+.quick-entry-actions {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: var(--ui-density-sm);
+}
+
+.quick-entry-primary-group {
+  order: -1;
+  width: 100%;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  gap: var(--ui-density-2xs);
+}
+
+.quick-entry-primary-group [data-testid="quick-entry-save"] {
+  margin-inline-start: auto;
+  min-width: var(--ui-control-height);
+  width: var(--ui-control-height);
+  min-height: var(--ui-control-height);
+  max-height: var(--ui-control-height);
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.quick-entry-save-icons,
+.quick-entry-save-icon,
+.quick-entry-save-ring {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.quick-entry-save-icon--save {
+  z-index: 1;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+/*
+FNXC:NativeQuickEntry 2026-09-16-23:28:
+FN-478: the floppy turns INTO a circular progress ring. The ring only paints once the press is an ENGAGED hold, so a brief
+click never flashes it. `--quick-entry-hold-duration` is the REMAINING fill time after engagement, not the whole hold
+threshold, so the arc reaching 100% still coincides with Start. FN-498 (2026-09-17-09:02) raised that threshold by 20%
+without touching the engagement delay, so the remaining fill simply grew and the arc still lands exactly on Start. Releasing early cancels the gesture: the ring disappears and
+the floppy comes back. The SVG is sized as a percentage of the button so it stays inside `overflow: hidden` at both the
+desktop (`--ui-control-height`) and mobile (`--ui-touch-height`) control sizes.
+*/
+.quick-entry-save > .quick-entry-save-icons > .quick-entry-save-ring {
+  z-index: 2;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.quick-entry-save-ring > svg {
+  width: 70%;
+  height: 70%;
+  overflow: visible;
+}
+
+.quick-entry-save-ring__track,
+.quick-entry-save-ring__indicator {
+  stroke-width: 4;
+}
+
+.quick-entry-save-ring__track {
+  stroke: color-mix(in srgb, currentColor 25%, transparent);
+}
+
+.quick-entry-save-ring__indicator {
+  stroke: var(--color-warning);
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+}
+
+.quick-entry-save[data-hold-state="holding"] > .quick-entry-save-icons > .quick-entry-save-ring {
+  opacity: 1;
+}
+
+.quick-entry-save[data-hold-state="holding"] .quick-entry-save-icon--save {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+.quick-entry-save[data-hold-state="holding"] .quick-entry-save-ring__indicator {
+  animation: quick-entry-hold-ring var(--quick-entry-hold-duration) linear forwards;
+}
+
+@keyframes quick-entry-hold-ring {
+  to { stroke-dashoffset: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick-entry-save[data-hold-state="holding"] .quick-entry-save-icon--save,
+  .quick-entry-save[data-hold-state="holding"] > .quick-entry-save-icons > .quick-entry-save-ring {
+    transition: none;
+  }
+
+  .quick-entry-save[data-hold-state="holding"] .quick-entry-save-ring__indicator {
+    animation: none;
+    stroke-dashoffset: 50;
+  }
+}
+
+.quick-entry-options-group {
+  width: 100%;
+  padding-top: var(--ui-density-sm);
+  border-top: var(--border-width) solid var(--border);
+  justify-content: flex-start;
+  gap: var(--ui-density-2xs);
+}
+
+.quick-entry-options-group[hidden] {
+  display: none;
+}
+
+.quick-entry-actions :is(.btn, .wf-optional-steps-dropdown-trigger) {
+  min-height: var(--ui-control-height);
+  max-height: var(--ui-control-height);
+  padding-inline: var(--ui-density-sm);
+}
+
+@media (max-width: 768px) {
+  .quick-entry-box {
+    padding: var(--ui-density-sm);
+  }
+
+  .quick-entry-actions,
+  .quick-entry-options-group,
+  .quick-entry-primary-group {
+    justify-content: flex-start;
+    column-gap: var(--ui-density-2xs);
+  }
+
+  .quick-entry-primary-group {
+    flex-wrap: wrap;
+  }
+
+  .quick-entry-actions :is(.btn, .wf-optional-steps-dropdown-trigger),
+  .quick-entry-primary-group [data-testid="quick-entry-save"] {
+    min-height: var(--ui-touch-height);
+    max-height: var(--ui-touch-height);
+  }
+
+  .quick-entry-primary-group .btn-icon {
+    flex: 0 0 var(--ui-touch-height);
+    width: var(--ui-touch-height);
+    min-width: var(--ui-touch-height);
+    max-width: var(--ui-touch-height);
+    height: var(--ui-touch-height);
+    min-height: var(--ui-touch-height);
+    max-height: var(--ui-touch-height);
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .quick-entry-primary-group [data-testid="quick-entry-save"] {
+    margin-inline-start: auto;
   }
 }
 

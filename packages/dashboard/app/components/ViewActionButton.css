@@ -1,0 +1,216 @@
+/*
+FNXC:StandardizedViewActions 2026-09-13-16:12:
+Header actions reuse the shared button system and icon metrics. Phone chrome hides only the redundant action label, never labels belonging to tabs, list choices, or forms.
+
+FNXC:IconOnlyButtonCanon 2026-09-16-19:05:
+FN-471 supersedes the 44px touch-target rule that the note above carried for the ICON-ONLY presentations of
+these two shared owners. A button reduced to its glyph now uses the canonical shared geometry (28px desktop /
+36px mobile) and one of the two canonical variants only; the 44px floor stays with LABELLED controls, list
+rows, tabs, and selects. The collapsed create action is therefore bordered, never a filled CTA square.
+*/
+/*
+FNXC:IconOnlyButtonCanon 2026-09-17-09:26:
+FN-502 opens a badge slot next to the label. `position: relative` only establishes the containing block the collapsed
+phone presentation needs to pin that badge to a corner; it changes no box, glyph, or spacing metric, so the canonical
+geometry contracts (`--icon-button-size-mobile`, `--icon-button-glyph-scale-mobile`, FN-486 chevron parity) are intact.
+*/
+.view-action-button {
+  position: relative;
+  gap: var(--space-xs);
+  white-space: nowrap;
+}
+
+.view-action-button__badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}
+
+.view-action-button > svg,
+.view-back-button > svg {
+  flex: none;
+  inline-size: var(--icon-size-sm);
+  block-size: var(--icon-size-sm);
+  pointer-events: none;
+}
+
+/*
+FNXC:ViewBackIconParity 2026-09-17-03:18:
+FN-486 : le retour et la création doivent avoir EXACTEMENT la même géométrie visible. La déclaration
+ci-dessus était inerte pour le chevron : `styles.css` est chargé en DERNIER et y repose `.btn-icon > svg`
+à spécificité égale (0,1,1) avec les propriétés PHYSIQUES `width`/`height`, qui l'emportaient donc par
+ordre de document et donnaient au chevron un pictogramme plus grand que celui du « + ». Cette règle porte
+la même intention à 0,2,1, en propriétés physiques, sans `!important` ni `:not()` : elle gagne de manière
+déterministe pour ce seul bouton, et ne touche ni les autres `btn-icon` ni la taille du « + ».
+*/
+.btn.view-back-button > svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+/*
+FNXC:ViewBackIconParity 2026-09-17-03:18:
+Sur téléphone, la boîte du retour est la boîte canonique partagée, déclarée explicitement comme celle de
+l'action de création réduite à son icône : même carré, aucun padding résiduel, et `flex-shrink` empêché
+pour qu'un titre long ne puisse pas la comprimer. Aucune règle globale `.btn-icon` n'est modifiée.
+*/
+/*
+FNXC:IconOnlyButtonCanon 2026-09-17-05:05:
+FN-496 : ces deux propriétaires partagés épinglent leur PROPRE taille de glyphe hors du contrat global
+`.btn-icon > svg` — le retour délibérément, à 0,2,1 en propriétés PHYSIQUES par décision FN-486 —, donc la
+correction centrale de `styles.css` ne les atteint pas. Chacun applique ici EXPLICITEMENT la même échelle
+mobile `--icon-button-glyph-scale-mobile`, dans le MÊME bloc média que la règle de boîte qu'elle accompagne
+(l'hôte hydraté inclut l'arm `(max-height: 480px)`, le repli pré-hydratation non), et résout à la même valeur
+que l'autre : la parité FN-486 entre le chevron et le « + » est ainsi préservée à la proportion corrigée.
+Les règles de glyphe du retour gardent leur PRÉFIXE D'HÔTE : une règle nue `.btn.view-back-button > svg`
+ajoutée dans un bloc média dédoublerait le sélecteur que `view-back-icon-parity.test.tsx` exige unique.
+*/
+@media (max-width: 768px), (max-height: 480px) {
+  html[data-viewport-mode="mobile"] .btn.view-back-button {
+    inline-size: var(--icon-button-size-mobile);
+    min-inline-size: var(--icon-button-size-mobile);
+    block-size: var(--icon-button-size-mobile);
+    min-block-size: var(--icon-button-size-mobile);
+    flex: none;
+    justify-content: center;
+    padding: 0;
+  }
+
+  html[data-viewport-mode="mobile"] .btn.view-back-button > svg {
+    width: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+    height: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+  }
+}
+
+@media (max-width: 768px) {
+  html:not([data-viewport-mode]) .btn.view-back-button {
+    inline-size: var(--icon-button-size-mobile);
+    min-inline-size: var(--icon-button-size-mobile);
+    block-size: var(--icon-button-size-mobile);
+    min-block-size: var(--icon-button-size-mobile);
+    flex: none;
+    justify-content: center;
+    padding: 0;
+  }
+
+  html:not([data-viewport-mode]) .btn.view-back-button > svg {
+    width: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+    height: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+  }
+}
+
+/*
+FNXC:IconOnlyButtonCanon 2026-09-16-19:05:
+The back chevron is icon-only at every viewport, so it owns no box of its own: `btn btn-icon` already resolves
+to the canonical square through the global contract in `styles.css`. Only its flex behaviour stays local.
+*/
+.view-back-button {
+  flex: none;
+}
+
+.view-back-button:focus-visible,
+.view-action-button:focus-visible {
+  box-shadow: var(--focus-ring-strong);
+}
+
+/*
+FNXC:IconOnlyButtonCanon 2026-09-16-19:05:
+FN-471 moves the CTA fill off the shared class stack and onto this create-specific selector, so the LABELLED
+desktop/tablet presentation keeps its emphasis while the phone icon-only presentation (which overrides these
+tokens below) can be plain bordered chrome. The button no longer carries `btn-primary`, whose 0,1,0 paint the
+mobile blocks could not neutralize without a specificity escalation.
+*/
+.view-action-button--create {
+  background: var(--cta-bg);
+  border-color: var(--cta-border);
+  color: var(--cta-text);
+}
+
+@media (hover: hover) {
+  .view-action-button--create:hover {
+    background: var(--cta-bg-hover);
+    border-color: var(--cta-border-hover);
+    box-shadow: var(--cta-glow);
+  }
+}
+
+/*
+FNXC:StandardizedViewActions 2026-09-13-22:40:
+Icon-only actions are a PHONE affordance and follow the canonical classifier. A short desktop window (or one
+shrunk by a keyboard) keeps its labelled actions; collapsing them to icons there would remove readable text the
+viewport never actually lacked room for. The pre-hydration fallback covers the unambiguous narrow-width case.
+*/
+@media (max-width: 768px), (max-height: 480px) {
+  html[data-viewport-mode="mobile"] .view-action-button--mobile-icon-only {
+    inline-size: var(--icon-button-size-mobile);
+    min-inline-size: var(--icon-button-size-mobile);
+    block-size: var(--icon-button-size-mobile);
+    min-block-size: var(--icon-button-size-mobile);
+    justify-content: center;
+    padding: 0;
+    background: var(--card);
+    border-color: var(--border);
+    color: var(--text);
+  }
+
+  html[data-viewport-mode="mobile"] .view-action-button--mobile-icon-only > svg {
+    inline-size: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+    block-size: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+  }
+
+  html[data-viewport-mode="mobile"] .view-action-button--mobile-icon-only .view-action-button__label {
+    position: absolute;
+    inline-size: var(--btn-border-width);
+    block-size: var(--btn-border-width);
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /*
+  FNXC:IconOnlyButtonCanon 2026-09-17-09:26:
+  FN-502: the label is hidden because the glyph already carries its meaning; a badge carries a COUNT the glyph cannot,
+  so it survives the collapse and moves to the corner of the square instead of widening it.
+  */
+  html[data-viewport-mode="mobile"] .view-action-button--mobile-icon-only .view-action-button__badge {
+    position: absolute;
+    inset-block-start: calc(var(--space-3xs) * -1);
+    inset-inline-end: calc(var(--space-3xs) * -1);
+    pointer-events: none;
+  }
+}
+
+@media (max-width: 768px) {
+  html:not([data-viewport-mode]) .view-action-button--mobile-icon-only {
+    inline-size: var(--icon-button-size-mobile);
+    min-inline-size: var(--icon-button-size-mobile);
+    block-size: var(--icon-button-size-mobile);
+    min-block-size: var(--icon-button-size-mobile);
+    justify-content: center;
+    padding: 0;
+    background: var(--card);
+    border-color: var(--border);
+    color: var(--text);
+  }
+
+  html:not([data-viewport-mode]) .view-action-button--mobile-icon-only > svg {
+    inline-size: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+    block-size: calc(var(--icon-size-sm) * var(--icon-button-glyph-scale-mobile));
+  }
+
+  html:not([data-viewport-mode]) .view-action-button--mobile-icon-only .view-action-button__label {
+    position: absolute;
+    inline-size: var(--btn-border-width);
+    block-size: var(--btn-border-width);
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  html:not([data-viewport-mode]) .view-action-button--mobile-icon-only .view-action-button__badge {
+    position: absolute;
+    inset-block-start: calc(var(--space-3xs) * -1);
+    inset-inline-end: calc(var(--space-3xs) * -1);
+    pointer-events: none;
+  }
+}

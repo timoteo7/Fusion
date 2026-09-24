@@ -1,9 +1,14 @@
+import { ViewHeader } from "./ViewHeader";
+import { DashboardWindowSurfaceRoot } from "../context/DashboardWindowManagerContext";
+import { FloatingWindow } from "./FloatingWindow";
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { CSSProperties, DragEvent } from "react";
-import { X, RefreshCw, Activity, TrendingUp, CheckCircle, AlertTriangle, Eye, GripVertical, ChevronUp, ChevronDown } from "lucide-react";
+import { RefreshCw, Activity, TrendingUp, CheckCircle, AlertTriangle, Eye, GripVertical, ChevronUp, ChevronDown } from "lucide-react";
 import type { ProviderUsage, UsageWindow } from "../api";
 import { useUsageData } from "../hooks/useUsageData";
+import { useOutsidePointerDismiss } from "../hooks/useOutsidePointerDismiss";
 import { ProviderIcon } from "./ProviderIcon";
 import { inferProviderIconKey } from "../utils/providerIconKey";
 import { getScopedItem, setScopedItem } from "../utils/projectStorage";
@@ -673,7 +678,7 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
         refresh();
       }
     }
-    
+
     // Update ref for next render
     wasOpenRef.current = isOpen;
   }, [isOpen, lastUpdated, refresh]);
@@ -844,11 +849,19 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
     setIsRefreshing(false);
   }, [refresh]);
 
+  /* FNXC:FloatingWindowDialogHosts 2026-09-14-22:36: resolved before the Escape effect so that effect can tell the anchored popover from the hosted window without a temporal dead zone. */
+  const showDesktopPopover = Boolean(anchorRect && isDesktopViewport);
+
   // Close on Escape key
   // FNXC:UsageIndicator 2026-06-22-00:00: embedded presentation has no modal to
   // dismiss, so Escape-to-close is a modal-only behavior.
+  /*
+  FNXC:FloatingWindowDialogHosts 2026-09-14-22:36:
+  FN-394 hosts the non-anchored presentation in FloatingWindow, whose modal boundary already closes on Escape.
+  Only the anchored popover still needs this local listener; keeping both would close and report twice.
+  */
   useEffect(() => {
-    if (isEmbedded || !isOpen) return;
+    if (isEmbedded || !isOpen || !showDesktopPopover) return;
 
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -858,9 +871,25 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
 
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [isEmbedded, isOpen, onClose]);
+  }, [isEmbedded, isOpen, onClose, showDesktopPopover]);
 
-  // Close on overlay click
+  /*
+  FNXC:UsageIndicator 2026-09-17-05:48:
+  FN-491 : conséquence assumée de la garde `triggerSelector`. `header-usage-btn` n'a ni `aria-controls` ni bascule
+  (`onOpenUsage` OUVRE toujours), donc sans cette garde le `pointerdown` fermerait la popover et le `click` du même
+  geste la rouvrirait aussitôt — un cycle visible. Le prix est que re-cliquer cette icône pendant que la popover est
+  ouverte la LAISSE ouverte au lieu de la fermer ; c'est volontaire et acceptable, parce que le clic extérieur, Échap
+  et le bouton « Close » du panneau restent tous des fermetures. On ne transforme délibérément pas le déclencheur en
+  bascule dans `App.tsx` / `Header.tsx` : ce serait une modification de navigation hors périmètre.
+  */
+  const { onPointerDownCapture: onPopoverPointerDownCapture } = useOutsidePointerDismiss({
+    open: isOpen && !isEmbedded && showDesktopPopover,
+    onDismiss: onClose,
+    surfaceRefs: [modalRef],
+    triggerSelector: '[data-testid="header-usage-btn"]',
+  });
+
+  // Close on overlay click (FloatingWindow modal branch only)
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent) => {
       if (e.target === e.currentTarget) {
@@ -872,7 +901,6 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
 
   if (!isOpen) return null;
 
-  const showDesktopPopover = Boolean(anchorRect && isDesktopViewport);
   const defaultPopoverWidth = 420;
   const popoverWidth = savedSize?.width ?? defaultPopoverWidth;
   const desktopTop = showDesktopPopover
@@ -896,6 +924,7 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
   const usageContent = (
       <div
         ref={modalRef}
+        onPointerDownCapture={onPopoverPointerDownCapture}
         className={
           isEmbedded
             ? "usage-modal usage-modal--embedded"
@@ -915,11 +944,20 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
             : sizeStyle
         }
       >
-        <div className="modal-header">
-          <div className="usage-header">
-            <Activity size={18} className="usage-header-icon" />
-            <h3>{t("usage.title", "Usage")}</h3>
-          </div>
+        {/*
+        FNXC:StandardizedViewLayout 2026-09-13-21:49:
+        Usage adopts the shared header: one title owner, the view-mode group as header actions, and the canonical
+        close only when this surface owns its dismissal. The embedded right-dock presentation still delegates the
+        exit to its host, so no close control is invented there.
+        */}
+        <ViewHeader
+          className="modal-header"
+          headingLevel={3}
+          icon={Activity}
+          title={t("usage.title", "Usage")}
+          onClose={isEmbedded ? undefined : onClose}
+          closeButtonProps={{ "aria-label": t("actions.closeModal", "Close usage modal"), "data-testid": "usage-modal-close" }}
+          actions={(
           <div className="usage-header-actions">
             <div className="usage-view-toggle" role="group" aria-label={t("usage.viewModeLabel", "Usage view mode")}>
               <button
@@ -939,20 +977,9 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
                 {t("usage.viewModeRemaining", "Remaining")}
               </button>
             </div>
-            {/* FNXC:UsageIndicator 2026-06-22-00:00: embedded presentation drops the
-                modal close button; the right-dock owns dismissal. */}
-            {!isEmbedded && (
-              <button
-                className="modal-close"
-                onClick={onClose}
-                aria-label={t("actions.closeModal", "Close usage modal")}
-                data-testid="usage-modal-close"
-              >
-                <X size={20} />
-              </button>
-            )}
           </div>
-        </div>
+          )}
+        />
 
         <div className="usage-content" ref={contentRef}>
           {(!hasFetched && !error) && providers.length === 0 ? (
@@ -1044,21 +1071,55 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
   }
 
   if (showDesktopPopover) {
-    return (
-      <>
-        <div
-          className="usage-popover-backdrop"
-          onClick={onClose}
-          data-testid="usage-modal-overlay"
-        />
+    /*
+    FNXC:PopoverLayering 2026-09-15-09:31:
+    FN-413 portals the anchored popover (backdrop + panel) to document.body like CustomModelDropdown does.
+    floatingWindowStack.ts's contract requires any surface compared in the `--fusion-max-z` band to live in the
+    ROOT stacking context: an inline panel cannot beat siblings outside its own context whatever its z-index.
+    The popover is already `position: fixed` with computed coordinates, so the portal is geometrically neutral,
+    and Escape / outside-click dismissal are document-level listeners.
+
+    FNXC:UsageIndicator 2026-09-17-05:48:
+    FN-491 : la vitre `.usage-popover-backdrop` est SUPPRIMÉE. Ce calque plein écran transparent n'existait que pour
+    capter le clic extérieur ; il gelait le tableau derrière la popover (molette, défilement tactile, clics), de sorte
+    qu'un clic sur une carte refermait seulement la popover sans jamais atteindre la carte. La fermeture au clic
+    extérieur est portée par le hook partagé `useOutsidePointerDismiss`, qui ne monte aucun élément. Seule cette
+    branche ANCRÉE change : la branche `FloatingWindow` reste une vraie modale bloquante avec son `handleOverlayClick`.
+    */
+    return createPortal(
+      <DashboardWindowSurfaceRoot logicalId="usage" group="dialog" className="dashboard-window-surface-root--contents">
         {usageContent}
-      </>
+      </DashboardWindowSurfaceRoot>,
+      document.body
     );
   }
 
+  /*
+  FNXC:FloatingWindowDialogHosts 2026-09-14-22:36:
+  FN-394 hosts the non-anchored Usage dialog in the shared window. The anchored desktop presentation above stays
+  a popover and the embedded right-dock presentation stays embedded; on a phone the shared host still renders a
+  full-screen sheet with no drag or resize affordance.
+  */
   return (
-    <div className="modal-overlay open usage-modal-overlay" onClick={handleOverlayClick} data-testid="usage-modal-overlay">
+    <FloatingWindow
+      windowKey="usage"
+      modal
+      hideHeader
+      surfaceGroup="dialog"
+      title={t("usage.title", "Usage")}
+      ariaLabel={t("usage.title", "Usage")}
+      onClose={onClose}
+      dragHandleSelector=".usage-modal .modal-header"
+      className="floating-window--dialog floating-window--usage"
+      overlayClassName="usage-modal-overlay"
+      testId="usage-modal-overlay"
+      defaultSize={{ width: 900, height: 640 }}
+      minSize={{ width: 320, height: 280 }}
+      suspendGeometryPersistenceOnMobile
+      suspendGeometryPersistenceOnShortViewport
+      backdropMouseHandlers={{ onClick: handleOverlayClick }}
+    >
       {usageContent}
-    </div>
+    </FloatingWindow>
   );
 }

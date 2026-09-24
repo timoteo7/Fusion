@@ -5,6 +5,7 @@ import type { GithubIssueAction, GlobalSettings, ProjectSettings, Task, TaskStor
 import { columnsWithFlag, declaresAnyLifecycleTrait, resolveWorkflowIrForTask } from "@fusion/core";
 import { GitHubClient } from "./github.js";
 import { resolveGithubTrackingAuth } from "./github-auth.js";
+import { reportTaskListenerFailure, safeLogTaskEntry } from "./task-log-safety.js";
 
 /*
 FNXC:WorkflowResolvedColumns 2026-07-31-13:40 (fleet — inline fallback arms):
@@ -17,7 +18,6 @@ arm stays on the backlog permanently, and the number stops distinguishing real d
 degraded answers. Same shape as `LEGACY_PLANNER_LANES` and `LEGACY_TERMINAL_COLUMNS`.
 */
 const LEGACY_COMPLETE_LANES: ReadonlySet<string> = new Set(["done"]);
-const LEGACY_ARCHIVE_LANES: ReadonlySet<string> = new Set(["archived"]);
 
 
 
@@ -38,26 +38,18 @@ interface TaskMovedEvent {
       };
     };
   };
-  // #1403: the store's `task:moved` event carries `ColumnId` (custom column ids
-  // admitted). U12 re-keys the decision on the complete/archived traits, so a
-  // workflow-defined terminal column maps to GitHub state like `done` does.
+  // The store's task:moved event admits custom column ids. Completion decisions
+  // resolve the task workflow so renamed Complete columns behave like Done.
   from: string;
   to: string;
 }
 
 /*
-FNXC:WorkflowColumns 2026-07-19-2b:50 (U12 / R2):
-GitHub open/closed state keys on the `complete` and `archived` TRAITS, not the literal ids `done`
-and `archived`. A user-authored workflow whose terminal column is called something else never
-closed its linked GitHub issue, and a custom archive column never mapped to `not_planned`.
-
-`classify` is injected rather than resolved here so this stays a pure decision function (the
-caller owns IR resolution). Its default reproduces the legacy literal mapping exactly, so every
-existing caller and the default workflow are byte-identical.
+FNXC:WorkflowColumns 2026-09-04-10:36:
+GitHub issue state follows the Complete role. The injected classifier keeps this decision pure while the caller owns workflow resolution.
 */
 export interface ColumnLifecycleClass {
   complete: boolean;
-  archived: boolean;
 }
 
 /*
@@ -73,7 +65,6 @@ marker — which is why the wiring change and this marker are in the same commit
 */
 export const legacyColumnLifecycleClass = (columnId: string): ColumnLifecycleClass => ({
   complete: columnId === "done",
-  archived: columnId === "archived",
 });
 
 export function decideIssueAction(
@@ -84,23 +75,8 @@ export function decideIssueAction(
   const fromClass = classify(from);
   const toClass = classify(to);
 
-  // Un-archiving back into the completed column re-opens the issue.
-  if (fromClass.archived && toClass.complete) {
-    return { action: "reopen", stateReason: "reopened" };
-  }
-
   if (toClass.complete && !fromClass.complete) {
     return { action: "close", stateReason: "completed" };
-  }
-
-  if (toClass.archived) {
-    if (fromClass.complete) {
-      return { action: "close", stateReason: "completed" };
-    }
-    if (!fromClass.archived) {
-      return { action: "close", stateReason: "not_planned" };
-    }
-    return null;
   }
 
   // Leaving the completed column re-opens the issue.
@@ -186,10 +162,10 @@ export class GitHubTrackingStateService {
     }
 
     const onTaskMoved = (event: TaskMovedEvent): void => {
-      void this.handleTaskMoved(store, event);
+      void this.handleTaskMoved(store, event).catch((error) => reportTaskListenerFailure(severityAuditLog, "github-tracking-state:moved", error));
     };
     const onTaskDeleted = (task: Task, meta?: TaskDeletedMeta): void => {
-      void this.handleTaskDeleted(store, task, meta);
+      void this.handleTaskDeleted(store, task, meta).catch((error) => reportTaskListenerFailure(severityAuditLog, "github-tracking-state:deleted", error));
     };
     this.listeners.set(store, { onTaskMoved, onTaskDeleted });
 
@@ -233,14 +209,8 @@ export class GitHubTrackingStateService {
     }
 
     /*
-    FNXC:WorkflowResolvedColumns 2026-07-30-14:20 (PR #2754 review — greptile):
-    EVERY TERMINAL LANE, NOT THE FIRST ONE. `LifecycleColumns` names one column per role by design
-    (#2721 pinned that), so a workflow declaring `complete` or `archived` on two columns had the second
-    invisible here: moving a card there left the linked GitHub issue OPEN, and moving it back out never
-    reopened one.
-
-    Core's `resolveTerminalColumns` does not help — it is the same singular pair, one `complete` and one
-    `archived`. The flag sets are the membership answer.
+    FNXC:WorkflowResolvedColumns 2026-09-04-10:36:
+    Resolve every Complete lane, not only the first one. A workflow may declare more than one Complete column, and each one must close the linked issue.
 
     RESOLUTION FAILURE vs A RESOLVED ABSENCE, the distinction this program keeps paying for (#2731,
     #2733, #2734): `ir === undefined` means the workflow could not be READ, and the legacy ids are the
@@ -270,10 +240,8 @@ export class GitHubTrackingStateService {
     const ir = await resolveWorkflowIrForTask(store, event.task.id).catch(() => undefined);
     const traitsExpressed = ir !== undefined && declaresAnyLifecycleTrait(ir);
     const completeLanes = ir === undefined || !traitsExpressed ? undefined : columnsWithFlag(ir, "complete");
-    const archivedLanes = ir === undefined || !traitsExpressed ? undefined : columnsWithFlag(ir, "archived");
     const decision = decideIssueAction(event.from, event.to, (columnId) => ({
       complete: completeLanes === undefined ? LEGACY_COMPLETE_LANES.has(columnId) : completeLanes.includes(columnId),
-      archived: archivedLanes === undefined ? LEGACY_ARCHIVE_LANES.has(columnId) : archivedLanes.includes(columnId),
     }));
     if (!decision) {
       return;
@@ -360,17 +328,16 @@ export class GitHubTrackingStateService {
     (store as unknown as { emit: (eventName: string, payload: GitHubIssueActionEvent) => void }).emit("github-issue:action", event);
   }
 
+  /*
+  FNXC:GithubTrackingReconcile 2026-09-15-15:19:
+  Delete handlers can race a soft-deleted or historical row becoming read-only. Delegate the known
+  refusal to the shared seam so it cannot starve the entire delete-path handler.
+  */
   private async safeLogDeletedTaskEntry(store: TaskStore, taskId: string, message: string, details: string): Promise<void> {
-    try {
-      await store.logEntry(taskId, message, details);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes(`Task ${taskId} not found`)) {
-        severityAuditLog.warn(`[github-tracking-state] Unable to write log entry for deleted task ${taskId}: ${message}`);
-        return;
-      }
-      throw error;
-    }
+    await safeLogTaskEntry(store, taskId, message, details, {
+      logger: severityAuditLog,
+      context: "github-tracking-state",
+    });
   }
 
   private async handleSourceIssueDelete(store: TaskStore, task: Task, meta?: TaskDeletedMeta): Promise<void> {

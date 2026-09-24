@@ -59,7 +59,7 @@ import { resolveHeartbeatPromptTemplate, resolveHeartbeatScopeDisciplineMode, se
 import { buildPromptLayers, collapsePromptLayers } from "./execution/prompt-layers.js";
 import { resolveAndEmitGoalContext } from "./goals/goal-injection-diagnostics.js";
 import { createLogger, heartbeatLog, formatError } from "./logger.js";
-import { mergeEffectiveSettings, mergeProjectWorkflowModelLaneBaseline } from "./project/effective-settings.js";
+import { mergeEffectiveSettings } from "./project/effective-settings.js";
 import {
   extractConcurrentSoftDeleteRaceDetails,
   isConcurrentSoftDeleteRaceError,
@@ -94,6 +94,8 @@ FNXC:HeartbeatRecovery 2026-07-15-08:50:
 heartbeat-model-unavailable parks from assignment/on-demand runs were terminal until a human Retry, even when the next attempt succeeds with unchanged credentials (false "model unavailable" / registry / credential-probe blips). Admit those parks to the same bounded heartbeatErrorRecovery budget as error-state recovery so the engine auto-retries like operator Retry, while genuine missing credentials re-park after the budget exhausts.
 */
 import { acquireTaskWorktree, WorktreeBaseRefreshError } from "./worktree/worktree-acquisition.js";
+import { acknowledgeOverlapResumeContext, type OverlapResumeContextDelivery } from "./execution/overlap-resume-context.js";
+
 import { createRunAuditor, generateSyntheticRunId, type DatabaseMutationType, type EngineRunContext } from "./util/run-audit.js";
 import { promptWithFallback } from "./pi.js";
 import { withRateLimitRetry } from "./errors/rate-limit-retry.js";
@@ -109,6 +111,16 @@ import { detectDeicticReference, extractAntecedentCandidates, renderAmbiguityPro
 import { countActiveAgentMembers, decideRoomCoordination, detectTaskFilingIntent, renderRoomCoordinationPromptBlock } from "./triage-domain/room-coordination.js";
 import { evaluateParkedAgentTaskLink, isParkedTaskColumn, type AgentTaskLinkExecutionProof } from "./agents/task-agent-sync.js";
 import { MemoryConsolidationError, MemoryConsolidationService, resolveMemoryConsolidationPorts } from "./memory/index.js";
+
+export async function dispatchHeartbeatTransportWithOverlapAck(input: {
+  send: () => Promise<void>;
+  store: Pick<TaskStore, "completeTaskOverlapWait">;
+  taskId?: string;
+  delivery?: OverlapResumeContextDelivery;
+}): Promise<void> {
+  await input.send();
+  if (input.taskId && input.delivery) await acknowledgeOverlapResumeContext(input.store, input.taskId, input.delivery);
+}
 
 /*
 FNXC:WorkflowLifecycleColumns 2026-07-28-09:25 (U11 conversion):
@@ -705,9 +717,9 @@ async function getHeartbeatMemorySettings(taskStore: TaskStore): Promise<Setting
  */
 /**
  * FNXC:WorkflowLifecycleColumns 2026-08-01-07:20 (fleet — heartbeat terminal checks):
- * Is this task finished — resting in its OWN board's complete or archived lane?
+ * Is this task finished — resting in its own board's Complete lane?
  *
- * Both heartbeat call sites asked with `column === "done" || "archived"`. Neither is cosmetic:
+ * Both heartbeat call sites once used hardcoded terminal ids. Neither is cosmetic:
  *
  *   - the linked-task check clears an agent's assignment once its card is finished. Keyed on the
  *     literals, an agent on a renamed board stayed bound to a completed card indefinitely, so every
@@ -716,7 +728,7 @@ async function getHeartbeatMemorySettings(taskStore: TaskStore): Promise<Setting
  *     A card resting in a renamed complete lane read as non-terminal, so an acquisition failure
  *     could stamp `status: "failed"` and an error onto work that was already done.
  *
- * Fail-soft to the legacy pair: an unresolvable workflow keeps exactly today's answer rather than
+ * Fail-soft to Done: an unresolvable workflow keeps the built-in answer rather than
  * treating every card as unfinished, which is the expensive direction here (the second site WRITES).
  */
 export async function isTaskInTerminalLane(
@@ -728,8 +740,8 @@ export async function isTaskInTerminalLane(
   /* DELIBERATE-LITERAL — the no-metadata fallback. Deleting it makes an unresolvable workflow read
      as NEVER terminal, which is the direction that writes: the second call site would then run its
      failure bookkeeping against finished work. Strictly worse than the legacy answer. */
-  if (!columns) return task.column === "done" || task.column === "archived";
-  return task.column === columns.complete || task.column === columns.archived;
+  if (!columns) return task.column === "done";
+  return task.column === columns.complete;
 }
 
 export class HeartbeatMonitor {
@@ -1929,7 +1941,6 @@ export class HeartbeatMonitor {
     if (this.taskStore && cascadeToTasks) {
       const pausedTasks = await this.taskStore.getTasksByAssignedAgent(agentId, {
         pausedOnly: true,
-        excludeArchived: true,
       });
       const toUnpause = pausedTasks.filter((task) => task.pausedByAgentId === agentId && !task.userPaused);
       const results = await Promise.allSettled(toUnpause.map((task) => this.taskStore!.pauseTask(task.id, false)));
@@ -3017,6 +3028,7 @@ export class HeartbeatMonitor {
         }
 
         let sessionCwd = rootDir;
+        let overlapResumeDelivery: OverlapResumeContextDelivery | undefined;
         if (!isNoTaskRun && taskDetail) {
           try {
             const acquisition = await acquireTaskWorktree({
@@ -3032,6 +3044,7 @@ export class HeartbeatMonitor {
               refreshStaleBase: true,
             });
             sessionCwd = acquisition.worktreePath;
+            overlapResumeDelivery = acquisition.overlapResumeDelivery;
           } catch (worktreeErr) {
             const detail = worktreeErr instanceof Error ? worktreeErr.message : String(worktreeErr);
             const refreshKind = worktreeErr instanceof WorktreeBaseRefreshError
@@ -3134,9 +3147,14 @@ export class HeartbeatMonitor {
         }
 
         const heartbeatBaseSettings = heartbeatModelSettings ?? ({} as Settings);
+        /*
+        FNXC:ModelResolution 2026-09-14-19:07:
+        Idle heartbeats consume project role lanes directly from project settings. Only a heartbeat
+        attached to a task overlays that task's selected workflow tier.
+        */
         heartbeatModelSettings = taskDetail
           ? await mergeEffectiveSettings(taskStore, taskDetail, heartbeatBaseSettings)
-          : await mergeProjectWorkflowModelLaneBaseline(taskStore, heartbeatBaseSettings);
+          : heartbeatBaseSettings;
         /*
         FNXC:AgentModelInheritance 2026-08-09-22:38:
         A model-less durable workflow role agent inherits its own role lane rather than always
@@ -3336,25 +3354,21 @@ export class HeartbeatMonitor {
           let multiAssignWakeDeltaLines: string[] = [];
           if (!isAgentEphemeral && this.taskStore && typeof this.taskStore.getTasksByAssignedAgent === "function") {
             try {
-              const assignedOpen = await this.taskStore.getTasksByAssignedAgent(agentId, { excludeArchived: true });
+              const assignedOpen = await this.taskStore.getTasksByAssignedAgent(agentId);
               /*
               FNXC:WorkflowLifecycleColumns 2026-07-30-13:40:
               Pass the resolved lane flags so the ranking's terminal filter is not the literal pair.
 
-              `rankAssignedTasksForWakeDelta` gained `flagsByColumnId` and this, its only production
-              caller, passed nothing — so the conversion was inert here. Auditing it also surfaced the
-              larger defect one level down in `getTasksByAssignedAgent`, whose `excludeArchived`
-              filtered on the literal id and therefore returned archived cards as open assigned work.
-              Both halves are needed: the store read stops handing back archived rows, and this stops
-              the ranking counting a finished card as open.
+              `rankAssignedTasksForWakeDelta` uses `flagsByColumnId` to keep workflow Complete rows out
+              of open assignment inventory. `getTasksByAssignedAgent` already reads the live task set,
+              so soft-deleted and historical-sentinel rows never enter this ranking.
               */
-              const wakeLaneFlags = new Map<string, { complete?: boolean; archived?: boolean }>();
+              const wakeLaneFlags = new Map<string, { complete?: boolean }>();
               const wakeIrCache = new Map<string, Awaited<ReturnType<typeof resolveWorkflowIrForTask>>>();
               for (const assignedTask of assignedOpen) {
                 const ir = await resolveWorkflowIrForTask(this.taskStore, assignedTask.id, wakeIrCache).catch(() => undefined);
                 if (!ir) continue;
                 for (const id of columnsWithFlag(ir, "complete")) wakeLaneFlags.set(id, { ...wakeLaneFlags.get(id), complete: true });
-                for (const id of columnsWithFlag(ir, "archived")) wakeLaneFlags.set(id, { ...wakeLaneFlags.get(id), archived: true });
               }
               const ranked = rankAssignedTasksForWakeDelta(assignedOpen, {
                 agentId,
@@ -3687,6 +3701,10 @@ export class HeartbeatMonitor {
           let rotationEvent: import("./credential-instance-rotation.js").RotationEvent | undefined;
           let rotationDeclined = false;
           let activeInstanceId = heartbeatSessionModels.credentialInstanceId ?? DEFAULT_PROVIDER_INSTANCE_ID;
+          if (overlapResumeDelivery?.context) {
+            executionPrompt = [executionPrompt, "", "## Overlap wait synchronization", overlapResumeDelivery.context].join("\n");
+          }
+
           let dispatchedRotation = false;
           /*
           FNXC:CredentialInstanceRotation 2026-08-01-09:07:
@@ -3696,7 +3714,11 @@ export class HeartbeatMonitor {
           session is then resolved for the offered instance rather than mutating credentials
           on the live session.
           */
-          await withRateLimitRetry(async () => promptWithFallback(session, executionPrompt), {
+          await dispatchHeartbeatTransportWithOverlapAck({
+            store: taskStore,
+            taskId,
+            delivery: overlapResumeDelivery,
+            send: () => withRateLimitRetry(async () => promptWithFallback(session, executionPrompt), {
             signal: heartbeatRetryAbortController.signal,
             rotation: this.credentialRotator && heartbeatSessionModels.defaultProvider ? {
               providerId: heartbeatSessionModels.defaultProvider,
@@ -3772,6 +3794,7 @@ export class HeartbeatMonitor {
               const delaySec = Math.round(delayMs / 1000);
               heartbeatLog.warn(`Agent ${agentId} heartbeat prompt hit retryable provider error — retry ${attempt} in ${delaySec}s: ${retryError.message}`);
             },
+          }),
           });
           if (dispatchedRotation) rotationEvent?.recordOutcome("rotation-succeeded");
 

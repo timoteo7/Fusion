@@ -20,14 +20,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MobileNavBar } from "../components/MobileNavBar";
 import { Header, useViewportMode } from "../components/Header";
+import { isMobileShellMode } from "../hooks/useViewportMode";
 import { LeftSidebarNav } from "../components/LeftSidebarNav";
+import { resolveNavigationSurfaces, type NavigationPlacement } from "../utils/navigationPlacement";
 
 function mockViewport(mode: "mobile" | "tablet" | "desktop") {
   Object.defineProperty(window, "matchMedia", {
     writable: true,
     value: vi.fn().mockImplementation((query: string) => {
       const isMobileQuery = query === "(max-width: 768px)" || query === "(max-width: 768px), (max-height: 480px)";
-      const isTabletQuery = query === "(min-width: 769px) and (max-width: 1024px)";
+      const isTabletQuery = query === "(min-width: 769px) and (max-width: 1023.98px)";
       return {
         matches: mode === "mobile" ? isMobileQuery : mode === "tablet" ? isTabletQuery : false,
         media: query,
@@ -63,13 +65,20 @@ const createDefaultMobileNavProps = () => ({
   projectId: "proj_1",
 });
 
-function LeftSidebarAppGateHarness({ leftSidebarNavFlag }: { leftSidebarNavFlag?: boolean }) {
+/*
+ * FNXC:Navigation 2026-09-15-14:41:
+ * FN-419: these harnesses used to DUPLICATE App's sidebar gate (and therefore asserted the removed
+ * `experimentalFeatures.leftSidebarNav` placement semantics). They now consume the same shared resolver App does,
+ * so the placement setting — not the legacy flag — decides which single surface mounts.
+ */
+function LeftSidebarAppGateHarness({ navigationPlacement }: { navigationPlacement: NavigationPlacement }) {
   const mode = useViewportMode();
-  const isMobile = mode === "mobile";
-  const viewMode = "project";
   const currentProject = createProjects()[0];
-  const leftSidebarNavEnabled = leftSidebarNavFlag !== false;
-  const sidebarActive = leftSidebarNavEnabled && !isMobile && viewMode === "project" && !!currentProject;
+  const { sidebarActive } = resolveNavigationSurfaces({
+    viewportMode: mode,
+    projectShellPresent: !!currentProject,
+    navigationPlacement,
+  });
 
   return sidebarActive ? (
     <LeftSidebarNav
@@ -84,23 +93,27 @@ function LeftSidebarAppGateHarness({ leftSidebarNavFlag }: { leftSidebarNavFlag?
   ) : null;
 }
 
-function PrimaryNavigationSurfaceHarness({ leftSidebarNavFlag }: { leftSidebarNavFlag?: boolean }) {
+function PrimaryNavigationSurfaceHarness({ navigationPlacement }: { navigationPlacement: NavigationPlacement }) {
   const mode = useViewportMode();
-  const isMobile = mode === "mobile";
+  /* FN-468 : la pill possède la navigation primaire sur tout le shell mobile (téléphone ET tablette). */
+  const mobileShellActive = isMobileShellMode(mode);
   const currentProject = createProjects()[0];
-  const leftSidebarNavEnabled = leftSidebarNavFlag !== false;
-  const sidebarActive = leftSidebarNavEnabled && !isMobile && !!currentProject;
+  const { headerPrimaryNavSuppressed } = resolveNavigationSurfaces({
+    viewportMode: mode,
+    projectShellPresent: !!currentProject,
+    navigationPlacement,
+  });
 
   return (
     <>
       <Header
         view="board"
         onChangeView={vi.fn()}
-        mobileNavEnabled={isMobile}
+        mobileNavEnabled={mobileShellActive}
         showAgentsTab={true}
-        leftSidebarNavActive={sidebarActive}
+        leftSidebarNavActive={headerPrimaryNavSuppressed}
       />
-      <LeftSidebarAppGateHarness leftSidebarNavFlag={leftSidebarNavFlag} />
+      <LeftSidebarAppGateHarness navigationPlacement={navigationPlacement} />
       <MobileNavBar {...createDefaultMobileNavProps()} />
     </>
   );
@@ -127,26 +140,109 @@ const createProjects = () => [
   },
 ];
 
+/*
+ * FN-511 : la résolution des accès rapides complète toute sélection plus courte que CINQ par l'ordre par défaut, donc
+ * une sélection d'une seule destination ne laisse plus `tasks` dans le menu. Pour prouver qu'une destination reste
+ * atteignable depuis le menu, il faut une sélection EXPLICITE de cinq destinations qui l'exclut.
+ */
+const FN511_TASKS_EXCLUDED_SELECTION = ["planning", "missions", "agents", "git", "files"];
+
 describe("Mobile Feature Access Regression Guard", () => {
   beforeEach(() => {
     mockViewport("mobile");
     document.documentElement.style.removeProperty("--mobile-nav-height");
   });
 
-  it("list view is independently accessible via mobile nav bar", () => {
+  /*
+   * FN-480 : le bouton List codé en dur du menu est supprimé ; le producteur téléphone est le slot d'accès rapide
+   * `tasks`, rendu ici dans le menu (`mobile-more-item-tasks`) car la sélection ne le contient pas.
+   */
+  it("keeps List accessible from the official mobile navigation menu", () => {
     const props = createDefaultMobileNavProps();
-    render(<MobileNavBar {...props} view="board" />);
+    render(<MobileNavBar {...props} view="board" navigationMenuOpen quickAccessItems={FN511_TASKS_EXCLUDED_SELECTION} />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-list"));
+    expect(screen.queryByTestId("mobile-more-item-list")).toBeNull();
+    fireEvent.click(screen.getByTestId("mobile-more-item-tasks"));
     expect(props.onChangeView).toHaveBeenCalledWith("list");
   });
 
-  it("board view is accessible from Tasks on mobile nav bar", () => {
+  /*
+   * FNXC:ToolSurfaces 2026-09-16-23:06:
+   * FN-437 cas (d) : le Header mobile ne rend plus Liste, Notes ni Activité. Ce garde-fou prouve que les trois
+   * destinations restent atteignables depuis le menu du pied de page, qui en est désormais le propriétaire unique.
+   */
+  it("garde Liste, Notes et Activité atteignables depuis le menu de la barre du bas", () => {
     const props = createDefaultMobileNavProps();
-    render(<MobileNavBar {...props} view="list" />);
+    render(<MobileNavBar {...props} view="board" navigationMenuOpen quickAccessItems={FN511_TASKS_EXCLUDED_SELECTION} />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-tasks"));
-    expect(props.onChangeView).toHaveBeenCalledWith("board");
+    fireEvent.click(screen.getByTestId("mobile-more-item-tasks"));
+    expect(props.onChangeView).toHaveBeenCalledWith("list");
+
+    fireEvent.click(screen.getByTestId("mobile-more-item-notes"));
+    expect(props.onChangeView).toHaveBeenCalledWith("notes");
+
+    fireEvent.click(screen.getByTestId("mobile-more-item-activity"));
+    expect(props.onOpenActivityLog).toHaveBeenCalled();
+  });
+
+  /*
+   * FN-437 cas croisé : un seul propriétaire par destination sur téléphone. Le même test asserte l'absence des trois
+   * déclencheurs du Header ET la présence des trois entrées du menu, de sorte qu'aucun retrait ne peut rendre une
+   * destination inaccessible et qu'aucune restauration ne peut recréer un doublon sans casser ce garde-fou.
+   */
+  it("attribue Liste, Notes et Activité au seul menu du pied de page sur téléphone", () => {
+    const navProps = createDefaultMobileNavProps();
+    render(
+      <>
+        <Header
+          mobileNavEnabled
+          projectId="proj_1"
+          onChangeView={vi.fn()}
+          onOpenActivityPanel={vi.fn()}
+          onOpenNotesPanel={vi.fn()}
+        />
+        <MobileNavBar {...navProps} view="board" navigationMenuOpen quickAccessItems={FN511_TASKS_EXCLUDED_SELECTION} />
+      </>,
+    );
+
+    expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
+    expect(screen.queryByTestId("header-activity-panel-btn")).toBeNull();
+    expect(screen.queryByTestId("header-notes-panel-btn")).toBeNull();
+
+    expect(screen.queryByTestId("mobile-more-item-list")).toBeNull();
+    expect(screen.getByTestId("mobile-more-item-tasks")).toBeInTheDocument();
+    expect(screen.getByTestId("mobile-more-item-notes")).toBeInTheDocument();
+    expect(screen.getByTestId("mobile-more-item-activity")).toBeInTheDocument();
+  });
+
+  /*
+   * FN-480 cas (e) : sur téléphone, List a EXACTEMENT un producteur. Le slot d'accès rapide `tasks` le rend, en onglet
+   * direct quand il est sélectionné et en entrée de menu sinon — jamais les deux, jamais zéro — le bouton codé en dur
+   * `mobile-more-item-list` n'existe plus, `header-list-view-btn` reste absent, et le hamburger reste dernier enfant.
+   */
+  it("rend List dans exactement une surface de navigation selon la sélection", () => {
+    /* FN-511 : la seconde sélection doit être explicitement complète, sinon le complément à cinq promeut `tasks`. */
+    for (const selection of [["tasks", "planning"], FN511_TASKS_EXCLUDED_SELECTION]) {
+      const props = createDefaultMobileNavProps();
+      const view = render(
+        <>
+          <Header mobileNavEnabled projectId="proj_1" onChangeView={vi.fn()} />
+          <MobileNavBar {...props} view="list" navigationMenuOpen quickAccessItems={selection} />
+        </>,
+      );
+
+      const tab = screen.queryByTestId("mobile-nav-tab-tasks");
+      const menuEntry = screen.queryByTestId("mobile-more-item-tasks");
+      expect([tab, menuEntry].filter(Boolean)).toHaveLength(1);
+      expect(screen.queryByTestId("mobile-more-item-list")).toBeNull();
+      expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
+      expect(document.querySelector(".mobile-nav-bar--native")?.lastElementChild).toBe(screen.getByTestId("mobile-menu-trigger"));
+
+      fireEvent.click((tab ?? menuEntry)!);
+      expect(props.onChangeView).toHaveBeenCalledWith("list");
+      expect(props.onChangeView).not.toHaveBeenCalledWith("board");
+      view.unmount();
+    }
   });
 
   it("mobile Header exposes New Task without the retired view toggle", () => {
@@ -158,15 +254,21 @@ describe("Mobile Feature Access Regression Guard", () => {
     expect(onNewTask).toHaveBeenCalledOnce();
   });
 
-  it("agents view is accessible via mobile nav bar", () => {
+  it("agents view is accessible via the mobile navigation menu", () => {
     const props = createDefaultMobileNavProps();
-    render(<MobileNavBar {...props} />);
+    render(<MobileNavBar {...props} navigationMenuOpen />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-agents"));
+    fireEvent.click(screen.getByTestId("mobile-more-item-agents"));
     expect(props.onChangeView).toHaveBeenCalledWith("agents");
   });
 
-  it("project list is accessible via header overflow menu on mobile", () => {
+  /*
+  FNXC:HeaderNavigationOwnership 2026-09-17-02:14:
+  FN-481 : le Header historique sans pill portait DEUX accès Projets — son sélecteur compact, dont l'action « View
+  Projects » appelle déjà `onViewAllProjects`, et une entrée de menu de débordement. Le doublon disparaît ; l'accès
+  reste prouvé par le chemin conservé.
+  */
+  it("project management stays reachable once, through the compact selector, on the legacy mobile header", () => {
     const projects = createProjects();
     const onViewAllProjects = vi.fn();
     const { container } = render(
@@ -180,55 +282,80 @@ describe("Mobile Feature Access Regression Guard", () => {
       />,
     );
 
-    const overflowTrigger = container.querySelector(".compact-overflow-trigger");
-    expect(overflowTrigger).not.toBeNull();
-
+    expect(container.querySelector(".compact-overflow-trigger")).not.toBeNull();
+    fireEvent.click(screen.getByTitle("More header actions"));
+    expect(screen.queryByTestId("overflow-project-selector-btn")).toBeNull();
+    /* Usage n'a pas de raccourci direct dans cette variante : son entrée de débordement reste légitime. */
     fireEvent.click(screen.getByTitle("More header actions"));
 
+    fireEvent.click(screen.getByTestId("mobile-project-switch-trigger"));
+    fireEvent.click(screen.getByTestId("mobile-project-switch-view-all"));
+    expect(onViewAllProjects).toHaveBeenCalledOnce();
+  });
+
+  /* FN-481 : sans sélecteur montable, l'entrée de repli du menu de débordement reste le seul chemin et est conservée. */
+  it("keeps the header overflow Projects fallback when the compact selector cannot mount", () => {
+    const projects = createProjects();
+    const onViewAllProjects = vi.fn();
+    render(
+      <Header
+        projects={projects}
+        currentProject={projects[0]}
+        onViewAllProjects={onViewAllProjects}
+        onOpenSettings={vi.fn()}
+        mobileNavEnabled={false}
+      />,
+    );
+
+    expect(screen.queryByTestId("mobile-project-switch-trigger")).toBeNull();
+    fireEvent.click(screen.getByTitle("More header actions"));
     const projectsButton = screen.getByTestId("overflow-project-selector-btn");
     expect(projectsButton.textContent).toContain("Projects");
-
     fireEvent.click(projectsButton);
     expect(onViewAllProjects).toHaveBeenCalledOnce();
   });
 
-  it("more sheet provides access to secondary mobile features", () => {
-    render(<MobileNavBar {...createDefaultMobileNavProps()} />);
+  /* FN-481 : le raccourci Usage direct n'existe pas dans cette variante, donc son entrée de débordement est conservée. */
+  it("keeps the legacy header overflow Usage entry when no direct Usage shortcut exists", () => {
+    const onOpenUsage = vi.fn();
+    render(<Header onOpenSettings={vi.fn()} onOpenUsage={onOpenUsage} mobileNavEnabled={false} />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
+    expect(screen.queryByTestId("mobile-header-usage-btn")).toBeNull();
+    fireEvent.click(screen.getByTitle("More header actions"));
+    fireEvent.click(screen.getByTestId("overflow-usage-btn"));
+    expect(onOpenUsage).toHaveBeenCalledOnce();
+  });
 
-    expect(screen.getByTestId("mobile-nav-tab-mailbox")).toBeDefined();
-    expect(screen.queryByTestId("mobile-more-item-mailbox")).toBeNull();
+  it("official menu provides access to secondary mobile features", () => {
+    render(<MobileNavBar {...createDefaultMobileNavProps()} navigationMenuOpen />);
+
+    /*
+     * FN-511 : le défaut vaut CINQ destinations terminées par le Chat, donc Mailbox reste une entrée ordinaire du menu
+     * — toujours un seul propriétaire, seulement une autre surface.
+     */
+    expect(screen.queryByTestId("mobile-nav-tab-mailbox")).toBeNull();
+    expect(screen.getByTestId("mobile-more-item-mailbox")).toBeDefined();
     expect(screen.getByTestId("mobile-more-item-git")).toBeDefined();
     expect(screen.getByTestId("mobile-more-item-terminal")).toBeDefined();
     expect(screen.getByTestId("mobile-more-item-files")).toBeDefined();
-    expect(screen.getByTestId("mobile-more-item-planning")).toBeDefined();
+    expect(screen.queryByTestId("mobile-more-item-planning")).toBeNull();
     expect(screen.getByTestId("mobile-more-item-workflow")).toBeDefined();
     expect(screen.getByTestId("mobile-more-item-schedules")).toBeDefined();
     expect(screen.getByTestId("mobile-more-item-github")).toBeDefined();
     expect(screen.getByTestId("mobile-more-item-usage")).toBeDefined();
     expect(screen.queryByTestId("mobile-more-item-reliability")).toBeNull();
+    /* FN-511 : le Chat est la cinquième destination par défaut, donc un onglet direct — et jamais aussi une entrée du menu. */
+    expect(screen.getByTestId("mobile-nav-tab-chat")).toBeDefined();
     expect(screen.queryByTestId("mobile-more-item-chat")).toBeNull();
     expect(screen.queryByTestId("mobile-more-item-nodes")).toBeNull();
     expect(screen.getByTestId("mobile-more-item-settings")).toBeDefined();
   });
 
-  it("keeps every configurable destination reachable when a custom footer omits one", () => {
-    render(
-      <MobileNavBar
-        {...createDefaultMobileNavProps()}
-        mobileNavPrimaryItems={["command-center", "tasks", "agents", "planning", "chat", "mailbox", "skills"]}
-        showSkillsTab={false}
-        experimentalFeatures={{ insights: false, memoryView: false }}
-      />,
-    );
-
-    expect(screen.queryByTestId("mobile-nav-tab-missions")).toBeNull();
-    expect(screen.queryByTestId("mobile-nav-tab-skills")).toBeNull();
-    expect(screen.getByTestId("mobile-nav-tab-more")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
-    expect(screen.getByTestId("mobile-more-item-missions")).toBeInTheDocument();
+  it("keeps enabled official destinations reachable without persisted footer customization", () => {
+    render(<MobileNavBar {...createDefaultMobileNavProps()} navigationMenuOpen showSkillsTab={false} experimentalFeatures={{ insights: false, memoryView: false }} />);
+    /* FN-511 : sans sélection persistée, Missions fait partie des CINQ destinations par défaut de la rangée directe. */
+    expect(screen.getByTestId("mobile-nav-tab-missions")).toBeInTheDocument();
+    expect(screen.queryByTestId("mobile-more-item-missions")).toBeNull();
     expect(screen.queryByTestId("mobile-more-item-skills")).toBeNull();
   });
 
@@ -236,7 +363,6 @@ describe("Mobile Feature Access Regression Guard", () => {
     const props = createDefaultMobileNavProps();
     render(<MobileNavBar {...props} />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
     expect(screen.queryByTestId("mobile-more-item-reliability")).toBeNull();
 
     fireEvent.click(screen.getByTestId("mobile-nav-tab-command-center"));
@@ -247,22 +373,31 @@ describe("Mobile Feature Access Regression Guard", () => {
     const props = createDefaultMobileNavProps();
     render(<MobileNavBar {...props} />);
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
     expect(screen.queryByTestId("mobile-more-item-nodes")).toBeNull();
 
     fireEvent.click(screen.getByTestId("mobile-nav-tab-command-center"));
     expect(props.onChangeView).toHaveBeenCalledWith("command-center");
   });
 
-  it("chat is accessible via the bottom nav while remaining absent from the More sheet", () => {
-    const props = createDefaultMobileNavProps();
-    render(<MobileNavBar {...props} view="board" />);
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-chat"));
-    expect(props.onChangeView).toHaveBeenCalledWith("chat");
-
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-more"));
+  /*
+   * FN-511 : le Chat est une destination ORDINAIRE des cinq créneaux configurables. Il a donc exactement un producteur
+   * par répartition : onglet direct quand il est résolu (cas du défaut), entrée du menu quand une sélection explicite de
+   * cinq destinations l'exclut — jamais les deux. Naviguer depuis le menu referme le menu.
+   */
+  it("chat reste joignable une seule fois, dans exactement une surface", () => {
+    const asTab = render(<MobileNavBar {...createDefaultMobileNavProps()} view="board" navigationMenuOpen onUiMenuOpenChange={vi.fn()} />);
+    expect(screen.getByTestId("mobile-nav-tab-chat")).toBeInTheDocument();
     expect(screen.queryByTestId("mobile-more-item-chat")).toBeNull();
+    asTab.unmount();
+
+    const props = createDefaultMobileNavProps();
+    const onUiMenuOpenChange = vi.fn();
+    render(<MobileNavBar {...props} view="board" navigationMenuOpen onUiMenuOpenChange={onUiMenuOpenChange} quickAccessItems={["command-center", "tasks", "missions", "mailbox", "planning"]} />);
+
+    expect(screen.queryByTestId("mobile-nav-tab-chat")).toBeNull();
+    fireEvent.click(screen.getByTestId("mobile-more-item-chat"));
+    expect(props.onChangeView).toHaveBeenCalledWith("chat");
+    expect(onUiMenuOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("mobile nav bar renders only on mobile viewport and hides for modal, desktop, or project overview", () => {
@@ -369,7 +504,11 @@ describe("Mobile Feature Access Regression Guard", () => {
       );
 
       expect(screen.getByTitle("Board view")).toBeDefined();
-      expect(screen.getByTitle("List view")).toBeDefined();
+      /*
+       * FN-426 supersedes FN-382's dock-only List: the right sidebar is optional now, so the header toggle offers
+       * List again — exactly once — on every host that renders this group.
+       */
+      expect(screen.getAllByTitle("List view")).toHaveLength(1);
       expect(screen.getByTestId("view-toggle-overflow-trigger")).toBeDefined();
       unmount();
     }
@@ -395,45 +534,49 @@ describe("Mobile Feature Access Regression Guard", () => {
     }
   });
 
-  it("left sidebar app gate renders by default on desktop and tablet, honors explicit opt-out, and never renders on mobile", () => {
+  it("left sidebar app gate follows the project navigation placement and never renders in the mobile shell", () => {
     /*
-     * Surface Enumeration checklist asserted here:
-     * - leftSidebarNav unset/undefined -> sidebar renders on desktop and tablet.
-     * - leftSidebarNav true -> sidebar renders on desktop and tablet.
-     * - leftSidebarNav false -> sidebar does not render and legacy Header nav returns.
-     * - mobile never renders the sidebar for any flag state; MobileNavBar owns navigation.
-     * - active sidebar state suppresses Header view-toggle and overflow shells.
+     * Surface Enumeration checklist asserted here (FN-468 : la bande tablette appartient au shell mobile) :
+     * - navigationPlacement "sidebar" -> la colonne ne rend QUE sur ordinateur.
+     * - navigationPlacement "footer" -> aucune colonne ; le pied de page large possède la navigation sur ordinateur,
+     *   donc les raccourcis de vues du Header restent supprimés.
+     * - téléphone ET tablette ne rendent jamais la colonne, quelle que soit la placement : `MobileNavBar` possède la
+     *   navigation et le Header n'ajoute aucune troisième surface.
      */
-    const flagStates = [
-      { label: "unset", leftSidebarNavFlag: undefined, sidebarExpected: true },
-      { label: "true", leftSidebarNavFlag: true, sidebarExpected: true },
-      { label: "false", leftSidebarNavFlag: false, sidebarExpected: false },
-    ] as const;
+    const placements = [
+      { label: "sidebar", navigationPlacement: "sidebar" as const, sidebarExpected: true },
+      { label: "footer", navigationPlacement: "footer" as const, sidebarExpected: false },
+    ];
 
-    for (const { label, leftSidebarNavFlag, sidebarExpected } of flagStates) {
-      for (const tier of ["desktop", "tablet"] as const) {
-        mockViewport(tier);
-        const { unmount } = render(<PrimaryNavigationSurfaceHarness leftSidebarNavFlag={leftSidebarNavFlag} />);
-        expect(screen.queryByTestId("left-sidebar-nav"), `${label} flag on ${tier}`).toBe(
+    for (const { label, navigationPlacement, sidebarExpected } of placements) {
+      mockViewport("desktop");
+      {
+        const { unmount } = render(<PrimaryNavigationSurfaceHarness navigationPlacement={navigationPlacement} />);
+        expect(screen.queryByTestId("left-sidebar-nav"), `${label} placement on desktop`).toBe(
           sidebarExpected ? screen.getByTestId("left-sidebar-nav") : null,
         );
-        expect(screen.queryByTitle("Board view"), `${label} flag header board shortcut on ${tier}`).toBe(
-          sidebarExpected ? null : screen.getByTitle("Board view"),
-        );
-        expect(screen.queryByTestId("view-toggle-overflow-trigger"), `${label} flag overflow on ${tier}`).toBe(
-          sidebarExpected ? null : screen.getByTestId("view-toggle-overflow-trigger"),
-        );
+        // Either wide surface owns routing, so the Header never re-adds a third navigation.
+        expect(screen.queryByTitle("Board view"), `${label} placement header board shortcut on desktop`).toBeNull();
+        expect(screen.queryByTestId("view-toggle-overflow-trigger"), `${label} placement overflow on desktop`).toBeNull();
         unmount();
       }
 
-      mockViewport("mobile");
-      const { container, unmount } = render(<PrimaryNavigationSurfaceHarness leftSidebarNavFlag={leftSidebarNavFlag} />);
-      expect(screen.queryByTestId("left-sidebar-nav"), `${label} flag on mobile`).toBeNull();
-      expect(container.querySelector(".mobile-nav-bar"), `${label} flag mobile nav`).not.toBeNull();
-      unmount();
+      for (const tier of ["mobile", "tablet"] as const) {
+        mockViewport(tier);
+        const { container, unmount } = render(<PrimaryNavigationSurfaceHarness navigationPlacement={navigationPlacement} />);
+        expect(screen.queryByTestId("left-sidebar-nav"), `${label} placement on ${tier}`).toBeNull();
+        expect(container.querySelector(".mobile-nav-bar"), `${label} placement mobile nav on ${tier}`).not.toBeNull();
+        expect(screen.queryByTitle("Board view"), `${label} placement header board shortcut on ${tier}`).toBeNull();
+        unmount();
+      }
     }
   });
 
+  /*
+   * FN-437 : Liste n'est plus un déclencheur du Header sur téléphone (le menu du pied de page en est le propriétaire
+   * unique, cf. le garde-fou « garde Liste, Notes et Activité atteignables… »). Le repli du Header reste vérifié pour
+   * Board et Agents, qui n'ont pas changé de propriétaire.
+   */
   it("left sidebar suppression does not affect the mobile header fallback", () => {
     mockViewport("mobile");
     render(
@@ -447,7 +590,7 @@ describe("Mobile Feature Access Regression Guard", () => {
     );
 
     expect(screen.getByTitle("Board view")).toBeDefined();
-    expect(screen.getByTitle("List view")).toBeDefined();
+    expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
   });
 
   it("header view toggle fallback renders on mobile when mobile nav is disabled", () => {
@@ -461,8 +604,8 @@ describe("Mobile Feature Access Regression Guard", () => {
     );
 
     expect(screen.getByTitle("Board view")).toBeDefined();
-    expect(screen.getByTitle("List view")).toBeDefined();
     expect(screen.getByTitle("Agents view")).toBeDefined();
+    expect(screen.queryByTestId("header-list-view-btn")).toBeNull();
   });
 
   it("all three task views remain reachable across mobile navigation surfaces", () => {
@@ -472,13 +615,15 @@ describe("Mobile Feature Access Regression Guard", () => {
         {...createDefaultMobileNavProps()}
         view="missions"
         onChangeView={mobileNavOnChangeView}
+        navigationMenuOpen
+        /* FN-511 : sélection explicite de cinq destinations excluant `tasks` ET `agents`, pour qu'aucun complément ne les promeuve. */
+        quickAccessItems={["planning", "missions", "git", "files", "mailbox"]}
       />,
     );
 
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-tasks"));
-
-    expect(mobileNavOnChangeView).toHaveBeenCalledWith("board");
-    fireEvent.click(screen.getByTestId("mobile-nav-tab-agents"));
+    fireEvent.click(screen.getByTestId("mobile-more-item-tasks"));
+    expect(mobileNavOnChangeView).toHaveBeenCalledWith("list");
+    fireEvent.click(screen.getByTestId("mobile-more-item-agents"));
     expect(mobileNavOnChangeView).toHaveBeenCalledWith("agents");
 
     mobileNav.unmount();
@@ -493,9 +638,9 @@ describe("Mobile Feature Access Regression Guard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByTitle("List view"));
+    // FN-437 : sur téléphone, seul le menu du pied de page route vers Liste ; le Header garde Board et Agents.
+    expect(screen.queryByTitle("List view")).toBeNull();
     fireEvent.click(screen.getByTitle("Agents view"));
-    expect(headerOnChangeView).toHaveBeenCalledWith("list");
     expect(headerOnChangeView).toHaveBeenCalledWith("agents");
   });
 });

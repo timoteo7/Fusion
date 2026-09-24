@@ -133,6 +133,15 @@ Terminal acceptance tasks that require real mobile Safari should use [`docs/ios-
 
 Agents running verification through `fn_run_verification` are bounded by default: project `verificationCommandTimeoutMs` when set, otherwise 300s for package scope and 900s for workspace scope, with an 1800s hard cap. Marathon invocations such as root `pnpm test`, `pnpm test:full`, `pnpm verify:workspace`, whole-package tests without file filters, and shell repeat loops are soft-capped unless the agent explicitly passes `allowFullSuite: true`; the escape hatch still emits progress heartbeats and respects the hard cap. **Do not pass `allowFullSuite: true` unless absolutely necessary** — it is the main way verification balloons past its budget. Default to a targeted, file-scoped command such as `pnpm --filter @fusion/<pkg> exec vitest run src/path/to/test.ts --silent=passed-only --reporter=dot`; reserve `allowFullSuite` for a genuinely full run with no targetable test set (state the reason), with the thin merge gate (`pnpm test:gate`) as the cross-cutting safety net.
 
+## Dynamic-list verification
+
+<!-- FNXC:DynamicListTesting 2026-09-07-17:16: FN-311 makes automatic pagination and bounded rendering one cross-surface contract. Tests must cover the production host, not only the primitive: stable cursor continuation, stale-response fencing, intersection and scroll fallback, variable-height remeasurement, prepend anchoring, unmount cleanup, and a bounded DOM under at least 10,000 logical rows. -->
+
+When changing a dynamic dashboard list, update `listSurfaceInventory.ts` and keep a targeted production-reachability test named by that inventory entry. Manual “Load more” controls are reserved for explicit error retry actions; ordinary continuation must be driven by an edge sentinel and a single-flight loader.
+
+<!-- FNXC:DoneKeysetPagination 2026-09-08-22:25: FN-318 makes the completion history a server-keyset collection. -->
+Done-history tests must replay only the opaque `nextCursor` returned by `/api/tasks/done`, verify exact per-column and per-workflow counts independently of loaded rows, and accumulate rendered IDs while scrolling because the virtualized DOM intentionally never contains the full history at once.
+
 ## Dashboard source-read fixtures
 
 Dashboard app tests that inspect CSS or TypeScript source must use `packages/dashboard/app/test/cssFixture.ts` helpers such as `readAppFile()` and `loadComponentCss()`. Never read a bare relative path or construct a source path from `process.cwd()`; root-anchored Vitest launches otherwise fail at import time. `scripts/check-no-cwd-relative-dashboard-test-reads.mjs` enforces this convention in the full-suite pretest hook and merge gate.
@@ -223,6 +232,15 @@ A dropped baseline must be **deliberately re-recorded and committed** with
 `--strict --update-baseline`. `--strict --exact` restores hard failure on a drop, for the end state where the
 count is pinned and any divergence is a real event. `--strict --update-baseline` re-records unconditionally
 and prints `ACCEPTED RISES`, which is the only way to record a rise deliberately.
+
+<!-- FNXC:LifecycleColumnCensus 2026-09-15-15:11: The PR-only ratchet let main-line drift
+accumulate unseen until an unrelated pull request inherited the failure. Keep post-merge observation
+separate from the merge gate while making the same strict command visible at the introducing commit. -->
+The strict ratchet runs in the `Lint` job of `PR Checks` on `pull_request` and in the
+`lifecycle-ratchet-drift` job of `.github/workflows/full-suite.yml` on pushes to `main`.
+`pnpm lint` does **not** run this census. Resolve every rise by converting it to a live
+workflow-resolved check or adding a declaration-leading `DELIBERATE-LITERAL` marker with its reason,
+then re-record the baseline with `--strict --update-baseline` in the same change.
 
 The regression suite is `packages/engine/src/__tests__/lifecycle-column-census.test.ts`. It pins
 each form the census must catch (all six ids, non-`column` locals, single quotes, negation,
@@ -453,7 +471,7 @@ reviewable. New test ids never fail the diff.
 the FN-175/FN-177 class: merge admission before a Code Review verdict, a failed card
 whose branch has already landed, and cleanup that removes a live executor worktree.
 It drives disposable local Git repositories, a throwaway PostgreSQL store, the real
-built-in Coding (Ideas) and Coding workflow definitions, real merger admission, and
+built-in Coding (Ideas) and Coding (Auto) workflow definitions, real merger admission, and
 deterministic mock-provider scripts under `testMode: true`.
 
 Prerequisites are Git and reachable test PostgreSQL. Start the latter with
@@ -464,6 +482,9 @@ and `engine-core` so it cannot expand `pnpm test` or the merge gate. The non-blo
 `Pipeline smoke tier` job in `.github/workflows/full-suite.yml` runs after merge with
 `fetch-depth: 0` and a PostgreSQL service; never add it to `pr-checks.yml`, branch
 protection, or the engine-core allow-list.
+
+<!-- FNXC:PipelineSmoke 2026-09-12-22:57: FN-9291 keeps the opt-in lane observable from the ordinary engine test project without making its Git/PostgreSQL composition part of the merge gate. -->
+**Import-integrity ratchet:** Engine TypeScript configuration excludes `src/__tests__/**/*`, and this opt-in project is excluded from `engine-default`. Consequently, a test-only named import of a deleted engine export can evade typecheck, build, `verify:fast`, and the merge gate until the full smoke lane runs. `pipeline-smoke-import-integrity.test.ts` runs in `engine-default` and resolves each non-type named relative import from pipeline-smoke modules against its runtime module namespace, failing with the importer, specifier, and missing binding. When product behavior is removed, delete the tests that assert that retired behavior in the same change rather than restoring a compatibility stub.
 
 <!-- FNXC:PipelineSmoke 2026-08-23-20:49: The completed production-chain drivers measured 53,378ms and 60,459ms, so the declared budget is rounded to 70 seconds from current observed execution rather than the earlier seeded-row measurement. -->
 <!--
@@ -500,14 +521,20 @@ remediation drive) plus S05 extended to `builtin:coding-ideas-v2`, one of the lo
 the matrix. Five consecutive runs measured 140.1s, 143.8s, 146.7s, 147.0s and 148.4s — green against
 the old 150s ceiling, but with under 2s of headroom, which is a flake waiting to happen rather than
 a passing lane. Third precedent for the same rule: growth must be nameable, or it is a regression.
+
+FNXC:WorkflowSuccession 2026-09-06-02:15:
+FN-297 removes the retired Ideas workflow from the 19 scenario matrices because its compatibility alias resolves the same surviving graph. The workload decreases by one duplicate workflow execution per affected scenario, while 175 seconds remains a ceiling rather than a target or a reason to conceal future regressions.
 -->
+<!-- FNXC:PipelineSmoke 2026-09-16-22:32: FN-9310 requires the post-merge runner to terminate the pnpm-to-Vitest process group at its existing budget, so descendants cannot outlive a timed-out smoke invocation. -->
 The declared budget is **175 seconds**, rounded up from a measured 148,434ms slowest full-matrix
 run (7 files, 90 tests) after the Code Review remediation drive was added and S05 was extended to
-`builtin:coding-ideas-v2`. The wrapper enforces it for every run; an overrun is a result
-to investigate, never a reason to hide a regression behind unbounded timeouts. Use
-`--repeat=10` for the reproducibility proof, `--json` for machine output, and
-`--budget-ms=<n>` only for loud diagnostic measurement. The normalized report lists
-scenario, variant, workflow, expected terminal, observed terminal, verdict, and duration.
+`builtin:coding-ideas-v2`. The wrapper enforces it through bounded process-group termination at the
+`pnpm` → Vitest boundary: timeout sends SIGTERM to the launched group and escalates to SIGKILL after
+the watchdog grace window. An overrun, child failure, or incomplete report is a fail-closed result
+to investigate, never a reason to widen timeouts. Use `--repeat=10` for the reproducibility proof,
+`--json` for machine output, and `--budget-ms=<n>` only for loud diagnostic measurement. The
+normalized report lists scenario, variant, workflow, expected terminal, observed terminal, verdict,
+and duration.
 
 Each scenario declares one closed terminal state: `merged-done`, `inert-intake`,
 `parked`, `manual-hold`, or `no-op-merge`. The harness fails on an undeclared terminal
@@ -980,6 +1007,14 @@ Prefer `it.each` over copy-pasted `it()` blocks. When trimming, keep: first case
 - Integration tests exercising real SQLite, real worker pool, or spawned processes.
 - Lean core/engine unit tests with low mock burden.
 
+## Testing short-circuit guards and output handoffs
+
+<!-- FNXC:PlanReviewOutputExclusivity 2026-09-06-01:01: FN-299 showed that a passing event-driven test can exercise only an earlier short-circuit term, and that a writer-side assertion can target data the real reader intentionally ignores. -->
+
+For a disjunctive event guard, exercise each term with the earlier terms unarmed. In particular, do not emit a setup event that inserts an ID into a set if deleting that ID is the guard's first term; the later durable predicates then become unreachable even though the test passes. Cover nominal evidence directly rather than treating an exception form (such as an operator bypass) as coverage of the ordinary producer result, and include an identical-event case for any deduplication set.
+
+For an output-chain claim such as “review approval queues execution” or “revision notes reach planning,” assert all three boundaries: the durable gate, the production trigger, and its observable consumer effect. Use the real reader for transmitted data; do not assert against an audit or activity-log copy that the reader excludes. When several routes share the same top-level outcome, route assertions must use visited nodes, durable writes, and the final queue/replan effect rather than the shared outcome value.
+
 ## Test isolation for module-singleton state
 
 <!-- FNXC:ConcurrencyAdmission 2026-08-01-06:57: Module-singleton admission state can survive mocked lane starts and unstopped processors, silently consuming capacity in later tests. FN-8671 fixes that root cause without quarantine: stop tracked owners first, then clear shared state in a finally block and assert the result through read-only inspection seams. -->
@@ -1003,6 +1038,17 @@ In this pnpm workspace, one dependency version can resolve to several peer-hashe
 - Use the canonical taxonomy in **What NOT to write** and **What TO keep unconditionally** when deciding trim vs keep.
 - See `docs/test-speed-audit-FN-5048.md` for the measured baseline offender list and optimization priorities.
 
+### Plan premise contract
+
+Every implementation PROMPT.md carries a short `## Plan Premises` section. Each bullet is exactly one JSON object from this closed grammar:
+
+- `{"kind":"file-exists","path":"project/relative/path"}`
+- `{"kind":"file-absent","path":"project/relative/path"}`
+- `{"kind":"text-present","path":"project/relative/path","literal":"exact text"}`
+- `{"kind":"text-absent","path":"project/relative/path","literal":"exact text"}`
+
+Choose one to a few facts that the implementation actually assumes and that can be disproved against the current main checkout. Paths must be relative, normalized, non-glob paths inside the project; text literals are exact, non-empty strings. Do not use prose, commands, regular expressions, JavaScript, goals, or restated steps. Parser tests cover all four kinds plus absent/empty sections, malformed JSON, extra keys, unknown kinds, traversal, absolute paths, globs, and command-shaped lines.
+
 ### Surface Enumeration checklist
 
 Copy this checklist into a bug-fix or UI-affordance add/remove task's `## Surface Enumeration` section and make the implementation tests prove the invariant across every checked surface. This checklist applies to bug-fix tasks and UI-affordance add/remove tasks that add, remove, or restructure icons, buttons, chevrons/arrows, toggles, badges, menu entries, or click targets. See `AGENTS.md` → **Standing Rule: Fix the Invariant, Not the Repro (FN-5893)** for the enforced planning/review contract.
@@ -1015,9 +1061,11 @@ Copy this checklist into a bug-fix or UI-affordance add/remove task's `## Surfac
 - [ ] For worktree cleanup: active-session, successor-session after abort, raw/canonical path spellings, workspace sub-repository worktrees, and proof-gated ignored-only versus deliverable/unverifiable checkout content
 - [ ] Long-running subprocess or verification-active surfaces when the invariant involves engine liveness, stuck detection, or command execution (`fn_run_verification`, configured commands, timeout/deadline behavior)
 - [ ] Desktop + mobile breakpoints / platforms that exercise the behavior
+- [ ] Input CAPABILITY surfaces when the behavior depends on hover or pointer precision: fine-pointer hover, coarse pointer at mobile width, and coarse pointer ABOVE the mobile breakpoint (a touch tablet in landscape is reached by no `max-width: 768px` override, so a width-based guard leaves it regressive — FN-482)
 - [ ] Empty / undefined / duplicate / populated data states
 - [ ] Shared hooks / components / modules / helpers reusing the logic
 - [ ] Every component that renders the affordance (search the codebase for the icon/class/testid, not just the one the user pointed at)
+- [ ] Every HOST of a shared layout primitive when the defect is in a call-site ARGUMENT rather than the primitive: for a `ViewSidebar` rail, check which box each class lands on (`className` styles the outer `.view-sidebar`, `panelClassName` the inner `aside.view-sidebar__panel`) and scan the other rails for the same shape (FN-502 — a leftover `flex-direction: column` on the outer box removed the panel's vertical stretch and unbounded the whole scroll chain)
 - [ ] Leftover shells after removal — empty buttons, orphaned click targets, now-unused wrappers, dangling aria-labels — are explicitly checked and fixed/hidden
 
 Motivating incident: FN-6115/FN-6118/FN-6123 — a single workflow-row chevron required three tasks to fully remove because the affordance rendered across multiple components and one mobile surface kept an empty `btn-icon` button shell.
@@ -1067,6 +1115,12 @@ pnpm --filter @fusion/dashboard exec vitest run app/components/__tests__/Workspa
 ```
 
 The parity invariant is that a mono-repository task and a workspace task changing one scoped repository have identical review, completion, and landing outcomes. The acquired clean peer must be displayed as **No changes — not reviewed**, must not get a blocking verdict, and must not become a partial-land target.
+
+### Forced stuck-resume race regressions
+
+Test both deterministic FIFO orderings whenever executor ownership or stuck recovery changes. In the invalidation-first ordering, suspend the old attempt after it selects cleanup but before it enters the mutation section, reserve forced invalidation, synchronously signal abort, acquire a real successor through `TaskExecutor`, then release the old unwind; no old store writer, task move, task-keyed cleanup, Git cleanup, or lifecycle event may run. In the mutation-first ordering, suspend an asynchronous writer or destructive `StepSessionExecutor.cleanup()` after section entry and prove invalidation plus real successor acquisition remain unpublished until it settles, with no overlap between attempts. Exercise both step-session and single-session production paths, and assert that the successor's active-session registration and persisted checkout identity survive the late unwind.
+
+The symptom fixture retains completed and in-progress steps plus workflow node, branch, worktree, and current column. It must assert those values survive and that logs contain neither an unattributed WIP→Hold move nor a parent-moved abort. The `check:move-target-literals` AST ratchet also records production engine `moveTask` calls lacking explicit `moveSource`; its baseline may decrease but no new omission is accepted, while operator routes and comments remain outside that engine-only population.
 
 ### Branch-writer validation regressions
 

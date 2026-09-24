@@ -28,6 +28,7 @@ import {
   resolveExecutorFallbackModel,
   resolvePersistAgentThinkingLog,
   resolveReviewBlockingSeverity,
+  resolveWorkflowStepVerdictRequirement,
   requiresContentReviewProof,
   resolveValidatorFallbackModel,
   resolveTaskOutputLanguage,
@@ -66,7 +67,7 @@ import {
   requiredArtifactReadFailedValue,
 } from "../execution/required-workflow-artifacts.js";
 import { accumulateSessionTokenUsage } from "../execution/session-token-usage.js";
-import { createStreamingDeltaNormalizer } from "../execution/streaming-delta.js";
+import { createAssistantStreamCapture } from "../execution/assistant-text-capture.js";
 import { describeModel, formatModelMarkerDetails, promptWithFallback } from "../pi.js";
 import {
   detectExternalIntegrationEvidenceGaps,
@@ -93,8 +94,11 @@ import { createSeenSteeringIds } from "./task-predicates.js";
 import {
   parseWorkflowStepNotesRepair,
   parseWorkflowStepOutput,
+  parseWorkflowStepVerdictRepair,
+  workflowStepMissingVerdictNotice,
   workflowStepVerdictNoNotesNotice,
   WORKFLOW_STEP_NOTES_REPAIR_PROMPT,
+  WORKFLOW_STEP_VERDICT_REPAIR_PROMPT,
   type WorkflowStepOutcome,
   type WorkflowStepVerdictNoNotesReason,
 } from "./workflow-step-verdict.js";
@@ -119,8 +123,10 @@ import { attachAgentUsageTelemetry, emitAgentSessionStart } from "../agents/agen
 const execAsync = promisify(exec);
 
 export const WORKFLOW_STEP_NOTES_REPAIR_TIMEOUT_MS = 120_000;
+export const WORKFLOW_STEP_VERDICT_REPAIR_TIMEOUT_MS = 120_000;
 
 type WorkflowStepNotesRepairOutcome = "repaired" | Exclude<WorkflowStepVerdictNoNotesReason, "reused-empty">;
+type WorkflowStepVerdictRepairOutcome = "repaired" | "empty" | "timed-out" | "failed-soft" | "unavailable";
 
 /** Find the current reusable review result for one node, scope generation, and exact input fingerprint. */
 export function findReusableReviewResult(
@@ -238,9 +244,18 @@ export async function executeWorkflowStep(
     reviewInputFingerprint?: string;
     /** Identifies the repository inspected by a per-repository workspace dispatch. */
     dispatchLabel?: string;
+    /** Run-scoped graph cancellation fence for session creation and registration. */
+    signal?: AbortSignal;
   },
 ): Promise<WorkflowStepOutcome> {
-  const diffBaseCommitSha = stepOptions?.diffBaseCommitSha ?? task.baseCommitSha;
+    const graphSignal = stepOptions?.signal;
+    const graphAbortedOutcome = (): WorkflowStepOutcome => ({
+      success: false,
+      error: "workflow graph execution cancelled",
+      failureValue: "aborted",
+    });
+    if (graphSignal?.aborted) return graphAbortedOutcome();
+    const diffBaseCommitSha = stepOptions?.diffBaseCommitSha ?? task.baseCommitSha;
     let toolMode: "coding" | "readonly" = workflowStep.toolMode || "readonly";
     // (U3) Genuinely-unattended run — set FUSION_HEADLESS=1 below so skills record
     // assumptions and proceed instead of parking on a question. Explicit opt-in
@@ -277,14 +292,17 @@ export async function executeWorkflowStep(
       || optionalGroupId === "plan-review"
       || optionalGroupId === "code-review"
       || optionalGroupId === "browser-verification";
-    const reviewerInlineFixesEnabled = (settings as Settings & { reviewerInlineFixes?: boolean }).reviewerInlineFixes !== false;
+    /*
+     * FNXC:WorkflowReviewers 2026-09-03-05:40:
+     * Graph execution supplies the raw project settings map, but `reviewerInlineFixes` is workflow-owned and absent from `DEFAULT_PROJECT_SETTINGS`. Resolve the review step's effective workflow settings once so both its declaration default and an operator's stored value reach the tool-policy decision; reading the raw map made both unreachable. The two-tier merge still lets an explicit base value win over a declaration default.
+     */
+    const effectiveReviewSettings = isReviewTypeWorkflowStep
+      ? await mergeEffectiveSettings(deps.store, task, settings).catch(() => settings)
+      : settings;
+    const reviewerInlineFixesEnabled = (effectiveReviewSettings as Settings & { reviewerInlineFixes?: boolean }).reviewerInlineFixes === true;
     const allowReviewerInlineFixes = reviewerInlineFixesEnabled && isReviewTypeWorkflowStep && workflowStep.mode === "prompt";
     const allowPlanReviewPromptWrite = allowReviewerInlineFixes && isPlanReviewStep;
     if (allowReviewerInlineFixes && !isPlanReviewStep) {
-      /*
-       * FNXC:WorkflowReviewers 2026-07-01-12:36:
-       * Review-type workflow nodes can now repair their own findings when the workflow setting `reviewerInlineFixes` is on. Use coding tools for implementation review sessions so Code Review, Browser Verification, and custom review/verification gates do not have to bounce through executor remediation for issues they can safely fix inline. Plan Review stays on a narrow PROMPT.md writer because it runs before implementation.
-       */
       toolMode = "coding";
     }
     const requireExternalIntegrationEvidence =
@@ -526,18 +544,15 @@ CRITICAL SCOPING RULES — read before doing anything else:
      * Prompt/custom workflow-step reviewers, including Browser Verification agents, do not call reviewStep. They still gate quality, so their system prompt must carry the same canonical uncapped user comments plus legacy steering selected from a fresh task snapshot.
      */
 
-    // (KTD-6) Verdict-contract reconciliation. The trailing-verdict JSON is the
-    // gate-parsing contract — it only matters for steps that gate merge. A skill
-    // step that isn't a gate (e.g. ce-plan / ce-work / ce-compound) produces
-    // skill-native output (and may emit a ===FUSION_AWAIT_INPUT=== sentinel and
-    // stop), so forcing a verdict would contradict the U2 preamble. Require the
-    // verdict only for gate steps (and skill-less prompt steps, which keep the
-    // legacy reviewer contract); relax it for non-gate skill steps. The executor
-    // runs parseAwaitInputSentinel on output regardless, so the await-input
-    // sentinel always takes priority when present.
-    const isSkillStep = typeof workflowStep.skillName === "string" && workflowStep.skillName.trim().length > 0;
-    const isSummaryProjectionStep = (workflowStep as WorkflowStep & { summaryTarget?: string }).summaryTarget === "task";
-    const requireVerdict = !isSummaryProjectionStep && (workflowStep.gateMode === "gate" || !isSkillStep);
+    // (KTD-6) Verdict-contract reconciliation. Skill-native plan/work steps keep
+    // their own output contract, while prompt steps whose durable optional-group
+    // result reaches merge admission must author a structured verdict.
+    const requireVerdict = resolveWorkflowStepVerdictRequirement({
+      gateMode: workflowStep.gateMode,
+      skillName: workflowStep.skillName,
+      summaryTarget: (workflowStep as WorkflowStep & { summaryTarget?: string }).summaryTarget,
+      optionalGroupId,
+    });
     const reviewFindingsContract = workflowStepMetadata.reviewKind === "plan" || workflowStepMetadata.reviewKind === "code";
     /*
      * FNXC:ReviewSeverityGate 2026-08-10-17:33:
@@ -555,8 +570,7 @@ CRITICAL SCOPING RULES — read before doing anything else:
     const reviewBlockingSeverity = reviewFindingsContract
       ? resolveReviewBlockingSeverity({
         reviewKind: workflowStepMetadata.reviewKind as WorkflowReviewKind,
-        workflowSettings: await mergeEffectiveSettings(deps.store, task, settings)
-          .catch(() => settings) as unknown as Record<string, unknown>,
+        workflowSettings: effectiveReviewSettings as unknown as Record<string, unknown>,
         nodeBlockingSeverity: (workflowStep as WorkflowStep & { blockingSeverity?: unknown }).blockingSeverity,
       })
       : undefined;
@@ -836,9 +850,11 @@ CRITICAL SCOPING RULES — read before doing anything else:
     const workflowFallback = isReviewTypeWorkflowStep
       ? resolveValidatorFallbackModel(settings)
       : resolveExecutorFallbackModel(settings);
-    const fallback = workflowFallback.provider && workflowFallback.modelId
-      && (workflowFallback.provider !== primaryProvider || workflowFallback.modelId !== primaryModelId)
-      ? workflowFallback
+    const fallbackProvider = workflowFallback.provider?.trim();
+    const fallbackModelId = workflowFallback.modelId?.trim();
+    const fallback = fallbackProvider && fallbackModelId
+      && (fallbackProvider !== primaryProvider || fallbackModelId !== primaryModelId)
+      ? { ...workflowFallback, provider: fallbackProvider, modelId: fallbackModelId }
       : undefined;
     const fallbackSettingsHint = isReviewTypeWorkflowStep
       ? "settings.validatorFallbackProvider/validatorFallbackModelId or fallbackProvider/fallbackModelId"
@@ -851,17 +867,30 @@ CRITICAL SCOPING RULES — read before doing anything else:
     /*
     FNXC:WorkflowStepModelMarker 2026-08-29-06:46:
     A workspace review constructs one session per repository, so its model markers must identify
-    the inspected tree. A same-model malformed-output self-retry adds no model-resolution value;
-    dedupe identical markers within this workflow-step call while retaining a marker for a real
-    fallback model change.
+    the inspected tree. A same-model secondary attempt adds no model-resolution value; dedupe
+    identical markers within this workflow-step call while retaining a marker for a real configured
+    fallback model change and its trigger.
     */
     let lastEmittedModelMarker: string | undefined;
+
+    type AttemptTrigger = "timeout" | "malformed-output";
+    type Attempt =
+      | { kind: "primary" }
+      | { kind: "configured-fallback"; trigger: AttemptTrigger }
+      | { kind: "same-model-retry"; trigger: AttemptTrigger };
+    const triggerLabel = (trigger: AttemptTrigger) => trigger === "timeout" ? "timeout" : "malformed output";
+    const attemptLabel = (attempt: Attempt) => {
+      if (attempt.kind === "configured-fallback") return "configured fallback";
+      if (attempt.kind === "same-model-retry") return "same-model retry";
+      return "primary";
+    };
 
     const runOnce = async (
       provider: string | undefined,
       modelId: string | undefined,
-      attemptLabel: string,
+      attempt: Attempt,
     ): Promise<WorkflowStepOutcome> => {
+      if (graphSignal?.aborted) return graphAbortedOutcome();
       const stepInstructions = await deps.resolveInstructionsForRole("executor", settings);
       const stepSystemPrompt = buildSystemPromptWithInstructions(systemPrompt, stepInstructions);
 
@@ -1016,7 +1045,7 @@ CRITICAL SCOPING RULES — read before doing anything else:
        */
       const workflowStepThinkingSource = workflowStep.thinkingLevel
         ?? (isReviewTypeWorkflowStep ? task.validatorThinkingLevel ?? task.thinkingLevel : task.thinkingLevel);
-      const workflowStepThinkingLevel = attemptLabel === "fallback"
+      const workflowStepThinkingLevel = attempt.kind === "configured-fallback"
         ? isReviewTypeWorkflowStep
           ? resolveValidatorFallbackThinkingLevel(workflowStepThinkingSource, settings)
           : resolveExecutorFallbackThinkingLevel(workflowStepThinkingSource, settings)
@@ -1032,6 +1061,8 @@ CRITICAL SCOPING RULES — read before doing anything else:
           `Workflow step '${workflowStep.name}' enabled read-only MCP servers: ${readonlyMcpServerAllowlist.join(", ")}`,
         );
       }
+      const mcpServers = await deps.resolveMcpServers(undefined);
+      if (graphSignal?.aborted) return graphAbortedOutcome();
       const { session } = await createResolvedAgentSession({
         sessionPurpose: "executor",
         taskExecutionSession: true,
@@ -1043,7 +1074,7 @@ CRITICAL SCOPING RULES — read before doing anything else:
         tools: toolMode,
         defaultProvider: provider,
         defaultModelId: modelId,
-        ...(attemptLabel !== "fallback" && primaryCredentialInstanceId
+        ...(attempt.kind !== "configured-fallback" && primaryCredentialInstanceId
           ? { credentialInstanceId: primaryCredentialInstanceId }
           : {}),
         fallbackProvider: workflowFallback.provider,
@@ -1053,7 +1084,7 @@ CRITICAL SCOPING RULES — read before doing anything else:
         runAuditor: createRunAuditor(deps.store, deps.getRunContextFor(task.id)),
         settings,
         taskEnv: stepEnv,
-        mcpServers: await deps.resolveMcpServers(undefined),
+        mcpServers,
         ...(allowReadonlyMcpTools
           ? {
               allowMcpToolsInReadonly: true,
@@ -1085,6 +1116,10 @@ CRITICAL SCOPING RULES — read before doing anything else:
           ? { customTools: readonlyCustomTools.allowed, fusionTools: readonlyCustomTools.allowed }
           : {}),
       });
+      if (graphSignal?.aborted) {
+        try { session.dispose(); } catch { /* best-effort */ }
+        return graphAbortedOutcome();
+      }
       // FNXC:CommandCenterActivity 2026-08-15-22:15: session boundary for the workflow-step runtime session (restored post-wave-18).
       emitAgentSessionStart({ store: deps.store, agentId: sessionTask.assignedAgentId ?? null, taskId: task.id, nodeId: task.effectiveNodeId ?? task.nodeId ?? null, model: primaryModelId ?? null, provider: primaryProvider ?? null, lane: "executor" });
 
@@ -1092,8 +1127,10 @@ CRITICAL SCOPING RULES — read before doing anything else:
         describeModel(session),
         workflowStepThinkingLevel,
         [
-          useOverride && attemptLabel === "primary" ? "workflow step override" : "",
-          attemptLabel === "fallback" ? "fallback after timeout" : "",
+          useOverride && attempt.kind !== "configured-fallback" ? "workflow step override" : "",
+          attempt.kind === "configured-fallback"
+            ? `configured fallback after ${triggerLabel(attempt.trigger)}`
+            : "",
         ],
       );
       const workflowModelMarker = `Workflow step '${workflowStep.name}'${dispatchLabel ? ` [${dispatchLabel}]` : ""} using model: ${workflowModelDetails}`;
@@ -1101,6 +1138,10 @@ CRITICAL SCOPING RULES — read before doing anything else:
       if (workflowModelMarker !== lastEmittedModelMarker) {
         lastEmittedModelMarker = workflowModelMarker;
         await deps.store.logEntry(task.id, workflowModelMarker);
+      }
+      if (graphSignal?.aborted) {
+        try { session.dispose(); } catch { /* best-effort */ }
+        return graphAbortedOutcome();
       }
       deps.setActiveWorkflowStepSession(task.id, session, worktreePath, createSeenSteeringIds(task));
       // FNXC:TaskTiming 2026-07-30-21:40: graph-owned Plan Review is the only
@@ -1118,28 +1159,20 @@ CRITICAL SCOPING RULES — read before doing anything else:
       }
 
       let output = "";
-      const deltaNormalizer = createStreamingDeltaNormalizer();
+      let acceptSessionEvents = true;
+      /* FNXC:AssistantTextCapture 2026-09-08-14:13: Workflow verdict output must include terminal text blocks exactly once, even when providers omit deltas. */
+      const capture = createAssistantStreamCapture({
+        onText: (delta) => { output += delta; agentLogger.onText(delta); },
+        onThinking: (delta) => agentLogger.onThinking(delta),
+      });
       let detectedQuestion: string | null = null;
       let resolveQuestion: ((value: "await-input") => void) | undefined;
       const questionPromise = new Promise<"await-input">((resolve) => {
         resolveQuestion = resolve;
       });
       session.subscribe((event) => {
-        if (event.type === "message_update") {
-          const msgEvent = event.assistantMessageEvent;
-          if (msgEvent.type === "text_delta") {
-            // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-            // including tool-call cross-message boundaries (see streaming-delta.ts).
-            const delta = deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "text");
-            output += delta;
-            agentLogger.onText(delta);
-          } else if (msgEvent.type === "thinking_delta") {
-            // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-            // including tool-call cross-message boundaries (see streaming-delta.ts).
-            const delta = deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "thinking");
-            agentLogger.onThinking(delta);
-          }
-        }
+        if (!acceptSessionEvents) return;
+        capture.handleAgentEvent(event);
         if (event.type === "tool_execution_start") {
           agentLogger.onToolStart(event.toolName, event.args as Record<string, unknown> | undefined);
           if (!unattended && detectedQuestion === null) {
@@ -1180,7 +1213,15 @@ CRITICAL SCOPING RULES — read before doing anything else:
           questionPromise,
         ]);
 
+        if (graphSignal?.aborted) {
+          acceptSessionEvents = false;
+          try { session.dispose(); } catch { /* best-effort */ }
+          await agentLogger.flush();
+          return graphAbortedOutcome();
+        }
+
         if (outcome === "await-input" && detectedQuestion) {
+          acceptSessionEvents = false;
           try { session.dispose(); } catch { /* best-effort */ }
           await agentLogger.flush();
           return {
@@ -1190,10 +1231,12 @@ CRITICAL SCOPING RULES — read before doing anything else:
         }
 
         if (outcome === "timeout") {
-          executorLog.warn(`${task.id}: workflow step '${workflowStep.name}' (${attemptLabel}) timed out after ${timeoutMs}ms — disposing session`);
+          acceptSessionEvents = false;
+          const timedOutAttemptLabel = attemptLabel(attempt);
+          executorLog.warn(`${task.id}: workflow step '${workflowStep.name}' (${timedOutAttemptLabel}) timed out after ${timeoutMs}ms — disposing session`);
           await deps.store.logEntry(
             task.id,
-            `Workflow step '${workflowStep.name}' ${attemptLabel === "primary" ? "primary" : "fallback"} model timed out after ${Math.round(timeoutMs / 1000)}s — aborting session`,
+            `Workflow step '${workflowStep.name}' ${timedOutAttemptLabel} model timed out after ${Math.round(timeoutMs / 1000)}s — aborting session`,
           );
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: timed out`);
@@ -1203,7 +1246,12 @@ CRITICAL SCOPING RULES — read before doing anything else:
           await accumulateSessionTokenUsage(deps.store, task.id, session, { agentId: task.assignedAgentId ?? undefined, role: "executor" });
           try { session.dispose(); } catch { /* best-effort */ }
           await agentLogger.flush();
-          return { success: false, error: `workflow step timed out after ${timeoutMs}ms`, timedOut: true };
+          return {
+            success: false,
+            error: `workflow step timed out after ${timeoutMs}ms`,
+            timedOut: true,
+            ...(requireVerdict ? { verdictRequired: true } : {}),
+          };
         }
 
         // Completed within the timeout — let any post-completion errors surface.
@@ -1216,6 +1264,79 @@ CRITICAL SCOPING RULES — read before doing anything else:
         let parsed = requireVerdict
           ? parseWorkflowStepOutput(output, { optionalGroupId })
           : parseWorkflowStepOutput(output, { requireVerdict: false, optionalGroupId });
+
+        /*
+        FNXC:ReviewVerdictAuthority 2026-09-03-05:40:
+        A verdict-required review cannot finish without authored lifecycle authority. Ask the already-live
+        reviewer exactly once for the verdict envelope only, before token accounting and disposal; never
+        re-review, use tools, infer approval from prose, or loop. A missing, invalid, failed, or timed-out
+        repair remains malformed and is persisted as a failed review by the graph.
+        */
+        let verdictRepairResult: WorkflowStepVerdictRepairOutcome = "unavailable";
+        let repairedVerdict: ReturnType<typeof parseWorkflowStepVerdictRepair> = null;
+        if (requireVerdict && parsed.malformed) {
+          const repairStart = output.length;
+          const originalReviewOutput = output;
+          const repairTimeoutMs = Math.min(timeoutMs, WORKFLOW_STEP_VERDICT_REPAIR_TIMEOUT_MS);
+          let repairTimer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const repairTimeout = new Promise<"timeout">((resolve) => {
+              repairTimer = setTimeout(() => resolve("timeout"), repairTimeoutMs);
+            });
+            const repairPrompt = promptWithFallback(session, WORKFLOW_STEP_VERDICT_REPAIR_PROMPT(optionalGroupId));
+            const repairOutcome = await Promise.race([
+              repairPrompt.then(() => "completed" as const),
+              repairTimeout,
+            ]);
+            if (repairOutcome === "completed") {
+              repairedVerdict = parseWorkflowStepVerdictRepair(output.slice(repairStart), { optionalGroupId });
+              if (repairedVerdict) {
+                const repairedNotes = repairedVerdict === "CLOSE_NO_OP"
+                  ? undefined
+                  : parseWorkflowStepOutput(
+                    `${originalReviewOutput}\n${JSON.stringify({ verdict: repairedVerdict })}`,
+                    { optionalGroupId },
+                  );
+                parsed = repairedVerdict === "CLOSE_NO_OP"
+                  ? { output: "", verdict: repairedVerdict, notes: "" }
+                  : repairedNotes!;
+                verdictRepairResult = "repaired";
+              } else {
+                verdictRepairResult = "empty";
+              }
+            } else {
+              verdictRepairResult = "timed-out";
+            }
+          } catch {
+            verdictRepairResult = "failed-soft";
+          } finally {
+            if (repairTimer) clearTimeout(repairTimer);
+            try {
+              await deps.store.logEntry(
+                task.id,
+                `[pre-merge] Workflow step '${workflowStep.name}' requested a missing verdict`,
+                verdictRepairResult,
+              );
+            } catch {
+              // FNXC:ReviewVerdictAuthority 2026-09-03-05:40: Best-effort verdict-repair telemetry cannot fail the review step.
+            }
+            const context = deps.getRunContextFor(task.id);
+            if (context && verdictRepairResult !== "unavailable") await emitBoundedRunAudit(deps.store, {
+              taskId: task.id,
+              agentId: context.agentId,
+              runId: context.runId,
+              domain: "database",
+              mutationType: "task:review-verdict-repaired",
+              target: task.id,
+              metadata: {
+                taskId: task.id,
+                workflowStepId: sameGateStepId,
+                outcome: verdictRepairResult,
+                ...(repairedVerdict ? { verdict: repairedVerdict } : {}),
+              },
+            });
+          }
+        }
 
         /*
         FNXC:ReviewVerdictNotes 2026-08-28-21:23:
@@ -1283,9 +1404,10 @@ CRITICAL SCOPING RULES — read before doing anything else:
         }
 
         await accumulateSessionTokenUsage(deps.store, task.id, session, {
-            agentId: task.assignedAgentId ?? undefined,
-            role: "executor",
-          });
+          agentId: task.assignedAgentId ?? undefined,
+          role: "executor",
+        });
+        acceptSessionEvents = false;
         session.dispose();
         await agentLogger.flush();
         if (parsed.verdict) {
@@ -1297,11 +1419,20 @@ CRITICAL SCOPING RULES — read before doing anything else:
            * routing decision. A finding-less REVISE is non-blocking because it cannot produce
            * remediation; an unclassified open finding remains fail-closed and blocks.
            */
+          /*
+          FNXC:ReviewVerdictAuthority 2026-09-05-22:54:
+          FN-295: a verdict rescued from a MALFORMED payload carries no findings because they could not
+          be parsed. Tell the severity gate so it fails closed instead of reading the empty list as
+          "nothing blocking" — that read turned a REVISE with three `high` findings into an approval and
+          sent the card into execution on a rejected plan.
+          */
+          const findingsUnreadable = verdictRepairResult === "repaired" && (parsed.findings?.length ?? 0) === 0;
           const gated = reviewBlockingSeverity
             ? applyReviewSeverityGate({
               verdict: parsed.verdict,
               findings: parsed.findings,
               threshold: reviewBlockingSeverity,
+              findingsUnreadable,
             })
             : undefined;
           const effectiveVerdict = (gated?.verdict ?? parsed.verdict) as typeof parsed.verdict;
@@ -1396,6 +1527,7 @@ CRITICAL SCOPING RULES — read before doing anything else:
             revisionRequested,
             output: noNotesNotice ?? parsed.output,
             verdict: effectiveVerdict,
+            ...(requireVerdict ? { verdictRequired: true } : {}),
             notes: noNotesNotice ?? parsed.notes,
             ...(parsed.notesMissing ? { notesMissing: true } : {}),
             ...(parsed.findings ? { findings: parsed.findings } : {}),
@@ -1407,12 +1539,11 @@ CRITICAL SCOPING RULES — read before doing anything else:
         }
 
         if (parsed.malformed) {
-          // FNXC:ReviewLeniency 2026-07-02-00:30: malformed output (after the
-          // fallback-model retry) is recorded as a NON-BLOCKING advisory, not a
-          // hard gate block — see runGraphCustomNode's outcome mapping.
+          const malformedReason = parsed.malformedReason ?? "no-verdict";
+          const missingVerdictNotice = workflowStepMissingVerdictNotice(malformedReason);
           await deps.store.logEntry(
             task.id,
-            `[pre-merge] Workflow step '${workflowStep.name}' produced malformed output (no parseable verdict) — recorded as non-blocking advisory`,
+            `[pre-merge] Workflow step '${workflowStep.name}' produced malformed output (${malformedReason}) — ${missingVerdictNotice}`,
           );
           if (workflowStep.requiresBrowser === true) {
             await logBrowserVerificationActivity(`[browser-verification] finished browser verification for task ${task.id}: malformed output`);
@@ -1420,9 +1551,10 @@ CRITICAL SCOPING RULES — read before doing anything else:
           return {
             success: false,
             output: parsed.output,
-            error: "malformed output — no verdict extracted",
-            notes: undefined,
+            error: `malformed output — ${malformedReason}`,
+            notes: missingVerdictNotice,
             malformed: true,
+            ...(requireVerdict ? { verdictRequired: true } : {}),
             ...(reviewedCommitSha ? { reviewedCommitSha } : {}),
           };
         }
@@ -1432,6 +1564,7 @@ CRITICAL SCOPING RULES — read before doing anything else:
         }
         return { success: true, output: parsed.output };
       } catch (err: unknown) {
+        acceptSessionEvents = false;
         await agentLogger.flush();
         // Persist the delta before error disposal so graph-owned planning reviews
         // cannot disappear from operator cost totals.
@@ -1455,6 +1588,7 @@ CRITICAL SCOPING RULES — read before doing anything else:
         }
         return { success: false, error: errorMessage };
       } finally {
+        acceptSessionEvents = false;
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (ownsPlanningSegment) {
           try {
@@ -1478,42 +1612,48 @@ CRITICAL SCOPING RULES — read before doing anything else:
       }
     };
 
-    const primaryOutcome = await runOnce(primaryProvider, primaryModelId, "primary");
-    /*
-    FNXC:ReviewLeniency 2026-07-02-00:30:
-    Retry the fallback model on a MALFORMED (unparseable-verdict) primary response, not only on a timeout. A single fumbled response — reasoning with no trailing verdict — should get one more attempt on the fallback model before the gate result is recorded, mirroring the reviewer path's UNAVAILABLE retry. If no fallback is configured the malformed primary is returned as-is (and is treated as a non-blocking advisory downstream, see runGraphCustomNode).
-    */
-    const primaryMalformed = (primaryOutcome as { malformed?: boolean }).malformed === true;
+    const primaryOutcome = await runOnce(primaryProvider, primaryModelId, { kind: "primary" });
+    if (graphSignal?.aborted) return graphAbortedOutcome();
+    const primaryMalformed = primaryOutcome.malformed === true;
     if (!primaryOutcome.timedOut && !primaryMalformed) return primaryOutcome;
 
-    if (!fallback) {
-      /*
-       * FNXC:ReviewLeniency 2026-07-05-17:24:
-       * FN-7561: when NO fallback model is configured, a MALFORMED primary (unparseable verdict — a single fumbled response) still deserves one retry so a transient formatting fumble does not feed the plan-review replan loop. Self-retry once on the SAME primary model. Timeouts are NOT self-retried — they would likely just time out again and burn another full budget. If the self-retry is still malformed it is returned as a non-blocking advisory downstream.
-       */
-      if (primaryMalformed && !primaryOutcome.timedOut) {
-        await deps.store.logEntry(
-          task.id,
-          `Workflow step '${workflowStep.name}' retrying the primary model after malformed output — no fallback model is configured`,
-        );
-        const retryOutcome = await runOnce(primaryProvider, primaryModelId, "primary-retry");
-        const retryMalformed = (retryOutcome as { malformed?: boolean }).malformed === true;
-        if (!retryMalformed) return retryOutcome;
-        await deps.store.logEntry(
-          task.id,
-          `Workflow step '${workflowStep.name}' produced malformed output on both the primary attempt and one self-retry — no fallback model configured (set ${fallbackSettingsHint})`,
-        );
-        return retryOutcome;
-      }
-      const reason = primaryOutcome.timedOut ? "timed out" : "produced malformed output";
-      executorLog.warn(`${task.id}: workflow step '${workflowStep.name}' ${reason} and no fallback model is configured`);
+    const trigger: AttemptTrigger = primaryOutcome.timedOut ? "timeout" : "malformed-output";
+    /*
+    FNXC:WorkflowStepTimeoutRetry 2026-09-13-14:47:
+    A primary timeout or malformed verdict receives exactly one sequential secondary attempt. Prefer
+    a distinct configured lane fallback; otherwise dispose and unregister the expired session before
+    opening a fresh session with the primary provider, model, credential identity, and step inputs.
+    Late events from the retired attempt are inert, and only the secondary aggregate outcome reaches
+    graph persistence; a second timeout or malformed response remains fail-closed without a third try.
+
+    FNXC:WorkflowStepTimeoutRetry 2026-09-13-15:25:
+    The graph invocation's AbortSignal is the ownership fence for that secondary attempt. Re-check it
+    after primary cleanup, after asynchronous retry preparation, after session creation, and before
+    registration so a cancelled graph cannot open or publish work under its retired run.
+    */
+    if (fallback) {
+      executorLog.log(`${task.id}: retrying workflow step '${workflowStep.name}' with configured ${fallbackLaneLabel} fallback ${fallback.provider}/${fallback.modelId} after primary ${triggerLabel(trigger)}`);
       await deps.store.logEntry(
         task.id,
-        `Workflow step '${workflowStep.name}' ${reason} — no fallback model configured (set ${fallbackSettingsHint})`,
+        `Workflow step '${workflowStep.name}' starting one configured ${fallbackLaneLabel} fallback attempt after primary ${triggerLabel(trigger)}`,
       );
-      return primaryOutcome;
+      const fallbackOutcome = await runOnce(fallback.provider, fallback.modelId, { kind: "configured-fallback", trigger });
+      return graphSignal?.aborted ? graphAbortedOutcome() : fallbackOutcome;
     }
 
-    executorLog.log(`${task.id}: retrying workflow step '${workflowStep.name}' with ${fallbackLaneLabel} fallback ${fallback.provider}/${fallback.modelId} after primary ${primaryOutcome.timedOut ? "timeout" : "malformed output"}`);
-    return runOnce(fallback.provider, fallback.modelId, "fallback");
+    await deps.store.logEntry(
+      task.id,
+      `Workflow step '${workflowStep.name}' starting one fresh same-model retry after primary ${triggerLabel(trigger)} — no distinct fallback model is configured`,
+    );
+    const retryOutcome = await runOnce(primaryProvider, primaryModelId, { kind: "same-model-retry", trigger });
+    if (graphSignal?.aborted) return graphAbortedOutcome();
+    const retryMalformed = retryOutcome.malformed === true;
+    if (retryOutcome.timedOut || retryMalformed) {
+      const secondaryFailure = retryOutcome.timedOut ? "timed out" : "produced malformed output";
+      await deps.store.logEntry(
+        task.id,
+        `Workflow step '${workflowStep.name}' exhausted its two-attempt budget: the fresh same-model retry after primary ${triggerLabel(trigger)} ${secondaryFailure} (configure ${fallbackSettingsHint} for a distinct fallback)`,
+      );
+    }
+    return retryOutcome;
 }

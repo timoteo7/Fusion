@@ -140,7 +140,7 @@ export function createSpawnAgentTool(
           store: deps.store,
           tasks: await deps.store.listTasks({ slim: true, includeArchived: false }),
         });
-        const spawnCap = resolveEffectiveConcurrency(settings).effectiveLimit;
+        const spawnCap = resolveEffectiveConcurrency(settings).maxConcurrent;
         const liveChildren = deps.getTotalSpawnedCount();
         if (spawnClaimed + liveChildren >= spawnCap) {
           return {
@@ -201,7 +201,8 @@ export function createSpawnAgentTool(
             board with no single task to resolve against; it is legacy-seeded, so a default board
             still excludes exactly `done` and `archived` and this is byte-identical there.
             */
-            const spawnTerminalColumns = await resolveProjectColumnsForRoles(deps.store, ["complete", "archived"]);
+            const spawnCompleteColumns = await resolveProjectColumnsForRoles(deps.store, ["complete"]);
+            const spawnTerminalColumns = new Set(spawnCompleteColumns);
             const heldWorktrees = spawnTasks.filter((t) =>
               !spawnTerminalColumns.has(t.column)
               && typeof t.worktree === "string" && t.worktree.length > 0).length;

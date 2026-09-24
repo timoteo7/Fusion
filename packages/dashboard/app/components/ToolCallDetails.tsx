@@ -1,4 +1,5 @@
 import { useId, useState, type ReactNode } from "react";
+import { UiButton } from "./ui";
 import { useTranslation } from "react-i18next";
 import "./ToolCallDetails.css";
 
@@ -109,7 +110,7 @@ function ToolCallDetailsRow({
           {renderValue(text)}
         </pre>
         {canClamp ? (
-          <button
+          <UiButton
             type="button"
             className="tool-call-details-reveal"
             aria-expanded={expanded}
@@ -117,7 +118,7 @@ function ToolCallDetailsRow({
             onClick={() => setExpanded((value) => !value)}
           >
             {expanded ? t("toolCallDetails.showLess", "Show less") : revealLabel}
-          </button>
+          </UiButton>
         ) : null}
       </div>
     </div>

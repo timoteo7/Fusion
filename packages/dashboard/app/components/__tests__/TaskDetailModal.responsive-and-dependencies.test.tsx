@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readAppFile } from "../../test/cssFixture";
 import {
   makeTask,
   noop,
@@ -172,7 +173,8 @@ describe("TaskDetailModal", () => {
       expect(mobileComposerBlock).toContain("flex-direction: row;");
       expect(mobileComposerBlock).toContain("flex-wrap: wrap;");
       expect(css).not.toContain(".task-planner-chat-target-controls");
-      expect(css).toMatch(/\.task-planner-chat-composer \.chat-thinking-popover\s*\{[^}]*left:\s*var\(--space-md\);[^}]*right:\s*var\(--space-md\);[^}]*width:\s*auto;/);
+      expect(css).not.toMatch(/\.task-planner-chat-composer \.chat-thinking-popover\s*\{/);
+      expect(css).toMatch(/\.chat-thinking-popover\s*\{[^}]*position:\s*fixed;/);
       expect(mobileComposerBlock).toContain("align-items: flex-end;");
       /*
       FNXC:ChatComposerHeight 2026-08-23-20:15:
@@ -194,45 +196,38 @@ describe("TaskDetailModal", () => {
       expect(mobileBlock).toContain("margin-inline: 0;");
 
       const detailCss = readDashboardStylesSource();
-      const plannerExpandedMetaBlock = getExactCssRuleBlock(detailCss, ".task-detail-content--planner-chat-expanded .detail-meta");
       expectBaseRule(detailCss, ".detail-body--planner-chat", "overflow-y: hidden;");
-      expectBaseRule(detailCss, ".detail-section--planner-chat", "min-height: 0;");
-      expect(detailCss).toContain(".task-detail-content--planner-chat-expanded .detail-provenance");
+      expectBaseRule(detailCss, ".task-detail-planner-keep-alive", "min-height: 0;");
       expect(detailCss).toContain(".task-detail-content--planner-chat-expanded .modal-actions");
       expect(detailCss).toContain(".task-detail-content--planner-chat-expanded .detail-tabs");
-      expect(detailCss).toContain(".task-detail-content--planner-chat-expanded .detail-meta-inline-controls");
-      expect(detailCss).not.toContain(".task-detail-content--planner-chat-expanded .detail-heading-row");
-      expect(detailCss).not.toMatch(/\.task-detail-content--planner-chat-expanded \.detail-timestamps\s*\{/);
-      expect(detailCss).toContain(".task-detail-content--planner-chat-expanded .detail-timestamps .detail-timestamp-item");
-      expect(detailCss).not.toMatch(/\.task-detail-content--planner-chat-expanded \.detail-meta,\s*\.task-detail-content--planner-chat-expanded \.detail-near-duplicate-banner/);
-      expect(detailCss).not.toMatch(/\.task-detail-content--planner-chat-expanded \.detail-tabs,\s*\.task-detail-content--planner-chat-expanded \.branch-group-card/);
-      expect(plannerExpandedMetaBlock).toContain("flex: 0 0 auto;");
+      expect(detailCss).toContain(".task-detail-content--planner-chat-expanded .detail-overseer-explain-panel");
+      expect(detailCss).not.toContain(".task-detail-content--planner-chat-expanded .detail-meta");
+      expect(detailCss).not.toContain(".task-detail-content--planner-chat-expanded .detail-provenance");
+      expect(detailCss).not.toContain(".task-detail-content--planner-chat-expanded .detail-timestamps");
     });
 
     it("keeps task-detail outer padding canonical while Planner Chat owns only internal spacing", () => {
       const css = readDashboardStylesSource();
+      const plannerCss = readAppFile("components/TaskPlannerChatTab.css");
       const paddingContractStart = css.indexOf("Task-detail tabs share the `.detail-body` outer content inset");
       expect(paddingContractStart).toBeGreaterThanOrEqual(0);
       const detailBodyBlock = getExactCssRuleBlock(css, ".detail-body");
       const activityBodyBlock = getCssRuleBlock(css, ".detail-body--chat");
       const plannerBodyBlock = getCssRuleBlock(css, ".detail-body--planner-chat");
-      const plannerPanelBlock = getExactCssRuleBlock(css, ".task-planner-chat");
-      const plannerTranscriptBlock = getExactCssRuleBlock(css, ".task-planner-chat-transcript");
-      const plannerComposerBlock = getExactCssRuleBlock(css, ".task-planner-chat-composer");
+      const plannerPanelBlock = getExactCssRuleBlock(plannerCss, ".task-planner-chat");
+      const plannerTranscriptBlock = getExactCssRuleBlock(plannerCss, ".task-planner-chat-transcript");
+      const plannerComposerBlock = getExactCssRuleBlock(plannerCss, ".task-planner-chat-composer");
       const expandedPlannerBodyBlock = getExactCssRuleBlock(css, ".task-detail-content--planner-chat-expanded .detail-body--planner-chat");
-      const expandedPlannerSectionBlock = getExactCssRuleBlock(css, ".task-detail-content--planner-chat-expanded .detail-section--planner-chat");
+      const expandedPlannerSectionBlock = getExactCssRuleBlock(css, ".task-detail-content--planner-chat-expanded .task-detail-planner-keep-alive");
       const mobileBodyBlock = getCssAtRuleBlockContainingExactRule(css, "@media (max-width: 768px)", ".detail-body");
       const mobileDetailBodyBlock = getExactCssRuleBlock(mobileBodyBlock, ".detail-body");
-      const detailBodyContentBlock = getExactCssRuleBlock(css, ".detail-body-content");
-      const mobileDetailBodyContentBlock = getExactCssRuleBlock(mobileBodyBlock, ".detail-body-content");
+
       const mobilePlannerBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-body--chat");
       const mobilePlannerBodyBlock = getStandaloneCssRuleBlock(mobilePlannerBlock, ".detail-body--planner-chat");
       const mobileExpandedPlannerBodyBlock = getExactCssRuleBlock(mobilePlannerBlock, ".task-detail-content--planner-chat-expanded .detail-body--planner-chat");
 
-      expect(detailBodyBlock).toContain("padding: 0;");
-      expect(detailBodyContentBlock).toContain("padding: calc(var(--space-lg) + var(--space-xs));");
-      expect(mobileDetailBodyBlock).toContain("padding: 0;");
-      expect(mobileDetailBodyContentBlock).toContain("padding: calc(var(--space-md) + var(--space-xs) / 2);");
+      expect(detailBodyBlock).toContain("padding: calc(var(--space-lg) + var(--space-xs));");
+      expect(mobileDetailBodyBlock).toContain("padding: calc(var(--space-md) + var(--space-xs) / 2);");
       expectNoSpacingOverrides(activityBodyBlock, "desktop Activity body modifier");
       expectNoSpacingOverrides(plannerBodyBlock, "desktop planner body modifier");
       expect(expandedPlannerBodyBlock).toContain("flex: 1;");
@@ -245,332 +240,10 @@ describe("TaskDetailModal", () => {
       expect(mobileExpandedPlannerBodyBlock).toBe("");
       expect(plannerPanelBlock).toContain("gap: var(--space-md);");
       expect(plannerTranscriptBlock).toContain("padding: var(--space-md);");
-      expect(plannerTranscriptBlock).toContain("gap: var(--space-md);");
+      expect(plannerTranscriptBlock).toContain("gap: 0;");
       expect(plannerComposerBlock).toContain("gap: var(--space-sm);");
       expect(css).not.toMatch(/task-detail-content--planner-chat-expanded[^{]+\.(?:task-planner-chat|task-planner-chat-transcript|task-planner-chat-composer)\s*\{[^}]*(?:padding|margin|gap)\s*:/);
       expect(css).not.toMatch(/task-detail-content--planner-chat-expanded[^{]+\.detail-body--planner-chat\s*\{[^}]*(?:padding|margin|gap)\s*:/);
-    });
-
-    it("keeps detail metadata as a single wrapping flex row without mobile column fallbacks", () => {
-      const css = readDashboardStylesSource();
-
-      expectBaseRule(css, ".detail-meta", "display: flex;");
-      expectBaseRule(css, ".detail-meta", "flex-wrap: wrap;");
-      expect(css).not.toMatch(/@media[^{]*\(max-width: 768px\)[^{]*\{[\s\S]*?\.detail-meta\s*\{[^}]*flex-direction:\s*column;/);
-      expect(css).not.toMatch(/@media[^{]*\(max-width: 768px\)[^{]*\{[\s\S]*?\.detail-meta-inline-controls\s*\{[^}]*flex-direction:\s*column;/);
-      expect(css).not.toMatch(/@media[^{]*\(max-width: 768px\)[^{]*\{[\s\S]*?\.detail-timestamps\s*\{[^}]*flex-direction:\s*column;/);
-    });
-
-    it("keeps inline metadata controls in a single row with a wrapping mobile fallback", () => {
-      const css = readDashboardStylesSource();
-      const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-meta-inline-controls");
-
-      expectBaseRule(css, ".detail-meta-inline-controls", "display: flex;");
-      expectBaseRule(css, ".detail-meta-inline-controls", "flex-wrap: nowrap;");
-      expect(mobileBlock).toMatch(/\.detail-meta-inline-controls\s*\{[^}]*flex-wrap:\s*wrap;/);
-      expect(mobileBlock).not.toMatch(/\.detail-meta-inline-controls\s*\{[^}]*flex-direction:\s*column;/);
-      expect(css).not.toMatch(/@media \(max-width: 640px\)\s*\{[^}]*\.detail-meta-inline-controls\s*\{[^}]*flex-direction:\s*column;/);
-    });
-
-    it("scopes tokenized SVG sizing to every inline-row descendant without changing breakpoint scaffolding", () => {
-      const css = readDashboardStylesSource();
-      const tabletBlock = getCssAtRuleBlockContaining(css, "@media (min-width: 769px) and (max-width: 1024px)", ".modal.task-detail-modal");
-      const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-meta-inline-controls");
-      const rowSvgBlock = getExactCssRuleBlock(css, ".detail-meta-inline-controls svg");
-
-      // FNXC:TaskDetailModalResponsive 2026-07-19-12:00: Source guards preserve
-      // the scoped token contract; Blink smoke separately proves computed sizes.
-      expect(rowSvgBlock).toContain("width: var(--icon-size-sm);");
-      expect(rowSvgBlock).toContain("height: var(--icon-size-sm);");
-      expect(rowSvgBlock).toContain("flex-shrink: 0;");
-      expect(css).not.toMatch(/\.detail-meta-inline-controls svg\s*\{[^}]*width:\s*1em/);
-      expect(tabletBlock).not.toBe("");
-      expect(mobileBlock).toMatch(/\.detail-meta-inline-controls\s*\{[^}]*flex-wrap:\s*wrap;/);
-    });
-
-    it("gives every task-detail inline action the shared square tokenized box across themes (FN-8287)", () => {
-      const css = readDashboardStylesSource();
-      const sharedSizingSelector = [
-        ".detail-inline-attach",
-        ".detail-inline-github-toggle",
-        ".detail-priority-trigger",
-        ".detail-oversight-menu-trigger",
-        ".detail-execution-mode-toggle",
-      ].join(",\n");
-      const sharedSizingBlock = getCssRuleBlock(css, sharedSizingSelector);
-
-      // FNXC:TaskDetail 2026-07-17-17:30: Attach, GitHub, Priority,
-      // Oversight, and Fast must read one common rule so theme-specific
-      // spacing/icon tokens cannot desynchronize their square footprints.
-      expect(sharedSizingBlock).toContain("height: var(--detail-priority-control-min-height);");
-      expect(sharedSizingBlock).toContain("min-height: var(--detail-priority-control-min-height);");
-      expect(sharedSizingBlock).toContain("width: var(--detail-priority-control-min-height);");
-      expect(sharedSizingBlock).toContain("min-width: var(--detail-priority-control-min-height);");
-      expect(sharedSizingBlock).toContain("box-sizing: border-box;");
-      expect(sharedSizingBlock).toContain("border-width: var(--btn-border-width);");
-      expect(sharedSizingBlock).toContain("border-color: var(--border);");
-      expect(sharedSizingBlock).toContain("border-radius: var(--detail-control-border-radius);");
-
-      const inlineControlsBlock = getStandaloneCssRuleBlock(css, ".detail-meta-inline-controls");
-      const tabletBlock = getCssAtRuleBlockContaining(css, "@media (min-width: 769px) and (max-width: 1024px)", ".modal.task-detail-modal");
-      const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-meta-inline-controls");
-      const mobileInlineControlsBlock = getCssRuleBlock(mobileBlock, ".detail-meta-inline-controls");
-
-      // FNXC:QuickAddActionRow 2026-07-20-12:00: Equal boxes are insufficient:
-      // desktop and tablet must use Quick Add's compact token, while mobile
-      // deliberately upgrades the same shared alias to its touch-floor token.
-      expect(inlineControlsBlock).toContain("--detail-priority-control-min-height: var(--quick-entry-action-row-height-desktop);");
-      expect(inlineControlsBlock).not.toContain("calc(var(--space-lg) + var(--space-lg) + var(--space-xs))");
-      expect(tabletBlock).not.toMatch(/\.detail-(?:oversight-menu-trigger|execution-mode-toggle)\s*\{[^}]*?(?:height|min-height|width|min-width):/);
-      expect(mobileInlineControlsBlock).toContain("--detail-priority-control-min-height: var(--quick-entry-action-row-height-mobile);");
-    });
-
-    it.skip("unifies border/radius/height across the Priority, Execution-mode, and Oversight quick controls (FN-7585)", () => {
-      const css = readDashboardStylesSource();
-
-      const inlineControlsBlock = getStandaloneCssRuleBlock(css, ".detail-meta-inline-controls");
-      const priorityChipBlock = getExactCssRuleBlock(css, ".detail-priority-chip");
-      const executionToggleBlock = getExactCssRuleBlock(css, ".detail-execution-mode-toggle");
-      const oversightTriggerBlock = getExactCssRuleBlock(css, ".detail-oversight-menu-trigger");
-
-      // The cluster declares one shared border-radius token; all three
-      // controls must reference it rather than independent literal radii.
-      // FNXC:PlannerOversight 2026-07-05-00:00: FN-7604 removed the desktop-only
-      // `.detail-oversight-chip` wrapper (the inline branch it styled was
-      // deleted); the Oversight surface is now represented solely by
-      // `.detail-oversight-menu-trigger`, which already carried this trio.
-      expect(inlineControlsBlock).toContain("--detail-control-border-radius: var(--radius-md);");
-      for (const block of [priorityChipBlock, executionToggleBlock, oversightTriggerBlock]) {
-        expect(block).toContain("border-radius: var(--detail-control-border-radius);");
-        expect(block).toContain("border-width: var(--btn-border-width);");
-        expect(block).toContain("border-color: var(--border);");
-        // Same height token as the rest of the invariant.
-        expect(block).toContain("min-height: var(--detail-priority-control-min-height);");
-        expect(block).toContain("box-sizing: border-box;");
-      }
-
-      // Guard against regressing back to independent literal radius values
-      // (e.g. reintroducing a bare `var(--radius-pill)` on the priority chip).
-      expect(priorityChipBlock).not.toMatch(/border-radius:\s*var\(--radius-pill\)/);
-      expect(oversightTriggerBlock).not.toMatch(/border-radius:\s*var\(--radius-pill\)/);
-    });
-
-    it.skip("stretches the Oversight dropdown wrapper so the trigger matches the Priority/Execution-mode row height on every surface (FN-7618)", () => {
-      const css = readDashboardStylesSource();
-      const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-meta-inline-controls");
-
-      const priorityChipBlock = getExactCssRuleBlock(css, ".detail-priority-chip");
-      const executionToggleBlock = getExactCssRuleBlock(css, ".detail-execution-mode-toggle");
-      const oversightTriggerBlock = getExactCssRuleBlock(css, ".detail-oversight-menu-trigger");
-      const oversightDropdownBlock = getExactCssRuleBlock(css, ".detail-oversight-menu-dropdown");
-      const oversightMenuBlock = getExactCssRuleBlock(css, ".detail-oversight-menu");
-
-      // Priority and Execution-mode are direct flex children of
-      // `.detail-meta-inline-controls { align-items: stretch }`, so they
-      // stretch to the shared row height via the same min-height token.
-      for (const block of [priorityChipBlock, executionToggleBlock, oversightTriggerBlock]) {
-        expect(block).toContain("min-height: var(--detail-priority-control-min-height);");
-      }
-
-      // The Oversight trigger instead lives inside a `position: relative`
-      // `.detail-oversight-menu-dropdown` wrapper (required for the popover's
-      // absolute positioning). Without the wrapper itself participating in
-      // the cluster's stretch, the trigger only gets its own intrinsic
-      // min-height and renders shorter than its siblings on non-mobile
-      // widths. Assert the wrapper stretches and the trigger fills it, so a
-      // future change that drops either declaration fails this test.
-      expect(oversightDropdownBlock).toContain("position: relative;");
-      expect(oversightDropdownBlock).toContain("display: inline-flex;");
-      expect(oversightDropdownBlock).toContain("align-items: stretch;");
-      expect(oversightTriggerBlock).toContain("align-self: stretch;");
-
-      // This invariant is not scoped to a mobile-only media block: the
-      // cluster's base rule (which the dropdown/trigger rules above read
-      // from) applies at every width, and there must be no non-mobile
-      // override that removes the stretch behavior.
-      expect(css).not.toMatch(/@media[^{]*\(min-width:[^{]*\{[\s\S]*?\.detail-oversight-menu-dropdown\s*\{[^}]*align-items:\s*(?:center|flex-start|flex-end);/);
-
-      // The wrapper stretch must not affect the popover: it stays absolutely
-      // positioned (independent of the flex layout) and unstretched.
-      expect(oversightMenuBlock).toContain("position: absolute;");
-      expect(oversightMenuBlock).not.toContain("align-self: stretch;");
-      expect(oversightMenuBlock).not.toMatch(/height:\s*100%/);
-
-      // No `@media (max-width: 768px)` override removes the wrapper's stretch
-      // declarations, so the mobile `flex-wrap: wrap` fallback keeps the same
-      // fix in effect.
-      expect(mobileBlock).not.toMatch(/\.detail-oversight-menu-dropdown\s*\{[^}]*align-items:\s*(?:center|flex-start|flex-end|normal);/);
-      expect(mobileBlock).not.toMatch(/\.detail-oversight-menu-trigger\s*\{[^}]*align-self:\s*(?:auto|center|flex-start|flex-end);/);
-    });
-
-    it.skip("resolves the same fixed box height for Priority, Execution-mode, and the Oversight trigger, not just a shared floor (FN-7633)", () => {
-      const css = readDashboardStylesSource();
-      const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-meta-inline-controls");
-
-      const priorityChipBlock = getExactCssRuleBlock(css, ".detail-priority-chip");
-      const executionToggleBlock = getExactCssRuleBlock(css, ".detail-execution-mode-toggle");
-      const oversightTriggerBlock = getExactCssRuleBlock(css, ".detail-oversight-menu-trigger");
-      const oversightMenuBlock = getExactCssRuleBlock(css, ".detail-oversight-menu");
-
-      // FN-7618 gave the Oversight trigger `align-self: stretch` so it fills
-      // its wrapper's stretched row height, while Priority and Execution-mode
-      // were only floored via `min-height` — a floor is not a guarantee of
-      // equality, so on desktop the trigger could resolve taller than its
-      // siblings whenever their content/line-height differed. Assert all
-      // three now pin an explicit, EQUAL `height` (not merely `min-height`)
-      // from the SAME shared token, so none can outgrow or undershoot the
-      // others regardless of flex stretch/content differences.
-      for (const block of [priorityChipBlock, executionToggleBlock, oversightTriggerBlock]) {
-        expect(block).toContain("height: var(--detail-priority-control-min-height);");
-        expect(block).toContain("min-height: var(--detail-priority-control-min-height);");
-        expect(block).toContain("box-sizing: border-box;");
-      }
-
-      // Guard against a future regression reintroducing a second, independent
-      // literal height source (e.g. a hardcoded px height) instead of reusing
-      // the shared token.
-      expect(css).not.toMatch(/\.detail-priority-chip\s*\{[^}]*height:\s*\d+px/);
-      expect(css).not.toMatch(/\.detail-execution-mode-toggle\s*\{[^}]*height:\s*\d+px/);
-      expect(css).not.toMatch(/\.detail-oversight-menu-trigger\s*\{[^}]*height:\s*\d+px/);
-
-      // The fixed height must hold at non-mobile widths (the reported
-      // symptom) — the base (non-media-scoped) rules above already assert
-      // this since `getExactCssRuleBlock` matches the top-level selector, not
-      // one nested in a media query.
-
-      // No `@media (max-width: 768px)` override redefines any of the three
-      // selectors with a diverging `height`, so the mobile wrap fallback
-      // keeps all three controls the same height too.
-      for (const selector of [".detail-priority-chip", ".detail-execution-mode-toggle", ".detail-oversight-menu-trigger"]) {
-        const mobileSelectorBlock = getExactCssRuleBlock(mobileBlock, selector);
-        expect(mobileSelectorBlock).toBe("");
-      }
-
-      // The popover itself must remain untouched by the height fix — still
-      // absolutely positioned, no explicit height forcing it to stretch.
-      expect(oversightMenuBlock).toContain("position: absolute;");
-      expect(oversightMenuBlock).not.toMatch(/^\s*height:/m);
-    });
-
-    it.skip("renders the Priority dropdown chip like the Oversight dropdown chip, on every surface (FN-7597)", () => {
-      const css = readDashboardStylesSource();
-
-      const priorityChipBlock = getExactCssRuleBlock(css, ".detail-priority-chip");
-      const oversightTriggerBlock = getExactCssRuleBlock(css, ".detail-oversight-menu-trigger");
-      const prioritySelectBlock = getExactCssRuleBlock(css, ".detail-priority-select");
-      const oversightSelectBlock = getExactCssRuleBlock(css, ".detail-oversight-select");
-      const prioritySelectOptionBlock = getExactCssRuleBlock(css, ".detail-priority-select option");
-      const oversightSelectOptionBlock = getExactCssRuleBlock(css, ".detail-oversight-select option");
-
-      // Same box size AND same border source for the Priority chip vs. the
-      // (now-universal, FN-7604) Oversight overflow trigger.
-      for (const block of [priorityChipBlock, oversightTriggerBlock]) {
-        expect(block).toContain("min-height: var(--detail-priority-control-min-height);");
-        expect(block).toContain("border-width: var(--btn-border-width);");
-        expect(block).toContain("border-color: var(--border);");
-        expect(block).toContain("border-radius: var(--detail-control-border-radius);");
-        expect(block).toContain("box-sizing: border-box;");
-      }
-
-      // Same select typography: neither select force-uppercases its own text
-      // or options; both rely on the ancestor chip label's uppercase transform,
-      // so a regression re-adding a Priority-only override fails this.
-      expect(prioritySelectBlock).not.toMatch(/text-transform\s*:/);
-      expect(oversightSelectBlock).not.toMatch(/text-transform\s*:/);
-      expect(prioritySelectOptionBlock).not.toMatch(/text-transform\s*:/);
-      expect(oversightSelectOptionBlock).not.toMatch(/text-transform\s*:/);
-      expect(prioritySelectBlock).toContain("font: inherit;");
-      expect(oversightSelectBlock).toContain("font: inherit;");
-
-      // The untinted `normal` priority level must resolve a real, non-transparent
-      // neutral chip background (not a borderless/background-less shell), just
-      // like the Oversight chip's neutral `--off` background.
-      const priorityNormalBlock = getExactCssRuleBlock(css, ".detail-priority-chip.card-priority-badge--normal");
-      const oversightOffBlock = getExactCssRuleBlock(css, ".card-oversight-badge--off");
-      expect(priorityNormalBlock).toMatch(/background:\s*color-mix\(in srgb, var\(--text-muted\)/);
-      expect(oversightOffBlock).toMatch(/background:\s*color-mix\(in srgb, var\(--text-muted\)/);
-
-      // The semantic priority tints (info/warning/error family) must survive —
-      // this task must not flatten low/high/urgent to the same neutral tone.
-      expect(css).toMatch(/\.card-priority-badge--low\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--color-info\)/);
-      expect(css).toMatch(/\.card-priority-badge--high\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--color-warning\)/);
-      expect(css).toMatch(/\.card-priority-badge--urgent\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--color-error\)/);
-
-      // `--saving` only dims opacity; it must never change box size/border.
-      const prioritySavingBlock = getExactCssRuleBlock(css, ".detail-priority-chip--saving");
-      expect(prioritySavingBlock.replace(/\s+/g, "")).toBe("opacity:0.75;");
-      expect(prioritySavingBlock).not.toMatch(/border|min-height|padding/);
-    });
-
-    it.skip("makes low/high/urgent visibly distinct colors on the detail Priority chip, scoped away from TaskCard (FN-7601)", () => {
-      const css = readDashboardStylesSource();
-
-      // FN-7585's shared base rule and FN-7597's neutral `normal` rule must
-      // survive untouched — this task only ADDS per-level overrides on top.
-      const baseChipBlock = getExactCssRuleBlock(css, ".detail-priority-chip");
-      expect(baseChipBlock).toContain("border-width: var(--btn-border-width);");
-      expect(baseChipBlock).toContain("border-color: var(--border);");
-      expect(baseChipBlock).toContain("border-radius: var(--detail-control-border-radius);");
-      const normalBlock = getExactCssRuleBlock(css, ".detail-priority-chip.card-priority-badge--normal");
-      expect(normalBlock).toMatch(/background:\s*color-mix\(in srgb, var\(--text-muted\)/);
-      expect(normalBlock).toContain("color: var(--text-muted);");
-
-      const lowBlock = getExactCssRuleBlock(css, ".detail-priority-chip.card-priority-badge--low");
-      const highBlock = getExactCssRuleBlock(css, ".detail-priority-chip.card-priority-badge--high");
-      const urgentBlock = getExactCssRuleBlock(css, ".detail-priority-chip.card-priority-badge--urgent");
-
-      // Each non-neutral level must declare its own tinted border-color AND
-      // background, using the matching semantic token family.
-      for (const [block, token] of [
-        [lowBlock, "--color-info"],
-        [highBlock, "--color-warning"],
-        [urgentBlock, "--color-error"],
-      ] as const) {
-        expect(block).not.toBe("");
-        expect(block).toMatch(/border-color\s*:/);
-        expect(block).toMatch(/background\s*:/);
-        expect(block).toContain(token);
-      }
-
-      // None of the per-level border-colors may resolve to the plain shared
-      // `var(--border)` value used by the base rule — that was the original
-      // bug (every level looked the same washed-out box).
-      const borderColorOf = (block: string): string => {
-        const match = block.match(/border-color\s*:\s*([^;]+);/);
-        return match?.[1]?.trim() ?? "";
-      };
-      const backgroundOf = (block: string): string => {
-        const match = block.match(/background\s*:\s*([^;]+);/);
-        return match?.[1]?.trim() ?? "";
-      };
-
-      const lowBorder = borderColorOf(lowBlock);
-      const highBorder = borderColorOf(highBlock);
-      const urgentBorder = borderColorOf(urgentBlock);
-
-      expect(lowBorder).not.toBe("var(--border)");
-      expect(highBorder).not.toBe("var(--border)");
-      expect(urgentBorder).not.toBe("var(--border)");
-
-      // Mutually distinct — low, high, and urgent must not collapse onto the
-      // same border-color or background declaration as one another.
-      expect(new Set([lowBorder, highBorder, urgentBorder]).size).toBe(3);
-      const lowBg = backgroundOf(lowBlock);
-      const highBg = backgroundOf(highBlock);
-      const urgentBg = backgroundOf(urgentBlock);
-      expect(new Set([lowBg, highBg, urgentBg]).size).toBe(3);
-
-      // `normal`'s background/border must remain distinct from all three tinted
-      // levels (it keeps the FN-7597 neutral treatment, not a semantic tint).
-      expect(new Set([backgroundOf(normalBlock), lowBg, highBg, urgentBg]).size).toBe(4);
-
-      // The read-only TaskCard badge tints referenced by TaskCard.css must be
-      // untouched by this task — confirm no `.detail-priority-chip` compound
-      // selector leaks a border-color override into the bare `.card-priority-badge--*`
-      // selectors (those remain single-class, background/color-only rules).
-      expect(css).toMatch(/\.card-priority-badge--low\s*\{\s*background:\s*color-mix\(in srgb, var\(--color-info\) 15%, transparent\);\s*color:\s*var\(--color-info\);\s*\}/);
-      expect(css).toMatch(/\.card-priority-badge--high\s*\{\s*background:\s*color-mix\(in srgb, var\(--color-warning\) 18%, transparent\);\s*color:\s*var\(--color-warning\);\s*\}/);
-      expect(css).toMatch(/\.card-priority-badge--urgent\s*\{\s*background:\s*color-mix\(in srgb, var\(--color-error\) 20%, transparent\);\s*color:\s*var\(--color-error-dark\);\s*\}/);
     });
 
     it("keeps grouped timestamp metadata inline on desktop and mobile", () => {
@@ -583,7 +256,7 @@ describe("TaskDetailModal", () => {
 
       expect(css).toMatch(/@media \(max-width: 768px\)[\s\S]*?\.detail-timestamps\s*\{[^}]*align-items:\s*center;[^}]*flex-wrap:\s*nowrap;/);
       expect(css).not.toMatch(/@media[^{]*\(max-width: 768px\)[^{]*\{[\s\S]*?\.detail-timestamps\s*\{[^}]*flex-direction:\s*column;/);
-      expect(css).toContain(".task-detail-content--planner-chat-expanded .detail-timestamps .detail-timestamp-separator");
+      expect(css).not.toContain(".task-detail-content--planner-chat-expanded .detail-timestamps");
     });
 
     it("keeps the canonical workflow badge owned by the timestamp group across breakpoints", () => {
@@ -632,27 +305,40 @@ describe("TaskDetailModal", () => {
       expect(tabletModalBlock).not.toContain("16px");
     });
 
+    /*
+    FNXC:TaskDetailDefinition 2026-09-15-16:02:
+    FN-424 gives the definition blocks a padded card treatment; the mobile override tightens that
+    padding rather than dropping it, and stays token-only.
+    */
+    it("tightens the definition card padding on mobile with tokens only", () => {
+      const css = readDashboardStylesSource();
+      const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-definition-transformation");
+
+      expect(mobileBlock).toContain(".detail-step-progress,");
+      expect(mobileBlock).toContain(".detail-definition-description,");
+      expect(mobileBlock).toContain(".detail-definition-outcome,");
+      expect(mobileBlock).toContain(".detail-definition-transformation");
+      expect(mobileBlock).toContain("padding: var(--space-sm);");
+      expect(mobileBlock).not.toMatch(/padding:\s*\d+px/);
+    });
+
+    /*
+    FNXC:TaskDetailPresentation 2026-09-15-16:02:
+    FN-424 made the plan sub-view read-only, so the inline editor's surfaces no longer exist in this
+    scope and their assertions are deleted with their subject. The full-width contract that remains
+    covers the rendered plan, the `(no prompt)` fallback and the loading spinner — and the removed
+    selectors must not reappear in this file's scope.
+    */
     it("keeps Plan prompt surfaces full-width across modal, embedded, and mobile task-detail layouts", () => {
       const css = readDashboardStylesSource();
       const planBlock = getExactCssRuleBlock(css, ".detail-section--plan-prompt");
-      const planSurfaceBlock = getExactCssRuleBlock(css, ".detail-section--plan-prompt .markdown-body,\n.detail-section--plan-prompt .detail-prompt,\n.detail-section--plan-prompt .spec-loading,\n.detail-section--plan-prompt .spec-editor-edit-mode,\n.detail-section--plan-prompt .spec-editor-revision,\n.detail-section--plan-prompt .spec-editor-textarea,\n.detail-section--plan-prompt .spec-editor-feedback");
+      const planSurfaceBlock = getExactCssRuleBlock(css, ".detail-section--plan-prompt .markdown-body,\n.detail-section--plan-prompt .detail-prompt,\n.detail-section--plan-prompt .spec-loading");
       const embeddedPlanBlock = getExactCssRuleBlock(css, ".task-detail-content--embedded .detail-section--plan-prompt");
-      const editModeBlock = getExactCssRuleBlock(css, ".spec-editor-edit-mode");
-      const textareaBlock = getExactCssRuleBlock(css, ".spec-editor-textarea");
-      const feedbackBlock = getExactCssRuleBlock(css, ".spec-editor-feedback");
-      const actionsBlock = getExactCssRuleBlock(css, ".spec-editor-actions-row");
-      const revisionActionsBlock = getExactCssRuleBlock(css, ".spec-editor-revision-actions");
-      const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-section--plan-prompt .spec-editor-actions-row");
 
       for (const [surface, block] of [
         ["Plan wrapper", planBlock],
         ["Plan prompt descendants", planSurfaceBlock],
         ["embedded Plan wrapper", embeddedPlanBlock],
-        ["edit mode", editModeBlock],
-        ["textarea", textareaBlock],
-        ["feedback", feedbackBlock],
-        ["save/cancel actions", actionsBlock],
-        ["AI revision actions", revisionActionsBlock],
       ] as const) {
         expect(block, `${surface} width`).toContain("width: 100%;");
         expect(block, `${surface} min-width`).toContain("min-width: 0;");
@@ -662,18 +348,9 @@ describe("TaskDetailModal", () => {
       expect(planBlock).toContain("display: flex;");
       expect(planBlock).toContain("flex-direction: column;");
       expect(planSurfaceBlock).toContain("box-sizing: border-box;");
-      expect(textareaBlock).toContain("box-sizing: border-box;");
-      expect(feedbackBlock).toContain("box-sizing: border-box;");
-      expect(actionsBlock).toContain("flex-wrap: wrap;");
-      expect(revisionActionsBlock).toContain("flex-wrap: wrap;");
-      expect(mobileBlock).toContain(".detail-section--plan-prompt .spec-editor-actions-row,");
-      expect(mobileBlock).toContain(".detail-section--plan-prompt .spec-editor-revision-actions");
-      expect(mobileBlock).toContain("align-items: stretch;");
-      expect(mobileBlock).toContain("flex-wrap: wrap;");
-      expect(mobileBlock).toContain(".detail-section--plan-prompt .spec-editor-actions-row .btn,");
-      expect(mobileBlock).toContain(".detail-section--plan-prompt .spec-editor-revision-actions .btn");
-      expect(mobileBlock).toContain("flex: 1 1 auto;");
       expect(css).not.toMatch(/\.detail-section\s*\{[^}]*width:\s*100%;/);
+      expect(css).not.toContain(".detail-section--plan-prompt .spec-editor-");
+      expect(css).not.toContain(".detail-spec-edit-trigger");
     });
 
     it("keeps task-detail tabs as horizontal scrollers across modal, embedded, mobile, and tablet surfaces", () => {
@@ -717,11 +394,10 @@ describe("TaskDetailModal", () => {
       const feedBodyBlock = getExactCssRuleBlock(css, ".detail-body--feed,\n.detail-body--agent-log");
       const feedContentBlock = getExactCssRuleBlock(
         css,
-        ".detail-body--feed > .detail-body-content,\n.detail-body--agent-log > .detail-body-content,\n.detail-body--chat > .detail-body-content,\n.detail-body--planner-chat > .detail-body-content",
+        ".detail-body--feed > *,\n.detail-body--agent-log > *,\n.detail-body--chat > *,\n.detail-body--planner-chat > *",
       );
-      const feedSectionBlock = getExactCssRuleBlock(css, ".detail-section--feed,\n.detail-section--agent-log");
-      const feedActivityBlock = getExactCssRuleBlock(css, ".detail-section--feed > .detail-activity");
-      const feedListBlock = getExactCssRuleBlock(css, ".detail-section--feed .detail-activity-list");
+      const feedActivityBlock = getExactCssRuleBlock(css, ".detail-body--feed > .detail-activity");
+      const feedListBlock = getExactCssRuleBlock(css, ".detail-body--feed > .detail-activity .detail-activity-list");
       const footerBlock = getExactCssRuleBlock(css, ".task-detail-content > .modal-actions");
       const mobileBlock = getCssAtRuleBlockContainingExactRule(css, "@media (max-width: 768px)", ".detail-body");
       const mobileDetailBodyBlock = getExactCssRuleBlock(mobileBlock, ".detail-body");
@@ -740,8 +416,6 @@ describe("TaskDetailModal", () => {
       expect(feedBodyBlock).toContain("overflow-y: hidden;");
       expect(feedContentBlock).toContain("flex: 1;");
       expect(feedContentBlock).toContain("min-height: 0;");
-      expect(feedSectionBlock).toContain("flex: 1;");
-      expect(feedSectionBlock).toContain("min-height: 0;");
       expect(feedActivityBlock).toContain("flex: 1;");
       expect(feedActivityBlock).toContain("min-height: 0;");
       expect(feedListBlock).toContain("flex: 1;");
@@ -806,7 +480,6 @@ describe("TaskDetailModal", () => {
       This contract covers modal, pop-out, embedded, and mobile task-detail surfaces.
       */
       const mobileDetailBodyBlock = getExactCssRuleBlock(mobileBlock, ".detail-body");
-      const mobileDetailBodyContentBlock = getExactCssRuleBlock(mobileBlock, ".detail-body-content");
       const baseInterventionsBlock = getExactCssRuleBlock(css, ".detail-activity--interventions");
       const mobilePrBlock = getExactCssRuleBlock(
         getCssAtRuleBlockContainingExactRule(css, "@media (max-width: 768px)", ".detail-pr-tab"),
@@ -818,8 +491,7 @@ describe("TaskDetailModal", () => {
       );
       const allMobileCss = getCssAtRuleBlocks(css, "@media (max-width: 768px)").join("\n");
 
-      expect(mobileDetailBodyBlock).toContain("padding: 0;");
-      expect(mobileDetailBodyContentBlock).toContain("padding: calc(var(--space-md) + var(--space-xs) / 2);");
+      expect(mobileDetailBodyBlock).toContain("padding: calc(var(--space-md) + var(--space-xs) / 2);");
       expect(mobileDetailBodyBlock).toContain("overflow-x: hidden;");
       expect(baseInterventionsBlock).toContain("padding-inline-end: 0;");
       expect(mobileBlock).toContain(".detail-activity:not(.detail-activity--interventions) > h4,");
@@ -857,7 +529,6 @@ describe("TaskDetailModal", () => {
       const baseScrollbarBlock = getExactCssRuleBlock(css, ".detail-body::-webkit-scrollbar");
       const mobileBlock = getCssAtRuleBlockContainingExactRule(css, "@media (max-width: 768px)", ".detail-body");
       const mobileDetailBodyBlock = getExactCssRuleBlock(mobileBlock, ".detail-body");
-      const mobileDetailBodyContentBlock = getExactCssRuleBlock(mobileBlock, ".detail-body-content");
       const mobileScrollbarBlock = getExactCssRuleBlock(mobileBlock, ".detail-body::-webkit-scrollbar");
       const mobileActivityBlock = getExactCssRuleBlock(mobileBlock, ".detail-activity");
       const mobileInterventionsBlock = getExactCssRuleBlock(mobileBlock, ".detail-activity--interventions");
@@ -874,8 +545,7 @@ describe("TaskDetailModal", () => {
 
       expect(baseDetailBodyBlock).toContain("scrollbar-width: thin;");
       expect(baseScrollbarBlock).toContain("width: 6px;");
-      expect(mobileDetailBodyBlock).toContain("padding: 0;");
-      expect(mobileDetailBodyContentBlock).toContain("padding: calc(var(--space-md) + var(--space-xs) / 2);");
+      expect(mobileDetailBodyBlock).toContain("padding: calc(var(--space-md) + var(--space-xs) / 2);");
       expect(mobileDetailBodyBlock).toContain("overflow-x: hidden;");
       expect(mobileDetailBodyBlock).toContain("overflow-y: auto;");
       expect(mobileDetailBodyBlock).toContain("scrollbar-width: none;");
@@ -1027,6 +697,7 @@ describe("TaskDetailModal", () => {
     it("renders responsive structural classes (modal-lg, overlay, spacer, tabs, detail-body)", () => {
       const { baseElement: container } = render(
         <TaskDetailModal
+          initialTab="details"
           task={makeTask({ column: "in-progress" as Column })}
           onClose={noop}
           onDeleteTask={noopDelete}
@@ -1037,7 +708,7 @@ describe("TaskDetailModal", () => {
       );
       expect(container.querySelector(".modal.modal-lg")).toBeTruthy();
       expect(container.querySelector("[data-testid='floating-window-overlay-task-detail']")).toBeTruthy();
-      expect(container.querySelector(".modal-actions .modal-actions-spacer")).toBeTruthy();
+      expect(container.querySelector(".modal-actions")).toBeNull();
       expect(container.querySelector(".detail-body")).toBeTruthy();
       expect(container.querySelector(".detail-timestamps")).toBeTruthy();
       expect(container.querySelectorAll(".detail-timestamp-item").length).toBe(2);
@@ -1059,8 +730,8 @@ describe("TaskDetailModal", () => {
         "Details",
         "Terminal",
       ]);
-      expect(tabs[0].classList.contains("detail-tab-active")).toBe(true);
-      expect(Array.from(tabs).slice(1).every((t) => !t.classList.contains("detail-tab-active"))).toBe(true);
+      expect(screen.getByRole("button", { name: "Details" })).toHaveClass("detail-tab-active");
+      expect(Array.from(tabs).filter((tab) => tab.classList.contains("detail-tab-active"))).toHaveLength(1);
       // Responsive CSS controls sizing — no inline padding/fontSize/borderBottom leaks
       expect((tabs[0] as HTMLElement).style.padding).toBe("");
       expect((tabs[0] as HTMLElement).style.fontSize).toBe("");
@@ -1075,7 +746,7 @@ describe("TaskDetailModal", () => {
       const buttonBlock = getExactCssRuleBlock(mobileBlock, ".task-detail-content .modal-actions .btn");
       const labelBlock = getExactCssRuleBlock(mobileBlock, ".task-detail-content .detail-footer-button-label");
       const dropdownBlock = getExactCssRuleBlock(mobileBlock, ".task-detail-content .detail-actions-dropdown");
-      const expandedChatBlock = getExactCssRuleBlock(css, ".task-detail-content--chat-expanded .modal-actions");
+      const expandedChatBlock = getExactCssRuleBlock(css, ".task-detail-content--chat-expanded .modal-actions:not(.task-detail-chat-footer),\n.task-detail-content--chat-expanded .detail-overseer-explain-panel");
 
       /*
       FNXC:TaskDetailModalResponsive 2026-07-22-00:00:
@@ -1103,13 +774,13 @@ describe("TaskDetailModal", () => {
       expect(labelBlock).toContain("overflow: hidden;");
       expect(labelBlock).toContain("text-overflow: ellipsis;");
       expect(expandedChatBlock).toContain("display: none;");
-      expect(css).toMatch(/\.task-detail-content--planner-chat-expanded \.modal-actions,[\s\S]*?\{\s*display:\s*none;/);
+      expect(css).toMatch(/\.task-detail-content--planner-chat-expanded \.modal-actions:not\(\.task-detail-chat-footer\),[\s\S]*?\{\s*display:\s*none;/);
     });
 
     it("keeps dense in-review and standard task controls in their shared footer", () => {
       const { baseElement: container, unmount } = render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({ column: "in-review" as Column })}
           onClose={noop}
           onDeleteTask={noopDelete}
@@ -1121,7 +792,8 @@ describe("TaskDetailModal", () => {
       const inReviewFooter = container.querySelector(".modal-actions");
 
       expect(inReviewFooter).toBeTruthy();
-      expect(inReviewFooter?.contains(screen.getByRole("button", { name: "Actions" }))).toBe(true);
+      expect(inReviewFooter?.contains(screen.getByRole("button", { name: "Actions" }))).toBe(false);
+      expect(container.querySelector(".modal-header")?.contains(screen.getByRole("button", { name: "Actions" }))).toBe(true);
       expect(inReviewFooter?.contains(screen.getByRole("button", { name: "Merge & Close" }))).toBe(true);
       expect(inReviewFooter?.querySelector(".detail-move-dropdown, .detail-move-btn, .detail-move-menu")).toBeNull();
 
@@ -1140,15 +812,9 @@ describe("TaskDetailModal", () => {
       );
       const standardFooter = standard.baseElement.querySelector(".modal-actions");
 
-      expect(standardFooter).toBeTruthy();
-      expect(standardFooter?.contains(screen.getByRole("button", { name: "Actions" }))).toBe(true);
-      const footerChildren = Array.from(standardFooter?.children ?? []);
-      const actionsIndex = footerChildren.findIndex((child) => child.classList.contains("detail-actions-dropdown"));
-      const spacerIndex = footerChildren.findIndex((child) => child.classList.contains("modal-actions-spacer"));
-
-      expect(actionsIndex).toBeGreaterThanOrEqual(0);
-      expect(spacerIndex).toBeGreaterThan(actionsIndex);
-      expect(standardFooter?.querySelector(".detail-move-dropdown, .detail-move-btn, .detail-move-menu")).toBeNull();
+      expect(standardFooter).toBeNull();
+      expect(standard.baseElement.querySelector(".modal-header")?.contains(screen.getByRole("button", { name: "Actions" }))).toBe(true);
+      expect(standard.baseElement.querySelector(".detail-move-dropdown, .detail-move-btn, .detail-move-menu")).toBeNull();
     });
 
     it("keeps the triage footer recoverable through Actions", () => {
@@ -1167,16 +833,18 @@ describe("TaskDetailModal", () => {
       );
       const footer = container.querySelector(".modal-actions");
 
-      expect(footer?.querySelector(".detail-actions-dropdown")).toBeTruthy();
-      expect(footer?.querySelector(".modal-actions-spacer")).toBeTruthy();
-      expect(footer?.querySelector(".detail-move-dropdown, .detail-move-btn, .detail-move-menu")).toBeNull();
+      expect(footer).toBeNull();
+      expect(container.querySelector(".modal-header .detail-actions-dropdown")).toBeTruthy();
+      expect(container.querySelector(".detail-move-dropdown, .detail-move-btn, .detail-move-menu")).toBeNull();
+      // FNXC:TaskDetailHeaderActions 2026-09-17-00:48: FN-470 moved triage lifecycle actions into the single header overflow; opening it is the current operator route.
       fireEvent.click(screen.getByRole("button", { name: "Actions" }));
       expect(screen.getByRole("menuitem", { name: "Retry" })).toBeTruthy();
       expect(screen.getByRole("menuitem", { name: "Reset" })).toBeTruthy();
       expect(screen.getAllByRole("menuitem", { name: "Delete" })).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
     });
 
-    it("modal-actions contains Delete and Pause buttons for non-done tasks (via Actions dropdown)", () => {
+    it("header actions contain Delete and a wired Pause control for mutable tasks", () => {
       render(
         <TaskDetailModal
           initialTab="definition"
@@ -1185,12 +853,13 @@ describe("TaskDetailModal", () => {
           onDeleteTask={noopDelete}
           onMergeTask={noopMerge}
           onOpenDetail={noopOpenDetail}
+          onPauseTask={async (id) => makeTask({ id, paused: true }) as Task}
           addToast={noop}
         />,
       );
 
-      // Actions are now in a dropdown - open it first.
-      // FNXC:PlannerOversight 2026-07-05-00:00: FN-7604 — the footer "Actions"
+      // Secondary actions remain in the header overflow while direct lifecycle controls are adjacent.
+      // FNXC:PlannerOversight 2026-07-05-00:00: FN-7604 — the header "Actions"
       // dropdown button name must be matched EXACTLY (not `/actions/i`) because
       // the now-universal Oversight overflow trigger's aria-label is "Oversight
       // actions", which also matches a loose /actions/i regex and made this
@@ -1535,105 +1204,13 @@ describe("TaskDetailModal", () => {
       });
     });
 
-    it("offers archive instead when deleting a non-done live task", async () => {
-      const onArchiveTask = vi.fn().mockResolvedValue({} as Task);
-      mockConfirmWithChoice.mockResolvedValueOnce("tertiary");
 
-      render(
-        <TaskDetailModal
-          initialTab="definition"
-          task={makeTask({ column: "todo" as any })}
-          onClose={noop}
-          onDeleteTask={noopDelete}
-          onArchiveTask={onArchiveTask}
-          onMergeTask={noopMerge}
-          onOpenDetail={noopOpenDetail}
-          addToast={noop}
-        />,
-      );
 
-      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
-      fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-
-      await waitFor(() => {
-        expect(onArchiveTask).toHaveBeenCalledWith("FN-099");
-      });
-      expect(noopDelete).not.toHaveBeenCalled();
-    });
-
-    it("retries archive after lineage-conflict confirmation", async () => {
-      const onArchiveTask = vi.fn();
-      const conflict = new Error("Cannot archive task FN-099: still referenced as a lineage parent by FN-201.") as Error & {
-        status: number;
-        details: { code: string; lineageChildIds: string[] };
-      };
-      conflict.status = 409;
-      conflict.details = { code: "TASK_HAS_LINEAGE_CHILDREN", lineageChildIds: ["FN-201"] };
-      onArchiveTask
-        .mockRejectedValueOnce(conflict)
-        .mockResolvedValueOnce({} as Task);
-      mockConfirmWithChoice.mockResolvedValueOnce("tertiary");
-      mockConfirm.mockResolvedValueOnce(true);
-
-      render(
-        <TaskDetailModal
-          initialTab="definition"
-          task={makeTask({ column: "done" as any })}
-          onClose={noop}
-          onDeleteTask={noopDelete}
-          onArchiveTask={onArchiveTask}
-          onMergeTask={noopMerge}
-          onOpenDetail={noopOpenDetail}
-          addToast={noop}
-        />,
-      );
-
-      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
-      fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-
-      await waitFor(() => {
-        expect(onArchiveTask).toHaveBeenNthCalledWith(2, "FN-099", { removeLineageReferences: true });
-      });
-    });
-
-    it("does not retry archive when lineage-force confirmation is canceled", async () => {
-      const onArchiveTask = vi.fn();
-      const conflict = new Error("Cannot archive task FN-099: still referenced as a lineage parent by FN-202.") as Error & {
-        status: number;
-        details: { code: string; lineageChildIds: string[] };
-      };
-      conflict.status = 409;
-      conflict.details = { code: "TASK_HAS_LINEAGE_CHILDREN", lineageChildIds: ["FN-202"] };
-      onArchiveTask.mockRejectedValue(conflict);
-      mockConfirmWithChoice.mockResolvedValueOnce("tertiary");
-      mockConfirm.mockResolvedValueOnce(false);
-
-      render(
-        <TaskDetailModal
-          initialTab="definition"
-          task={makeTask({ column: "done" as any })}
-          onClose={noop}
-          onDeleteTask={noopDelete}
-          onArchiveTask={onArchiveTask}
-          onMergeTask={noopMerge}
-          onOpenDetail={noopOpenDetail}
-          addToast={noop}
-        />,
-      );
-
-      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
-      fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-
-      await waitFor(() => {
-        expect(onArchiveTask).toHaveBeenCalledTimes(1);
-        expect(mockConfirm).toHaveBeenCalledTimes(1);
-      });
-    });
 
     it("keeps the in-review Merge & Close action in the footer without relocation controls", () => {
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({ column: "in-review" as Column })}
           onClose={noop}
           onDeleteTask={noopDelete}
@@ -1659,7 +1236,7 @@ describe("TaskDetailModal", () => {
 
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({ column: "in-review" as Column })}
           onClose={noop}
           onDeleteTask={noopDelete}
@@ -1688,7 +1265,7 @@ describe("TaskDetailModal", () => {
 
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({ column: "in-review" as Column })}
           onClose={noop}
           onDeleteTask={noopDelete}
@@ -1733,7 +1310,7 @@ describe("TaskDetailModal", () => {
 
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({
             column: "in-review" as Column,
             prInfo: {
@@ -1782,7 +1359,7 @@ describe("TaskDetailModal", () => {
 
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({
             column: "in-review" as Column,
             prInfo: {
@@ -1828,7 +1405,7 @@ describe("TaskDetailModal", () => {
 
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({
             column: "in-review" as Column,
             prInfo: {
@@ -1856,7 +1433,7 @@ describe("TaskDetailModal", () => {
     it("shows linked PR number in detail metadata for in-review tasks", () => {
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="details"
           task={makeTask({ column: "in-review" as Column, prInfo: {
             url: "https://github.com/owner/repo/pull/42",
             number: 42,
@@ -1908,7 +1485,7 @@ describe("TaskDetailModal", () => {
 
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={task}
           onClose={noop}
           onDeleteTask={noopDelete}
@@ -1924,7 +1501,7 @@ describe("TaskDetailModal", () => {
     it("shows PR automation waiting label instead of Merge & Close when awaiting PR checks", () => {
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({ column: "in-review" as Column, status: "awaiting-pr-checks", prInfo: {
             url: "https://github.com/owner/repo/pull/42",
             number: 42,
@@ -1950,7 +1527,7 @@ describe("TaskDetailModal", () => {
     it("shows Creating PR label while PR-first automation is creating a PR", () => {
       render(
         <TaskDetailModal
-          initialTab="definition"
+          initialTab="review"
           task={makeTask({ column: "in-review" as Column, status: "creating-pr" })}
           onClose={noop}
           onDeleteTask={noopDelete}
@@ -2445,13 +2022,5 @@ describe("TaskDetailModal", () => {
   });
 
 
-  it("keeps icon-only toolbar controls in a wrapping mobile row", () => {
-    const css = readDashboardStylesSource();
-    const mobileBlock = getCssAtRuleBlockContaining(css, "@media (max-width: 768px)", ".detail-meta-inline-controls");
-    expectBaseRule(css, ".detail-meta-inline-controls", "flex-wrap: nowrap;");
-    expect(mobileBlock).toMatch(/\.detail-meta-inline-controls\s*\{[^}]*flex-wrap:\s*wrap;/);
-    expect(mobileBlock).not.toMatch(/flex-direction:\s*column/);
-    expect(css).not.toMatch(/\.detail-oversight-menu-trigger svg\s*\{[^}]*width:\s*1em/);
-  });
 
 });

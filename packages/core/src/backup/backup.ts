@@ -1,9 +1,12 @@
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { resolveGlobalDir } from "../config/global-settings.js";
 import { CronExpressionParser } from "cron-parser";
 import { PgBackupManager, type PgBackupPair, type PgDumpResult } from "../postgres/pg-backup.js";
 import { resolveBackend } from "../postgres/backend-resolver.js";
 import { getActiveEmbeddedRuntimeUrl } from "../postgres/active-backend-registry.js";
+import { reconcileRestoredSchemaMigrationsFromUrl } from "../postgres/restore-migration-reconcile.js";
+import { redactCredentialsFromMessage } from "../postgres/credential-redact.js";
 import type { Settings } from "../types.js";
 import type { Routine } from "../automation/routine.js";
 
@@ -33,12 +36,29 @@ export interface BackupInfo extends BackupFileInfo {
     | {
         failed: string;
       };
+  migrationsBackup?: BackupFileInfo | { skipped: "missing" };
 }
 
 export interface BackupPairInfo {
   timestamp: string;
   project?: BackupFileInfo;
   central?: BackupFileInfo;
+  migrations?: BackupFileInfo;
+}
+
+export interface BackupRestoreOptions {
+  createPreRestoreBackup?: boolean;
+  skipCentral?: boolean;
+  centralOnly?: boolean;
+}
+
+export interface BackupRestoreResult {
+  restored: Array<"project" | "central">;
+  preRestoreBackup?: BackupPairInfo;
+  projectRollback?: "succeeded";
+  centralRollback?: "succeeded";
+  migrationBookkeepingRollback?: "succeeded";
+  migrationBookkeeping: "restored" | "unavailable" | "skipped-central-only";
 }
 
 export interface BackupOptions {
@@ -52,6 +72,18 @@ export interface BackupOptions {
    * was removed as part of the SQLite-to-PostgreSQL cutover.
    */
   connectionString?: string;
+  /** Override PostgreSQL client paths, primarily for embedders and tests. */
+  pgDumpPath?: string;
+  pgRestorePath?: string;
+  /** Override the bounded native-client timeout. Defaults to 120 seconds. */
+  clientTimeoutMs?: number;
+  /**
+   * FNXC:PostgresBackup 2026-09-04-05:26:
+   * Test seam for post-restore rewind/replay. Production reconnects and
+   * reconciles `public.fusion_schema_migrations` against restored relations so
+   * a legacy two-member stem (no bookkeeping dump) cannot skip later migrations.
+   */
+  reconcileRestoredMigrations?: () => Promise<void>;
 }
 
 /**
@@ -68,6 +100,8 @@ export class BackupManager {
   private backupDir: string;
   private retention: number;
   private includeCentralDb: boolean;
+  private readonly connectionString: string;
+  private readonly reconcileRestoredMigrations?: () => Promise<void>;
   private readonly pgManager: PgBackupManager;
 
   constructor(fusionDir: string, options?: BackupOptions) {
@@ -82,10 +116,15 @@ export class BackupManager {
           "Pass connectionString explicitly or ensure DATABASE_URL / embedded backend is configured.",
       );
     }
+    this.connectionString = connectionString;
+    this.reconcileRestoredMigrations = options?.reconcileRestoredMigrations;
     this.pgManager = new PgBackupManager(connectionString, fusionDir, {
       backupDir: this.backupDir,
       retention: this.retention,
       includeCentral: this.includeCentralDb,
+      pgDumpPath: options?.pgDumpPath,
+      pgRestorePath: options?.pgRestorePath,
+      clientTimeoutMs: options?.clientTimeoutMs,
     });
   }
 
@@ -123,27 +162,18 @@ export class BackupManager {
   }
 
   async listBackupPairs(): Promise<BackupPairInfo[]> {
-    const projects = await this.listBackups();
-    const centrals = await this.listCentralBackups();
-    const pairs = new Map<string, BackupPairInfo>();
-
-    for (const project of projects) {
-      const key = getBackupPairKey(project.filename, false);
-      if (!key) continue;
-      const existing = pairs.get(key) ?? { timestamp: key };
-      existing.project = project;
-      pairs.set(key, existing);
-    }
-
-    for (const central of centrals) {
-      const key = getBackupPairKey(central.filename, true);
-      if (!key) continue;
-      const existing = pairs.get(key) ?? { timestamp: key };
-      existing.central = central;
-      pairs.set(key, existing);
-    }
-
-    return [...pairs.values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    const pairs = await this.pgManager.listBackups();
+    return pairs.map((pair) => ({
+      timestamp: pair.timestamp,
+      project: pair.project ? pgDumpResultToBackupFileInfo(pair.project) : undefined,
+      central:
+        pair.central && "filename" in pair.central
+          ? pgDumpResultToBackupFileInfo(pair.central)
+          : undefined,
+      migrations: pair.migrations && "filename" in pair.migrations
+        ? pgDumpResultToBackupFileInfo(pair.migrations)
+        : undefined,
+    }));
   }
 
   async cleanupOldBackups(): Promise<number> {
@@ -152,15 +182,109 @@ export class BackupManager {
   }
 
   /**
-   * FNXC:SqliteFinalRemoval 2026-06-26:
-   * Restore is delegated to PgBackupManager (pg_restore). The legacy SQLite
-   * file-copy restore (cp fusion.db, pre-restore snapshots) was removed.
+   * FNXC:PostgresBackup 2026-09-04-05:26:
+   * Project/archive restores also restore captured migration bookkeeping. That
+   * write is permitted only with a complete pre-restore stem so failures can
+   * roll every committed group back to one consistent snapshot.
+   * After the dump groups commit, rewind/replay still runs so a legacy
+   * two-member stem (bookkeeping unavailable) cannot skip later CREATE-TABLE
+   * migrations. A thrown reconcile uses the same rollback helper as a dump failure.
    */
   async restoreBackup(
     filename: string,
-    _options?: { createPreRestoreBackup?: boolean; skipCentral?: boolean; centralOnly?: boolean }
-  ): Promise<void> {
-    await this.pgManager.restoreBackup(filename);
+    options: BackupRestoreOptions = {},
+  ): Promise<BackupRestoreResult> {
+    if (options.skipCentral && options.centralOnly) {
+      throw new Error("skipCentral and centralOnly cannot be used together");
+    }
+
+    const selection = this.pgManager.resolveBackupSelection(filename);
+    if (selection.selectedKind === "central" && options.skipCentral) {
+      throw new Error("skipCentral cannot be used when a central dump is selected");
+    }
+
+    const restoreProject = selection.selectedKind === "project" && !options.centralOnly;
+    const restoreCentral = selection.selectedKind === "central"
+      || options.centralOnly === true
+      || (selection.selectedKind === "project" && !options.skipCentral);
+    const restoreBookkeeping = restoreProject && existsSync(selection.migrationsPath);
+    if (restoreBookkeeping && options.createPreRestoreBackup === false) {
+      throw new Error("createPreRestoreBackup: false is refused: migration bookkeeping restore requires a pre-restore backup for rollback.");
+    }
+    const sources: Array<{ path: string }> = [];
+    if (restoreProject) sources.push({ path: selection.projectPath });
+    if (restoreCentral) sources.push({ path: selection.centralPath });
+    if (restoreBookkeeping) sources.push({ path: selection.migrationsPath });
+    for (const source of sources) await this.pgManager.validateBackup(source.path);
+
+    let preRestorePair: PgBackupPair | undefined;
+    if (options.createPreRestoreBackup !== false) {
+      preRestorePair = await this.pgManager.createPreRestoreBackup();
+      const complete = preRestorePair.project && preRestorePair.central && "path" in preRestorePair.central
+        && (!restoreBookkeeping || (preRestorePair.migrations && "path" in preRestorePair.migrations));
+      if (!complete) throw new Error("Pre-restore backup did not produce a complete PostgreSQL dump pair including migration bookkeeping");
+      const preProject = preRestorePair.project!;
+      const preCentral = preRestorePair.central as PgDumpResult;
+      await this.pgManager.validateBackup(preProject.path);
+      await this.pgManager.validateBackup(preCentral.path);
+      if (restoreBookkeeping) await this.pgManager.validateBackup((preRestorePair.migrations as PgDumpResult).path);
+    }
+
+    const result: BackupRestoreResult = {
+      restored: [],
+      preRestoreBackup: preRestorePair ? pgBackupPairToBackupPairInfo(preRestorePair) : undefined,
+      migrationBookkeeping: restoreProject ? (restoreBookkeeping ? "restored" : "unavailable") : "skipped-central-only",
+    };
+    const rollback = async (failure: unknown): Promise<never> => {
+      if (!preRestorePair?.project) throw new Error(`Restore failed without rollback invariant: ${errorMessage(failure)}`, { cause: failure });
+      const failures: unknown[] = [failure];
+      try { await this.pgManager.restoreBackup(preRestorePair.project.path); result.projectRollback = "succeeded"; } catch (error) { failures.push(error); }
+      if (restoreCentral && preRestorePair.central && "path" in preRestorePair.central) {
+        try { await this.pgManager.restoreBackup(preRestorePair.central.path); result.centralRollback = "succeeded"; } catch (error) { failures.push(error); }
+      }
+      if (restoreBookkeeping && preRestorePair.migrations && "path" in preRestorePair.migrations) {
+        try { await this.pgManager.restoreBackup(preRestorePair.migrations.path); result.migrationBookkeepingRollback = "succeeded"; } catch (error) { failures.push(error); }
+      }
+      const names = [preRestorePair.project.filename, preRestorePair.central && "filename" in preRestorePair.central ? preRestorePair.central.filename : undefined, preRestorePair.migrations && "filename" in preRestorePair.migrations ? preRestorePair.migrations.filename : undefined].filter(Boolean).join(", ");
+      if (failures.length > 1) throw new AggregateError(failures, `Restore failed: ${errorMessage(failure)}; rollback from retained dumps ${names} also failed: ${failures.slice(1).map(errorMessage).join("; ")}`);
+      throw new Error(`Restore failed; committed groups were rolled back from retained dumps ${names}: ${errorMessage(failure)}`, { cause: failure as Error });
+    };
+    let projectCommitted = false;
+    try {
+      if (restoreProject) {
+        await this.pgManager.restoreBackup(selection.projectPath);
+        projectCommitted = true;
+        result.restored.push("project");
+      }
+      if (restoreCentral) { await this.pgManager.restoreBackup(selection.centralPath); result.restored.push("central"); }
+      if (restoreBookkeeping) await this.pgManager.restoreBackup(selection.migrationsPath);
+      if (restoreProject) await this.reconcileProjectMigrationState();
+    } catch (error) {
+      if (!projectCommitted) throw error;
+      await rollback(error);
+    }
+    return result;
+  }
+
+  /**
+   * FNXC:PostgresBackup 2026-09-04-05:26:
+   * Same-stem bookkeeping dumps restore the ledger when present. Legacy stems
+   * leave public.fusion_schema_migrations at the current binary version, so
+   * rewind from the earliest missing CREATE-TABLE sentinel and replay.
+   */
+  private async reconcileProjectMigrationState(): Promise<void> {
+    try {
+      if (this.reconcileRestoredMigrations) {
+        await this.reconcileRestoredMigrations();
+        return;
+      }
+      await reconcileRestoredSchemaMigrationsFromUrl(this.connectionString);
+    } catch (error) {
+      throw new Error(
+        `Restored schemas but failed to reconcile migration bookkeeping: ${redactCredentialsFromMessage(errorMessage(error))}`,
+        { cause: error },
+      );
+    }
   }
 }
 
@@ -184,15 +308,6 @@ function formatTimestamp(date: Date): string {
   const minutes = String(date.getUTCMinutes()).padStart(2, "0");
   const seconds = String(date.getUTCSeconds()).padStart(2, "0");
   return `${year}-${month}-${day}-${hours}${minutes}${seconds}`;
-}
-
-function getBackupPairKey(filename: string, isCentral: boolean): string | null {
-  const pattern = isCentral
-    ? /^fusion-central(?:-pre-restore)?-(\d{4}-\d{2}-\d{2}-\d{6})(-\d+)?\.db$/
-    : /^(?:fusion|kb)(?:-pre-restore)?-(\d{4}-\d{2}-\d{2}-\d{6})(-\d+)?\.db$/;
-  const match = filename.match(pattern);
-  if (!match) return null;
-  return `${match[1]}${match[2] ?? ""}`;
 }
 
 export function validateBackupSchedule(schedule: string): boolean {
@@ -283,17 +398,32 @@ function pgDumpResultToBackupFileInfo(result: PgDumpResult): BackupFileInfo {
   };
 }
 
+function pgBackupPairToBackupPairInfo(pair: PgBackupPair): BackupPairInfo {
+  return {
+    timestamp: pair.timestamp,
+    project: pair.project ? pgDumpResultToBackupFileInfo(pair.project) : undefined,
+    central: pair.central && "filename" in pair.central ? pgDumpResultToBackupFileInfo(pair.central) : undefined,
+    migrations: pair.migrations && "filename" in pair.migrations ? pgDumpResultToBackupFileInfo(pair.migrations) : undefined,
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function pgBackupPairToBackupInfo(pair: PgBackupPair): BackupInfo {
   const info: BackupInfo = pair.project
     ? pgDumpResultToBackupFileInfo(pair.project)
     : { filename: "", createdAt: pair.timestamp, size: 0, path: "" };
 
   if (pair.central) {
-    if ("filename" in pair.central) {
-      info.centralBackup = pgDumpResultToBackupFileInfo(pair.central);
-    } else {
-      info.centralBackup = pair.central; // { skipped: "disabled" | "missing" }
-    }
+    if ("filename" in pair.central) info.centralBackup = pgDumpResultToBackupFileInfo(pair.central);
+    else info.centralBackup = pair.central;
+  }
+  if (pair.migrations) {
+    info.migrationsBackup = "filename" in pair.migrations
+      ? pgDumpResultToBackupFileInfo(pair.migrations)
+      : pair.migrations;
   }
   return info;
 }

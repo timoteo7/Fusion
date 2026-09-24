@@ -152,18 +152,18 @@ Active merges on a workflow should be visible from the dropdown without requirin
 
 /*
 FNXC:WorkflowSwitcher 2026-06-20-00:00:
-The switcher's inline Todo, In Progress, and Done count badges intentionally mirror the board column color tokens so each count reads as the same color as the column it summarizes.
+The switcher's inline Plan, Progress, and Review count badges mirror the board lifecycle color tokens so each count reads as the same phase it summarizes.
 */
-.workflow-switcher-count--todo {
+.workflow-switcher-count--plan {
   color: var(--todo);
 }
 
-.workflow-switcher-count--in-progress {
+.workflow-switcher-count--progress {
   color: var(--in-progress);
 }
 
-.workflow-switcher-count--done {
-  color: var(--done);
+.workflow-switcher-count--review {
+  color: var(--in-review);
 }
 
 .workflow-switcher-count-separator {
@@ -235,6 +235,26 @@ The workflow listbox is portaled but visually remains the ProjectSelector siblin
   background: color-mix(in srgb, var(--todo) 25%, transparent);
 }
 
+/*
+FNXC:NativeUiCollections 2026-09-15-05:29:
+All workflow selections live in one navigable native listbox.
+FN-407 removed the sibling edit rail, so the popover body is a single full-width column instead of a two-column grid that would otherwise leave an empty track.
+*/
+.workflow-switcher-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflow-switcher-option-collection {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.workflow-switcher-option-collection > * {
+  min-height: var(--control-height-sm);
+}
+
 .workflow-switcher-option {
   display: flex;
   align-items: center;
@@ -253,23 +273,9 @@ The workflow listbox is portaled but visually remains the ProjectSelector siblin
   transition: background var(--transition-fast);
 }
 
-.workflow-switcher-option:focus-visible,
-.workflow-switcher-edit:focus-visible,
-.workflow-switcher-create:focus-visible {
+.workflow-switcher-option:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
-}
-
-.workflow-switcher-edit {
-  flex: 0 0 auto;
-  align-self: center;
-  color: var(--text-muted);
-  transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.workflow-switcher-edit:hover {
-  background: var(--card-hover);
-  color: var(--text);
 }
 
 .workflow-switcher-option-name {
@@ -280,30 +286,11 @@ The workflow listbox is portaled but visually remains the ProjectSelector siblin
   margin-left: auto;
 }
 
-.workflow-switcher-footer {
-  flex: 0 0 auto;
-  margin-top: var(--space-xs);
-  padding-top: var(--space-xs);
-  border-top: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.workflow-switcher-create {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-sm);
-  width: 100%;
-  min-height: calc(var(--space-lg) + var(--space-sm));
-  border-radius: var(--radius-md);
-}
-
 [data-theme="light"] .workflow-switcher-option-row--selected {
   background: color-mix(in srgb, var(--todo) 10%, transparent);
 }
 
-[data-theme="light"] .workflow-switcher-menu,
-[data-theme="light"] .workflow-switcher-footer {
+[data-theme="light"] .workflow-switcher-menu {
   background: var(--surface);
 }
 

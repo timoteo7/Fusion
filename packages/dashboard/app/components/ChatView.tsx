@@ -1,13 +1,12 @@
 // ChatView.css is imported eagerly from App.tsx to avoid a flash of
 // unstyled content when the lazy chunk loads. Do not re-import here.
+import { UiButton, UiDialogBackdrop, UiInput, UiListBox, UiListBoxItem, UiMenu, UiMenuItem, UiMenuSection, UiSelect, UiTextArea } from "./ui";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   MessageSquare,
   Plus,
   Search,
   Trash2,
-  Archive,
-  ArrowLeft,
   Pencil,
   Bot,
   Paperclip,
@@ -23,17 +22,20 @@ import {
   ExternalLink,
   Tag,
   FileText,
-  PanelLeft,
-  PanelLeftClose,
   Bookmark,
 } from "lucide-react";
 import { FN_AGENT_ID, TASK_PLANNER_CHAT_AGENT_ID_PREFIX, useChat, type ChatMessageInfo, type ChatSessionInfo } from "../hooks/useChat";
+import { isPersistedChatMessageId } from "../hooks/chatTypes";
 import { useChatUnread } from "../hooks/useChatUnread";
+import { useVirtualizedChatTranscript } from "../hooks/useVirtualizedChatTranscript";
+import { useStickyBottomFollow } from "../hooks/useStickyBottomFollow";
+import { useVirtualizedList } from "../hooks/useVirtualizedList";
+import { useAutoPaginationSentinel } from "../hooks/useAutoPaginationSentinel";
 import { useComposerDictation } from "../hooks/useComposerDictation";
 import { useViewportMode } from "./Header";
 import { isTabletTouchViewport } from "../hooks/useViewportMode";
 import { fetchSettings, fetchChatSession, type DiscoveredSkill } from "../api";
-import { isExperimentalFeatureEnabled, CHAT_FOCUS_FLAG, type Agent, type ChatTag, type Settings } from "@fusion/core";
+import { isExperimentalFeatureEnabled, CHAT_FOCUS_FLAG, type Agent, type ChatSnippet, type ChatTag, type Settings } from "@fusion/core";
 import { MicButton } from "./MicButton";
 import { ChatThinkingLevelControl } from "./ChatThinkingLevelControl";
 import { ChatThreadTitleSwitcher } from "./ChatThreadTitleSwitcher";
@@ -45,9 +47,12 @@ import { FileMentionPopup } from "./FileMentionPopup";
 import { CliChatSurface, type CliChatTier } from "./CliChatSurface";
 import { useFileMention } from "../hooks/useFileMention";
 import { useModelsCache } from "../hooks/useModelsCache";
+import { useFavorites } from "../hooks/useFavorites";
 import { useDiscoveredSkillsCache } from "../hooks/useDiscoveredSkillsCache";
+import { useChatSnippets } from "../hooks/useChatSnippetsCache";
 import { useAgentsMapCache } from "../hooks/useAgentsMapCache";
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
+import { useKeyboardViewportSurface } from "../hooks/useKeyboardViewportSurface";
 import { useMobileKeyboardViewportLock, isIOS } from "../hooks/useMobileScrollLock";
 import { useOverlayDismiss } from "../hooks/useOverlayDismiss";
 import { matchesAgentMentionFilter } from "./mentionMatching";
@@ -57,9 +62,16 @@ import { formatTokenCount } from "../utils/estimateChatTokens";
 import { resolveChatContextUsage } from "../utils/chatContextUsage";
 import { copyTextToClipboard } from "../utils/copyToClipboard";
 import { buildChatQuotePrefill } from "../utils/chatQuotePrefill";
+import {
+  clearPersistedChatOpenSession,
+  getPersistedChatOpenSession,
+} from "../utils/projectStorage";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { ViewHeader } from "./ViewHeader";
+import { ViewActionButton } from "./ViewActionButton";
+import { ViewSidebar } from "./ViewSidebar";
+import { ViewLayout } from "./ViewLayout";
 import {
   StandardChatActionButton,
   StandardChatMessageItem,
@@ -68,7 +80,10 @@ import {
 } from "./StandardChatSurface";
 import { buildChatReportHandoff, type ChatReportHandoff } from "./chatReportHandoff";
 import { matchChatCommand, filterChatCommands, getSlashTriggerMatch, selectChatCommands, type ChatCommand } from "./chat-commands";
+import { applySnippetToDraft, filterChatSnippets, matchStandaloneSnippetInvocation } from "./chat-snippets";
 import { useChatMessageLayout } from "../context/ChatMessageLayoutContext";
+import { useDashboardWindowSurfaceActivity } from "../context/DashboardWindowManagerContext";
+import { useChatEnterSubmits } from "../context/ChatSubmitOnEnterContext";
 import {
   createChatInputAutosizeController,
   type ChatInputAutosizeController,
@@ -103,6 +118,7 @@ export interface ChatCommandContext {
  */
 export type SkillMenuEntry =
   | { kind: "command"; command: ChatCommand; disabled: boolean }
+  | { kind: "snippet"; snippet: ChatSnippet }
   | { kind: "skill"; skill: DiscoveredSkill };
 
 export interface ChatViewProps {
@@ -110,10 +126,7 @@ export interface ChatViewProps {
   addToast: (msg: string, type?: "success" | "error" | "warning") => void;
   experimentalFeatures?: Record<string, boolean>;
   floating?: boolean;
-  /**
-   * FNXC:ChatFind 2026-08-21-16:44:
-   * A retained-but-hidden Quick Chat must release document Find ownership; visible hosts retain the default.
-   */
+  /** Whether this host may own document Find; managed window visibility is composed automatically. */
   findActive?: boolean;
   /*
   FNXC:MainViewKeepAlive 2026-08-30-19:05:
@@ -128,11 +141,26 @@ export interface ChatViewProps {
   The right dock can host ChatView in a 360px sidebar while the browser viewport remains desktop-sized. Let dock callers force the same narrow list/detail layout used by mobile/resized floating chat without passing floating chrome callbacks.
   */
   compactLayout?: boolean;
+  /** Keeps this host on the conversation list and delegates every open/create to a chat window. */
+  listOnly?: boolean;
+  /** Project-scoped identities of conversations already open in dedicated windows. */
+  openChatWindows?: ReadonlySet<string>;
+  /** Locks this host to initialDirectSession and removes every cross-conversation navigation control. */
+  dedicatedConversation?: boolean;
   onPopOut?: () => void;
   onMaximize?: () => void;
   onClose?: () => void;
-  /** Opens this exact active Direct session in a separate in-app Quick Chat. */
-  onOpenSessionInNewWindow?: (session: ChatSessionInfo) => void;
+  /*
+  FNXC:ChatWindows 2026-09-16-04:37:
+  FN-447: the optional second argument carries the operator's INTENT, not a host preference.
+  `keepListOpen: true` means the operator explicitly asked for a separate window (Ctrl/Cmd-click on a
+  list row, or the "Open in new window" context-menu action), so a host that normally dismisses itself
+  on selection (the footer Conversations popover) must stay open and let several conversations be opened
+  in a row. A plain click reports `keepListOpen: false` and keeps the existing dismiss-on-select behavior.
+  Hosts that never dismiss themselves simply ignore the option.
+  */
+  /** Opens or focuses this exact Direct session in a separate in-app window. */
+  onOpenSessionInNewWindow?: (session: ChatSessionInfo, options?: { keepListOpen?: boolean }) => void;
   /** Secondary windows start in Direct and keep selection/scope storage private. */
   initialDirectSession?: ChatSessionInfo;
   /** Monotonic pop-out focus signal; a repeated open restores this window's detail view. */
@@ -142,10 +170,18 @@ export interface ChatViewProps {
   initialComposerDraft?: string;
   initialComposerDraftNonce?: number;
   onSendAsReport?: (handoff: ChatReportHandoff) => void;
+  /*
+  FNXC:ChatWindows 2026-09-14-23:48:
+  FN-396: a host that renders this conversation's identity outside the view (a detached window's header and accessible
+  name) cannot keep the snapshot it opened with. This reports the live active session whenever a rendered identity
+  field changes. It is a pure notification: it never selects a session and never writes into useChat.
+  */
+  onActiveSessionChange?: (session: ChatSessionInfo) => void;
 }
 
 const CHAT_CONTEXT_MENU_FALLBACK_WIDTH_PX = 200;
 const CHAT_CONTEXT_MENU_VIEWPORT_MARGIN_PX = 8;
+const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 50;
 
 /** Returns an issue or pull-request URL as a standalone composer line. */
 export function buildIssueChatPrefill(url: string): string {
@@ -169,34 +205,6 @@ export function resolveChatContextMenuPosition(
     x: Math.min(Math.max(CHAT_CONTEXT_MENU_VIEWPORT_MARGIN_PX, proposedLeft), maximumLeft),
     y: Math.min(Math.max(CHAT_CONTEXT_MENU_VIEWPORT_MARGIN_PX, anchorY), maximumTop),
   };
-}
-export const CHAT_DOCKED_SIDEBAR_WIDTH_STORAGE_KEY = "fusion:chat-docked-sidebar-width";
-export const CHAT_DOCKED_SIDEBAR_OPEN_STORAGE_KEY = "fusion:chat-docked-sidebar-open";
-export const CHAT_DOCKED_SIDEBAR_MIN_WIDTH = 220;
-export const CHAT_DOCKED_SIDEBAR_MAX_WIDTH = 480;
-export const CHAT_DOCKED_SIDEBAR_DEFAULT_WIDTH = 300;
-
-export function clampChatDockedSidebarWidth(width: number): number {
-  return Number.isFinite(width) ? Math.max(CHAT_DOCKED_SIDEBAR_MIN_WIDTH, Math.min(CHAT_DOCKED_SIDEBAR_MAX_WIDTH, width)) : CHAT_DOCKED_SIDEBAR_DEFAULT_WIDTH;
-}
-
-function readChatDockedSidebarWidth(persist: boolean): number {
-  if (!persist || typeof window === "undefined") return CHAT_DOCKED_SIDEBAR_DEFAULT_WIDTH;
-  try {
-    const raw = window.localStorage.getItem(CHAT_DOCKED_SIDEBAR_WIDTH_STORAGE_KEY);
-    const value = raw?.trim() ? Number(raw) : NaN;
-    return Number.isFinite(value) && value > 0 ? clampChatDockedSidebarWidth(value) : CHAT_DOCKED_SIDEBAR_DEFAULT_WIDTH;
-  } catch { return CHAT_DOCKED_SIDEBAR_DEFAULT_WIDTH; }
-}
-
-function readChatDockedSidebarOpen(persist: boolean): boolean {
-  if (!persist || typeof window === "undefined") return true;
-  try { return window.localStorage.getItem(CHAT_DOCKED_SIDEBAR_OPEN_STORAGE_KEY) !== "false"; } catch { return true; }
-}
-
-function persistChatDockedSidebarPreference(key: string, value: string, persist: boolean) {
-  if (!persist || typeof window === "undefined") return;
-  try { window.localStorage.setItem(key, value); } catch { /* Ignore unavailable storage. */ }
 }
 let chatViewWasPreviouslyInactive = false;
 let activeChatFindOwner: HTMLElement | null = null;
@@ -360,16 +368,20 @@ export function resolveSessionProvider(
  * the mobile keyboard and deliver its release or synthesized click to the backdrop. Only a gesture
  * that starts and ends on the backdrop may dismiss its host dialog.
  */
-function ChatDialogBackdrop({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+function ChatDialogBackdrop({ children, onClose }: { children: React.ReactElement<React.HTMLAttributes<HTMLElement>>; onClose: () => void }) {
   const overlayDismiss = useOverlayDismiss(onClose, { enabled: true });
-  return <div className="chat-new-dialog-backdrop chat-view-dialog-backdrop" {...overlayDismiss}>{children}</div>;
+  return <UiDialogBackdrop overlayClassName="chat-new-dialog-backdrop chat-view-dialog-backdrop" onClose={onClose}>{React.cloneElement(children, overlayDismiss)}</UiDialogBackdrop>;
 }
 
 type CopyFeedbackState = "success" | "error" | null;
 
-export function ChatView({ projectId, addToast, floating = false, compactLayout = false, findActive = true, active = true, onPopOut, onMaximize, onClose, onOpenSessionInNewWindow, initialDirectSession, initialDirectSessionNonce, persistChatPreferences = true, chatCommandContext, initialComposerDraft, initialComposerDraftNonce, onSendAsReport }: ChatViewProps) {
+function ChatViewContent({ projectId, addToast, floating = false, compactLayout = false, listOnly = false, openChatWindows, dedicatedConversation = false, findActive: hostFindActive = true, active: hostActive = true, onPopOut, onMaximize, onClose, onOpenSessionInNewWindow, initialDirectSession, initialDirectSessionNonce, persistChatPreferences = true, chatCommandContext, initialComposerDraft, initialComposerDraftNonce, onSendAsReport, onActiveSessionChange }: ChatViewProps) {
   const { t } = useTranslation("app");
+  const managedSurfaceActive = useDashboardWindowSurfaceActivity();
+  const active = hostActive && managedSurfaceActive;
+  const findActive = hostFindActive && managedSurfaceActive;
   const chatMessageLayout = useChatMessageLayout();
+  const enterSubmits = useChatEnterSubmits();
   useEffect(() => {
     recordResumeEvent({
       view: "ChatView",
@@ -454,10 +466,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     streamingToolCalls,
     selectSession,
     createSession,
-    archiveSession,
-    archivedSessions,
-    refreshArchivedSessions,
-    unarchiveSession,
     renameSession,
     pinSession,
     pinnedCount,
@@ -474,6 +482,8 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     setSessionTags,
     sendMessage,
     editMessageAndResend,
+    editDraftRestore,
+    clearEditDraftRestore,
     stopStreaming,
     pendingMessages,
     pendingQueueAction,
@@ -483,6 +493,9 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     forceSendPendingMessage,
     loadMoreMessages,
     hasMoreMessages,
+    loadMoreSessions,
+    hasMoreSessions,
+    sessionsLoadingMore,
     searchQuery,
     setSearchQuery,
     filteredSessions,
@@ -491,7 +504,13 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   const { isUnread, markRead } = useChatUnread(projectId);
   const [messageInput, setMessageInput] = useState(() => getPersistedChatDraft(getChatDraftKey(activeSession?.id)));
-  const [contextMenu, setContextMenu] = useState<{ sessionId: string; anchorX: number; anchorY: number; anchorRight: boolean; x: number; y: number } | null>(null);
+  /*
+  FNXC:ChatNavigation 2026-09-17-10:37:
+  FN-506 : `source` retient d'où ce menu unique a été ouvert (ligne de liste ou en-tête). Le menu lui-même reste
+  le SEUL rendu d'actions de conversation ; seule l'entrée "New Chat" est conditionnelle, parce que l'en-tête
+  est le seul point de création atteignable quand une conversation occupe le panneau.
+  */
+  const [contextMenu, setContextMenu] = useState<{ sessionId: string; anchorX: number; anchorY: number; anchorRight: boolean; x: number; y: number; source: "row" | "header" } | null>(null);
   /*
   FNXC:ChatStashBackfill 2026-08-19-16:28:
   (operator request 2026-08-19) Busy marker for the "Preserve to Stash" context-menu
@@ -500,7 +519,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   double-fire from the menu.
   */
   const [stashBackfillBusyId, setStashBackfillBusyId] = useState<string | null>(null);
-  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   /*
   FNXC:ChatMemoryFocus 2026-08-13:
@@ -548,7 +566,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     sessionId: string,
     anchorX: number,
     anchorY: number,
-    options?: { anchorRight?: boolean },
+    options?: { anchorRight?: boolean; source?: "row" | "header" },
   ) => {
     if (typeof window === "undefined") return;
 
@@ -559,6 +577,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       anchorRight: options?.anchorRight ?? false,
       x: anchorX,
       y: anchorY,
+      source: options?.source ?? "row",
     });
   };
 
@@ -603,6 +622,9 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   FNXC:ChatWindows 2026-08-27-09:09:
   FN-193 makes useChat expose initialDirectSession on the first committed render. Seed detail and previous detail state from that same requested session so a dedicated pop-out paints its thread without pushing a phantom navigation-history entry.
+
+  FNXC:ChatNavigation 2026-09-07-21:35:
+  FN-313 restaure le détail ordinaire seulement après que useChat a validé la session sauvegardée dans la liste du projet. Cette ouverture automatique ne pousse aucune entrée de navigation; Back efface la préférence pour représenter explicitement la liste, tandis qu’un hôte `persistChatPreferences={false}` reste entièrement local.
   */
   const [detailOpen, setDetailOpen] = useState(() => Boolean(initialDirectSession));
   /*
@@ -618,7 +640,24 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const [conversationSearchIndex, setConversationSearchIndex] = useState(0);
   const { agentsMap: cachedAgentsMap } = useAgentsMapCache(projectId);
   const agentsMap = useMemo(() => (chatAgentsMap.size > 0 ? chatAgentsMap : cachedAgentsMap), [cachedAgentsMap, chatAgentsMap]);
-  const { models, favoriteProviders, favoriteModels, defaultProvider, defaultModelId } = useModelsCache();
+  const { defaultProvider, defaultModelId } = useModelsCache();
+  const {
+    availableModels: models,
+    favoriteProviders,
+    favoriteModels,
+    toggleFavoriteProvider,
+    toggleFavoriteModel,
+  } = useFavorites();
+  const handleToggleFavoriteProvider = useCallback((provider: string) => {
+    void toggleFavoriteProvider(provider).catch(() => {
+      addToast(t("models.errors.failedUpdateFavorites", "Failed to update favorites"), "error");
+    });
+  }, [addToast, t, toggleFavoriteProvider]);
+  const handleToggleFavoriteModel = useCallback((modelId: string) => {
+    void toggleFavoriteModel(modelId).catch(() => {
+      addToast(t("models.errors.failedUpdateModelFavorites", "Failed to update model favorites"), "error");
+    });
+  }, [addToast, t, toggleFavoriteModel]);
   const defaultModel = useMemo<DefaultModelSelection>(() => ({ provider: defaultProvider, modelId: defaultModelId }), [defaultModelId, defaultProvider]);
   const _dialogDefaultModel = useMemo<DefaultModelSelection>(() => {
     if (chatDefaultTarget?.kind === "model") {
@@ -627,6 +666,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     return defaultModel;
   }, [chatDefaultTarget, defaultModel]);
   const { skills: discoveredSkills, loading: skillsLoading } = useDiscoveredSkillsCache(projectId);
+  const chatSnippets = useChatSnippets();
   const [showSkillMenu, setShowSkillMenu] = useState(false);
   const [skillFilter, setSkillFilter] = useState("");
   const [highlightedSkillIndex, setHighlightedSkillIndex] = useState(0);
@@ -644,11 +684,17 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const [copyFeedbackByMessageId, setCopyFeedbackByMessageId] = useState<Record<string, CopyFeedbackState>>({});
   const { pushNav, removeNav } = useNavigationHistoryContext();
 
-  // File mention state and hook
+  // Hash mention state and hook
   const [, setFileMentionPopupVisible] = useState(false);
   const [fileMentionPosition, setFileMentionPosition] = useState({ top: 0, left: 0 });
+  const mentionConversations = useMemo(
+    () => sessions
+      .filter((session) => session.id !== activeSession?.id)
+      .map((session) => ({ id: session.id, title: session.title ?? null })),
+    [activeSession?.id, sessions],
+  );
 
-  const fileMention = useFileMention({ projectId });
+  const fileMention = useFileMention({ projectId, conversations: mentionConversations });
 
   // Calculate popup position based on caret position in textarea
   const updateFileMentionPosition = useCallback((textarea: HTMLTextAreaElement | null) => {
@@ -672,6 +718,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const isUserScrollingRef = useRef(false);
   const lastAnchoredThreadStateRef = useRef<{ threadId: string; loaded: boolean; hasMessages: boolean } | null>(null);
   const directThreadDeferredAnchorTimeoutRef = useRef<number | null>(null);
+  const directThreadAnchorGenerationRef = useRef(0);
   const lastMessageCountRef = useRef(0);
   const lastThreadIdRef = useRef<string | null>(null);
   const scrollRestoreSnapshotRef = useRef<{
@@ -684,15 +731,53 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     wasPinnedBefore: boolean;
     capturedAtMs: number;
   } | null>(null);
+  const previousVirtualizedMessagesRef = useRef<{ threadId: string | null; ids: readonly string[] }>({ threadId: null, ids: [] });
   const hideSkillMenuTimeoutRef = useRef<number | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const transcriptKeys = useMemo(
+    () => [...messages.map((message) => message.id), ...(isStreaming ? ["__streaming__"] : [])],
+    [isStreaming, messages],
+  );
+  const virtualTranscript = useVirtualizedChatTranscript({
+    transcriptKey: activeSession?.id ?? null,
+    keys: transcriptKeys,
+    scrollRef: messagesContainerRef,
+  });
+  /*
+  FNXC:StickyBottomScroll 2026-09-14-20:19:
+  FN-398 : `.chat-messages` a désormais un propriétaire unique du suivi du bas. L'intention utilisateur (molette,
+  pan tactile, touche de navigation, glissement de barre de défilement) désengage le suivi de façon synchrone et
+  INDÉPENDAMMENT de la géométrie ; auparavant un geste de 30 px restait sous le seuil de 50 px, ne désengageait rien,
+  et la boucle d'ancrage suivante réécrivait `scrollTop` en bas. Le seuil ne sert plus qu'au RÉENGAGEMENT. Toute
+  intention clôt aussi la propriété d'alignement terminal du virtualiseur et l'ancrage différé de 250 ms, qui étaient
+  les deux autres écrivains capables de raccrocher le lecteur.
+  */
+  const stickyFollow = useStickyBottomFollow(messagesContainerRef, {
+    rearmThresholdPx: CHAT_BOTTOM_FOLLOW_THRESHOLD_PX,
+    attachKey: `${activeSession?.id ?? ""}:${detailOpen}`,
+    onFollowingChange: (following) => {
+      isUserScrollingRef.current = !following;
+      setIsUserScrolling(!following);
+    },
+    onUserIntent: () => {
+      directThreadAnchorGenerationRef.current += 1;
+      virtualTranscript.cancelPendingScrollToBottom();
+      if (directThreadDeferredAnchorTimeoutRef.current !== null) {
+        window.clearTimeout(directThreadDeferredAnchorTimeoutRef.current);
+        directThreadDeferredAnchorTimeoutRef.current = null;
+      }
+    },
+  });
   const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const clippedMessageFrameRef = useRef<number | null>(null);
   const [topClippedMessageIds, setTopClippedMessageIds] = useState<Set<string>>(() => new Set());
-  // FN-5365: mirror QuickChat's mid-dismiss suppress gate so transient
-  // visualViewport shrink samples do not jerk the chat thread/composer.
-  const suppressVvShrinkRef = useRef(false);
-  const suppressVvShrinkTimeoutRef = useRef<number | null>(null);
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+  FN-512 removed FN-5365's 450ms `suppressVvShrink` window along with the local viewport reader it
+  gated. Transient samples are now rejected where they are read: the shared frame marks a physically
+  impossible rectangle incoherent and holds the last coherent one, which is bounded and cancellable
+  instead of being a fixed delay that a fast close-then-refocus could outrun.
+  */
   // Deferred drift-reset scheduled on blur; cancelled on the next focus so a
   // quick re-tap never scrolls the document while iOS is raising the keyboard.
   const blurScrollResetTimeoutRef = useRef<number | null>(null);
@@ -707,14 +792,13 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const mentionCursorPosRef = useRef(0);
   const copyFeedbackTimeoutsRef = useRef<Map<string, number>>(new Map());
   /*
-  FNXC:ChatSendDedupe 2026-06-17-08:36:
-  FN-6576 refines FN-6563 by matching QuickChatFAB's two-latch touch contract: pointerdown/touchstart claim a per-input-task gesture so one mobile tap sends exactly once, while the separate 700ms latch is consumed only by a trailing click. A suppressed iOS click must never leave the long latch blocking the next tap; a send-to-stop DOM swap must consume the trailing click without swallowing a genuine later stop tap.
+  FNXC:ChatSendDedupe 2026-09-14-11:35:
+  Pointerdown/touchstart claim one composer gesture so a mobile tap sends exactly once; a separate trailing-click latch cannot swallow a later stop tap when Send changes to Stop.
   */
   const mode = useViewportMode();
   const isMobile = mode === "mobile";
   const isTablet = mode === "tablet";
   const chatViewRef = useRef<HTMLDivElement>(null);
-  const appliedThreadTranslateYRef = useRef(0);
   const [floatingNarrow, setFloatingNarrow] = useState(false);
   /*
   FNXC:ChatModal 2026-06-22-14:38:
@@ -747,11 +831,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   FN-9193 restores an optional conversation list only for non-floating tablet-or-wider hosts.
   Mobile, compact dock, and floating hosts retain their one-pane list/detail contract.
   */
-  const [dockedSidebarWidth, setDockedSidebarWidth] = useState(() => readChatDockedSidebarWidth(persistChatPreferences));
-  const [dockedSidebarOpen, setDockedSidebarOpen] = useState(() => readChatDockedSidebarOpen(persistChatPreferences));
-  const resizeTeardownRef = useRef<(() => void) | null>(null);
-  const dockedSidebarEligible = !floating && !isChatMobile;
-  const dockedSidebarVisible = dockedSidebarEligible && dockedSidebarOpen;
+  /*
+  FNXC:StandardizedChatLayout 2026-09-13-22:31:
+  Chat keeps its conversation collection mounted and visible on every tablet-or-wider in-place host, and that rail can no longer be hidden away. Floating pop-out windows and phones stay list-or-detail hosts, so they keep the shared header chevron as their single return. Dedicated conversation windows retain only their bound thread and never retarget the shared controller.
+  */
+  const dockedSidebarVisible = !listOnly && !dedicatedConversation && !floating && !isChatMobile;
 
   useEffect(() => {
     if (!active || !activeSession?.id) {
@@ -776,6 +860,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const activeDraftKey = getChatDraftKey(activeSession?.id);
   const lastDraftKeyRef = useRef<string | null>(activeDraftKey);
   const skipNextDraftRestoreRef = useRef(false);
+  const snippetDraftEphemeralRef = useRef(false);
 
   useEffect(() => {
     if (activeDraftKey === lastDraftKeyRef.current) {
@@ -783,6 +868,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     }
 
     lastDraftKeyRef.current = activeDraftKey;
+    snippetDraftEphemeralRef.current = false;
     if (skipNextDraftRestoreRef.current) {
       skipNextDraftRestoreRef.current = false;
       return;
@@ -796,6 +882,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     }
 
     try {
+      if (snippetDraftEphemeralRef.current) {
+        localStorage.removeItem(activeDraftKey);
+        if (!messageInput) snippetDraftEphemeralRef.current = false;
+        return;
+      }
       if (messageInput) {
         localStorage.setItem(activeDraftKey, messageInput);
         return;
@@ -817,6 +908,23 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     allowNonMobileViewport: keyboardTrackedHost,
   });
 
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+  FN-512: the thread measures ITS OWN rectangle against the shared visible bound, and only when no
+  ancestor already did. Before this, Chat recomputed occlusion locally from `window.innerHeight`
+  (which Android Chrome can report stale), clamped its height, translated itself by `offsetTop`, and
+  added a constant iOS accessory margin — all while a drawer or floating window was adapting the same
+  rectangle. Which adjustment won depended on the order the keyboard events arrived in, which is why
+  the operator saw the field either under the keyboard or far above it roughly every other time.
+
+  Inside an adapted owner the thread now adapts nothing: the flex column with `min-height: 0` and its
+  own message scroller already fit the bounded panel.
+  */
+  const chatKeyboardSurface = useKeyboardViewportSurface(chatThreadRef, {
+    enabled: keyboardTrackedHost && !!activeSession,
+    blockSizeProperty: "--chat-thread-visible-block-size",
+  });
+
   const filteredSkills = useMemo(() => {
     const normalizedFilter = skillFilter.trim().toLowerCase();
     const matchingSkills = normalizedFilter
@@ -824,6 +932,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       : discoveredSkills;
     return matchingSkills.slice(0, 10);
   }, [discoveredSkills, skillFilter]);
+
+  const filteredSnippets = useMemo(
+    () => filterChatSnippets(skillFilter, chatSnippets),
+    [chatSnippets, skillFilter],
+  );
 
   // Commands only contribute to the "/" menu when this ChatView instance is
   // bound to a task (chatCommandContext provided) — the general, non-task-bound
@@ -839,9 +952,10 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       command,
       disabled: command.requiresAgent && !chatCommandContext?.agentRunning,
     }));
+    const snippetEntries: SkillMenuEntry[] = filteredSnippets.map((snippet) => ({ kind: "snippet", snippet }));
     const skillEntries: SkillMenuEntry[] = filteredSkills.map((skill) => ({ kind: "skill", skill }));
-    return [...commandEntries, ...skillEntries];
-  }, [filteredCommands, filteredSkills, chatCommandContext]);
+    return [...commandEntries, ...snippetEntries, ...skillEntries];
+  }, [filteredCommands, filteredSnippets, filteredSkills, chatCommandContext]);
 
   /*
   FNXC:ChatDirectOnly 2026-08-23-03:10:
@@ -862,18 +976,19 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     return byName;
   }, [mentionAgents]);
 
-  // Key the reset on skill ids, not array identity: useDiscoveredSkillsCache
-  // (SWR) re-delivers content-identical lists with fresh identities (cache
-  // reads re-parse; revalidation notifies a new array). Resetting on identity
-  // alone wipes the user's keyboard highlight mid-navigation when a
-  // revalidation lands — only a *semantic* list change should reset it.
-  const filteredSkillsKey = useMemo(
-    () => filteredSkills.map((skill) => skill.id).join(" "),
-    [filteredSkills],
+  // Reset on semantic menu identity rather than fresh cache-array identities so
+  // revalidation cannot wipe a user's keyboard highlight mid-navigation.
+  const skillMenuEntriesKey = useMemo(
+    () => skillMenuEntries.map((entry) => {
+      if (entry.kind === "command") return `command:${entry.command.name}`;
+      if (entry.kind === "snippet") return `snippet:${entry.snippet.name}`;
+      return `skill:${entry.skill.id}`;
+    }).join("\u0000"),
+    [skillMenuEntries],
   );
   useEffect(() => {
     setHighlightedSkillIndex(0);
-  }, [filteredSkillsKey]);
+  }, [skillMenuEntriesKey]);
 
   useEffect(() => {
     setMentionHighlightIndex(0);
@@ -949,6 +1064,14 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     const threadId = getActiveThreadId();
     if (!messagesContainer || !threadId) return;
 
+    /*
+    FNXC:StickyBottomScroll 2026-09-14-20:19:
+    FN-398 : la propriété du viewport n'est plus redéduite de la géométrie ici. L'écouteur natif du propriétaire
+    unique s'exécute sur l'élément avant la délégation React, donc `isUserScrollingRef` est déjà à jour ;
+    recalculer un « suis-je à moins de 50 px ? » ici réengageait le suivi qu'un petit geste venait de relâcher.
+    */
+    const isDetached = isUserScrollingRef.current;
+
     const scrollTop = messagesContainer.scrollTop;
     const messageElements = messagesContainer.querySelectorAll<HTMLElement>(".chat-message[data-message-id]");
     const anchorMessage = Array.from(messageElements).find((element) => element.offsetTop + element.offsetHeight >= scrollTop)
@@ -964,7 +1087,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       clientHeight: messagesContainer.clientHeight,
       anchorMessageId,
       anchorOffset,
-      wasPinnedBefore: !isUserScrollingRef.current,
+      wasPinnedBefore: !isDetached,
       capturedAtMs: typeof performance !== "undefined" ? performance.now() : Date.now(),
     };
   }, [getActiveThreadId]);
@@ -973,32 +1096,42 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     const messagesContainer = messagesContainerRef.current;
     if (!messagesContainer) return;
 
-    const threshold = 50;
-    const atBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - threshold;
-    setIsUserScrolling(!atBottom);
-    isUserScrollingRef.current = !atBottom;
     captureScrollSnapshot();
     scheduleTopClippedMessageUpdate();
   }, [captureScrollSnapshot, scheduleTopClippedMessageUpdate]);
 
+  /*
+  FNXC:ChatScrollAnchor 2026-09-07-23:09:
+  ChatView commande la fin uniquement par le virtualiseur afin que la fenêtre de lignes et le viewport DOM changent ensemble. La commande est répétée pendant les mesures de montage, mais sa génération clôt les callbacks d’un ancien fil et le premier scroll manuel détaché clôt immédiatement toutes les écritures restantes de l’incarnation courante.
+  */
   const anchorToBottom = useCallback((container: HTMLElement, options?: { force?: boolean }) => {
     if (!container.isConnected) return;
     if (!options?.force && isUserScrollingRef.current) {
       return;
     }
 
+    const generation = ++directThreadAnchorGenerationRef.current;
+    /*
+    FNXC:StickyBottomScroll 2026-09-14-20:19:
+    FN-398 : chaque frame de la boucle (y compris la première et le chemin `force`) abandonne dès qu'une intention
+    utilisateur est arrivée depuis le début de la boucle. Auparavant seule la géométrie gardait cette boucle, et un
+    geste sous le seuil la laissait réécrire `scrollTop` en bas frame après frame.
+    */
+    const intentGenerationAtStart = stickyFollow.intentGenerationRef.current;
     let frame = 0;
     let stableFrames = 0;
     let lastScrollHeight = -1;
     const maxFrames = 6;
 
     const writeBottom = () => {
-      if (!container.isConnected) return;
-      if (!options?.force && isUserScrollingRef.current) {
+      if (!container.isConnected || generation !== directThreadAnchorGenerationRef.current) return;
+      if (stickyFollow.intentGenerationRef.current !== intentGenerationAtStart) return;
+      if (isUserScrollingRef.current && frame > 0) {
         return;
       }
 
-      container.scrollTop = container.scrollHeight;
+      virtualTranscript.scrollToBottom();
+      stickyFollow.noteProgrammaticWrite(container.scrollTop);
       if (container.scrollHeight === lastScrollHeight) {
         stableFrames += 1;
       } else {
@@ -1008,8 +1141,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
       frame += 1;
       if (frame >= maxFrames || stableFrames >= 2) {
-        setIsUserScrolling(false);
-        isUserScrollingRef.current = false;
+        if (stickyFollow.intentGenerationRef.current === intentGenerationAtStart) stickyFollow.setFollowing(true);
         return;
       }
 
@@ -1017,7 +1149,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     };
 
     writeBottom();
-  }, []);
+  }, [stickyFollow, virtualTranscript.scrollToBottom]);
 
   const activeThreadMessages = messages;
   const conversationSearchMatches = useMemo(() => {
@@ -1045,19 +1177,21 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     };
   }, [activeThreadMessages, scheduleTopClippedMessageUpdate]);
 
-  useLayoutEffect(() => {
+  /*
+  FNXC:ChatScrollAnchor 2026-09-06-07:42:
+  L’envoi capture la propriété du viewport avant l’ajout optimiste : un lecteur au seuil bas suit chaque croissance de la réponse, tandis qu’un lecteur détaché conserve son message-ancre, y compris à scrollTop === 0. Tout défilement manuel met à jour la propriété synchroniquement et neutralise les frames et observateurs déjà programmés ; seul un retour volontaire au seuil bas ou « Latest » réactive le suivi.
+
+  FNXC:ChatScrollAnchor 2026-09-06-07:56:
+  Les changements de réflexion, de texte et d’outils sont chacun des croissances autonomes du fil. Chacun doit donc relancer le suivi conditionnel du bas, même lorsqu’aucune autre forme de delta n’accompagne une mise à jour d’outil.
+  */
+  const restoreDetachedScrollSnapshot = useCallback(() => {
     const messagesContainer = messagesContainerRef.current;
     const threadId = getActiveThreadId();
     const snapshot = scrollRestoreSnapshotRef.current;
     if (!messagesContainer || !threadId || !snapshot || snapshot.threadId !== threadId || snapshot.wasPinnedBefore) {
       return;
     }
-
-    const snapshotAgeMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - snapshot.capturedAtMs;
-    const hasScrollableOverflow = messagesContainer.scrollHeight > messagesContainer.clientHeight;
-    const isStaleSnapshot = snapshotAgeMs > 3000;
-    const isLikelyInvalidTopSample = snapshot.scrollTop <= 0 && snapshot.anchorOffset <= 0 && hasScrollableOverflow;
-    if (!isUserScrollingRef.current || isStaleSnapshot || isLikelyInvalidTopSample) {
+    if (!isUserScrollingRef.current) {
       scrollRestoreSnapshotRef.current = null;
       return;
     }
@@ -1067,18 +1201,55 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       const anchorElement = getMessageElement(messagesContainer, snapshot.anchorMessageId);
       if (anchorElement) {
         restoredScrollTop = anchorElement.offsetTop - snapshot.anchorOffset;
-      } else {
-        restoredScrollTop = snapshot.scrollTop + (messagesContainer.scrollHeight - snapshot.scrollHeight);
       }
-    } else {
-      restoredScrollTop = snapshot.scrollTop + (messagesContainer.scrollHeight - snapshot.scrollHeight);
     }
 
     messagesContainer.scrollTop = Math.max(0, restoredScrollTop);
-    isUserScrollingRef.current = true;
-    setIsUserScrolling(true);
-    scrollRestoreSnapshotRef.current = null;
-  }, [activeThreadMessages, getActiveThreadId, getMessageElement]);
+    // Restauration d'ancre : écriture programmatique fencée par position attendue, pas par minuterie.
+    stickyFollow.noteProgrammaticWrite(messagesContainer.scrollTop);
+    scrollRestoreSnapshotRef.current = {
+      ...snapshot,
+      scrollTop: messagesContainer.scrollTop,
+      scrollHeight: messagesContainer.scrollHeight,
+      clientHeight: messagesContainer.clientHeight,
+      capturedAtMs: typeof performance !== "undefined" ? performance.now() : Date.now(),
+    };
+    stickyFollow.setFollowing(false);
+  }, [getActiveThreadId, getMessageElement, stickyFollow]);
+
+  /*
+  FNXC:ChatTranscriptVirtualization 2026-09-06-14:15:
+  Lorsqu’une page est préfixée, le virtualiseur est l’unique propriétaire de l’ancre et ajoute la hauteur estimée au scroll avant cet effet. La restauration DOM historique ne doit pas annuler ce déplacement lorsque l’ancienne ligne-ancre est hors fenêtre ; son snapshot est rebasé sur la géométrie déjà ajustée pour que les ResizeObserver ultérieurs conservent la lecture détachée.
+  */
+  useLayoutEffect(() => {
+    const threadId = getActiveThreadId();
+    const currentIds = activeThreadMessages.map((message) => message.id);
+    const previous = previousVirtualizedMessagesRef.current;
+    const prefixCount = currentIds.length - previous.ids.length;
+    const isVirtualizedPrepend = previous.threadId === threadId
+      && prefixCount > 0
+      && previous.ids.every((id, index) => currentIds[index + prefixCount] === id);
+    previousVirtualizedMessagesRef.current = { threadId, ids: currentIds };
+
+    if (isVirtualizedPrepend) {
+      const messagesContainer = messagesContainerRef.current;
+      const snapshot = scrollRestoreSnapshotRef.current;
+      if (messagesContainer && snapshot?.threadId === threadId && !snapshot.wasPinnedBefore) {
+        scrollRestoreSnapshotRef.current = {
+          ...snapshot,
+          scrollTop: messagesContainer.scrollTop,
+          scrollHeight: messagesContainer.scrollHeight,
+          clientHeight: messagesContainer.clientHeight,
+          anchorMessageId: null,
+          anchorOffset: 0,
+          capturedAtMs: typeof performance !== "undefined" ? performance.now() : Date.now(),
+        };
+      }
+      return;
+    }
+
+    restoreDetachedScrollSnapshot();
+  }, [activeThreadMessages, getActiveThreadId, restoreDetachedScrollSnapshot]);
 
   const logScrollDebug = useCallback((cause: string) => {
     if (typeof window === "undefined") {
@@ -1088,9 +1259,8 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       return;
     }
     const container = messagesContainerRef.current;
-    const threshold = 50;
     const atBottom = container
-      ? container.scrollTop + container.clientHeight >= container.scrollHeight - threshold
+      ? container.scrollTop + container.clientHeight >= container.scrollHeight - CHAT_BOTTOM_FOLLOW_THRESHOLD_PX
       : true;
     console.debug("[chat-scroll]", {
       cause,
@@ -1106,9 +1276,9 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     if (!messagesContainer) return;
     // Cancel any pending scroll restoration so it doesn't override the explicit jump-to-bottom.
     scrollRestoreSnapshotRef.current = null;
-    isUserScrollingRef.current = false;
+    stickyFollow.setFollowing(true);
     anchorToBottom(messagesContainer);
-  }, [anchorToBottom, logScrollDebug]);
+  }, [anchorToBottom, logScrollDebug, stickyFollow]);
 
   useLayoutEffect(() => {
     if (directThreadDeferredAnchorTimeoutRef.current !== null) {
@@ -1118,6 +1288,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
     const threadId = activeSession?.id ?? null;
     if (!threadId) {
+      directThreadAnchorGenerationRef.current += 1;
       lastAnchoredThreadStateRef.current = null;
       return;
     }
@@ -1144,7 +1315,16 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     }
 
     logScrollDebug(isThreadChanged ? "thread-change" : finishedLoading ? "finished-loading" : firstMessagesArrived ? "first-messages" : "mount");
-    anchorToBottom(messagesContainer, { force: true });
+    /*
+    FNXC:ChatScrollAnchor 2026-09-07-22:17:
+    Une nouvelle incarnation de fil reprend la propriété du viewport avant sa première écriture afin de ne jamais hériter du désengagement du fil précédent. Les frames suivantes et l’arrivée différée des messages respectent toutefois immédiatement tout nouveau défilement manuel effectué dans ce fil.
+    */
+    const shouldTakeViewportOwnership = previousState === null || isThreadChanged;
+    if (shouldTakeViewportOwnership) {
+      scrollRestoreSnapshotRef.current = null;
+      stickyFollow.setFollowing(true);
+    }
+    anchorToBottom(messagesContainer, { force: shouldTakeViewportOwnership });
     {
       directThreadDeferredAnchorTimeoutRef.current = window.setTimeout(() => {
         directThreadDeferredAnchorTimeoutRef.current = null;
@@ -1192,7 +1372,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       return;
     }
     scrollToBottom("streaming");
-  }, [isStreaming, streamingText, streamingThinking, scrollToBottom]);
+  }, [isStreaming, streamingText, streamingThinking, streamingToolCalls, scrollToBottom]);
 
   // Snap to latest on new messages only when the user was pinned before growth.
   useEffect(() => {
@@ -1240,7 +1420,15 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   // applies, and pinning body to position:fixed afterwards blurs the input
   // on iOS, collapsing the keyboard the instant it opens. Restores
   // window.scrollTo(0, 0) on cleanup to recover from any iOS drift.
-  useMobileKeyboardViewportLock(isMobile && keyboardOpen);
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-15:32:
+  FN-512 remediation: these two document-GLOBAL effects must follow the surface that actually owns the
+  focused field. `keyboardOpen` is derived from `document.activeElement`, so a retained-but-hidden
+  Chat (keep-alive route, hidden window) with a live session used to pin the body and cancel every
+  touchmove outside `.chat-messages` as soon as the operator focused a field in a VISIBLE form. The
+  activity gate (`active` = host active AND managed surface active) bounds them to the real surface.
+  */
+  useMobileKeyboardViewportLock(isMobile && keyboardOpen && active);
 
   /*
   FNXC:ChatComposer 2026-08-23-16:07:
@@ -1252,99 +1440,39 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   Landscape-phone keyboard state newly reaches the existing touch guard while its body lock keeps
   its own phone-width iOS gate, so this does not add body pinning on wide hosts.
   */
+  /*
+  FNXC:MobileKeyboardViewport 2026-09-17-14:23:
+  FN-512 replaced ChatView's parallel viewport reader with the shared surface above. What remains
+  here is only the publication of that single decision onto the thread element.
+
+  Deliberately removed, and not to be reintroduced:
+  - the local `window.innerHeight - offsetTop - height` overlap, because Android Chrome can report a
+    stale `innerHeight` and the document-first layout height is the correct denominator;
+  - `--chat-keyboard-accessory-clearance`, a constant iOS margin that measured nothing and simply
+    added the empty band the operator reported. Nothing replaces it: no other constant, no user-agent
+    test. If the iOS accessory bar ever needs compensating, it has to come from observable geometry;
+  - the `translateY(offsetTop)` drift compensation, which stacked on top of whatever the owning
+    drawer or window had already applied. The anti-blur invariant it protected still holds, and now
+    trivially: the thread never receives a transform at all, so it can never establish a containing
+    block over the focused composer and make WebKit collapse the keyboard.
+  */
   useLayoutEffect(() => {
-    if (!keyboardTrackedHost || !activeSession) return;
-    if (typeof window === "undefined") return;
-
     const thread = chatThreadRef.current;
-    const vv = window.visualViewport;
-    if (!thread || !vv) return;
+    if (!thread) return;
 
-    const isKeyboardTrackingFocusable = (element: Element | null): boolean => {
-      if (!(element instanceof HTMLElement)) return false;
-      if (element.tagName === "TEXTAREA") return true;
-      if (element.tagName !== "INPUT") return false;
-      const inputType = (element as HTMLInputElement).type.toLowerCase();
-      return ["", "text", "search", "email", "url", "tel", "password", "number"].includes(inputType);
-    };
+    const bounded = chatKeyboardSurface.maxBlockSize !== null;
+    if (bounded) {
+      thread.style.setProperty("--chat-thread-visible-block-size", `${chatKeyboardSurface.maxBlockSize}px`);
+    } else {
+      thread.style.removeProperty("--chat-thread-visible-block-size");
+    }
+    thread.classList.toggle("chat-thread--keyboard-active", bounded);
 
-    const apply = () => {
-      if (suppressVvShrinkRef.current) {
-        thread.classList.remove("chat-thread--keyboard-active");
-        thread.style.setProperty("--chat-keyboard-accessory-clearance", "0px");
-        thread.style.removeProperty("--chat-thread-viewport-top");
-        thread.style.transform = "";
-        thread.style.willChange = "";
-        appliedThreadTranslateYRef.current = 0;
-        return;
-      }
-      const overlap = Math.max(0, window.innerHeight - vv.offsetTop - vv.height);
-      const offsetTop = vv.offsetTop || 0;
-      thread.style.setProperty("--vv-height", `${vv.height}px`);
-      thread.style.setProperty("--vv-offset-top", `${offsetTop}px`);
-      thread.style.setProperty("--keyboard-overlap", `${overlap}px`);
-
-      const threadRect = thread.getBoundingClientRect();
-      if (threadRect.height > 0) {
-        const untransformedTop = Math.max(0, threadRect.top - appliedThreadTranslateYRef.current - offsetTop);
-        const viewportTop = Math.min(vv.height, untransformedTop);
-        thread.style.setProperty("--chat-thread-viewport-top", `${viewportTop}px`);
-      } else {
-        thread.style.removeProperty("--chat-thread-viewport-top");
-      }
-
-      const keyboardActive = (overlap > 0 || offsetTop > 0) && isKeyboardTrackingFocusable(document.activeElement);
-      thread.classList.toggle("chat-thread--keyboard-active", keyboardActive);
-      /*
-      FNXC:ChatComposer 2026-07-04-09:42:
-      Mobile Chat's composer must stay fully visible above the soft keyboard and the iOS input-assistant/autofill bar, which Safari does not subtract from visualViewport.height. Keep the clearance ChatView-local and keyed to iOS keyboard-active state so the shared keyboard hook contract stays stable, .chat-thread does not gain a persistent transform (anti-blur invariant), and Android resizes-content does not regain an empty reserved gap.
-      */
-      thread.style.setProperty(
-        "--chat-keyboard-accessory-clearance",
-        keyboardActive && isIOS() ? "calc(var(--space-2xl) + var(--space-md))" : "0px",
-      );
-
-      // Drift compensation is applied here (not in CSS) so .chat-thread —
-      // an ancestor of the focused composer textarea — only gets a
-      // non-`none` transform when iOS actually shifts the visual viewport
-      // (offsetTop > 0). Keeping a transform/will-change on it at all times
-      // (as the old CSS did) makes iOS Safari blur the input and collapse
-      // the keyboard the moment it opens, because at focus time offsetTop
-      // is 0 and translateY(0) still establishes a containing block over
-      // the focused element.
-      if (keyboardActive && offsetTop > 0) {
-        thread.style.transform = `translateY(${offsetTop}px)`;
-        thread.style.willChange = "transform";
-        appliedThreadTranslateYRef.current = offsetTop;
-      } else {
-        thread.style.transform = "";
-        thread.style.willChange = "";
-        appliedThreadTranslateYRef.current = 0;
-      }
-    };
-
-    apply();
-    vv.addEventListener("resize", apply);
-    vv.addEventListener("scroll", apply);
-    document.addEventListener("focusin", apply);
-    document.addEventListener("focusout", apply);
-    window.addEventListener("pageshow", apply);
-    document.addEventListener("visibilitychange", apply);
     return () => {
-      vv.removeEventListener("resize", apply);
-      vv.removeEventListener("scroll", apply);
-      document.removeEventListener("focusin", apply);
-      document.removeEventListener("focusout", apply);
-      window.removeEventListener("pageshow", apply);
-      document.removeEventListener("visibilitychange", apply);
+      thread.style.removeProperty("--chat-thread-visible-block-size");
       thread.classList.remove("chat-thread--keyboard-active");
-      thread.style.setProperty("--chat-keyboard-accessory-clearance", "0px");
-      thread.style.removeProperty("--chat-thread-viewport-top");
-      thread.style.transform = "";
-      thread.style.willChange = "";
-      appliedThreadTranslateYRef.current = 0;
     };
-  }, [activeSession, keyboardTrackedHost]);
+  }, [chatKeyboardSurface.maxBlockSize]);
 
   // Close context menu on outside click
   useEffect(() => {
@@ -1366,7 +1494,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   // React's synthetic onTouchMove is passive by default, so this has to
   // be a native addEventListener with { passive: false }.
   useEffect(() => {
-    if (!isMobile || !keyboardOpen) return;
+    if (!isMobile || !keyboardOpen || !active) return;
     const onTouchMove = (event: TouchEvent) => {
       const target = event.target as Element | null;
       if (target?.closest(".chat-messages")) return; // allow messages scroll
@@ -1376,7 +1504,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     return () => {
       document.removeEventListener("touchmove", onTouchMove);
     };
-  }, [isMobile, keyboardOpen]);
+  }, [active, isMobile, keyboardOpen]);
 
   // NOTE: a previous iOS-only "resync" effect here force-blurred and
   // re-focused the active textarea on visibilitychange/pageshow to nudge
@@ -1437,6 +1565,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
     const observer = new ResizeObserver(() => {
       if (isUserScrollingRef.current) {
+        restoreDetachedScrollSnapshot();
         return;
       }
       anchorToBottom(messagesContainer);
@@ -1447,7 +1576,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     return () => {
       observer.disconnect();
     };
-  }, [anchorToBottom, activeSession?.id]);
+  }, [anchorToBottom, activeSession?.id, restoreDetachedScrollSnapshot]);
 
   // Fetch agents on mount for name resolution (project-scoped with stale-request protection)
   useEffect(() => {
@@ -1536,7 +1665,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   open in this host. The plain path intentionally retains the existing in-place selection behavior.
   */
   const handleNewChat = useCallback((event?: React.MouseEvent<HTMLButtonElement>) => {
-    const openInNewWindow = Boolean((event?.ctrlKey || event?.metaKey) && onOpenSessionInNewWindow);
+    /*
+    FNXC:DesktopRightDock 2026-09-11-21:48:
+    The desktop dock is a list owner, never a transcript owner. New Chat therefore preserves the host selection and opens the returned identity immediately; standard hosts keep plain-click in-place creation and modifier-click pop-out.
+    */
+    const openInNewWindow = Boolean(onOpenSessionInNewWindow && (listOnly || event?.ctrlKey || event?.metaKey));
     if (chatDefaultTarget?.kind === "agent") {
       const input = { agentId: chatDefaultTarget.agentId };
       void (openInNewWindow ? handleCreateSession(input, { openInNewWindow: true }) : handleCreateSession(input));
@@ -1553,7 +1686,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       return;
     }
     addToast(t("chat.noDefaultModelConfigured", "Configure a default chat model in Settings before creating a conversation."), "error");
-  }, [addToast, chatDefaultTarget, defaultModel, handleCreateSession, onOpenSessionInNewWindow, t]);
+  }, [addToast, chatDefaultTarget, defaultModel, handleCreateSession, listOnly, onOpenSessionInNewWindow, t]);
 
   const resizeComposer = useCallback(() => {
     inputAutosizeRef.current?.resize();
@@ -1626,6 +1759,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   }, [initialComposerDraft, initialComposerDraftNonce]);
 
   const clearComposerState = useCallback(() => {
+    snippetDraftEphemeralRef.current = false;
     setMessageInput("");
     if (activeDraftKey) {
       try {
@@ -1665,11 +1799,47 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     });
   }, []);
 
+  /*
+  FNXC:ChatSnippets 2026-09-03-15:56:
+  Selecting or submitting /name expands only the editable draft. The inserted prompt is ephemeral until explicit clear or send: remove the active saved draft and fence the normal draft-persistence effect so reusable prompt content is never copied into localStorage by expansion.
+  */
+  const insertSnippetDraft = useCallback((snippet: ChatSnippet, cursorPosition = messageInput.length, standalone = false): boolean => {
+    const applied = standalone
+      ? { value: snippet.prompt, cursorPosition: snippet.prompt.length }
+      : applySnippetToDraft(messageInput, snippet, cursorPosition);
+    if (!applied) return false;
+    snippetDraftEphemeralRef.current = true;
+    if (activeDraftKey) {
+      try {
+        localStorage.removeItem(activeDraftKey);
+      } catch {
+        // Ignore storage errors.
+      }
+    }
+    setMessageInput(applied.value);
+    setShowSkillMenu(false);
+    setSkillFilter("");
+    setHighlightedSkillIndex(0);
+    window.requestAnimationFrame(() => {
+      if (!inputRef.current) return;
+      resizeComposer();
+      inputRef.current.focus();
+      inputRef.current.setSelectionRange(applied.cursorPosition, applied.cursorPosition);
+    });
+    return true;
+  }, [activeDraftKey, messageInput, resizeComposer]);
+
   // Handle send message including pending attachment uploads.
   const handleSend = useCallback(() => {
     const trimmed = messageInput.trim();
     const files = pendingAttachments.map((attachment) => attachment.file);
     if ((!trimmed && files.length === 0) || !activeSession) return;
+
+    const snippetInvocation = matchStandaloneSnippetInvocation(trimmed, chatSnippets);
+    if (snippetInvocation) {
+      insertSnippetDraft(snippetInvocation, messageInput.length, true);
+      return;
+    }
 
     if (chatCommandContext) {
       const commandMatch = matchChatCommand(trimmed, selectedChatCommands);
@@ -1764,16 +1934,18 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       return;
     }
 
-    if (isStreaming && files.length > 0) {
+    if ((isStreaming || pendingQueueAction) && files.length > 0) {
       /*
-      FNXC:ChatAttachments 2026-08-10-05:53:
-      Queued direct turns carry text only, so refuse staged attachments during a live reply rather than orphaning previews for files the queue cannot send.
+      FNXC:ChatAttachments 2026-09-06-00:48:
+      Queued direct turns carry text only, so refuse staged attachments while a live reply or its durable cancellation barrier owns dispatch rather than orphaning previews for files the queue cannot send. cancelAndReconcile clears isStreaming synchronously, so pendingQueueAction closes that otherwise invisible window here, where button and Enter submissions converge.
       */
       addToast(t("chat.attachmentsNotQueued", "Attachments can't be queued while a reply is streaming — wait for it to finish"), "warning");
       return;
     }
 
     const sentFiles = new Set(files);
+    captureScrollSnapshot();
+    snippetDraftEphemeralRef.current = false;
     setMessageInput("");
     try {
       sendMessage(trimmed, files, {
@@ -1800,8 +1972,12 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     sendMessage,
     chatCommandContext,
     isStreaming,
+    pendingQueueAction,
     releaseSentAttachments,
     selectedChatCommands,
+    chatSnippets,
+    insertSnippetDraft,
+    captureScrollSnapshot,
     t,
   ]);
 
@@ -1855,6 +2031,10 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     },
     [resizeComposer],
   );
+
+  const handleSnippetSelect = useCallback((snippet: ChatSnippet) => {
+    insertSnippetDraft(snippet, inputRef.current?.selectionStart ?? messageInput.length);
+  }, [insertSnippetDraft, messageInput.length]);
 
   const handleCommandSelect = useCallback(
     (command: ChatCommand, disabled: boolean) => {
@@ -1956,6 +2136,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
           const item = fileMention.combinedItems[fileMention.selectedIndex];
           if (item?.kind === "task") {
             insertHashMention(fileMention.selectTask(item.task, messageInput), `#${item.task.id}`);
+          } else if (item?.kind === "conversation") {
+            insertHashMention(
+              fileMention.selectConversation(item.conversation, messageInput),
+              `#${item.conversation.id}`,
+            );
           } else if (item?.kind === "file") {
             insertHashMention(fileMention.selectFile(item.file, messageInput), `#${item.file.path}`);
           }
@@ -2021,6 +2206,8 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         const entryToSelect = skillMenuEntries[highlightedSkillIndex] ?? skillMenuEntries[0];
         if (entryToSelect?.kind === "skill") {
           handleSkillSelect(entryToSelect.skill);
+        } else if (entryToSelect?.kind === "snippet") {
+          handleSnippetSelect(entryToSelect.snippet);
         } else if (entryToSelect?.kind === "command") {
           handleCommandSelect(entryToSelect.command, entryToSelect.disabled);
         }
@@ -2033,7 +2220,17 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         return;
       }
 
+      /*
+      FNXC:ChatComposer 2026-09-06-01:54:
+      `Shift+Enter` n'envoie jamais, y compris combiné à `Cmd/Ctrl` : `Cmd/Ctrl+Shift+Enter` n'est pas un envoi. Elle insère un saut de ligne, sauf dans le Chat lorsqu'un menu d'autocomplétion est ouvert — les trois menus du Chat (fichiers/tâches, agents, compétences) la consomment alors sans insérer de saut de ligne. Dans le Chat de tâche et le Chat du planificateur, `Shift+Enter` traverse le menu et insère bien un saut de ligne.
+      `Cmd/Ctrl+Enter` sans `Shift` envoie, indépendamment du réglage `chatSubmitOnEnter` et du type de pointeur.
+      `Entrée` sans `Cmd/Ctrl` ni `Shift` est gouvernée par `chatSubmitOnEnter` ; `Alt` n'est pas un modificateur d'envoi et ne change rien à cette règle.
+      Les règles 2 et 3 s'appliquent lorsqu'aucun menu d'autocomplétion n'est ouvert. Un menu ouvert a la priorité et consomme `Entrée` comme `Cmd/Ctrl+Enter` ; `Échap` ferme le menu et rétablit les règles.
+      Dans le Chat de tâche uniquement, une composition IME en cours (saisie CJK) court-circuite tout, `Cmd/Ctrl+Enter` compris, jusqu'à la validation du candidat.
+      Le bouton d'envoi reste rendu et actif dès que le brouillon n'est pas vide — menu ouvert et composition IME compris. Sur brouillon vide il est désactivé, comme aujourd'hui.
+      */
       if (e.key === "Enter" && !e.shiftKey) {
+        if (!(e.metaKey || e.ctrlKey) && !enterSubmits) return;
         e.preventDefault();
         void handleSendDispatch();
       }
@@ -2047,8 +2244,10 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       skillMenuEntries,
       highlightedSkillIndex,
       handleSkillSelect,
+      handleSnippetSelect,
       handleCommandSelect,
       handleSendDispatch,
+      enterSubmits,
       fileMention,
       insertHashMention,
       messageInput,
@@ -2076,7 +2275,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     const cursorPos = textarea.selectionStart ?? nextValue.length;
 
     // Resize BEFORE the state update so the textarea grows in the same frame
-    // the user typed in (matches QuickChat). Doing it after setMessageInput
+    // the user typed in. Doing it after setMessageInput
     // works in tests but can lose the height in production because React 18
     // batches the state update and the controlled-component value reset can
     // happen before our direct DOM height assignment lands.
@@ -2085,7 +2284,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     mentionCursorPosRef.current = cursorPos;
     setMessageInput(nextValue);
 
-    const skillTriggerMatch = getSkillTriggerMatch(nextValue);
+    const skillTriggerMatch = getSkillTriggerMatch(nextValue.slice(0, cursorPos));
     if (skillTriggerMatch) {
       setShowSkillMenu(true);
       setSkillFilter(skillTriggerMatch.filter);
@@ -2133,15 +2332,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   const handleInputBlur = useCallback(() => {
     if (typeof window !== "undefined" && window.innerWidth <= 768) {
-      suppressVvShrinkRef.current = true;
-      if (suppressVvShrinkTimeoutRef.current !== null) {
-        window.clearTimeout(suppressVvShrinkTimeoutRef.current);
-      }
-      suppressVvShrinkTimeoutRef.current = window.setTimeout(() => {
-        suppressVvShrinkRef.current = false;
-        suppressVvShrinkTimeoutRef.current = null;
-      }, 450);
-
       // Undo iOS layout-viewport drift HERE, on blur, not on the next focus.
       // After a keyboard dismiss iOS can leave window.scrollY > 0; if that
       // residual scroll is still present on the next focus, the keyboard
@@ -2184,11 +2374,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   }, [fileMention]);
 
   const handleInputFocus = useCallback(() => {
-    suppressVvShrinkRef.current = false;
-    if (suppressVvShrinkTimeoutRef.current !== null) {
-      window.clearTimeout(suppressVvShrinkTimeoutRef.current);
-      suppressVvShrinkTimeoutRef.current = null;
-    }
     if (hideSkillMenuTimeoutRef.current !== null) {
       window.clearTimeout(hideSkillMenuTimeoutRef.current);
       hideSkillMenuTimeoutRef.current = null;
@@ -2203,40 +2388,18 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     // event fires while iOS is still raising the soft keyboard, and iOS treats
     // a programmatic scroll mid-raise as a reason to abort it — the keyboard
     // opens then immediately dismisses, so the input can't be typed in. This
-    // mirrors QuickChatFAB's handleInputFocus, which does not scroll and works.
+    // matches the proven composer focus path, which does not scroll during keyboard raise.
     // Drift is instead reset on blur (see handleInputBlur), so by the time this
     // focus runs the document is already at scrollY 0.
   }, []);
 
   useEffect(() => {
     return () => {
-      if (suppressVvShrinkTimeoutRef.current !== null) {
-        window.clearTimeout(suppressVvShrinkTimeoutRef.current);
-      }
       if (blurScrollResetTimeoutRef.current !== null) {
         window.clearTimeout(blurScrollResetTimeoutRef.current);
       }
     };
   }, []);
-
-  // Handle archive
-  const handleArchive = useCallback(
-    async (id: string) => {
-      setContextMenu(null);
-      try {
-        await archiveSession(id);
-        addToast(t("chat.conversationArchived", "Conversation archived"), "success");
-      } catch {
-        addToast(t("chat.failedToArchiveConversation", "Failed to archive conversation"), "error");
-      }
-    },
-    [archiveSession, addToast],
-  );
-
-  const handleRestoreArchived = useCallback(async (id: string) => {
-    try { await unarchiveSession(id); addToast(t("chat.conversationRestored", "Conversation restored"), "success"); }
-    catch { addToast(t("chat.failedToRestoreConversation", "Failed to restore conversation"), "error"); }
-  }, [unarchiveSession, addToast, t]);
 
   const openRenameDialog = useCallback(
     (id: string) => {
@@ -2289,47 +2452,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     [deleteSession, addToast],
   );
 
-  useEffect(() => () => resizeTeardownRef.current?.(), []);
-
-  const persistDockedWidth = useCallback((nextWidth: number) => {
-    persistChatDockedSidebarPreference(CHAT_DOCKED_SIDEBAR_WIDTH_STORAGE_KEY, String(nextWidth), persistChatPreferences);
-  }, [persistChatPreferences]);
-
-  const handleDockedResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const handle = event.currentTarget;
-    handle.setPointerCapture?.(event.pointerId);
-    const startX = event.clientX;
-    const startWidth = dockedSidebarWidth;
-    let latestWidth = startWidth;
-    const priorUserSelect = document.body.style.userSelect;
-    document.body.style.userSelect = "none";
-    const onMove = (move: PointerEvent) => { latestWidth = clampChatDockedSidebarWidth(startWidth + move.clientX - startX); setDockedSidebarWidth(latestWidth); };
-    const teardown = (up?: PointerEvent) => {
-      if (up) handle.releasePointerCapture?.(up.pointerId);
-      document.body.style.userSelect = priorUserSelect;
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      document.removeEventListener("pointercancel", onUp);
-      resizeTeardownRef.current = null;
-      persistDockedWidth(latestWidth);
-    };
-    const onUp = (up: PointerEvent) => teardown(up);
-    resizeTeardownRef.current?.();
-    resizeTeardownRef.current = () => teardown();
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
-    document.addEventListener("pointercancel", onUp);
-  }, [dockedSidebarWidth, persistDockedWidth]);
-
-  const handleDockedResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const nextWidth = clampChatDockedSidebarWidth(dockedSidebarWidth + (event.key === "ArrowRight" ? 16 : -16));
-    setDockedSidebarWidth(nextWidth);
-    persistDockedWidth(nextWidth);
-  }, [dockedSidebarWidth, persistDockedWidth]);
-
   /*
   FNXC:ChatStashBackfill 2026-08-19-16:28:
   (operator request 2026-08-19) "Preserve to Stash" context-menu action: backfills this
@@ -2369,13 +2491,23 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   // Handle session click
   const handleSessionClick = useCallback(
-    (id: string) => {
+    (id: string, modifiers?: { ctrlKey?: boolean; metaKey?: boolean }) => {
       const selectedSession = filteredSessions.find((session) => session.id === id);
       markRead("direct", id, selectedSession?.lastMessageAt ?? selectedSession?.updatedAt);
+      if (listOnly) {
+        /*
+        FNXC:ChatWindows 2026-09-16-04:37:
+        FN-447: a list-only host always opens a window, but only a modifier-click is an EXPLICIT
+        "open beside" gesture. The flag is always sent as a real boolean so the host condition stays
+        deterministic instead of depending on an absent option.
+        */
+        if (selectedSession) onOpenSessionInNewWindow?.(selectedSession, { keepListOpen: Boolean(modifiers?.ctrlKey || modifiers?.metaKey) });
+        return;
+      }
       selectSession(id);
       setDetailOpen(true);
     },
-    [filteredSessions, markRead, selectSession],
+    [filteredSessions, listOnly, markRead, onOpenSessionInNewWindow, selectSession],
   );
 
   const handleBack = useCallback(() => {
@@ -2383,7 +2515,10 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     setConversationSearchOpen(false);
     setConversationSearchQuery("");
     setConversationSearchIndex(0);
-  }, []);
+    if (persistChatPreferences) {
+      clearPersistedChatOpenSession(projectId);
+    }
+  }, [persistChatPreferences, projectId]);
 
   const handleVisibleDetailBack = useCallback(() => {
     handleBack();
@@ -2392,11 +2527,23 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   // Render empty state (no active session)
   const renderEmptyState = () => {
+    /*
+    FNXC:ChatWindows 2026-09-12-04:56:
+    Une fenêtre dédiée dont la conversation vient d’être supprimée reste bornée à cette identité et ne propose jamais de créer ou sélectionner une autre conversation. Les hôtes ordinaires conservent leur état vide avec l’action New Chat.
+    */
+    if (dedicatedConversation) {
+      return (
+        <div className="chat-empty-state" data-testid="chat-dedicated-session-unavailable">
+          <MessageSquare size={48} strokeWidth={1.5} />
+          <h2>{t("chat.conversationDeleted", "Conversation deleted")}</h2>
+        </div>
+      );
+    }
     return (
       <div className="chat-empty-state">
         <MessageSquare size={48} strokeWidth={1.5} />
         <h2>{t("chat.startNewConversation", "Start a new conversation")}</h2>
-        <button
+        <UiButton
           className="btn btn-primary"
           onClick={handleNewChat}
           data-testid="chat-new-btn-empty"
@@ -2404,7 +2551,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         >
           <Plus size={16} />
           {t("chat.newChat", "New Chat")}
-        </button>
+        </UiButton>
       </div>
     );
   };
@@ -2434,7 +2581,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const activeModelTag = formatModelTag(activeResolvedModel?.provider, activeResolvedModel?.modelId);
   const activeModelProvider = activeResolvedModel?.provider ?? null;
   const hasThreadInView = Boolean(activeSession || isStreaming || messages.length > 0);
-  const hasDetailSelection = detailOpen && hasThreadInView;
+  const hasDetailSelection = !listOnly && detailOpen && (hasThreadInView || dedicatedConversation);
   // ── CLI-backed chat mount (U12) ──────────────────────────────────────────
   // When the active chat session selects a cli-agent executor, the message-pane
   // + composer region is delegated to <CliChatSurface> (transcript + raw-terminal
@@ -2456,8 +2603,8 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const suppressComposerFocus = isMobile || isTabletTouchViewport(mode);
 
   /*
-  FNXC:ChatComposerFocus 2026-09-01-01:04:
-  Opening or creating a conversation must put the caret in its composer so operators can type immediately without a mouse click. `findActive` is the focus-ownership gate because a retained-but-hidden Quick Chat stays mounted and portaled; reopening it onto an existing thread is itself an open.
+  FNXC:ChatComposerFocus 2026-09-14-11:35:
+  Opening or creating a conversation puts the caret in its composer. Managed activity and `findActive` gate focus ownership because retained canonical and detached hosts stay mounted while presentation-hidden.
 
   Phone and touch-tablet hosts deliberately keep focus off the composer: an unsolicited software keyboard would cover a freshly opened thread, and programmatic focus without a user gesture cannot reliably raise the iOS keyboard. Record the thread before that suppression so a later viewport or orientation change cannot retroactively steal focus.
   */
@@ -2474,6 +2621,20 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
     inputRef.current?.focus();
   }, [activeSession?.id, findActive, hasDetailSelection, initialDirectSessionNonce, suppressComposerFocus]);
+
+  useEffect(() => {
+    if (
+      initialDirectSession
+      || !persistChatPreferences
+      || !activeSession
+      || detailOpen
+      || getPersistedChatOpenSession(projectId) !== activeSession.id
+    ) {
+      return;
+    }
+    suppressAutomaticDetailNavRef.current = true;
+    setDetailOpen(true);
+  }, [activeSession, detailOpen, initialDirectSession, persistChatPreferences, projectId]);
 
   useEffect(() => {
     if (initialDirectSessionNonce === previousInitialDirectSessionNonceRef.current) return;
@@ -2524,9 +2685,8 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   useEffect(() => {
     if (!activeConversationMatchId) return;
-    const message = messagesContainerRef.current?.querySelector<HTMLElement>(`[data-message-id="${activeConversationMatchId}"]`);
-    message?.scrollIntoView({ block: "nearest" });
-  }, [activeConversationMatchId]);
+    virtualTranscript.scrollToKey(activeConversationMatchId, "center");
+  }, [activeConversationMatchId, virtualTranscript.scrollToKey]);
 
   useEffect(() => {
     const root = chatViewRef.current;
@@ -2570,11 +2730,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       : t("chat.conversationSearchMatchCount", "{{current}} of {{count}} matches", { current: conversationSearchIndex + 1, count });
     return <div className="chat-conversation-search" data-testid="chat-conversation-search">
       <Search size={14} aria-hidden="true" />
-      <input ref={conversationSearchInputRef} className="input chat-conversation-search-input" value={conversationSearchQuery} onChange={(event) => { setConversationSearchQuery(event.target.value); setConversationSearchIndex(0); }} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); closeConversationSearch(); } else if (event.key === "Enter") { event.preventDefault(); navigateConversationSearch(event.shiftKey ? -1 : 1); } }} placeholder={t("chat.conversationSearchPlaceholder", "Find in conversation") } aria-label={t("chat.conversationSearchLabel", "Find in conversation")} data-testid="chat-conversation-search-input" />
+      <UiInput ref={conversationSearchInputRef} className="input chat-conversation-search-input" value={conversationSearchQuery} onChange={(event) => { setConversationSearchQuery(event.target.value); setConversationSearchIndex(0); }} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); closeConversationSearch(); } else if (event.key === "Enter") { event.preventDefault(); navigateConversationSearch(event.shiftKey ? -1 : 1); } }} placeholder={t("chat.conversationSearchPlaceholder", "Find in conversation") } aria-label={t("chat.conversationSearchLabel", "Find in conversation")} data-testid="chat-conversation-search-input" />
       <span className="chat-conversation-search-status" role="status" aria-live="polite">{status}</span>
-      <button type="button" className="btn-icon" aria-label={t("chat.conversationSearchPrevious", "Previous match")} disabled={count === 0} onClick={() => navigateConversationSearch(-1)}><ChevronUp size={14} /></button>
-      <button type="button" className="btn-icon" aria-label={t("chat.conversationSearchNext", "Next match")} disabled={count === 0} onClick={() => navigateConversationSearch(1)}><ChevronDown size={14} /></button>
-      <button type="button" className="btn-icon" aria-label={t("chat.conversationSearchClose", "Close search")} onClick={closeConversationSearch}><X size={14} /></button>
+      <UiButton type="button" className="btn-icon" aria-label={t("chat.conversationSearchPrevious", "Previous match")} disabled={count === 0} onClick={() => navigateConversationSearch(-1)}><ChevronUp size={14} /></UiButton>
+      <UiButton type="button" className="btn-icon" aria-label={t("chat.conversationSearchNext", "Next match")} disabled={count === 0} onClick={() => navigateConversationSearch(1)}><ChevronDown size={14} /></UiButton>
+      <UiButton type="button" className="btn-icon" aria-label={t("chat.conversationSearchClose", "Close search")} onClick={closeConversationSearch}><X size={14} /></UiButton>
     </div>;
   };
 
@@ -2600,7 +2760,50 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   FNXC:ChatNavigation 2026-08-20-05:25:
   FN-068 makes the saved conversation title the direct-thread identity for every host. Model metadata remains secondary, and titleless legacy sessions use a stable label rather than promoting a model name into the title slot.
   */
-  const threadHeaderTitle = activeSession?.title?.trim() || t("chat.untitledConversation", "Untitled conversation");
+  /*
+  FNXC:ChatWindows 2026-09-14-23:48:
+  FN-396: report the live conversation identity to the host exactly when a field it renders moves. Comparing the
+  rendered fields rather than object identity keeps an unrelated refresh (a new preview, a streaming flag) from
+  looping the host's state writer.
+  */
+  const lastReportedSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!onActiveSessionChange || !activeSession) return;
+    const signature = JSON.stringify([
+      activeSession.id,
+      activeSession.title ?? null,
+      activeSession.updatedAt,
+      activeSession.status,
+      activeSession.agentId,
+      activeSession.modelProvider ?? null,
+      activeSession.modelId ?? null,
+      activeSession.pinnedAt ?? null,
+    ]);
+    if (lastReportedSessionRef.current === signature) return;
+    lastReportedSessionRef.current = signature;
+    onActiveSessionChange(activeSession);
+  }, [activeSession, onActiveSessionChange]);
+
+  /*
+  FNXC:ChatWindows 2026-09-14-23:48:
+  FN-396: the requested session is only a first-paint fallback for a dedicated host that has not resolved its
+  conversation yet. Once the live session exists it is authoritative, including when its title is cleared — otherwise
+  a cleared title silently resurrects the name the window was opened with.
+  */
+  const threadHeaderTitle = activeSession?.title?.trim()
+    || (dedicatedConversation && !activeSession ? initialDirectSession?.title?.trim() : "")
+    || t("chat.untitledConversation", "Untitled conversation");
+
+  /*
+  FNXC:ChatNavigation 2026-09-17-10:37:
+  FN-506 : cible du menu "…" de l'en-tête. Un hôte ne remplace le "+" que s'il affiche réellement une
+  conversation RÉSOLUE : `hasDetailSelection` seul peut être vrai sans `activeSession` (flux en cours), et un
+  déclencheur sans cible serait une coquille inerte. L'hôte `listOnly` n'atteint jamais l'état détail et la
+  fenêtre dédiée est l'exemption documentée (elle ne rend déjà aucune des deux affordances).
+  */
+  const headerConversationActionsSession = hasDetailSelection && !dedicatedConversation && activeSession
+    ? activeSession
+    : null;
 
   const showThreadHeaderModelTag = Boolean(activeModelTag);
   const showThreadHeaderContextWindow = !isChatMobile && hasThreadInView && chatContextUsage !== null;
@@ -2636,8 +2839,8 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   // The model tag is already visible in the thread header — repeating it on
   // every assistant message is noise. Keep it suppressed for regular chat
-  // (real agent name is the identity); QuickChat already collapses the tag
-  // because its `agentName` IS the model tag, so the per-message slot was
+  // (real agent name is the identity); compact hosts already collapse the tag
+  // because their `agentName` is the model tag, so the per-message slot was
   // always empty there too.
   const showAssistantModelTag = false;
 
@@ -2689,6 +2892,20 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     setCopyFeedback(messageId, copied ? "success" : "error");
   }, [setCopyFeedback]);
 
+  /*
+  FNXC:ChatSidebar 2026-09-04-09:58:
+  A conversation ID is the stable entry point for cross-conversation `#id` references. Keep copying in the shared right-click and three-dot menu so desktop and compact touch layouts expose the same action without adding row chrome.
+  */
+  const handleCopySessionId = useCallback(async (sessionId: string) => {
+    const copied = await copyTextToClipboard(sessionId);
+    setContextMenu(null);
+    if (copied) {
+      addToast(t("chat.conversationIdCopied", "Conversation ID copied"));
+    } else {
+      addToast(t("chat.copyFailed", "Copy failed"), "error");
+    }
+  }, [addToast, t]);
+
   const handleQuoteMessage = useCallback((message: ChatMessageInfo) => {
     const senderId = typeof message.metadata?.senderAgentId === "string" ? message.metadata.senderAgentId : undefined;
     const sessionAgent = activeSession?.agentId && activeSession.agentId !== FN_AGENT_ID ? agentsMap.get(activeSession.agentId) : undefined;
@@ -2706,29 +2923,28 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     const report = allowReport && role === "assistant" && onSendAsReport ? buildChatReportHandoff(content, t("chat.reportFallbackTitle", "Chat report")) : null;
     if (!canCopy && !report?.handoff) return undefined;
     return <>
-      {canCopy && <button type="button" className={`btn-icon chat-message-copy-action${copyFeedbackByMessageId[messageId] === "success" ? " chat-message-copy-action--success" : ""}${copyFeedbackByMessageId[messageId] === "error" ? " chat-message-copy-action--error" : ""}`} data-testid={testId ?? `chat-copy-response-${messageId}`} aria-label={copyFeedbackByMessageId[messageId] === "success" ? t("chat.responseCopied", "Response copied") : copyFeedbackByMessageId[messageId] === "error" ? t("chat.copyFailed", "Copy failed") : t("chat.copyResponse", "Copy response")} onClick={() => { void handleCopyResponse(messageId, content); }}>
+      {canCopy && <UiButton type="button" className={`btn-icon chat-message-copy-action${copyFeedbackByMessageId[messageId] === "success" ? " chat-message-copy-action--success" : ""}${copyFeedbackByMessageId[messageId] === "error" ? " chat-message-copy-action--error" : ""}`} data-testid={testId ?? `chat-copy-response-${messageId}`} aria-label={copyFeedbackByMessageId[messageId] === "success" ? t("chat.responseCopied", "Response copied") : copyFeedbackByMessageId[messageId] === "error" ? t("chat.copyFailed", "Copy failed") : t("chat.copyResponse", "Copy response")} onClick={() => { void handleCopyResponse(messageId, content); }}>
         {copyFeedbackByMessageId[messageId] === "success" ? <Check size={14} /> : <Copy size={14} />}
-      </button>}
-      {report?.handoff && <button type="button" className="btn-icon" data-testid={`chat-send-as-report-${messageId}`} aria-label={t("chat.sendAsReport", "Send as report")} onClick={() => { if (report.truncated) addToast(t("chat.reportTrimmed", "Message trimmed to 2000 characters for mail"), "warning"); onSendAsReport?.(report.handoff!); }}><FileText size={14} /></button>}
+      </UiButton>}
+      {report?.handoff && <UiButton type="button" className="btn-icon" data-testid={`chat-send-as-report-${messageId}`} aria-label={t("chat.sendAsReport", "Send as report")} onClick={() => { if (report.truncated) addToast(t("chat.reportTrimmed", "Message trimmed to 2000 characters for mail"), "warning"); onSendAsReport?.(report.handoff!); }}><FileText size={14} /></UiButton>}
     </>;
   }, [addToast, copyFeedbackByMessageId, handleCopyResponse, onSendAsReport, showProviderResponseCopy, t]);
 
   const handleScrollMessageToTop = useCallback((messageId: string) => {
-    const containerEl = messagesContainerRef.current;
-    if (!containerEl) return;
-    const selector = `[data-testid="chat-message-${messageId}"]`;
-    const targetEl = containerEl.querySelector<HTMLElement>(selector);
-    if (!targetEl) return;
-
-    const top = targetEl.getBoundingClientRect().top - containerEl.getBoundingClientRect().top + containerEl.scrollTop;
-    const prefersReducedMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    containerEl.scrollTo({ top, behavior: prefersReducedMotion ? "auto" : "smooth" });
-  }, []);
+    virtualTranscript.scrollToKey(messageId, "start");
+  }, [virtualTranscript.scrollToKey]);
 
   /*
    * FNXC:ChatMessageEdit 2026-08-24-03:34:
    * Editing is supported only for direct model-loop sessions: never CLI-agent-backed sessions
    * (a live PTY owns the transcript), and never while a generation is streaming.
+   *
+   * FNXC:ChatMessageEdit 2026-09-16-05:58:
+   * FN-459. It is additionally offered only on rows that actually exist on the server (see
+   * `isPersistedChatMessageId`, applied per-row below) — the same rule `TaskPlannerChatTab` already
+   * enforces. Editing a purely local bubble posted its `temp-<ts>` id and produced a guaranteed
+   * `Message temp-… not found in session …` 404 that also destroyed the typed correction. Persisted
+   * ids (`msg-<uuid8>`) stay editable: this narrows the affordance, it does not remove it.
    */
   const canEditChatMessages = !cliChatActive && !isStreaming;
 
@@ -2736,93 +2952,76 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   // provider path and the CLI-backed path (CliChatSurface thunks) render the
   // exact same JSX — no parallel message/composer UI.
   const renderSessionMessagesPane = () => (
-    <div className="chat-messages" ref={messagesContainerRef} onScroll={updateScrollState}>
+    <div className="chat-messages" ref={messagesContainerRef} onScroll={() => { virtualTranscript.onScroll(); updateScrollState(); }}>
       <div ref={loadMoreSentinelRef} className="chat-load-more-sentinel">
         {hasMoreMessages && messagesLoading && (
           <div className="chat-loading-older">{t("chat.loadingOlderMessages", "Loading older messages…")}</div>
         )}
       </div>
-      {isStreaming ? (
-        <>
-          {messages.map((message, index) => (
-            <StandardChatMessageItem
-              key={message.id}
-              message={message}
-              forcePlain={false}
-              agentName={resolveMessageAssistantIdentity(message).agentName}
-              hideAssistantIdentity={resolveMessageAssistantIdentity(message).hideAssistantIdentity}
-              showAssistantModelTag={showAssistantModelTag}
-              activeModelTag={activeModelTag}
-              activeModelProvider={activeModelProvider}
-              activeSessionId={activeSession?.id ?? null}
-              projectId={projectId}
-              mentionAgentsByName={mentionAgentsByName}
-              roomContext={null}
-              copyAction={renderMessageActions(message.id, message.content, message.role)}
-              onQuoteMessage={handleQuoteMessage}
-              onScrollToTop={handleScrollMessageToTop}
-              isTopClipped={topClippedMessageIds.has(message.id)}
-              isAwaitingQuestionAnswer={message.role === "assistant" && index === messages.length - 1 && !isStreaming}
-              submittedQuestionAnswer={findSubmittedQuestionAnswer(messages, index)}
-              onQuestionSubmit={handleQuestionSubmit}
-              canEdit={canEditChatMessages}
-              onEditMessage={editMessageAndResend}
-              isSearchMatch={conversationSearchMatches.includes(message.id)}
-              isSearchActive={activeConversationMatchId === message.id}
-            />
-          ))}
-          <StandardStreamingMessage
-            streamingText={streamingText}
-            streamingThinking={streamingThinking}
-            streamingToolCalls={streamingToolCalls}
-            forcePlain={false}
-            agentName={agentName}
-            hideAssistantIdentity={hideAssistantIdentity}
-            showAssistantModelTag={showAssistantModelTag}
-            activeModelTag={activeModelTag}
-            activeModelProvider={activeModelProvider}
-            /* FNXC:StructuralMail 2026-08-09-09:09: A streaming answer is unfinished and must never be routed as a report. */
-            copyAction={showProviderResponseCopy && streamingText ? renderMessageActions("__streaming__", streamingText, "assistant", "chat-copy-response-streaming", false) : undefined}
-            onQuestionSubmit={handleQuestionSubmit}
-            isSearchMatch={conversationSearchMatches.includes("__streaming__")}
-            isSearchActive={activeConversationMatchId === "__streaming__"}
-          />
-        </>
-      ) : messagesLoading && messages.length === 0 ? (
+      {messagesLoading && messages.length === 0 && !isStreaming ? (
         <div className="chat-empty-state">{t("chat.loadingMessages", "Loading messages...")}</div>
-      ) : messages.length === 0 && !activeSession ? (
+      ) : messages.length === 0 && !isStreaming && !activeSession ? (
         renderEmptyState()
-      ) : messages.length === 0 && activeSession ? (
+      ) : messages.length === 0 && !isStreaming && activeSession ? (
         <div className="chat-empty-state">{t("chat.noMessagesYet", "No messages yet. Start the conversation!")}</div>
       ) : (
         <>
-          {messages.map((message, index) => (
-            <StandardChatMessageItem
-              key={message.id}
-              message={message}
-              forcePlain={false}
-              agentName={resolveMessageAssistantIdentity(message).agentName}
-              hideAssistantIdentity={resolveMessageAssistantIdentity(message).hideAssistantIdentity}
-              showAssistantModelTag={showAssistantModelTag}
-              activeModelTag={activeModelTag}
-              activeModelProvider={activeModelProvider}
-              activeSessionId={activeSession?.id ?? null}
-              projectId={projectId}
-              mentionAgentsByName={mentionAgentsByName}
-              roomContext={null}
-              copyAction={renderMessageActions(message.id, message.content, message.role)}
-              onQuoteMessage={handleQuoteMessage}
-              onScrollToTop={handleScrollMessageToTop}
-              isTopClipped={topClippedMessageIds.has(message.id)}
-              isAwaitingQuestionAnswer={message.role === "assistant" && index === messages.length - 1 && !isStreaming}
-              submittedQuestionAnswer={findSubmittedQuestionAnswer(messages, index)}
-              onQuestionSubmit={handleQuestionSubmit}
-              canEdit={canEditChatMessages}
-              onEditMessage={editMessageAndResend}
-              isSearchMatch={conversationSearchMatches.includes(message.id)}
-              isSearchActive={activeConversationMatchId === message.id}
-            />
-          ))}
+          {virtualTranscript.topSpacerHeight > 0 && <div className="chat-transcript-spacer" style={{ height: virtualTranscript.topSpacerHeight }} aria-hidden="true" />}
+          {virtualTranscript.visibleKeys.map((key) => {
+            if (key === "__streaming__") {
+              return <div key={key} ref={virtualTranscript.measureRow(key)} className="chat-transcript-row">
+                <StandardStreamingMessage
+                  streamingText={streamingText}
+                  streamingThinking={streamingThinking}
+                  streamingToolCalls={streamingToolCalls}
+                  forcePlain={false}
+                  agentName={agentName}
+                  hideAssistantIdentity={hideAssistantIdentity}
+                  showAssistantModelTag={showAssistantModelTag}
+                  activeModelTag={activeModelTag}
+                  activeModelProvider={activeModelProvider}
+                  /* FNXC:StructuralMail 2026-08-09-09:09: A streaming answer is unfinished and must never be routed as a report. */
+                  copyAction={showProviderResponseCopy && streamingText ? renderMessageActions("__streaming__", streamingText, "assistant", "chat-copy-response-streaming", false) : undefined}
+                  onQuestionSubmit={handleQuestionSubmit}
+                  isSearchMatch={conversationSearchMatches.includes("__streaming__")}
+                  isSearchActive={activeConversationMatchId === "__streaming__"}
+                />
+              </div>;
+            }
+            const index = messages.findIndex((message) => message.id === key);
+            const message = messages[index];
+            if (!message) return null;
+            const identity = resolveMessageAssistantIdentity(message);
+            return <div key={key} ref={virtualTranscript.measureRow(key)} className="chat-transcript-row">
+              <StandardChatMessageItem
+                message={message}
+                forcePlain={false}
+                agentName={identity.agentName}
+                hideAssistantIdentity={identity.hideAssistantIdentity}
+                showAssistantModelTag={showAssistantModelTag}
+                activeModelTag={activeModelTag}
+                activeModelProvider={activeModelProvider}
+                activeSessionId={activeSession?.id ?? null}
+                projectId={projectId}
+                mentionAgentsByName={mentionAgentsByName}
+                roomContext={null}
+                copyAction={renderMessageActions(message.id, message.content, message.role)}
+                onQuoteMessage={handleQuoteMessage}
+                onScrollToTop={handleScrollMessageToTop}
+                isTopClipped={topClippedMessageIds.has(message.id)}
+                isAwaitingQuestionAnswer={message.role === "assistant" && index === messages.length - 1 && !isStreaming}
+                submittedQuestionAnswer={findSubmittedQuestionAnswer(messages, index)}
+                onQuestionSubmit={handleQuestionSubmit}
+                canEdit={canEditChatMessages && isPersistedChatMessageId(message.id)}
+                onEditMessage={editMessageAndResend}
+                initialEditDraft={editDraftRestore?.messageId === message.id ? editDraftRestore.content : undefined}
+                onEditDraftConsumed={clearEditDraftRestore}
+                isSearchMatch={conversationSearchMatches.includes(message.id)}
+                isSearchActive={activeConversationMatchId === message.id}
+              />
+            </div>;
+          })}
+          {virtualTranscript.bottomSpacerHeight > 0 && <div className="chat-transcript-spacer" style={{ height: virtualTranscript.bottomSpacerHeight }} aria-hidden="true" />}
         </>
       )}
       <div ref={messagesEndRef} />
@@ -2831,7 +3030,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   const renderSessionComposerPane = () => (
     <div className="chat-input-area">
-      <input
+      <UiInput
         ref={fileInputRef}
         type="file"
         data-testid="chat-file-input"
@@ -2844,9 +3043,9 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         }}
       />
       {showSkillMenu && (
-        <div className="chat-skill-menu" data-testid="chat-skill-menu" role="listbox" aria-label={t("chat.skillSuggestions", "Skill suggestions")}>
-          {skillsLoading && filteredCommands.length === 0 ? (
-            <div className="chat-skill-menu-empty">{t("chat.loadingSkills", "Loading skills…")}</div>
+        <UiListBox className="chat-skill-menu" data-testid="chat-skill-menu" aria-label={t("chat.slashSuggestions", "Slash suggestions")}>
+          {skillsLoading && skillMenuEntries.length === 0 ? (
+            <div className="chat-skill-menu-empty">{t("chat.loadingSlashSuggestions", "Loading suggestions…")}</div>
           ) : skillMenuEntries.length === 0 ? (
             <div className="chat-skill-menu-empty">
               {skillFilter ? t("chat.noSkillsFound", "No skills found") : t("chat.noSkillsAvailable", "No skills available")}
@@ -2854,10 +3053,12 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
           ) : (
             skillMenuEntries.map((entry, index) =>
               entry.kind === "command" ? (
-                <button
+                <UiListBoxItem
                   key={`command-${entry.command.trigger}`}
-                  type="button"
-                  role="option"
+                  id={`command-${entry.command.trigger}`}
+                  textValue={entry.command.trigger}
+                  legacyAs="button"
+                  isDisabled={entry.disabled}
                   aria-selected={index === highlightedSkillIndex}
                   aria-disabled={entry.disabled}
                   className={`chat-skill-menu-item chat-command-menu-item${index === highlightedSkillIndex ? " chat-skill-menu-item--highlighted" : ""}${entry.disabled ? " chat-command-menu-item--disabled" : ""}`}
@@ -2871,12 +3072,30 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                       ? t("chat.commandNoRunningAgentHint", "No running agent to steer")
                       : entry.command.description}
                   </span>
-                </button>
+                </UiListBoxItem>
+              ) : entry.kind === "snippet" ? (
+                <UiListBoxItem
+                  key={`snippet-${entry.snippet.name}`}
+                  id={`snippet-${entry.snippet.name}`}
+                  textValue={entry.snippet.name}
+                  legacyAs="button"
+                  aria-selected={index === highlightedSkillIndex}
+                  className={`chat-skill-menu-item${index === highlightedSkillIndex ? " chat-skill-menu-item--highlighted" : ""}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setHighlightedSkillIndex(index)}
+                  onClick={() => handleSnippetSelect(entry.snippet)}
+                >
+                  <span className="chat-skill-menu-item-name">/{entry.snippet.name}</span>
+                  <span className="chat-skill-menu-item-description">
+                    {t("chat.snippetSuggestion", "Insert saved prompt")}
+                  </span>
+                </UiListBoxItem>
               ) : (
-                <button
+                <UiListBoxItem
                   key={entry.skill.id}
-                  type="button"
-                  role="option"
+                  id={entry.skill.id}
+                  textValue={entry.skill.name}
+                  legacyAs="button"
                   aria-selected={index === highlightedSkillIndex}
                   className={`chat-skill-menu-item${index === highlightedSkillIndex ? " chat-skill-menu-item--highlighted" : ""}`}
                   onMouseDown={(e) => e.preventDefault()}
@@ -2887,11 +3106,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                   <span className="chat-skill-menu-item-description" title={entry.skill.relativePath}>
                     {entry.skill.relativePath}
                   </span>
-                </button>
+                </UiListBoxItem>
               ),
             )
           )}
-        </div>
+        </UiListBox>
       )}
       {pendingAttachments.length > 0 && (
         <div className="chat-attachment-previews" data-testid="chat-attachment-previews">
@@ -2906,7 +3125,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
               ) : (
                 <span className="chat-attachment-preview-name">{attachment.file.name}</span>
               )}
-              <button
+              <UiButton
                 type="button"
                 className="chat-attachment-remove"
                 onClick={() => removeAttachment(index)}
@@ -2914,7 +3133,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                 aria-label={`Remove ${attachment.file.name}`}
               >
                 ×
-              </button>
+              </UiButton>
             </div>
           ))}
         </div>
@@ -2929,7 +3148,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         testIdPrefix="chat-pending"
       />
       <div className="chat-input-row">
-        <button
+        <UiButton
           type="button"
           className="btn-icon chat-attach-btn"
           data-testid="chat-attach-btn"
@@ -2938,7 +3157,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
           disabled={pendingQueueAction}
         >
           <Paperclip size={16} />
-        </button>
+        </UiButton>
         {/*
         FNXC:ChatMemoryFocus 2026-08-24-04:21:
         Per-conversation memory focus is opt-in. Hide its direct-session chip until Settings
@@ -2964,9 +3183,11 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             defaultThinkingLevel={resolvedDefaultThinkingLevel}
             models={models}
             favoriteProviders={favoriteProviders}
+            onToggleFavorite={handleToggleFavoriteProvider}
             favoriteModels={favoriteModels}
-            agents={Array.from(agentsMap.values())}
+            onToggleModelFavorite={handleToggleFavoriteModel}
             agentId={activeSession?.agentId}
+            agentName={activeSession?.agentId ? agentsMap.get(activeSession.agentId)?.name : undefined}
             modelProvider={activeSession?.modelProvider}
             modelId={activeSession?.modelId}
             targetKey={activeSession?.id ?? null}
@@ -2996,13 +3217,14 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             handleAttachmentFiles(event.dataTransfer.files);
           }}
         >
-          <textarea
+          <UiTextArea
             ref={handleComposerRef}
             className="chat-input-textarea"
             placeholder={t("chat.typeMessage", "Type a message...")}
             value={messageInput}
             onChange={handleInputChange}
             onKeyDown={handleInputKeyDown}
+            enterKeyHint={enterSubmits ? "send" : "enter"}
             onKeyUp={handleInputKeyUp}
             onClick={handleInputSelectionChange}
             onBlur={handleInputBlur}
@@ -3018,7 +3240,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
               // the visualViewport/input-focus effects own scroll compensation.
             }}
             rows={1}
-            disabled={pendingQueueAction}
             data-testid="chat-input"
           />
           <AgentMentionPopup
@@ -3033,10 +3254,17 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             visible={fileMention.mentionActive && !mentionPopupVisible}
             position={fileMentionPosition}
             tasks={fileMention.tasks}
+            conversations={fileMention.conversations}
             files={fileMention.files}
             selectedIndex={fileMention.selectedIndex}
             onSelectTask={(task) => {
               insertHashMention(fileMention.selectTask(task, messageInput), `#${task.id}`);
+            }}
+            onSelectConversation={(conversation) => {
+              insertHashMention(
+                fileMention.selectConversation(conversation, messageInput),
+                `#${conversation.id}`,
+              );
             }}
             onSelectFile={(file) => {
               insertHashMention(fileMention.selectFile(file, messageInput), `#${file.path}`);
@@ -3044,14 +3272,14 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             loading={fileMention.loading}
           />
         </div>
-        <MicButton {...composerDictation.micProps} disabled={pendingQueueAction} />
+        <MicButton {...composerDictation.micProps} />
         {/*
-        FNXC:ChatPendingQueue 2026-08-19-06:25:
-        Force-send cancellation must own the Direct composer until server reconciliation completes; otherwise a new send is queued while the selected entry is being dispatched and loses its priority.
+        FNXC:ChatPendingQueue 2026-09-06-00:48:
+        Force-send cancellation owns dispatch, not local composition: the send threshold queues new text until reconciliation preserves the selected entry's priority. Keep canSend action-oriented because Enter bypasses it; attachment-bearing attempts converge in handleSend on the same explicit refusal.
         */}
         <StandardChatActionButton
           isStreaming={isStreaming}
-          canSend={!pendingQueueAction && Boolean(messageInput.trim() || pendingAttachments.length > 0)}
+          canSend={Boolean(messageInput.trim() || pendingAttachments.length > 0)}
           onSend={handleSend}
           onStop={stopStreaming}
         />
@@ -3070,9 +3298,36 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   FNXC:ChatDirectOnly 2026-08-24-03:34:
   The session list is direct-chat only; the canonical ViewHeader carries New Chat and docked-list actions without a stale Rooms scope control.
   */
-  const visibleSidebarSessions = showArchivedSessions ? archivedSessions : filteredSessions;
-  const pinnedFilteredSessions = visibleSidebarSessions.filter((session) => session.pinnedAt != null);
-  const unpinnedFilteredSessions = visibleSidebarSessions.filter((session) => session.pinnedAt == null);
+  /*
+  FNXC:ChatArchived 2026-09-16-15:50:
+  FN-465 retire l'archivage des conversations de l'interface opérateur : la liste latérale n'expose plus que la collection active (filtrée par recherche et par tag), sans bascule « Archived », sans action Restore et sans entrée de menu Archive. Les conversations archivées historiques restent en base mais ne sont ni listées ni restaurables ici.
+  */
+  const visibleSidebarSessions = filteredSessions;
+  const sessionListRef = useRef<HTMLDivElement | null>(null);
+  /*
+  FNXC:ChatScrollAnchor 2026-09-08-20:49:
+  La liste directe et le transcript possèdent deux politiques de défilement indépendantes : chaque collection active, archivée, recherchée ou filtrée commence en tête, tandis que seul le fil ouvert s’aligne sur son dernier message. L’ouverture ou la fermeture d’un fil ne doit donc jamais transmettre la commande terminale du transcript à la liste ni réinitialiser une position manuelle de celle-ci.
+  */
+  const virtualSessionList = useVirtualizedList({
+    collectionKey: `${projectId ?? "default"}:active:${selectedTagId ?? "all"}:${searchQuery}`,
+    keys: visibleSidebarSessions.map((session) => session.id),
+    scrollRef: sessionListRef,
+    estimateHeight: 76,
+    maxRenderedRows: 40,
+    initialAlign: "start",
+    preservePrependAnchor: false,
+  });
+  const visibleSessionIds = new Set(virtualSessionList.visibleKeys);
+  const windowedSidebarSessions = visibleSidebarSessions.filter((session) => visibleSessionIds.has(session.id));
+  const pinnedFilteredSessions = windowedSidebarSessions.filter((session) => session.pinnedAt != null);
+  const unpinnedFilteredSessions = windowedSidebarSessions.filter((session) => session.pinnedAt == null);
+  const sessionPagination = useAutoPaginationSentinel({
+    rootRef: sessionListRef,
+    hasMore: hasMoreSessions,
+    loading: sessionsLoadingMore,
+    onLoadMore: () => loadMoreSessions("active"),
+    direction: "end",
+  });
   const contextMenuSession = contextMenu
     ? filteredSessions.find((session) => session.id === contextMenu.sessionId) ?? (activeSession?.id === contextMenu.sessionId ? activeSession : undefined)
     : undefined;
@@ -3115,36 +3370,70 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     FNXC:ChatNavigation 2026-08-20-05:25:
     FN-068 reserves the shared ViewHeader for view-level actions. A selected conversation owns its sole textual Back action in the thread row, preserving one list/detail state machine across desktop, floating, compact, and mobile hosts.
 
-    FNXC:ChatNavigation 2026-08-20-23:57:
-    FN-096 keeps the canonical New Chat action in this shared header for both list and selected-detail states. Embedded, floating, and dock hosts must reuse this one creation entry point while the thread row retains the sole Back action.
+    FNXC:ChatNavigation 2026-09-17-10:37:
+    FN-506 replaces FN-096's "New Chat lives in this shared header for both list and selected-detail states" rule.
+    In the LIST state this header still carries the canonical New Chat creation action. In the DETAIL state an
+    operator wants the actions of the conversation they are looking at, not a creation button, so the header carries
+    a "…" trigger that opens the EXISTING conversation menu (same state, same handlers as the row's right-click).
+    Creation survives inside that menu as its first entry, so every host keeps exactly one reachable creation point.
+    Embedded, floating, and dock hosts reuse this single header; the thread row retains the sole Back action.
     */
-    <div ref={chatViewRef} className={`chat-view${floating ? " chat-view--floating" : ""}${isChatMobile ? " chat-view--narrow" : ""}${hasDetailSelection ? " chat-view--detail" : ""}${dockedSidebarVisible ? " chat-view--docked-list" : ""}${chatMessageLayout === "full-width" ? " chat-view--full-width" : ""}`}>
+    <ViewLayout contentOwnsScroll className={`chat-view${floating ? " chat-view--floating" : ""}${isChatMobile ? " chat-view--narrow" : ""}${hasDetailSelection ? " chat-view--detail" : ""}${dockedSidebarVisible ? " chat-view--docked-list" : ""}${chatMessageLayout === "full-width" ? " chat-view--full-width" : ""}`} header={<>
       <ViewHeader
         icon={MessageSquare}
-        title={t("chat.title", "Chat")}
+        title={dedicatedConversation ? threadHeaderTitle : t("chat.title", "Chat")}
+        onClose={floating ? onClose : undefined}
+        closeButtonProps={floating ? {
+          "aria-label": t("chat.closeChat", "Close chat"),
+          title: t("chat.closeChat", "Close chat"),
+          className: "chat-view-header-icon",
+          "data-testid": "chat-modal-close",
+        } : undefined}
+        backAction={hasDetailSelection && !dedicatedConversation && !dockedSidebarVisible ? {
+          label: t("chat.backToConversations", "Back to conversations"),
+          onClick: handleVisibleDetailBack,
+          "data-testid": "chat-back-btn",
+        } : undefined}
         actions={
           <>
-            {dockedSidebarEligible ? (
-              <button type="button" className="btn-icon chat-view-header-icon" data-testid="chat-docked-sidebar-toggle"
-                aria-pressed={dockedSidebarOpen}
-                aria-label={dockedSidebarOpen ? t("chat.hideConversationList", "Hide conversation list") : t("chat.showConversationList", "Show conversation list")}
-                title={dockedSidebarOpen ? t("chat.hideConversationList", "Hide conversation list") : t("chat.showConversationList", "Show conversation list")}
-                onClick={() => { const next = !dockedSidebarOpen; setDockedSidebarOpen(next); persistChatDockedSidebarPreference(CHAT_DOCKED_SIDEBAR_OPEN_STORAGE_KEY, String(next), persistChatPreferences); }}>
-                {dockedSidebarOpen ? <PanelLeftClose /> : <PanelLeft />}
-              </button>
-            ) : null}
-
-            <button
-              className="btn btn-sm btn-primary chat-view-header-new-chat"
+            {/*
+            FNXC:ChatNavigation 2026-09-17-10:37:
+            FN-506: a host that is actually SHOWING a conversation swaps creation for that conversation's quick
+            actions. `activeSession` is required, not just `hasDetailSelection`: a detail pane with no resolved
+            session has no menu target, so the header falls back to New Chat rather than rendering a "…" that
+            cannot open anything. The dedicated conversation window renders neither control (its identity is
+            locked to one conversation) and `listOnly` docks never reach the detail state.
+            */}
+            {!dedicatedConversation && headerConversationActionsSession ? (
+              <UiButton
+                type="button"
+                className="btn-icon chat-view-header-icon"
+                aria-label={t("chat.conversationActionsAria", "Conversation actions for {{title}}", { title: threadHeaderTitle })}
+                title={t("chat.conversationActions", "Conversation actions")}
+                aria-haspopup="menu"
+                aria-expanded={contextMenu?.sessionId === headerConversationActionsSession.id}
+                data-testid="chat-header-actions-btn"
+                onClick={(event) => {
+                  if (contextMenu?.sessionId === headerConversationActionsSession.id) {
+                    setContextMenu(null);
+                    return;
+                  }
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  openSessionMenu(headerConversationActionsSession.id, bounds.right, bounds.bottom, { anchorRight: true, source: "header" });
+                }}
+              >
+                <MoreHorizontal size={16} />
+              </UiButton>
+            ) : !dedicatedConversation ? <ViewActionButton
+              kind="create"
+              className="chat-view-header-new-chat"
+              label={t("chat.newChat", "New Chat")}
               onClick={handleNewChat}
               data-testid="chat-new-btn"
               title={onOpenSessionInNewWindow ? t("chat.newChatOpenInNewWindowHint", "Ctrl/Cmd + click to open the new conversation in a separate window") : undefined}
-            >
-              <Plus size={14} />
-              {t("chat.newChat", "New Chat")}
-            </button>
+            /> : null}
             {!floating && onPopOut ? (
-              <button
+              <UiButton
                 type="button"
                 className="btn-icon chat-view-header-icon"
                 onClick={onPopOut}
@@ -3153,10 +3442,10 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                 data-testid="chat-pop-out"
               >
                 <Maximize2 size={16} />
-              </button>
+              </UiButton>
             ) : null}
             {floating && onMaximize ? (
-              <button
+              <UiButton
                 type="button"
                 className="btn-icon chat-view-header-icon"
                 onClick={onMaximize}
@@ -3165,29 +3454,24 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                 data-testid="chat-modal-maximize"
               >
                 <Maximize2 size={16} />
-              </button>
-            ) : null}
-            {floating && onClose ? (
-              <button
-                type="button"
-                className="btn-icon chat-view-header-icon"
-                onClick={onClose}
-                aria-label={t("chat.closeChat", "Close chat")}
-                title={t("chat.closeChat", "Close chat")}
-                data-testid="chat-modal-close"
-              >
-                <X size={16} />
-              </button>
+              </UiButton>
             ) : null}
           </>
         }
       />
-      <div className="chat-view__body">
+      </>}
+    >
+      <div ref={chatViewRef} className="chat-view__body">
       {/* Sidebar */}
-      <div
-        className={`chat-sidebar${hasDetailSelection && !dockedSidebarVisible ? " chat-sidebar--hidden" : ""}${dockedSidebarVisible ? " chat-sidebar--docked" : ""}`}
-        style={dockedSidebarVisible ? { width: dockedSidebarWidth, minWidth: dockedSidebarWidth } : undefined}
-      >
+      {!dedicatedConversation ? <ViewSidebar
+        ariaLabel={t("chat.conversations", "Conversations")}
+        resizeLabel={t("chat.resizeSidebar", "Resize chat sidebar")}
+        hostIdentity={floating ? "chat-floating" : "chat-main"}
+        mobile={isChatMobile}
+        panelTestId="chat-sidebar-panel"
+        separatorTestId="chat-sidebar-resize-handle"
+        className={hasDetailSelection && !dockedSidebarVisible ? "chat-sidebar--hidden" : undefined}
+      ><div className={`chat-sidebar${dockedSidebarVisible ? " chat-sidebar--docked" : ""}`}>
         <>
             {/* Search section */}
             {/*
@@ -3200,7 +3484,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             <div className="chat-sidebar-search-container">
               <div className="chat-sidebar-search-wrapper">
                 <Search size={14} className="chat-sidebar-search-icon" />
-                <input
+                <UiInput
                   ref={listSearchInputRef}
                   type="text"
                   className="chat-sidebar-search"
@@ -3211,13 +3495,13 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                 />
               </div>
               {/*
-              FNXC:ChatArchived 2026-08-23-16:27:
-              The archived affordance is a compact Archived toggle sharing the tag-filter line, so the sidebar does not spend a full row on it. aria-pressed and active styling convey state instead of changing the visible label.
+              FNXC:ChatArchived 2026-09-16-15:50:
+              FN-465 : l'archivage n'est plus proposé à l'opérateur, donc la ligne de filtres ne porte plus que le filtre par tag. Elle reste une ligne dédiée (et non fusionnée avec la recherche) pour que les sidebars étroites et mobiles puissent l'enrouler sans rognage.
               */}
               <div className="chat-sidebar-filter-row">
                 <label className="chat-tag-filter" htmlFor="chat-tag-filter">
                   <Tag size={14} aria-hidden="true" />
-                  <select
+                  <UiSelect
                     id="chat-tag-filter"
                     value={selectedTagId ?? ""}
                     onChange={(event) => setSelectedTagId(event.target.value || null)}
@@ -3226,35 +3510,25 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                   >
                     <option value="">{t("chat.allTags", "All tags")}</option>
                     {tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}
-                  </select>
-                  {selectedTagId ? <button type="button" className="btn-icon" aria-label={t("chat.clearTagFilter", "Clear tag filter")} onClick={() => setSelectedTagId(null)}><X size={14} /></button> : null}
+                  </UiSelect>
+                  {selectedTagId ? <UiButton type="button" className="btn-icon" aria-label={t("chat.clearTagFilter", "Clear tag filter")} onClick={() => setSelectedTagId(null)}><X size={14} /></UiButton> : null}
                 </label>
-                <button
-                  type="button"
-                  className={`btn btn-sm chat-archived-toggle${showArchivedSessions ? " chat-archived-toggle--active" : ""}`}
-                  data-testid="chat-archived-toggle"
-                  aria-pressed={showArchivedSessions}
-                  title={t("chat.showArchivedConversations", "Show archived conversations")}
-                  aria-label={t("chat.showArchivedConversations", "Show archived conversations")}
-                  onClick={() => { const next = !showArchivedSessions; setShowArchivedSessions(next); if (next) void refreshArchivedSessions(); }}
-                >
-                  {t("chat.archived", "Archived")}
-                </button>
               </div>
             </div>
             {/* Session list section */}
-            <div className="chat-session-list chat-sidebar-list">
+            <div className="chat-session-list chat-sidebar-list" ref={sessionListRef} onScroll={virtualSessionList.onScroll}>
               {sessionsLoading ? (
                 <div className="chat-empty-state chat-empty-state--padded">{t("chat.loadingConversations", "Loading...")}</div>
-              ) : ((showArchivedSessions ? archivedSessions : filteredSessions).length === 0) ? (
+              ) : (filteredSessions.length === 0) ? (
                 <div className="chat-empty-state chat-empty-state--padded">{t("chat.noConversationsYet", "No conversations yet")}</div>
               ) : (
                 <>
+                  {virtualSessionList.topSpacerHeight > 0 ? <div aria-hidden="true" style={{ height: virtualSessionList.topSpacerHeight }} /> : null}
                   {/*
                   FNXC:ChatPinned 2026-07-19-00:00:
                   Direct conversation pins must be two explicit sections on every session-list surface.
                   Do not flatten Recent rows beneath Pinned: labels and wrappers make the pin boundary
-                  clear for desktop, mobile, full Chat, and Quick Chat (all share this component).
+                  clear in canonical and detached Chat hosts because all share this component.
                   */}
                   {[
                     { id: "pinned", label: t("chat.pinned", "Pinned"), testId: "chat-pinned-divider", sessions: pinnedFilteredSessions },
@@ -3263,8 +3537,14 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                     <section className="chat-session-section" data-testid={`chat-session-section-${group.id}`} key={group.id}>
                       <div className="chat-pinned-divider" data-testid={group.testId}>{group.label}</div>
                       {group.sessions.map((session) => {
-                  const isActive = activeSession?.id === session.id;
-                  const showUnreadDot = !isActive && isUnread("direct", session.id, session.lastMessageAt ?? session.updatedAt);
+                  const isSelected = activeSession?.id === session.id;
+                  /*
+                  FNXC:ChatWindows 2026-09-14-11:35:
+                  The project-scoped set records only whether a dedicated conversation window exists; the global window registry owns temporary presentation independently.
+                  */
+                  const isWindowOpen = openChatWindows?.has(session.id) ?? false;
+                  const isActive = listOnly ? false : isSelected;
+                  const showUnreadDot = !isSelected && isUnread("direct", session.id, session.lastMessageAt ?? session.updatedAt);
                   const sessionResolvedModel = resolveSessionProvider(
                     session,
                     agentsMap.get(session.agentId) ?? null,
@@ -3276,19 +3556,19 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                   return (
                     <div
                       key={session.id}
-                      className={`chat-session-item${isActive ? " chat-session-item--active" : ""}`}
-                      onClick={() => handleSessionClick(session.id)}
+                      className={`chat-session-item${isActive ? " chat-session-item--active" : ""}${isWindowOpen ? " chat-session-item--window-open" : ""}`}
+                      onClick={(event) => handleSessionClick(session.id, event)}
                       onContextMenu={(e) => {
                         e.preventDefault();
                         openSessionMenu(session.id, e.clientX, e.clientY);
                       }}
-                      data-testid={showArchivedSessions ? `chat-archived-session-${session.id}` : `chat-session-${session.id}`}
+                      data-testid={`chat-session-${session.id}`}
                     >
                       {/*
                       FNXC:ChatSidebar 2026-07-16-00:00:
                       FN-8173 consolidates Pin, Rename, and Delete into this single three-dot trigger so long conversation titles retain usable row width. It opens the existing context-menu state so click and right-click share the same labeled action list and handlers.
                       */}
-                      <button
+                      <UiButton
                         type="button"
                         className="btn-icon chat-session-menu-btn"
                         data-testid="chat-session-menu-btn"
@@ -3306,7 +3586,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                         }}
                       >
                         <MoreHorizontal size={14} />
-                      </button>
+                      </UiButton>
                       <div className="chat-session-title">
                         {sessionTitle}
                         {session.pinnedAt ? <Pin className="chat-session-pinned-indicator" size={14} data-testid={`chat-session-pinned-indicator-${session.id}`} aria-label={t("chat.pinned", "Pinned")} /> : null}
@@ -3318,6 +3598,9 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                           />
                         ) : null}
                       </div>
+                      {isWindowOpen ? <span className="chat-session-window-state" data-testid={`chat-session-window-state-${session.id}`}>
+                        {t("chat.windowOpen", "Open")}
+                      </span> : null}
                       <div className="chat-session-preview">
                         {session.lastMessagePreview || t("chat.noMessages", "No messages")}
                       </div>
@@ -3327,7 +3610,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                           {t("chat.matchedInMessage", "Matched: \"{{preview}}\"", { preview: session.matchedMessagePreview })}
                         </div>
                       ) : null}
-                      {showArchivedSessions ? <button type="button" className="btn btn-sm btn-secondary" data-testid={`chat-archived-restore-${session.id}`} onClick={(event) => { event.stopPropagation(); void handleRestoreArchived(session.id); }}>{t("chat.restore", "Restore")}</button> : null}
                       <div className="chat-session-meta">
                         <span className="chat-session-meta-model">
                           {sessionResolvedModel?.provider ? <ProviderIcon provider={sessionResolvedModel.provider} size="sm" /> : null}
@@ -3341,16 +3623,17 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                       })}
                     </section>
                   ))}
+                  {virtualSessionList.bottomSpacerHeight > 0 ? <div aria-hidden="true" style={{ height: virtualSessionList.bottomSpacerHeight }} /> : null}
+                  {hasMoreSessions ? (
+                    <div ref={sessionPagination.sentinelRef} role="status" aria-live="polite" data-testid="chat-session-auto-pagination-sentinel">
+                      {sessionsLoadingMore ? t("chat.loadingConversations", "Loading...") : null}
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
         </>
-        {dockedSidebarVisible ? <div className="chat-sidebar__resize-handle" role="separator" aria-orientation="vertical" tabIndex={0}
-          aria-valuenow={dockedSidebarWidth} aria-valuemin={CHAT_DOCKED_SIDEBAR_MIN_WIDTH} aria-valuemax={CHAT_DOCKED_SIDEBAR_MAX_WIDTH}
-          aria-label={t("chat.resizeSidebar", "Resize chat sidebar")} data-testid="chat-sidebar-resize-handle"
-          onPointerDown={handleDockedResizeStart} onKeyDown={handleDockedResizeKeyDown} /> : null}
-
-      </div>
+      </div></ViewSidebar> : null}
 
 
 
@@ -3359,25 +3642,64 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         <div
           className="chat-session-context-menu"
           ref={contextMenuRef}
-          role="menu"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(e) => e.stopPropagation()}
+          data-menu-layout="conversation-actions"
         >
-          {onOpenSessionInNewWindow && !showArchivedSessions && contextMenuSession ? (
-            <button
+          {/*
+          FNXC:NativeUiCollections 2026-09-10-20:43:
+          A conversation owns one sectioned native menu so arrow keys cross primary actions, every tag assignment, and maintenance actions. Tag editing remains a visibly labelled sibling rail after the collection because its buttons are auxiliary controls rather than competing menu items.
+          */}
+          <UiMenu aria-label={t("chat.conversationActions", "Conversation actions")} className="chat-session-context-menu-section">
+          <UiMenuSection aria-label={t("chat.conversationPrimaryActions", "Primary conversation actions")}>
+          {/*
+          FNXC:ChatNavigation 2026-09-17-10:37:
+          FN-506: when this menu is opened from the HEADER it has replaced the header's New Chat button, which was the
+          only reachable creation point while a conversation occupies the panel. Creation therefore moves inside the
+          menu as its first entry. The row right-click / long-press / row "…" menu is unchanged and never shows it.
+          The click event is FORWARDED to `handleNewChat`, so the Ctrl/Cmd-click "create beside, never in place of"
+          gesture survives the move from a header button to a menu entry instead of silently disappearing.
+          */}
+          {contextMenu.source === "header" ? (
+            <UiMenuItem
+              id="new-chat"
               type="button"
-              role="menuitem"
+              data-testid="chat-context-new-chat"
+              onClick={(event) => {
+                setContextMenu(null);
+                handleNewChat(event);
+              }}
+            >
+              <Plus size={14} />
+              {t("chat.newChat", "New Chat")}
+            </UiMenuItem>
+          ) : null}
+          {onOpenSessionInNewWindow && contextMenuSession ? (
+            <UiMenuItem
+              id="open-window"
+              type="button"
               data-testid="chat-context-open-window"
               onClick={() => {
-                onOpenSessionInNewWindow(contextMenuSession);
+                // FNXC:ChatWindows 2026-09-16-04:37: FN-447 — this menu action is an explicit new-window request, so the host list stays open.
+                onOpenSessionInNewWindow(contextMenuSession, { keepListOpen: true });
                 setContextMenu(null);
               }}
             >
               <ExternalLink size={14} />
               {t("chat.openInNewWindow", "Open in new window")}
-            </button>
+            </UiMenuItem>
           ) : null}
-          <button
+          <UiMenuItem
+            id="copy-id"
+            type="button"
+            data-testid="chat-context-copy-id"
+            onClick={() => void handleCopySessionId(contextMenu.sessionId)}
+          >
+            <Copy size={14} />
+            {t("chat.copyConversationId", "Copy conversation ID")}
+          </UiMenuItem>
+          <UiMenuItem
+            id="pin"
             onClick={() => handlePin(
               contextMenu.sessionId,
               !contextMenuSession?.pinnedAt,
@@ -3388,37 +3710,28 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
           >
             {contextMenuSession?.pinnedAt ? <PinOff size={14} /> : <Pin size={14} />}
             {contextMenuSession?.pinnedAt ? t("chat.unpin", "Unpin") : t("chat.pin", "Pin")}
-          </button>
-          <button
+          </UiMenuItem>
+          <UiMenuItem
+            id="rename"
             onClick={() => openRenameDialog(contextMenu.sessionId)}
             data-testid="chat-context-rename"
           >
             <Pencil size={14} />
             {t("chat.rename", "Rename")}
-          </button>
-          <div className="chat-session-tag-menu" role="group" aria-label={t("chat.conversationTags", "Conversation tags")}>
-            {tags.map((tag) => {
-              const assigned = (contextMenuSession?.tags ?? []).some((candidate) => candidate.id === tag.id);
-              return <div className="chat-tag-menu-item" key={tag.id}>
-                <button type="button" role="menuitemcheckbox" aria-checked={assigned} data-testid={`chat-context-tag-${tag.id}`} onClick={() => void setSessionTags(contextMenu.sessionId, assigned ? (contextMenuSession?.tags ?? []).filter((candidate) => candidate.id !== tag.id).map((candidate) => candidate.id) : [...(contextMenuSession?.tags ?? []).map((candidate) => candidate.id), tag.id]).catch(() => addToast(t("chat.failedToUpdateTags", "Failed to update tags"), "error"))}>{assigned ? "✓ " : ""}{tag.name}</button>
-                <button type="button" className="btn-icon" aria-label={t("chat.renameTag", "Rename tag {{name}}", { name: tag.name })} data-testid={`chat-context-rename-tag-${tag.id}`} onClick={(event) => { event.stopPropagation(); setRenameTagName(tag.name); setRenameTagDialog(tag); }}><Pencil size={14} /></button>
-                <button type="button" className="btn-icon" aria-label={t("chat.deleteTag", "Delete tag {{name}}", { name: tag.name })} data-testid={`chat-context-delete-tag-${tag.id}`} onClick={(event) => { event.stopPropagation(); setConfirmDeleteTag(tag); }}><Trash2 size={14} /></button>
-              </div>;
-            })}
-            <div className="chat-tag-create-row">
-              <input className="input" value={newTagName} placeholder={t("chat.newTag", "New tag")} aria-label={t("chat.newTag", "New tag")} onChange={(event) => setNewTagName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void handleCreateTagForSession(); } }} />
-              <button type="button" className="btn btn-sm" onClick={() => void handleCreateTagForSession()}>{t("chat.addTag", "Add")}</button>
-            </div>
-          </div>
-          <button
-            onClick={() => handleArchive(contextMenu.sessionId)}
-            data-testid="chat-context-archive"
-          >
-            <Archive size={14} />
-            {t("chat.archive", "Archive")}
-          </button>
+          </UiMenuItem>
+          </UiMenuSection>
+          {tags.length > 0 ? (
+            <UiMenuSection aria-label={t("chat.conversationTags", "Conversation tags")}>
+              {tags.map((tag) => {
+                const assigned = (contextMenuSession?.tags ?? []).some((candidate) => candidate.id === tag.id);
+                return <UiMenuItem key={tag.id} id={`tag-${tag.id}`} role="menuitemcheckbox" aria-checked={assigned} data-testid={`chat-context-tag-${tag.id}`} onClick={() => void setSessionTags(contextMenu.sessionId, assigned ? (contextMenuSession?.tags ?? []).filter((candidate) => candidate.id !== tag.id).map((candidate) => candidate.id) : [...(contextMenuSession?.tags ?? []).map((candidate) => candidate.id), tag.id]).catch(() => addToast(t("chat.failedToUpdateTags", "Failed to update tags"), "error"))}>{assigned ? "✓ " : ""}{tag.name}</UiMenuItem>;
+              })}
+            </UiMenuSection>
+          ) : null}
+          <UiMenuSection aria-label={t("chat.conversationMaintenanceActions", "Conversation maintenance actions")}>
           {chatSettings?.memoryBackendType === "stash" && chatSettings.memoryEnabled !== false ? (
-            <button
+            <UiMenuItem
+              id="stash-backfill"
               onClick={() => void handleBackfillStash(contextMenu.sessionId)}
               data-testid="chat-context-stash-backfill"
               disabled={stashBackfillBusyId !== null}
@@ -3428,9 +3741,10 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
               {stashBackfillBusyId === contextMenu.sessionId
                 ? t("chat.preserveToStashWorking", "Uploading to Stash…")
                 : t("chat.preserveToStash", "Preserve to Stash")}
-            </button>
+            </UiMenuItem>
           ) : null}
-          <button
+          <UiMenuItem
+            id="delete"
             onClick={() => {
               setContextMenu(null);
               setConfirmDelete(contextMenu.sessionId);
@@ -3439,7 +3753,18 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
           >
             <Trash2 size={14} />
             {t("chat.delete", "Delete")}
-          </button>
+          </UiMenuItem>
+          </UiMenuSection>
+          </UiMenu>
+          <div className="chat-session-tag-menu">
+            <div className="chat-tag-action-rail" aria-label={t("chat.tagActions", "Tag actions")}>
+              {tags.map((tag) => <div className="chat-tag-menu-item" key={tag.id}><span className="chat-tag-action-label">{tag.name}</span><UiButton type="button" className="btn-icon" aria-label={t("chat.renameTag", "Rename tag {{name}}", { name: tag.name })} data-testid={`chat-context-rename-tag-${tag.id}`} onClick={() => { setRenameTagName(tag.name); setRenameTagDialog(tag); }}><Pencil size={14} /></UiButton><UiButton type="button" className="btn-icon" aria-label={t("chat.deleteTag", "Delete tag {{name}}", { name: tag.name })} data-testid={`chat-context-delete-tag-${tag.id}`} onClick={() => setConfirmDeleteTag(tag)}><Trash2 size={14} /></UiButton></div>)}
+            </div>
+            <div className="chat-tag-create-row">
+              <UiInput className="input" value={newTagName} placeholder={t("chat.newTag", "New tag")} aria-label={t("chat.newTag", "New tag")} onChange={(event) => setNewTagName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void handleCreateTagForSession(); } }} />
+              <UiButton type="button" className="btn btn-sm" onClick={() => void handleCreateTagForSession()}>{t("chat.addTag", "Add")}</UiButton>
+            </div>
+          </div>
         </div>
       )}
       {/* Rename Dialog */}
@@ -3447,8 +3772,6 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         <ChatDialogBackdrop onClose={() => setRenameDialog(null)}>
           <div
             className="chat-new-dialog chat-view-dialog"
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="chat-rename-dialog-title"
             onClick={(e) => e.stopPropagation()}
           >
@@ -3459,7 +3782,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             <label className="chat-rename-label" htmlFor="chat-rename-input">
               {t("chat.conversationName", "Conversation name")}
             </label>
-            <input
+            <UiInput
               id="chat-rename-input"
               className="input chat-rename-input"
               type="text"
@@ -3476,16 +3799,16 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
               autoFocus
             />
             <div className="chat-new-dialog-actions">
-              <button className="btn btn-sm" onClick={() => setRenameDialog(null)}>
+              <UiButton className="btn btn-sm" onClick={() => setRenameDialog(null)}>
                 {t("chat.cancel", "Cancel")}
-              </button>
-              <button
+              </UiButton>
+              <UiButton
                 className="btn btn-sm btn-primary"
                 onClick={() => void handleRename()}
                 data-testid="chat-rename-save"
               >
                 {t("chat.save", "Save")}
-              </button>
+              </UiButton>
             </div>
           </div>
         </ChatDialogBackdrop>
@@ -3493,13 +3816,13 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
       {renameTagDialog && (
         <ChatDialogBackdrop onClose={() => setRenameTagDialog(null)}>
-          <div className="chat-new-dialog chat-view-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-rename-tag-dialog-title" onClick={(event) => event.stopPropagation()}>
+          <div className="chat-new-dialog chat-view-dialog" aria-labelledby="chat-rename-tag-dialog-title" onClick={(event) => event.stopPropagation()}>
             <h3 id="chat-rename-tag-dialog-title">{t("chat.renameTagTitle", "Rename tag")}</h3>
             <label className="chat-rename-label" htmlFor="chat-rename-tag-input">{t("chat.tagName", "Tag name")}</label>
-            <input id="chat-rename-tag-input" className="input chat-rename-input" value={renameTagName} data-testid="chat-rename-tag-input" onChange={(event) => setRenameTagName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void renameTag(renameTagDialog.id, renameTagName).then(() => setRenameTagDialog(null)).catch(() => addToast(t("chat.failedToRenameTag", "Failed to rename tag"), "error")); } }} autoFocus />
+            <UiInput id="chat-rename-tag-input" className="input chat-rename-input" value={renameTagName} data-testid="chat-rename-tag-input" onChange={(event) => setRenameTagName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void renameTag(renameTagDialog.id, renameTagName).then(() => setRenameTagDialog(null)).catch(() => addToast(t("chat.failedToRenameTag", "Failed to rename tag"), "error")); } }} autoFocus />
             <div className="chat-new-dialog-actions">
-              <button className="btn btn-sm" onClick={() => setRenameTagDialog(null)}>{t("chat.cancel", "Cancel")}</button>
-              <button className="btn btn-sm btn-primary" data-testid="chat-rename-tag-save" onClick={() => void renameTag(renameTagDialog.id, renameTagName).then(() => setRenameTagDialog(null)).catch(() => addToast(t("chat.failedToRenameTag", "Failed to rename tag"), "error"))}>{t("chat.save", "Save")}</button>
+              <UiButton className="btn btn-sm" onClick={() => setRenameTagDialog(null)}>{t("chat.cancel", "Cancel")}</UiButton>
+              <UiButton className="btn btn-sm btn-primary" data-testid="chat-rename-tag-save" onClick={() => void renameTag(renameTagDialog.id, renameTagName).then(() => setRenameTagDialog(null)).catch(() => addToast(t("chat.failedToRenameTag", "Failed to rename tag"), "error"))}>{t("chat.save", "Save")}</UiButton>
             </div>
           </div>
         </ChatDialogBackdrop>
@@ -3507,12 +3830,12 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
       {confirmDeleteTag && (
         <ChatDialogBackdrop onClose={() => setConfirmDeleteTag(null)}>
-          <div className="chat-new-dialog chat-view-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-delete-tag-dialog-title" onClick={(event) => event.stopPropagation()}>
+          <div className="chat-new-dialog chat-view-dialog" aria-labelledby="chat-delete-tag-dialog-title" onClick={(event) => event.stopPropagation()}>
             <h3 id="chat-delete-tag-dialog-title">{t("chat.deleteTagTitle", "Delete tag?")}</h3>
             <p className="chat-view-delete-dialog-copy">{t("chat.deleteTagBody", "This removes the tag from all conversations, but does not delete conversations.")}</p>
             <div className="chat-new-dialog-actions">
-              <button className="btn btn-sm" onClick={() => setConfirmDeleteTag(null)}>{t("chat.cancel", "Cancel")}</button>
-              <button className="btn btn-sm btn-danger" data-testid="chat-delete-tag-confirm" onClick={() => void deleteTag(confirmDeleteTag.id).then(() => setConfirmDeleteTag(null)).catch(() => addToast(t("chat.failedToDeleteTag", "Failed to delete tag"), "error"))}>{t("chat.delete", "Delete")}</button>
+              <UiButton className="btn btn-sm" onClick={() => setConfirmDeleteTag(null)}>{t("chat.cancel", "Cancel")}</UiButton>
+              <UiButton className="btn btn-sm btn-danger" data-testid="chat-delete-tag-confirm" onClick={() => void deleteTag(confirmDeleteTag.id).then(() => setConfirmDeleteTag(null)).catch(() => addToast(t("chat.failedToDeleteTag", "Failed to delete tag"), "error"))}>{t("chat.delete", "Delete")}</UiButton>
             </div>
           </div>
         </ChatDialogBackdrop>
@@ -3527,15 +3850,15 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
               {t("chat.deleteConversationBody", "This action cannot be undone. All messages in this conversation will be permanently deleted.")}
             </p>
             <div className="chat-new-dialog-actions">
-              <button className="btn btn-sm" onClick={() => setConfirmDelete(null)}>
+              <UiButton className="btn btn-sm" onClick={() => setConfirmDelete(null)}>
                 {t("chat.cancel", "Cancel")}
-              </button>
-              <button
+              </UiButton>
+              <UiButton
                 className="btn btn-sm btn-danger"
                 onClick={() => void handleDelete(confirmDelete)}
               >
                 {t("chat.delete", "Delete")}
-              </button>
+              </UiButton>
             </div>
           </div>
         </ChatDialogBackdrop>
@@ -3549,18 +3872,12 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             button (desktop `.chat-thread-header-render-toggle` and the mobile
             floating `--floating` variant) was removed per FN-7541. Chat now
             always renders Markdown (forcePlain is hardcoded to false). */}
-        {hasThreadInView && (
+        {/*
+        FNXC:ChatWindows 2026-09-12-04:06:
+        Une fenêtre de conversation dédiée affiche son titre non interactif dans le ViewHeader et ne monte ni Back, ni ChatThreadTitleSwitcher, ni liste, ni New Chat. Le transcript, la recherche interne et le composer restent ceux du ChatView partagé.
+        */}
+        {hasThreadInView && !dedicatedConversation && (
           <div className="chat-thread-header">
-            {!dockedSidebarVisible ? <button
-              type="button"
-              className="btn btn-sm chat-thread-header-back chat-back-btn"
-              onClick={handleVisibleDetailBack}
-              data-testid="chat-back-btn"
-              aria-label={t("chat.backToConversations", "Back to conversations")}
-            >
-              <ArrowLeft size={14} aria-hidden="true" />
-              <span>{t("chat.back", "Back")}</span>
-            </button> : null}
             <div className="chat-thread-header-identity" data-testid="chat-thread-header-identity">
               {activeModelProvider ? <ProviderIcon provider={activeModelProvider} size="md" /> : <Bot size={16} />}
               {/*
@@ -3610,7 +3927,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
             {renderConversationSearch()}
             {renderSessionMessagesPane()}
             {isUserScrolling && (
-              <button
+              <UiButton
                 type="button"
                 className="btn btn-sm chat-jump-to-latest"
                 data-testid="chat-jump-to-latest"
@@ -3618,7 +3935,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
               >
                 <ChevronDown size={14} />
                 {t("chat.latest", "Latest")}
-              </button>
+              </UiButton>
             )}
             {activeSession && renderSessionComposerPane()}
           </>
@@ -3628,6 +3945,15 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
       </div>
 
-    </div>
+    </ViewLayout>
   );
+}
+
+/*
+FNXC:NativeUiPresentation 2026-09-15-00:20:
+REMOVED: the Alpha boundary wrapper. Chat keeps its canonical flex sizing and scroll owner, and the
+selected colour theme now actually recolours its transcript, composer and body-portaled menus.
+*/
+export function ChatView(props: ChatViewProps) {
+  return <ChatViewContent {...props} />;
 }

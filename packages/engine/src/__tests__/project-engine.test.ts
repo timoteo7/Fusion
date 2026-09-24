@@ -2387,12 +2387,19 @@ describe("ProjectEngine workspace merge dispatch hardening (Phase C review)", ()
   });
 });
 
-describe("ProjectEngine merge queue priority ordering", () => {
+/*
+FNXC:TaskQueueOrder 2026-09-17-12:07:
+FN-509 replaced merge-queue priority ordering with the shared arrival order. The `FN-low` /
+`FN-normal` / `FN-urgent` ids below are RETAINED deliberately: they still carry a legacy
+`priority` value, and the assertions now prove that value has NO effect — the merge order follows
+`createdAt` instead. Renaming them would lose that proof.
+*/
+describe("ProjectEngine merge queue arrival ordering", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("merges higher-priority tasks before lower-priority ones regardless of enqueue order", async () => {
+  it("merges by task arrival, so a legacy urgent value cannot jump an older card", async () => {
     const mockStore = createMockStore({ ...baseSettings, autoMerge: true });
     const tasksById: Record<string, Record<string, unknown>> = {
       "FN-low": {
@@ -2435,8 +2442,9 @@ describe("ProjectEngine merge queue priority ordering", () => {
     const engine = createEngine();
     await engine.start();
 
-    // Enqueue lowest priority first, urgent last. Priority-aware dequeue must
-    // still surface FN-urgent before FN-normal regardless of enqueue order.
+    // Enqueue order is deliberately scrambled. The dequeue follows TASK ARRIVAL
+    // (createdAt), so FN-urgent (created 04-02) still precedes FN-normal (04-03) —
+    // by age, not by the legacy level it still carries.
     engine.enqueueMerge("FN-low");
     engine.enqueueMerge("FN-normal");
     engine.enqueueMerge("FN-urgent");
@@ -2446,9 +2454,9 @@ describe("ProjectEngine merge queue priority ordering", () => {
     });
 
     // FN-low may merge first if drainMergeQueue picked it up before the other
-    // enqueues landed (single-item fast path). The contract is that once 2+
-    // tasks are queued together, the higher-priority one wins — so FN-urgent
-    // (enqueued last) must merge before FN-normal (enqueued before it).
+    // enqueues landed (single-item fast path). The contract is that once 2+ tasks
+    // are queued together, the OLDER one wins — so FN-urgent (created first of the
+    // two, enqueued last) must merge before FN-normal.
     const urgentIdx = mergeOrder.indexOf("FN-urgent");
     const normalIdx = mergeOrder.indexOf("FN-normal");
     expect(urgentIdx).toBeGreaterThanOrEqual(0);
@@ -2458,14 +2466,14 @@ describe("ProjectEngine merge queue priority ordering", () => {
     await engine.stop();
   });
 
-  it("startup sweep merges higher-priority tasks first even though listTasks returns oldest-first", async () => {
+  it("startup sweep merges in task arrival order, ignoring any legacy priority value", async () => {
     const mockStore = createMockStore({ ...baseSettings, autoMerge: true });
-    // Tasks returned in createdAt ASC order (matches store.listTasks contract).
-    // Priority order is interleaved so a naive iteration would merge FN-low
-    // first; priority-aware sorting must reorder to urgent → normal → low.
+    // Tasks returned in createdAt ASC order (matches store.listTasks contract). The
+    // legacy priority values are interleaved on purpose: under FN-509 they change
+    // nothing, so the sweep must merge strictly oldest-first.
     /* FNXC:MergeAuthority 2026-08-23-18:05: the sweep now also proves graph authority per card, so a
        fixture expected to reach the queue must look mergeable — no outstanding optional gates, and
-       quiet long enough for stall recovery. Priority ordering is what this test is about. */
+       quiet long enough for stall recovery. Queue ordering is what this test is about. */
     const mergeable = {
       column: "in-review",
       paused: false,
@@ -2500,16 +2508,16 @@ describe("ProjectEngine merge queue priority ordering", () => {
       expect(mergeOrder).toHaveLength(3);
     });
 
-    expect(mergeOrder).toEqual(["FN-urgent", "FN-normal", "FN-low"]);
+    expect(mergeOrder).toEqual(["FN-low", "FN-urgent", "FN-normal"]);
 
     await engine.stop();
   });
 
   // Direct unit-tests of pickNextMergeTaskId to exercise the multi-item
-  // priority path with concurrent queue mutations during getTask awaits.
+  // ordering path with concurrent queue mutations during getTask awaits.
   // These are unreachable through enqueueMerge alone because the first
   // enqueue always takes the single-item fast path.
-  it("picker falls back to next-priority task when the chosen one is removed from the queue during getTask awaits", async () => {
+  it("picker falls back to the next queued task when the chosen one is removed during getTask awaits", async () => {
     const mockStore = createMockStore({ ...baseSettings, autoMerge: true });
     const tasksById: Record<string, Record<string, unknown>> = {
       "FN-urgent": { id: "FN-urgent", column: "in-review", paused: false, enabledWorkflowSteps: [], steps: [], mergeRetries: 0, status: null, priority: "urgent", createdAt: "2026-04-01T00:00:00.000Z", updatedAt: new Date(Date.now() - 60 * 60_000).toISOString() },
@@ -3009,7 +3017,7 @@ describe("ProjectEngine paused in-review auto-merge behavior", () => {
     await engine.stop();
   });
 
-  it("does not admit a merge over a pending optional workflow-step lease", async () => {
+  it("does not admit a merge over the maxConcurrent agent ceiling", async () => {
     const mockStore = createMockStore({ ...baseSettings, autoMerge: true, maxConcurrent: 1, maxWorktrees: 1 });
     mockStore.store.getTask.mockResolvedValue({
       id: "FN-MERGE-WAITING",
@@ -3057,7 +3065,7 @@ describe("ProjectEngine paused in-review auto-merge behavior", () => {
     expect(await engine.isMergePending("FN-MERGE-WAITING")).toBe(true);
     expect(mockStore.store.logEntry).toHaveBeenCalledWith(
       "FN-MERGE-WAITING",
-      expect.stringContaining("maxWorktrees capacity exhausted: used=1/1"),
+      expect.stringContaining("maxConcurrent capacity exhausted: used=1/1"),
     );
 
     // An unrelated queue wake must not make the deferred task runnable before its timer.
@@ -3079,6 +3087,45 @@ describe("ProjectEngine paused in-review auto-merge behavior", () => {
     await engine.stop();
     expect(privateEngine.capacityDeferredMergeTaskIds.size).toBe(0);
     expect(await engine.isMergePending("FN-MERGE-WAITING")).toBe(false);
+  });
+
+  it("admits a merge claim when maxWorktrees is full but maxConcurrent has slack", async () => {
+    const mockStore = createMockStore({ ...baseSettings, autoMerge: true, maxConcurrent: 2, maxWorktrees: 1 });
+    mockStore.store.getTask.mockResolvedValue({
+      id: "FN-MERGE-WORKTREE-FULL",
+      column: "in-review",
+      paused: false,
+      mergeRetries: 0,
+      status: null,
+      branch: "fusion/fn-merge-worktree-full",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    mockStore.store.listTasks.mockImplementation(async (options?: { slim?: boolean }) => options?.slim === false
+      ? [{
+          id: "FN-WORKTREE-HOLDER",
+          column: "in-progress",
+          paused: false,
+          status: null,
+          worktree: "/tmp/fn-worktree-holder",
+        }]
+      : []);
+    mocks.currentStore = mockStore.store;
+
+    const engine = createEngine();
+    await engine.start();
+    engine.enqueueMerge("FN-MERGE-WORKTREE-FULL");
+
+    await vi.waitFor(() => expect(mocks.runAiMerge).toHaveBeenCalledWith(
+      mockStore.store,
+      "/tmp/proj_test",
+      "FN-MERGE-WORKTREE-FULL",
+      expect.any(Object),
+    ));
+    expect(mockStore.store.logEntry).not.toHaveBeenCalledWith(
+      "FN-MERGE-WORKTREE-FULL",
+      expect.stringContaining("maxWorktrees capacity exhausted"),
+    );
+    await engine.stop();
   });
 
   it("records an audit event (not silent) when auto-promotion of a branch-group member fails (Fix #4)", async () => {

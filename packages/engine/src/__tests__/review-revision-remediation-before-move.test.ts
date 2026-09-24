@@ -3,6 +3,7 @@ import {
   BUILTIN_CODING_IDEAS_V2_WORKFLOW_IR,
   BUILTIN_CODING_IDEAS_WORKFLOW_IR,
   resolveStepReopenPolicy,
+  ABSOLUTE_MAX_AUTOMATIC_REVIEW_REVISIONS,
   planRemediationPlacement,
   type Task,
   type TaskStep,
@@ -56,7 +57,7 @@ function failedReviewTask(overrides: Partial<Task> = {}): Task {
   } as Task;
 }
 
-function createRecoveryHarness(workflowId: "builtin:coding-ideas-v2" | "builtin:coding-ideas") {
+function createRecoveryHarness(workflowId: "builtin:coding-ideas" | "builtin:coding") {
   const row = failedReviewTask();
   const calls: string[] = [];
   let bounce: Promise<unknown> | undefined;
@@ -68,6 +69,12 @@ function createRecoveryHarness(workflowId: "builtin:coding-ideas-v2" | "builtin:
     updateTask: vi.fn(async (_id: string, patch: Partial<Task>) => {
       calls.push("updateTask");
       Object.assign(row, patch);
+      return row;
+    }),
+    updateTaskAtomic: vi.fn(async (_id: string, compute: (current: Task) => Partial<Task> | null) => {
+      calls.push("updateTaskAtomic");
+      const patch = compute(row);
+      if (patch) Object.assign(row, patch);
       return row;
     }),
     appendRemediationSteps: vi.fn(async (_id: string, steps: readonly TaskStep[], options: { wave?: number }) => {
@@ -111,12 +118,16 @@ function createRecoveryHarness(workflowId: "builtin:coding-ideas-v2" | "builtin:
       scheduleWorkflowRerun,
       maxWorkflowStepRetries: 3,
     } as never, ...args);
-  const append = (task: Task, info: Parameters<typeof appendReviewRemediationSteps>[2][1]) =>
-    appendReviewRemediationSteps(
-      { store: store as never, readTaskArtifact: vi.fn(async () => "## File Scope\n- `packages/engine/src/self-healing.ts`\n"), sendTaskBackForFix: sendBack },
-      task,
-      info,
-    );
+  const append = (
+    task: Task,
+    info: Parameters<typeof appendReviewRemediationSteps>[2],
+    options?: Parameters<typeof appendReviewRemediationSteps>[3],
+  ) => appendReviewRemediationSteps(
+    { store: store as never, readTaskArtifact: vi.fn(async () => "## File Scope\n- `packages/engine/src/self-healing.ts`\n"), sendTaskBackForFix: sendBack },
+    task,
+    info,
+    options,
+  );
   return { row, calls, store, append, sendBack, waitForBounce: async () => bounce };
 }
 
@@ -145,14 +156,14 @@ describe("FN-267 review remediation precedes review-to-WIP movement", () => {
     }
   });
   it("reproduces the FN-264 none-policy empty bounce until recovery appends named remediation", async () => {
-    const harness = createRecoveryHarness("builtin:coding-ideas-v2");
+    const harness = createRecoveryHarness("builtin:coding-ideas");
     expect(resolveStepReopenPolicy(BUILTIN_CODING_IDEAS_V2_WORKFLOW_IR)).toBe("none");
 
     await recoverFailedPreMergeWorkflowStep({
       store: harness.store as never,
       getRunContextFor: () => undefined,
       resolveFailedPreMergeWorkflowStepBudget: vi.fn(async () => ({
-        unbounded: true, max: Infinity, label: "unbounded", key: "code-review", attempts: 0,
+        unbounded: true, max: ABSOLUTE_MAX_AUTOMATIC_REVIEW_REVISIONS, label: "unbounded", key: "code-review", attempts: 0,
       })),
       appendReviewRemediationSteps: harness.append,
       sendTaskBackForFix: harness.sendBack,
@@ -167,7 +178,7 @@ describe("FN-267 review remediation precedes review-to-WIP movement", () => {
         remediation: expect.objectContaining({ gate: "Code Review", findingId: "critical-self-healing-orphan" }),
       }),
     ]));
-    expect(harness.calls.indexOf("appendRemediationSteps")).toBeLessThan(harness.calls.indexOf("moveTask"));
+    expect(harness.calls.indexOf("updateTaskAtomic")).toBeLessThan(harness.calls.indexOf("moveTask"));
     expect(harness.store.logEntry).not.toHaveBeenCalledWith(
       harness.row.id,
       "Workflow rerun refused — no pending remediation work",
@@ -176,14 +187,14 @@ describe("FN-267 review remediation precedes review-to-WIP movement", () => {
   });
 
   it("returns an incomplete Code Review REVISE to WIP with a deterministic Fix step", async () => {
-    const harness = createRecoveryHarness("builtin:coding-ideas-v2");
+    const harness = createRecoveryHarness("builtin:coding-ideas");
     harness.row.workflowStepResults![0]!.findings = [];
 
     await recoverFailedPreMergeWorkflowStep({
       store: harness.store as never,
       getRunContextFor: () => undefined,
       resolveFailedPreMergeWorkflowStepBudget: vi.fn(async () => ({
-        unbounded: true, max: Infinity, label: "unbounded", key: "code-review", attempts: 0,
+        unbounded: true, max: ABSOLUTE_MAX_AUTOMATIC_REVIEW_REVISIONS, label: "unbounded", key: "code-review", attempts: 0,
       })),
       appendReviewRemediationSteps: harness.append,
       sendTaskBackForFix: harness.sendBack,
@@ -201,7 +212,7 @@ describe("FN-267 review remediation precedes review-to-WIP movement", () => {
         }),
       }),
     ]));
-    expect(harness.calls.indexOf("appendRemediationSteps")).toBeLessThan(harness.calls.indexOf("moveTask"));
+    expect(harness.calls.indexOf("updateTaskAtomic")).toBeLessThan(harness.calls.indexOf("moveTask"));
   });
 
   /*
@@ -213,7 +224,7 @@ describe("FN-267 review remediation precedes review-to-WIP movement", () => {
   deliberately spends the full chain on the sentinel.
   */
   it("writes the real fallback Fix step and reaches WIP for an empty-diff REVISE with no findings", async () => {
-    const harness = createRecoveryHarness("builtin:coding-ideas-v2");
+    const harness = createRecoveryHarness("builtin:coding-ideas");
     harness.row.workflowStepResults![0]!.reviewInputFingerprint = EMPTY_REVIEW_DIFF_FINGERPRINT;
     harness.row.workflowStepResults![0]!.findings = [];
 
@@ -221,7 +232,7 @@ describe("FN-267 review remediation precedes review-to-WIP movement", () => {
       store: harness.store as never,
       getRunContextFor: () => undefined,
       resolveFailedPreMergeWorkflowStepBudget: vi.fn(async () => ({
-        unbounded: true, max: Infinity, label: "unbounded", key: "code-review", attempts: 0,
+        unbounded: true, max: ABSOLUTE_MAX_AUTOMATIC_REVIEW_REVISIONS, label: "unbounded", key: "code-review", attempts: 0,
       })),
       appendReviewRemediationSteps: harness.append,
       sendTaskBackForFix: harness.sendBack,
@@ -240,20 +251,20 @@ describe("FN-267 review remediation precedes review-to-WIP movement", () => {
       }),
     ]));
     // ...and it was durable BEFORE the move, which is what the bounce guard requires.
-    expect(harness.calls.indexOf("appendRemediationSteps")).toBeLessThan(harness.calls.indexOf("moveTask"));
+    expect(harness.calls.indexOf("updateTaskAtomic")).toBeLessThan(harness.calls.indexOf("moveTask"));
     expect(outcome).toBe("bounced");
     expect(harness.row.column).toBe("in-progress");
   });
 
   it("treats a reopened trailing occurrence as the pending work required by the bounce", async () => {
-    const harness = createRecoveryHarness("builtin:coding-ideas");
+    const harness = createRecoveryHarness("builtin:coding");
     expect(resolveStepReopenPolicy(BUILTIN_CODING_IDEAS_WORKFLOW_IR)).toBe("reopen-trailing");
 
     await recoverFailedPreMergeWorkflowStep({
       store: harness.store as never,
       getRunContextFor: () => undefined,
       resolveFailedPreMergeWorkflowStepBudget: vi.fn(async () => ({
-        unbounded: true, max: Infinity, label: "unbounded", key: "code-review", attempts: 0,
+        unbounded: true, max: ABSOLUTE_MAX_AUTOMATIC_REVIEW_REVISIONS, label: "unbounded", key: "code-review", attempts: 0,
       })),
       appendReviewRemediationSteps: harness.append,
       sendTaskBackForFix: harness.sendBack,

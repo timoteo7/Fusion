@@ -7,7 +7,7 @@ import type {
   TaskDetail,
   TaskCreateInput,
   ColumnId,
-  TaskPriority,
+
   TaskSourceIssue,
   TaskGitLabTracking,
   TaskGitLabTrackedItem,
@@ -16,7 +16,6 @@ import type {
   DriftReport,
   SpecLock,
   TaskRecommendationListItem,
-  TaskColumnSortMode,
 } from "@fusion/core";
 import { withTokenHeader } from "../../auth";
 import { api, ApiRequestError, buildApiUrl, proxyApi } from "../client/client.js";
@@ -30,8 +29,70 @@ export interface DeleteTaskOptions {
   allowResurrection?: boolean;
 }
 
-export interface ArchiveTaskOptions {
-  removeLineageReferences?: boolean;
+export interface TaskListPageResponse {
+  tasks: Task[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+/*
+FNXC:TaskSearch 2026-09-17-09:41:
+FN-477 gave the header search its OWN paginated collection, which must be able to read a remote
+node's tasks. `nodeId`/`localNodeId` are therefore optional: when they are absent — which is the case
+for both pre-existing `useTasks` callers — this resolves to the byte-identical local request it always
+made. Only a caller that explicitly names a remote node is routed through `/proxy/:nodeId/tasks/page`.
+*/
+export function fetchTaskPage(
+  projectId?: string,
+  options?: {
+    limit?: number;
+    cursor?: string;
+    query?: string;
+    signal?: AbortSignal;
+    nodeId?: string;
+    localNodeId?: string;
+  },
+): Promise<TaskListPageResponse> {
+  const search = new URLSearchParams();
+  if (options?.limit !== undefined) search.set("limit", String(options.limit));
+  if (options?.cursor) search.set("cursor", options.cursor);
+  if (options?.query) search.set("q", options.query);
+  const suffix = search.size > 0 ? `?${search.toString()}` : "";
+  const path = withProjectId(`/tasks/page${suffix}`, projectId);
+  if (options?.nodeId && options.nodeId !== options.localNodeId) {
+    return proxyApi<TaskListPageResponse>(path, {
+      signal: options.signal,
+      nodeId: options.nodeId,
+      ...(options.localNodeId ? { localNodeId: options.localNodeId } : {}),
+    });
+  }
+  return api<TaskListPageResponse>(path, { signal: options?.signal });
+}
+
+/*
+FNXC:TaskQueueOrder 2026-09-17-13:51:
+FN-509: fetch the HEAD of one board lane in that lane's own server-side order. The generic board
+page is creation-ascending across every lane, so a boosted card or a newly captured Ideas card
+beyond its limit is absent from the payload entirely; sorting what already arrived cannot fix that.
+The cursor is the server's opaque lane keyset and must be replayed verbatim.
+*/
+export function fetchTaskQueuePage(
+  projectId?: string,
+  options?: {
+    columns: readonly string[];
+    order?: "queue" | "intake";
+    limit?: number;
+    cursor?: string;
+    signal?: AbortSignal;
+  },
+): Promise<TaskListPageResponse> {
+  const search = new URLSearchParams();
+  search.set("columns", (options?.columns ?? []).join(","));
+  if (options?.order) search.set("order", options.order);
+  if (options?.limit !== undefined) search.set("limit", String(options.limit));
+  if (options?.cursor) search.set("cursor", options.cursor);
+  return api<TaskListPageResponse>(withProjectId(`/tasks/page?${search.toString()}`, projectId), { signal: options?.signal });
 }
 
 export function fetchTasks(
@@ -39,37 +100,41 @@ export function fetchTasks(
   offset?: number,
   projectId?: string,
   q?: string,
-  includeArchived?: boolean,
+  excludeDone?: boolean,
 ): Promise<Task[]> {
   const search = new URLSearchParams();
   if (limit !== undefined) search.set("limit", String(limit));
   if (offset !== undefined) search.set("offset", String(offset));
   if (projectId) search.set("projectId", projectId);
   if (q) search.set("q", q);
-  if (includeArchived) search.set("includeArchived", "1");
+  if (excludeDone) search.set("excludeDone", "1");
   const suffix = search.size > 0 ? `?${search.toString()}` : "";
   return api<Task[]>(`/tasks${suffix}`);
 }
 
-/**
- * FNXC:ArchivePagination 2026-07-08-00:00:
- * Dedicated paged read for the Archived board column (FN-7659). Returns
- * one bounded page (default 100) ordered `archivedAt DESC` plus `total`/
- * `hasMore` so the caller can drive a "Show more" affordance without ever
- * fetching the whole archive in one request.
- */
-export function fetchArchivedTasks(
+export interface CompletedTaskPageResponse {
+  tasks: Task[];
+  total: number;
+  hasMore: boolean;
+  nextCursor?: string | null;
+  counts?: {
+    byColumn: Record<string, number>;
+    byWorkflow: Record<string, Record<string, number>>;
+  };
+}
+
+/** One bounded keyset page from the workflow-defined completion lanes. */
+export function fetchCompletedTasks(
   projectId?: string,
   limit?: number,
-  offset?: number,
-  sortMode: TaskColumnSortMode = "completion-date-desc",
-): Promise<{ tasks: Task[]; total: number; hasMore: boolean }> {
+  cursor?: string,
+  options?: { signal?: AbortSignal },
+): Promise<CompletedTaskPageResponse> {
   const search = new URLSearchParams();
   if (limit !== undefined) search.set("limit", String(limit));
-  if (offset !== undefined) search.set("offset", String(offset));
-  search.set("sort", sortMode);
+  if (cursor !== undefined) search.set("cursor", cursor);
   const suffix = search.size > 0 ? `?${search.toString()}` : "";
-  return api<{ tasks: Task[]; total: number; hasMore: boolean }>(withProjectId(`/tasks/archived${suffix}`, projectId));
+  return api<CompletedTaskPageResponse>(withProjectId(`/tasks/done${suffix}`, projectId), { signal: options?.signal });
 }
 
 /** Row-paginated recommendation aggregate returned by the Insights triage route. */
@@ -308,8 +373,10 @@ export async function createTask(
     summarize,
     reviewLevel,
     executionMode,
+    /* FNXC:HumanPlanApproval 2026-09-15-06:24: FN-408 forwards ONLY the arming flag; a decision can never be created client-side. */
+    humanPlanApproval,
+    humanMergeApproval,
     autoMerge,
-    priority,
     source,
     nodeId,
     branch,
@@ -351,8 +418,9 @@ export async function createTask(
       summarize,
       reviewLevel,
       executionMode,
+      humanPlanApproval,
+      humanMergeApproval,
       autoMerge,
-      priority,
       source,
       nodeId,
       branch,
@@ -445,7 +513,6 @@ export function updateTask(
     executionMode?: "standard" | "fast" | null;
     noCommitsExpected?: boolean;
     autoMerge?: boolean | null;
-    priority?: TaskPriority | null;
     sourceIssue?: TaskSourceIssue | null;
     nodeId?: string | null;
     branch?: string | null;

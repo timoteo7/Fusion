@@ -30,6 +30,8 @@ import {resolveDefaultOnOptionalGroupIds} from "../workflows/workflow-optional-s
 import {toJson} from "../db/db.js";
 import {GoalStore} from "../goals/goal-store.js";
 import {AsyncGoalStore} from "../async-stores/async-goal-store.js";
+import {AsyncNoteStore} from "../async-stores/async-note-store.js";
+import {AsyncWhiteboardStore} from "../async-stores/async-whiteboard-store.js";
 import {normalizeTaskCommitAssociation} from "../tasks/task-lineage.js";
 import {__setTaskActivityLogLimitsForTesting} from "../task-store/comments.js";
 import {withTaskBranchContextInSourceMetadata} from "../task-store/branch-context.js";
@@ -42,6 +44,7 @@ import {getAllDocuments as getAllDocumentsAsync} from "../task-store/async/async
 import {recordGoalCitations as recordGoalCitationsAsync} from "../task-store/async/async-events.js";
 import type { WorkflowWorkItemRow } from "../task-store/row-types.js";
 import { projectScopeFor, type DbTransaction } from "../postgres/data-layer.js";
+import { observeOverlapWaitTransitionInTransaction } from "./overlap-wait-ops.js";
 
 export async function recordGoalCitationsImpl(store: TaskStore, inputs: GoalCitationInput[]): Promise<GoalCitation[]> {
         const layer = store.asyncLayer!;
@@ -107,10 +110,24 @@ export async function atomicWriteTaskJsonImpl2(
         if (!pgRow) {
           const context = store.createTaskPersistSerializationContext(task);
           await upsertTaskRowInTransaction(tx, task as unknown as Record<string, unknown>, context, layer.projectId);
+          if (layer.projectId && task.overlapBlockedBy) {
+            await observeOverlapWaitTransitionInTransaction(tx, {
+              projectId: layer.projectId,
+              previous: { ...task, overlapBlockedBy: undefined },
+              nextOverlapBlockedBy: task.overlapBlockedBy,
+            });
+          }
         }
         return;
       }
       const existingRow = store.pgRowToTaskRow(pgRow);
+      if (layer.projectId) {
+        await observeOverlapWaitTransitionInTransaction(tx, {
+          projectId: layer.projectId,
+          previous: store.rowToTask(existingRow),
+          nextOverlapBlockedBy: task.overlapBlockedBy,
+        });
+      }
       preserveDurableTaskWedgeInvariants(existingRow, task);
       const deletedAt = store.getSoftDeletedWriteConflict(id, task, existingRow);
       if (deletedAt) {
@@ -640,6 +657,24 @@ export async function getTaskMovedCountsByDayImpl(store: TaskStore, options: { s
         const layer = store.asyncLayer!;
     return getTaskMovedCountsByDayAsync(layer.db, layer.projectId ?? "", options);
 }
+
+export function getNoteStoreImpl(store: TaskStore): AsyncNoteStore {
+    if (!store.noteStore) {
+      const layer = store.getAsyncLayer();
+      if (!layer) throw new Error("NoteStore is not available: AsyncDataLayer not initialized");
+      store.noteStore = new AsyncNoteStore(layer);
+    }
+    return store.noteStore;
+  }
+
+export function getWhiteboardStoreImpl(store: TaskStore): AsyncWhiteboardStore {
+    if (!store.whiteboardStore) {
+      const layer = store.getAsyncLayer();
+      if (!layer) throw new Error("WhiteboardStore is not available: AsyncDataLayer not initialized");
+      store.whiteboardStore = new AsyncWhiteboardStore(layer);
+    }
+    return store.whiteboardStore;
+  }
 
 export function getGoalStoreImpl(store: TaskStore): GoalStore | AsyncGoalStore {
     if (!store.goalStore) {

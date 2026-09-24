@@ -1,5 +1,4 @@
 import { BUILTIN_CODING_WORKFLOW_IR } from "./builtin-coding-workflow-ir.js";
-import { BUILTIN_CODING_IDEAS_WORKFLOW_IR } from "./builtin-coding-ideas-workflow-ir.js";
 import { BUILTIN_CODING_IDEAS_V2_WORKFLOW_IR } from "./builtin-coding-ideas-v2-workflow-ir.js";
 import { BUILTIN_BRAINSTORMING_WORKFLOW_IR } from "./builtin-brainstorming-workflow-ir.js";
 import { BUILTIN_LEAD_GENERATION_WORKFLOW_IR } from "./builtin-lead-generation-workflow-ir.js";
@@ -30,6 +29,7 @@ export const BUILTIN_WORKFLOW_ID_PREFIX = "builtin:";
 export function isBuiltinWorkflowId(id: string): boolean {
   return id.startsWith(BUILTIN_WORKFLOW_ID_PREFIX);
 }
+
 
 const PLUGIN_GATED_BUILTIN_WORKFLOWS: ReadonlyMap<string, string> = new Map([
   ["builtin:compound-engineering", "fusion-plugin-compound-engineering"],
@@ -78,6 +78,10 @@ export function defaultEnabledBuiltinWorkflowIds(): string[] {
   return toggleEligibleBuiltinWorkflowIds().filter((id) => !isBuiltinWorkflowPluginGated(id));
 }
 
+/*
+FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
+*/
 /** Validate the shape and catalog membership of a persisted enablement list. */
 export function validateEnabledBuiltinWorkflowIds(value: unknown): asserts value is string[] | null | undefined {
   if (value === undefined || value === null) return;
@@ -117,8 +121,13 @@ export function resolveEffectiveDefaultWorkflowId(
   configuredWorkflowId?: string | null,
   enabledIds?: readonly string[],
 ): string {
+  /*
+  FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
+  */
   const enabled = effectiveEnabledBuiltinWorkflowIds(enabledIds);
-  const configured = configuredWorkflowId?.trim();
+  const requested = configuredWorkflowId?.trim();
+  const configured = requested ? requested : requested;
   if (configured && !isBuiltinWorkflowId(configured)) return configured;
   if (configured && enabled.includes(configured)) return configured;
   return enabled[0] ?? defaultEnabledBuiltinWorkflowIds()[0] ?? DEFAULT_WORKFLOW_ID;
@@ -214,10 +223,15 @@ function ceManualPrReviewOptionalGroupNode(column: string): WorkflowIrNode {
   };
 }
 
+/*
+FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
+*/
 export function isBuiltinWorkflowEnabled(id: string, enabledIds?: readonly string[]): boolean {
   if (!isBuiltinWorkflowId(id)) return true;
   if (!enabledIds) return true;
-  return enabledIds.includes(id);
+  const canonicalId = id;
+  return enabledIds.some((enabledId) => enabledId === canonicalId);
 }
 
 // Stable timestamp so built-ins round-trip deterministically.
@@ -517,7 +531,7 @@ function withPostMergeVerificationNode(nodes: BuiltinSpec["nodes"]): BuiltinSpec
 export const BUILTIN_WORKFLOWS: WorkflowDefinition[] = [
   {
     id: "builtin:coding",
-    name: "Coding",
+    name: "Coding (Auto)",
     description: "Default coding pipeline: plan steps, execute them one at a time, then run the optional final code review and merge.",
     kind: "workflow",
     ir: BUILTIN_STEPWISE_FINAL_REVIEW_CODING_WORKFLOW_IR,
@@ -550,45 +564,8 @@ export const BUILTIN_WORKFLOWS: WorkflowDefinition[] = [
     updatedAt: BUILTIN_TS,
   },
   /*
-   * FNXC:CodingIdeasWorkflow 2026-07-04-09:40:
-   * The Coding (Ideas) variant adds a manual "Ideas" intake in front of the default stepwise pipeline. New cards land in "ideas" (autoTriage off) and are not planned until an operator promotes them into the merged "todo" planner column; from there the graph is identical to the default Coding workflow.
-   */
-  {
-    id: "builtin:coding-ideas",
-    name: "Coding (Ideas)",
-    description:
-      "Capture-first coding pipeline: park ideas in a manual intake, then plan, execute per step, run the optional final code review, and merge.",
-    kind: "workflow",
-    ir: BUILTIN_CODING_IDEAS_WORKFLOW_IR,
-    layout: {
-      start: { x: 60, y: 160 },
-      plan: { x: 230, y: 160 },
-      "plan-review": { x: 400, y: 160 },
-      "plan-replan": { x: 400, y: 320 },
-      "plan-review-no-op": { x: 570, y: 320 },
-      parse: { x: 570, y: 160 },
-      steps: { x: 740, y: 160 },
-      /* U8: the pending-review park is an exit, not a stage — placed off the main line. */
-      "review-pending-handoff": { x: 740, y: 320 },
-      "browser-verification": { x: 910, y: 160 },
-      "browser-verification-remediation": { x: 910, y: 320 },
-      "code-review": { x: 1080, y: 160 },
-      "code-review-remediation": { x: 1080, y: 320 },
-      "completion-summary": { x: 1250, y: 160 },
-      "merge-gate": { x: 1420, y: 160 },
-      "branch-group-member-integration": { x: 1590, y: 80 },
-      "branch-group-promotion": { x: 1760, y: 80 },
-      "merge-attempt": { x: 1930, y: 160 },
-      "merge-retry": { x: 2100, y: 80 },
-      "recovery-router": { x: 2100, y: 240 },
-      "merge-manual-hold": { x: 1590, y: 240 },
-      "post-merge-verification": { x: 2270, y: 160 },
-      end: { x: 2440, y: 160 },
-    },
-    createdAt: BUILTIN_TS,
-    updatedAt: BUILTIN_TS,
-  },
-  /*
+   * FNXC:WorkflowIdentity 2026-09-14-19:06:
+   * V2 is a revision of this workflow, never a second identity. Republishing updates the existing definition.
    * FNXC:CodingIdeasV2Workflow 2026-08-26-05:56:
    * Same Ideas board as builtin:coding-ideas, with one rule: in-review NEVER writes code.
    * Implementation and its tests finish in `in-progress` — the executor's own final verification
@@ -600,8 +577,8 @@ export const BUILTIN_WORKFLOWS: WorkflowDefinition[] = [
    * keeps positioning ghosts.
    */
   {
-    id: "builtin:coding-ideas-v2",
-    name: "Coding (Ideas) V2",
+    id: "builtin:coding-ideas",
+    name: "Coding (Ideas)",
     description:
       "Capture-first coding pipeline with a read-only review lane: park ideas in a manual intake, plan, implement and test per step, then review, document, and merge.",
     kind: "workflow",
@@ -1005,6 +982,10 @@ export const BUILTIN_WORKFLOWS: WorkflowDefinition[] = [
 
 const BUILTIN_BY_ID = new Map(BUILTIN_WORKFLOWS.map((wf) => [wf.id, wf]));
 
+/*
+FNXC:WorkflowIdentity 2026-09-14-19:06:
+A built-in revision retains its original identity. Migration 0079 converges persisted references before catalog reads, so selection, configuration and capacity use the same raw workflow id without redirects.
+*/
 export function getBuiltinWorkflow(id: string): WorkflowDefinition | undefined {
   return BUILTIN_BY_ID.get(id);
 }

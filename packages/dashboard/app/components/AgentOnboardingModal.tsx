@@ -1,3 +1,4 @@
+import { ViewHeader } from "./ViewHeader";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ThinkingLevel } from "@fusion/core";
@@ -192,13 +193,17 @@ export function AgentOnboardingModal({ isOpen, onClose, onCreated, addToast, pro
   };
 
   return (
-        <FloatingWindow windowKey="agent-onboarding" modal title={t("agents.onboarding.title", "Agent Onboarding")} ariaLabel={t("agents.onboarding.title", "Agent Onboarding")} onClose={() => void handleClose()} hideHeader dragHandleSelector=".agent-onboarding-modal .modal-header" className="floating-window--agent-onboarding" defaultSize={{ width: 720, height: 620 }} minSize={{ width: 420, height: 320 }} persistGeometryKey="floating-window:agent-onboarding" suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport>
+        <FloatingWindow windowKey="agent-onboarding" modal title={t("agents.onboarding.title", "Agent Onboarding")} ariaLabel={t("agents.onboarding.title", "Agent Onboarding")} onClose={() => void handleClose()} hideHeader dragHandleSelector=".agent-onboarding-modal .modal-header" className="floating-window--agent-onboarding" defaultSize={{ width: 720, height: 620 }} minSize={{ width: 420, height: 320 }} suspendGeometryPersistenceOnMobile suspendGeometryPersistenceOnShortViewport>
       {/* FNXC:ModalTouchGeometry 2026-07-26-16:07: First-run onboarding remains blocking: omit outside dismissal while sharing tablet geometry and suspending every sheet viewport. */}
       <div className="modal modal-lg agent-onboarding-modal">
-        <div className="modal-header">
-          <h3>{t("agents.onboarding.title", "Agent Onboarding")}</h3>
-          <button className="modal-close" onClick={() => void handleClose()} aria-label={t("common.close", "Close")}>×</button>
-        </div>
+        {/* FNXC:StandardizedViewLayout 2026-09-13-21:49: Shared dialog chrome; `.modal-header` stays for the drag handle selector. */}
+        <ViewHeader
+          className="modal-header"
+          headingLevel={3}
+          title={t("agents.onboarding.title", "Agent Onboarding")}
+          onClose={() => void handleClose()}
+          closeButtonProps={{ "aria-label": t("common.close", "Close") }}
+        />
 
         {history.length > 0 && <ConversationHistory entries={history} />}
 
