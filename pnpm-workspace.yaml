@@ -5,6 +5,9 @@ ignoredBuiltDependencies:
   - keytar
   - sharp
   - ssh2
+# FNXC:WorkspaceConcurrency 2026-09-23: Cap recursive package commands at 2 so task typechecks cannot fan out 4 concurrent tsc workers (1GB+ each) and thrash the 12GB desktop. Measured: pnpm 10.33 ignores ~/.npmrc workspace-concurrency entirely; this key (camelCase) is the live channel.
+workspaceConcurrency: 2
+
 onlyBuiltDependencies:
   - '@embedded-postgres/darwin-arm64'
   - '@embedded-postgres/darwin-x64'
