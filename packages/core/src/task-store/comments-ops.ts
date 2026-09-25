@@ -48,14 +48,30 @@ literals. The remaining one is the caller's gate (`column === "todo" || column =
 fires for default cards, and narrowing it to traits needs an IR the caller does not
 have.
 */
+/*
+FNXC:SpecWipeoutGuard 2026-09-24-13:24:
+An ambiguous user comment must NEVER delete/re-plan a task spec. The old rule
+(`retriagePlanned = hasRealPrompt`) was by-CONTENT (any comment that merely read as
+spec prose triggered `retrySpecification`, which deleted PROMPT.md without a .bak -
+measured: 5+ specs wiped by commentary at 01:51, 9 more by a wipeout loop). The rule
+is now an explicit INTENT: only a comment carrying a re-specify command (e.g. `/retriage`,
+`/re-specify`, `re-specify this`, `retry specification`) may request re-specification.
+Plain commentary never re-triages and never deletes a spec.
+*/
 export function resolvePostCommentRetriageDecision(input: {
   column: string;
   status?: string | null;
   hasRealPrompt: boolean;
+  explicitRetriageRequested?: boolean;
 }): { invalidateApproval: boolean; retriagePlanned: boolean } {
   const invalidateApproval = input.status === "awaiting-approval";
-  const retriagePlanned = input.hasRealPrompt && !invalidateApproval;
+  const retriagePlanned = input.explicitRetriageRequested === true && !invalidateApproval;
   return { invalidateApproval, retriagePlanned };
+}
+
+/** Detects an explicit re-specify intent in a comment body (the only sanctioned spec-wipe trigger). */
+export function hasExplicitRetriageIntent(text: string): boolean {
+  return /\/retriage\b|\/re-specify\b|\bre-specify this\b|\bretry (the )?specification\b/i.test(text);
 }
 
 export async function addCommentImpl(store: TaskStore, id: string, text: string, author: string = "user", options?: { skipRefinement?: boolean; source?: "user" | "agent" | "github-review" | "github-review-comment"; externalId?: string; reviewState?: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED"; }, runContext?: RunMutationContext,): Promise<Task> {
@@ -291,7 +307,8 @@ export async function addCommentImpl(store: TaskStore, id: string, text: string,
       back would silently double-gate.
       */
       const { invalidateApproval: shouldInvalidateAwaitingApproval, retriagePlanned: shouldRetriagePlannedTask } =
-        resolvePostCommentRetriageDecision({ column: task.column, status: task.status, hasRealPrompt });
+        resolvePostCommentRetriageDecision({
+        explicitRetriageRequested: hasExplicitRetriageIntent(text), column: task.column, status: task.status, hasRealPrompt });
 
       if (shouldInvalidateAwaitingApproval || shouldRetriagePlannedTask) {
         const phase = shouldInvalidateAwaitingApproval
