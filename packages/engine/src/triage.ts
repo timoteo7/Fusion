@@ -176,8 +176,10 @@ import { ModelFallbackExhaustedError, describeModel, formatModelMarkerDetails, p
 import { hasAdvancedPastPlanning, isTaskStillInPlanningStage, resolvePlannerLanesForTaskAsync } from "./execution/replan-target.js";
 import {
   classifyPersistedPlanHandoff,
+  hasNonTerminalWorkItem,
   isPlanningLifecycleLockTransportError,
   LEGACY_NULL_PLAN_HANDOFF_STALE_MS,
+  TERMINAL_WORK_ITEM_STATES,
 } from "./planning-handoff-recovery.js";
 import {
   createResolvedAgentSession,
@@ -1527,6 +1529,60 @@ export class TriageProcessor {
     return evicted;
   }
 
+  /*
+  FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+  A recovery refusal must never be a silent no-op. The stale-planning sweep announces
+  "Recovering specified triage task <id>" for every candidate and never compares that line with an
+  outcome, so a refusal here was indistinguishable from a successful recovery and from a card no
+  sweep ever saw. Every refusal therefore writes the reason to the engine log AND to the card's own
+  history, where an operator reading the task can see which gate held it.
+
+  The task-log entry is deduplicated per (task, reason): the sweep retries every poll, and a card
+  that is legitimately refused for hours (a graph run still owning it) must not flood its own log.
+  The engine-log line stays per attempt because it is the scanning trace.
+  */
+  private readonly recordedPlanningRecoveryRefusals = new Map<string, string>();
+
+  private async recordPlanningRecoveryRefusal(task: Task, reason: string): Promise<void> {
+    planLog.warn(`${task.id} planning recovery withheld — ${reason}`);
+    if (this.recordedPlanningRecoveryRefusals.get(task.id) === reason) return;
+    this.recordedPlanningRecoveryRefusals.set(task.id, reason);
+    await this.store.logEntry(task.id, `Planning recovery withheld: ${reason}`).catch(() => undefined);
+  }
+
+  /*
+  FNXC:PlanningDependencyReseed 2026-08-04-02:10:
+  A graph run can persist foreach step-instance rows before it creates a
+  result or continuation. That is still graph handoff evidence, so a
+  legacy null-status repair must defer instead of duplicating finalization.
+  Older narrow unit-store adapters lack this reader; production requires it.
+
+  FNXC:PlanningDependencyReseed 2026-08-04-01:04:
+  Legacy unit fixtures have no graph-work-item reader; production always applies this fence, so an
+  absent reader means "no evidence to defer to" rather than "assume the worst".
+
+  FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+  Returns the operator-facing reason a `legacy-null` handoff is withheld, or `null` when nothing
+  blocks it. Only NON-terminal work items count as ownership; terminal rows are finished history.
+  */
+  private async describeLegacyNullHandoffBlock(
+    taskId: string,
+    continuationReader: TaskStore["listWorkflowWorkItemsForTask"] | undefined,
+    stepInstanceReader: TaskStore["hasWorkflowRunStepInstancesForTask"] | undefined,
+  ): Promise<string | null> {
+    if (continuationReader) {
+      const items = await continuationReader.call(this.store, taskId);
+      if (hasNonTerminalWorkItem(items)) {
+        const liveStates = [...new Set(items.map((item) => item.state).filter((state) => !TERMINAL_WORK_ITEM_STATES.has(state)))];
+        return `a non-terminal workflow work item still owns the card (${liveStates.join(", ") || "unknown state"})`;
+      }
+    }
+    if (stepInstanceReader && (await stepInstanceReader.call(this.store, taskId))) {
+      return "the graph run already persisted workflow step instances for this card";
+    }
+    return null;
+  }
+
   /**
    * Recover a triage task whose PROMPT.md was already written but the final
    * handoff out of planning never completed.
@@ -1567,20 +1623,20 @@ export class TriageProcessor {
       // applies the real stuck-processing grace.
       legacyStaleMs: continuationReader ? TriageProcessor.STALE_PROCESSING_THRESHOLD_MS : 0,
     });
-    const legacyNullStatusCandidate = handoffKind === "legacy-null"
-      // FNXC:PlanningDependencyReseed 2026-08-04-01:04: Legacy unit fixtures
-      // have no graph-work-item reader; production always applies this fence.
-      && (!continuationReader || (
-        (await continuationReader.call(this.store, task.id)).length === 0
-        /*
-        FNXC:PlanningDependencyReseed 2026-08-04-02:10:
-        A graph run can persist foreach step-instance rows before it creates a
-        result or continuation. That is still graph handoff evidence, so a
-        legacy null-status repair must defer instead of duplicating finalization.
-        Older narrow unit-store adapters lack this reader; production requires it.
-        */
-        && (!stepInstanceReader || !(await stepInstanceReader.call(this.store, task.id)))
-      ));
+    /*
+    FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+    The fence exists to answer one question — "does a LIVE graph run still own this card?" — and
+    `listWorkflowWorkItemsForTask` answers with the card's whole history instead. Reading that
+    history as a bare `len === 0` made every card that had ever recorded a work item unrecoverable:
+    in production the stale-planning sweep logged `Recovering specified triage task FN-XXXX` on
+    every poll while this returned false with nothing written anywhere, so the card sat in planning
+    with no cause recorded. A terminal item (succeeded/failed/cancelled/exhausted) is finished work,
+    not ownership, so only a NON-terminal item may defer the repair.
+    */
+    const legacyNullBlockedBy = handoffKind === "legacy-null"
+      ? await this.describeLegacyNullHandoffBlock(task.id, continuationReader, stepInstanceReader)
+      : null;
+    const legacyNullStatusCandidate = handoffKind === "legacy-null" && legacyNullBlockedBy === null;
     const recoverableStatus = handoffKind === "planning"
       || handoffKind === "approved-null"
       || legacyNullStatusCandidate;
@@ -1654,6 +1710,18 @@ export class TriageProcessor {
     const inPlannerColumn = task.column === lanes.intake
       || (task.column === "triage" && !declaresLegacyTriage);
     if (!inPlannerColumn || !recoverableStatus) {
+      /*
+      FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+      This gate used to `return false` with nothing written anywhere. The stale-planning sweep
+      announces "Recovering specified triage task <id>" for every candidate and then has no row to
+      compare against, so a refusal here looked identical to a recovery that worked and to a card
+      the sweep never saw — the operator-visible symptom was a card parked in planning for days with
+      no cause. Every refusal now names its gate: the engine log carries the scanning reason and the
+      task's own history gets one deduplicated entry (see `recordPlanningRecoveryRefusal`).
+      */
+      await this.recordPlanningRecoveryRefusal(task, !inPlannerColumn
+        ? `card sits in column "${task.column}", not this workflow's planning lane "${lanes.intake}"`
+        : `no recoverable persisted plan handoff for status ${task.status ?? "null"} (classifier: ${handoffKind ?? "none"})${legacyNullBlockedBy ? ` — ${legacyNullBlockedBy}` : ""}`);
       return false;
     }
 
@@ -3800,12 +3868,25 @@ export class TriageProcessor {
             planningCwd,
             author: "triage",
             logger: { log: (m: string) => planLog.log(m), warn: (m: string) => planLog.warn(m) },
+            /*
+            FNXC:PlanCommitSpin 2026-09-23-17:21:
+            Planning-spin fix (operator: "o planner roda mas nunca commita o plano" -> GDPR-001 etc. looped
+            "Planning using model..." forever). The authoritative half used to THROW on a
+            PlanningLifecycleLockTransportError, aborting the attempt and re-planning forever. Mirror the
+            FN-151 degrade: swallow ONLY a lifecycle-lock TRANSPORT rejection (infrastructure blip) and let
+            the validation own the verdict, so the planner commits the plan instead of spinning. Every other
+            write failure still throws exactly as before.
+            */
             writeAuthoritativePrompt: async (content) => await this.persistResetFencedPlanningArtifact(
               task,
               planningGeneration,
               content,
               false,
-            ),
+            ).catch((error: unknown) => {
+              if (!isPlanningLifecycleLockTransportError(error)) throw error;
+              planLog.warn(`${task.id}: lifecycle-lock transport failure committing the authoritative plan: ${error.message}`);
+              return false;
+            }),
             /*
             FNXC:PlanArtifactPersistence 2026-08-23-19:24:
             The project-database mirror is BEST-EFFORT — the comment above says so and validation below
@@ -3898,7 +3979,13 @@ export class TriageProcessor {
             await Promise.all(pendingSettlements);
           }
           const artifactChangedByAttempt = planningAttempt.baseline !== written;
-          if (fallbackDispatchBoundaryMissing || planningAttempt.fallbackEngaged || !artifactChangedByAttempt) {
+          // FNXC:PlanningSpin 2026-09-23-20:48:
+          // Root cause (operator board): `!artifactChangedByAttempt` re-planned FOREVER when the planner confirmed an
+          // already-valid PROMPT.md without rewriting it ("Planner did not update the authoritative PROMPT.md" -
+          // FUSI-023/025, GDPR-076). An unchanged-but-valid artifact is a SUCCESS, not a failure. Only fail the attempt
+          // when the artifact is missing/empty (a real no-plan) or the fallback/transport boundaries fired.
+          const authoritativePromptValid = typeof written === "string" && written.trim().length > 0;
+          if (fallbackDispatchBoundaryMissing || planningAttempt.fallbackEngaged || (!artifactChangedByAttempt && !authoritativePromptValid)) {
             const liveTask = await Promise.resolve(this.store.getTask(task.id)).catch(() => task) ?? task;
             const transportFailure = getPlanningLifecycleLockTransportFailure(liveTask);
             const failure = transportFailure

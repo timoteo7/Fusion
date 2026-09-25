@@ -3304,7 +3304,6 @@ export class Scheduler {
         Persist dispatch metadata before executor handoff when possible, but isolate update/log failures per task. A metadata failure must not block later released tasks or strand an already released task without onSchedule handoff.
         */
         schedulerLog.log(`Starting ${taskId}: ${prep.task.title || taskId} (deps satisfied)`);
-        const latest = await this.store.getTask(taskId).catch(() => null);
         const dispatchUpdate = {
           status: null,
           blockedBy: null,
@@ -3315,8 +3314,13 @@ export class Scheduler {
           dispatchStormCount: prep.dispatchStormCount,
           lastDispatchAt: prep.dispatchTimestamp,
         };
+        const authoritativeTask = await this.store.getTask(taskId).catch(() => null);
+        if (!authoritativeTask || authoritativeTask.paused === true || authoritativeTask.userPaused === true) {
+          schedulerLog.log(`Skipping scheduled handoff for ${taskId} because the task is paused or no longer exists`);
+          continue;
+        }
         const scheduledTask = {
-          ...(latest?.id === taskId ? latest : prep.task),
+          ...authoritativeTask,
           ...dispatchUpdate,
           status: undefined,
           blockedBy: undefined,

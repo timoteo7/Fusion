@@ -271,7 +271,8 @@ export class AcpRuntimeAdapter implements AgentRuntime {
       },
     };
 
-    return { session };
+    // FNXC:AcpFallbackSettlement 2026-09-23: boundary no-op (parity pi.ts).
+    return { session, settleFallbackDispatch: async () => undefined };
   }
 
   async promptWithFallback(
