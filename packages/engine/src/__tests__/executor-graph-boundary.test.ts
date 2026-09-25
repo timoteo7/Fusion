@@ -12,6 +12,7 @@ assertion does not depend on the full agent-session execute() path.
 import { describe, expect, it, vi } from "vitest";
 import "./executor-test-helpers.js";
 import { TaskExecutor } from "../executor.js";
+import { evaluateWorkflowMergeBoundary } from "../executor/evaluate-workflow-merge-boundary.js";
 import { createMockStore } from "./executor-test-helpers.js";
 import type { WorkflowIr } from "@fusion/core";
 
@@ -76,8 +77,14 @@ function makeExecutor(opts: {
   workflowStepResults?: Array<{
     workflowStepId: string;
     workflowStepName: string;
-    source: "node";
-    phase: "pre-merge";
+    /*
+    FNXC:WorkflowMerge 2026-09-19-03:58:
+    Pre-merge results have two graph-runtime origins: `node` (graph-authored node progress) and
+    `optional-group` (enabled optional steps such as Plan Review / Code Review). Boundary cases
+    must be able to construct both, plus a post-merge phase to prove the phase filter still holds.
+    */
+    source: "node" | "optional-group";
+    phase: "pre-merge" | "post-merge";
     status: "passed" | "pending";
     completedAt: string;
   }>;
@@ -253,5 +260,155 @@ describe("U5a — IR-driven merge boundary (scenario 1)", () => {
       ) as { blocked?: { code: string; missingInstanceCount: number } };
       expect(result.blocked).toMatchObject({ code, missingInstanceCount });
     }
+  });
+});
+
+/*
+FNXC:WorkflowMerge 2026-09-19-03:58:
+Resultados pre-merge podem vir de passos opcionais habilitados (source="optional-group"); a prova de
+fronteira deve enxerga-los, senao tarefas com reviews aprovados ficam presas em merge-boundary-unproven.
+
+Pre-merge results have TWO graph-runtime origins: `node` (graph-authored node progress) and
+`optional-group` (an enabled optional step, e.g. the builtin Plan Review / Code Review groups).
+Measured on a live card (project proj_9ef728e7cc084681): its only two workflowStepResults were
+`phase="pre-merge"`, `status="passed"`, `source="optional-group"` (plan-review, code-review) with
+enabledWorkflowSteps ["plan-review","code-review"], and the boundary parked it with
+"workflow graph terminal merge failure at node 'merge' (merge-boundary-unproven) — operator action required".
+
+The proof must therefore accept BOTH origins without loosening anything else: a non-pre-merge phase
+stays out, terminality stays mandatory, and terminal foreach instance coverage stays mandatory.
+*/
+describe("merge boundary pre-merge result provenance (node | optional-group)", () => {
+  const optionalGroup = (
+    workflowStepId: string,
+    workflowStepName: string,
+    overrides: Partial<{ phase: "pre-merge" | "post-merge"; status: "passed" | "pending" }> = {},
+  ) => ({
+    workflowStepId,
+    workflowStepName,
+    source: "optional-group" as const,
+    phase: overrides.phase ?? ("pre-merge" as const),
+    status: overrides.status ?? ("passed" as const),
+    completedAt: "2026-09-19T03:58:00.000Z",
+  });
+
+  function boundaryHarness(workflowStepResults: ReturnType<typeof optionalGroup>[], steps: Array<{ id: string; title: string; status: "pending" | "done" | "skipped" }>) {
+    return makeExecutor({
+      selection: { workflowId: "custom:foreach", stepIds: [] },
+      ir: foreachIr(),
+      taskColumn: "in-progress",
+      steps,
+      workflowStepResults,
+    });
+  }
+
+  it("proves the boundary when the only pre-merge results came from enabled optional groups", async () => {
+    const { executor, store, liveTask } = boundaryHarness([
+      optionalGroup("plan-review", "Plan Review"),
+      optionalGroup("code-review", "Code Review"),
+    ], []);
+
+    const result = await executor.ensureWorkflowMergeBoundaryTask(
+      liveTask,
+      { reason: "workflow-merge-boundary", nodeId: "merge", workflowId: "custom:foreach", runId: "r1" },
+    ) as { blocked?: { code: string } };
+
+    expect(result.blocked).toBeUndefined();
+    expect(store.logEntry).not.toHaveBeenCalledWith("FN-B1", expect.stringContaining("Workflow merge boundary blocked:"), expect.anything(), expect.anything());
+    expect(store.moveTask).toHaveBeenCalledWith("FN-B1", "in-review", expect.anything());
+  });
+
+  it("reports the boundary proof as resolved/complete for an optional-group-only task", async () => {
+    const proof = await evaluateWorkflowMergeBoundary(
+      {
+        store: {
+          getTaskWorkflowSelection: () => ({ workflowId: "custom:foreach", stepIds: [] }),
+          getWorkflowDefinition: async () => ({ ir: foreachIr() }),
+        } as never,
+        loadMergeBoundaryInstances: async () => [],
+      },
+      {
+        id: "FN-B1",
+        column: "in-progress",
+        steps: [],
+        workflowStepResults: [optionalGroup("plan-review", "Plan Review"), optionalGroup("code-review", "Code Review")],
+      } as never,
+      "r1",
+    );
+
+    expect(proof.resolved).toBe(true);
+    expect(proof.hasRelevantNodeResult).toBe(true);
+    expect(proof.allResultsTerminal).toBe(true);
+    expect(proof.complete).toBe(true);
+  });
+
+  it("still blocks a non-terminal optional-group result (terminality stays mandatory)", async () => {
+    const { executor, liveTask } = boundaryHarness([
+      optionalGroup("plan-review", "Plan Review"),
+      optionalGroup("code-review", "Code Review", { status: "pending" }),
+    ], []);
+
+    const result = await executor.ensureWorkflowMergeBoundaryTask(
+      liveTask,
+      { reason: "workflow-merge-boundary", nodeId: "merge", workflowId: "custom:foreach", runId: "r1" },
+    ) as { blocked?: { code: string } };
+
+    expect(result.blocked).toMatchObject({ code: "non-terminal-node-result" });
+  });
+
+  it("still ignores a passed optional-group result from another phase (post-merge stays out)", async () => {
+    const { executor, store, liveTask } = boundaryHarness([
+      optionalGroup("post-merge-verification", "Post-merge verification", { phase: "post-merge" }),
+    ], []);
+
+    const result = await executor.ensureWorkflowMergeBoundaryTask(
+      liveTask,
+      { reason: "workflow-merge-boundary", nodeId: "merge", workflowId: "custom:foreach", runId: "r1" },
+    ) as { blocked?: { code: string } };
+
+    expect(result.blocked).toMatchObject({ code: "no-node-result" });
+    expect(store.moveTask).not.toHaveBeenCalled();
+  });
+
+  it("still requires terminal foreach instance coverage beside an optional-group result", async () => {
+    const { executor, liveTask } = boundaryHarness([
+      optionalGroup("plan-review", "Plan Review"),
+    ], [{ id: "0", title: "Implement", status: "pending" }]);
+
+    const result = await executor.ensureWorkflowMergeBoundaryTask(
+      liveTask,
+      { reason: "workflow-merge-boundary", nodeId: "merge", workflowId: "custom:foreach", runId: "r1" },
+    ) as { blocked?: { code: string; missingInstanceCount: number } };
+
+    expect(result.blocked).toMatchObject({ code: "missing-foreach-instances", missingInstanceCount: 1 });
+  });
+
+  /*
+  FNXC:WorkflowMerge 2026-09-19-03:58:
+  `shouldCompleteChecklistAtWorkflowMerge` answers the same "did graph-native pre-merge work run?"
+  question as the boundary proof when no proof is supplied, so it shares the predicate. Assert both
+  directions: optional-group pre-merge work completes it; a post-merge-only result does not.
+  */
+  const unfinishedSteps = [{ id: "0", title: "Implement", status: "pending" as const }];
+
+  it("completes the checklist fallback from optional-group pre-merge results", () => {
+    const { executor, liveTask } = boundaryHarness([
+      optionalGroup("plan-review", "Plan Review"),
+      optionalGroup("code-review", "Code Review"),
+    ], unfinishedSteps);
+    const shouldComplete = (executor as unknown as {
+      shouldCompleteChecklistAtWorkflowMerge(task: unknown, proof?: { complete: boolean }): boolean;
+    }).shouldCompleteChecklistAtWorkflowMerge;
+    expect(shouldComplete(liveTask)).toBe(true);
+  });
+
+  it("does not complete the checklist fallback from a post-merge-only result", () => {
+    const { executor, liveTask } = boundaryHarness([
+      optionalGroup("post-merge-verification", "Post-merge verification", { phase: "post-merge" }),
+    ], unfinishedSteps);
+    const shouldComplete = (executor as unknown as {
+      shouldCompleteChecklistAtWorkflowMerge(task: unknown, proof?: { complete: boolean }): boolean;
+    }).shouldCompleteChecklistAtWorkflowMerge;
+    expect(shouldComplete(liveTask)).toBe(false);
   });
 });
