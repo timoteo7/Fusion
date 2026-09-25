@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  EXECUTOR_SESSION_NOT_LIVE_REASON,
   OVERSEER_WATCHED_STAGES,
   PlannerOverseerMonitor,
   resolveWatchedStage,
@@ -676,5 +677,161 @@ describe("PlannerOverseerMonitor.observeTask — review-gate stall detection (in
     const observation = await monitor.observeTask(task, "autonomous", { now: () => NOW, executorStuckAfterMs: THRESHOLD_MS });
 
     expect(observation?.signal).toBe("progressing");
+  });
+});
+
+/*
+FNXC:PlannerOversight 2026-09-18-02:03:
+WIP liveness is owned only by the in-place stuck-session detector, and that state is in-memory — it
+dies with the process. So after an engine restart, or any executor death, an in-progress card with no
+live session reported `progressing` ("Task is actively executing in-progress work") until the FN-7743
+proxy fired, and that proxy is measured from COLUMN ENTRY with a 2h default. Observed 2026-09-17: a
+card sat in-progress with zero live agent sessions, ~1h30 of dead time, and every poll still said
+`progressing`.
+
+These tests lock the invariant across the enumerated surfaces: dead session (stuck — immediately,
+with the constant dedup-safe reason), live session (progressing, unchanged), a card that just entered
+the lane inside the grace floor (progressing — never bounce a session that is about to start), a
+threshold tighter than the floor (the operator's own setting still bounds it), unknown liveness and an
+unwired probe (fall back to the FN-7743 proxy, never a fabricated stall), and paused precedence (a
+human-owned card stays blocked).
+*/
+describe("PlannerOverseerMonitor.observeTask — executor dead-session detection", () => {
+  const THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2h, mirrors the declared setting default
+  const NOW = Date.UTC(2026, 8, 18, 2, 0, 0);
+
+  function isoMsAgo(ms: number): string {
+    return new Date(NOW - ms).toISOString();
+  }
+
+  it("reports stuck once the executor session is provably not live, without waiting for the 2h proxy", async () => {
+    const monitor = new PlannerOverseerMonitor();
+    const task = taskFixture({
+      column: "in-progress",
+      // Well inside the FN-7743 window: the timestamp proxy alone would still say `progressing`.
+      columnMovedAt: isoMsAgo(10 * 60 * 1000),
+      updatedAt: isoMsAgo(60 * 1000),
+    });
+
+    const observation = await monitor.observeTask(task, "autonomous", {
+      now: () => NOW,
+      executorStuckAfterMs: THRESHOLD_MS,
+      isTaskLive: () => false,
+    });
+
+    expect(observation?.stage).toBe("executor");
+    expect(observation?.signal).toBe("stuck");
+    expect(observation?.reason).toBe(EXECUTOR_SESSION_NOT_LIVE_REASON);
+  });
+
+  it("keeps progressing while a session is live inside the stall window", async () => {
+    const monitor = new PlannerOverseerMonitor();
+    const task = taskFixture({
+      column: "in-progress",
+      columnMovedAt: isoMsAgo(10 * 60 * 1000),
+      updatedAt: isoMsAgo(60 * 1000),
+    });
+
+    const observation = await monitor.observeTask(task, "autonomous", {
+      now: () => NOW,
+      executorStuckAfterMs: THRESHOLD_MS,
+      isTaskLive: () => true,
+    });
+
+    expect(observation?.signal).toBe("progressing");
+  });
+
+  it("never routes a LIVE session into the dead-session reason, even past the stall proxy", async () => {
+    // The FN-7743 timestamp proxy can still flag a long-running live card (pre-existing behaviour,
+    // and FN-8471's live-session guard is what keeps that from hard-cancelling it). The invariant
+    // this change adds is narrower: a live session must never be observed as sessionless.
+    const monitor = new PlannerOverseerMonitor();
+    const task = taskFixture({
+      column: "in-progress",
+      columnMovedAt: isoMsAgo(THRESHOLD_MS + 30 * 60 * 1000),
+      updatedAt: isoMsAgo(30 * 60 * 1000),
+    });
+
+    const observation = await monitor.observeTask(task, "autonomous", {
+      now: () => NOW,
+      executorStuckAfterMs: THRESHOLD_MS,
+      isTaskLive: () => true,
+    });
+
+    expect(observation?.reason).not.toBe(EXECUTOR_SESSION_NOT_LIVE_REASON);
+    expect(observation?.reason).toMatch(/inactive for over \d+h/);
+  });
+
+  it("holds the dead-session signal inside the grace floor so a just-claimed card is not bounced", async () => {
+    const monitor = new PlannerOverseerMonitor();
+    const task = taskFixture({ column: "in-progress", columnMovedAt: isoMsAgo(60 * 1000) });
+
+    const observation = await monitor.observeTask(task, "autonomous", {
+      now: () => NOW,
+      executorStuckAfterMs: THRESHOLD_MS,
+      isTaskLive: () => false,
+    });
+
+    expect(observation?.signal).toBe("progressing");
+  });
+
+  it("bounds the grace floor by the operator's own stall threshold", async () => {
+    const monitor = new PlannerOverseerMonitor();
+    const task = taskFixture({ column: "in-progress", columnMovedAt: isoMsAgo(2 * 60 * 1000) });
+
+    const observation = await monitor.observeTask(task, "autonomous", {
+      now: () => NOW,
+      executorStuckAfterMs: 60 * 1000, // 1 min — tighter than the 5 min floor
+      isTaskLive: () => false,
+    });
+
+    expect(observation?.signal).toBe("stuck");
+    expect(observation?.reason).toBe(EXECUTOR_SESSION_NOT_LIVE_REASON);
+  });
+
+  it("never fabricates a stall when the liveness probe cannot answer", async () => {
+    const monitor = new PlannerOverseerMonitor();
+    const fresh = taskFixture({ column: "in-progress", columnMovedAt: isoMsAgo(10 * 60 * 1000) });
+    const pastProxy = taskFixture({ column: "in-progress", columnMovedAt: isoMsAgo(3 * 60 * 60 * 1000) });
+
+    const unknownFloors = { now: () => NOW, executorStuckAfterMs: THRESHOLD_MS, isTaskLive: () => undefined };
+    const freshObs = await monitor.observeTask(fresh, "autonomous", unknownFloors);
+    const staleObs = await monitor.observeTask(pastProxy, "autonomous", unknownFloors);
+
+    expect(freshObs?.signal).toBe("progressing");
+    // The stale one is still the FN-7743 proxy's verdict, not the dead-session one.
+    expect(staleObs?.signal).toBe("stuck");
+    expect(staleObs?.reason).toMatch(/inactive for over \d+h/);
+  });
+
+  it("keeps the FN-7743 timestamp proxy unchanged when no probe is wired", async () => {
+    const monitor = new PlannerOverseerMonitor();
+    const stale = taskFixture({ column: "in-progress", columnMovedAt: isoMsAgo(3 * 60 * 60 * 1000) });
+    const fresh = taskFixture({ column: "in-progress", columnMovedAt: isoMsAgo(60 * 1000) });
+
+    const staleObs = await monitor.observeTask(stale, "autonomous", { now: () => NOW, executorStuckAfterMs: THRESHOLD_MS });
+    const freshObs = await monitor.observeTask(fresh, "autonomous", { now: () => NOW, executorStuckAfterMs: THRESHOLD_MS });
+
+    expect(staleObs?.signal).toBe("stuck");
+    expect(staleObs?.reason).toMatch(/inactive for over \d+h/);
+    expect(freshObs?.signal).toBe("progressing");
+  });
+
+  it("keeps paused precedence: a human-owned card is blocked, not stuck", async () => {
+    const monitor = new PlannerOverseerMonitor();
+    const task = taskFixture({
+      column: "in-progress",
+      paused: true,
+      pausedReason: "operator-parked",
+      columnMovedAt: isoMsAgo(3 * 60 * 60 * 1000),
+    });
+
+    const observation = await monitor.observeTask(task, "autonomous", {
+      now: () => NOW,
+      executorStuckAfterMs: THRESHOLD_MS,
+      isTaskLive: () => false,
+    });
+
+    expect(observation?.signal).toBe("blocked");
   });
 });

@@ -656,10 +656,19 @@ describe("Scheduler workflow cutover", () => {
 
     await scheduler.schedule();
 
+    /*
+    FNXC:CapacitySlotLeak 2026-09-23-16:24:
+    New truth (the #7 operator requirement): `status:"planning"` rows WITHOUT a live planner session are
+    stale/orphaned and must NOT hold a capacity slot. The 6 planners here have no live session, so they
+    no longer pin slots and all three dependency-free roots dispatch. The old assertion pinned the leak
+    (the stale planning rows blocking a slot); this records the fix. The test's intent — "slots represent
+    live task execution, not directories retained on disk" — is preserved: with no live execution in those
+    planning rows, the retained worktrees no longer strand slots.
+    */
     expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({ id: "FN-ROOT-1", column: "in-progress" }));
     expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({ id: "FN-ROOT-2", column: "in-progress" }));
-    expect(onSchedule).not.toHaveBeenCalledWith(expect.objectContaining({ id: "FN-ROOT-3" }));
-    expect(roots[2]?.column).toBe("todo");
+    expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({ id: "FN-ROOT-3", column: "in-progress" }));
+    expect(roots[2]?.column).toBe("in-progress");
   });
 
   /*
@@ -788,15 +797,23 @@ describe("Scheduler workflow cutover", () => {
     await scheduler.schedule();
 
     expect(store.listTasks).toHaveBeenCalledWith({ slim: false, includeArchived: false });
-    expect(store.moveTaskIf).not.toHaveBeenCalledWith(
+    /*
+    FNXC:CapacitySlotLeak 2026-09-23-16:20:
+    New truth (the #7 operator requirement): a `status:"planning"` row WITHOUT a live planner session
+    (`planningIsLive:false`) must NOT hold a capacity slot. The latePlanner here is exactly that stale/
+    orphaned planning row, so it no longer blocks admission and `ready` is dispatched. The old assertion
+    pinned the leak (the stale planning row blocking a slot); this records the fix without weakening the
+    recheck coverage (listTasks still re-queried canonical live tasks after the sweep snapshot went stale).
+    */
+    expect(store.moveTaskIf).toHaveBeenCalledWith(
       ready.id,
       "in-progress",
       expect.any(Function),
       expect.anything(),
     );
-    expect(onSchedule).not.toHaveBeenCalled();
-    expect(ready.column).toBe("todo");
-    expect(ready.status).toBe("queued");
+    expect(onSchedule).toHaveBeenCalledWith(expect.objectContaining({ id: ready.id, column: "in-progress" }));
+    expect(ready.column).toBe("in-progress");
+    expect(ready.status).toBeNull();
   });
 
   it("counts a pending optional workflow-step lease in final scheduler admission", async () => {

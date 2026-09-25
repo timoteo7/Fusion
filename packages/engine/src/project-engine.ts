@@ -3590,6 +3590,16 @@ export class ProjectEngine {
 
       /* One IR cache for the whole sweep: (distinct workflows) resolutions, not (cards). */
       const overseerIrCache = new Map<string, WorkflowIr>();
+      /*
+      FNXC:PlannerOversight 2026-09-18-02:03:
+      Hand the observation the SAME liveness predicate the retry handler below already gates on
+      (`isTaskLiveForOverseerRetry`, FN-8471), resolved once per sweep. Without it a card whose
+      executor session died reports `progressing` ("actively executing") until the FN-7743 proxy
+      fires 2h after column entry, so autonomous recovery never engages. A missing runtime/executor
+      wiring leaves this `undefined`, which preserves the previous behaviour exactly.
+      */
+      const executorLiveness = this.runtime.getExecutor?.();
+      const probeTaskLive = executorLiveness?.isTaskLiveForOverseerRetry?.bind(executorLiveness);
       for (const task of inFlight) {
         try {
           const workflowEffective = await resolveEffectiveSettings(store, { id: task.id }).catch(() => ({}) as Record<string, unknown>);
@@ -3624,7 +3634,7 @@ export class ProjectEngine {
              the legacy ids and every card on a renamed board classifies as null — see
              `resolveTaskColumnFlags`. The cache is per-poll so a workflow edit is picked up next tick. */
           const columnFlags = await this.resolveTaskColumnFlags(store, task, overseerIrCache);
-          await overseer.observeTask(task, level, { executorStuckAfterMs, columnFlags });
+          await overseer.observeTask(task, level, { executorStuckAfterMs, columnFlags, isTaskLive: probeTaskLive });
 
           // FN-7512: one guarded, autonomous-only bounded recovery tick at the
           // same passive seam FN-7511 uses for observation. Inert for every
