@@ -29,10 +29,14 @@ export const MANUAL_RETRY_RESET_COUNTER_KEYS = [
 export function buildAutoPauseClearPatch(
   task: Pick<Task, "paused" | "userPaused" | "pausedReason">,
 ): Partial<Task> {
+  // FNXC:ManualRetryReset 2026-09-23-18:00:
+  // Root cause (operator board): the manual retry cleared the engine pause ONLY for the in-review-stall-deadlock
+  // reason, so any OTHER engine park (branch-conflict-unrecoverable, tripwires, rate-limits) survived fn_task_retry
+  // as {paused:true, pausedReason:...} and the card stayed functionally paused (GDPR-075, FUSI-023). A manual retry is
+  // an explicit resume, so it must clear ANY non-user pause; userPaused is operator-owned and stays untouched.
   if (
     task.paused === true
     && task.userPaused !== true
-    && task.pausedReason === IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON
   ) {
     return {
       paused: false,
