@@ -56,7 +56,7 @@
     "build:package": "cross-env FUSION_CLI_FULL_PACKAGE=1 tsup",
     "build:exe": "bun run build.ts",
     "build:exe:all": "bun run build.ts --all",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --build --noEmit",
     "test": "vitest run --silent=passed-only --reporter=dot",
     "test:ci-shape": "vitest run src/__tests__/ci-workflow.test.ts --silent=passed-only --reporter=dot",
     "test:docs-index": "vitest run src/__tests__/docs-readme-index.test.ts --silent=passed-only --reporter=dot",
