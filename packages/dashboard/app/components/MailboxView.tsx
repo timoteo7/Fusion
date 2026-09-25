@@ -1528,6 +1528,15 @@ export function MailboxView({
             desktop and mobile layouts. Mutually exclusive with the dedicated
             worktrunk_install branch above, which must keep rendering unchanged.
           */}
+          {/*
+            FNXC:EvolutionApproval 2026-09-25-10:00:
+            Evolution candidates use the existing approval detail surface so the
+            redacted candidate, trial decision, and last-cycle summary remain
+            reviewable on desktop and mobile.
+          */}
+          {selectedApproval.targetAction.context?.source === "evolution-cycle" && (
+            <GatedActionApprovalDetails targetAction={selectedApproval.targetAction} />
+          )}
           {selectedApproval.targetAction.action !== "worktrunk_install"
             && (selectedApproval.targetAction.context as Record<string, unknown> | undefined)?.source === "agent-gating" && (
             <GatedActionApprovalDetails targetAction={selectedApproval.targetAction} />

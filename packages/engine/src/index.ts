@@ -738,6 +738,13 @@ export type {
   EvolutionCycleOptions,
 } from "./agents/evolution-cycle.js";
 export {
+  createTaskEvolutionSignalCapture,
+  type EvolutionSignalCaptureStore,
+  type TaskEvolutionSignalCaptureInput,
+  type TaskEvolutionSignalCaptureOptions,
+  type TaskEvolutionSignalCaptureResult,
+} from "./agents/evolution-signal-capture.js";
+export {
   buildAgentChatPrompt,
   resolveAgentInstructionsWithRatings,
   resolveAgentInstructions,

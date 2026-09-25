@@ -288,13 +288,34 @@ The default redaction thresholds come from
 
 Total: **98 tests** covering the MVP.
 
+## MVP-2: Operational evolution cycle
+
+GDPR-075 connects the sealed MVP-1 pipeline to real task execution and operator review without changing the `EvolutionSignal` schema. The production finalization seam projects task outcome, normalized failure category, duration, token cost when available, and explicit human feedback into a redacted `EvolutionSignal`; it never reads prompt history. Capture is best-effort and cannot block task completion.
+
+`fn evolution run [agent-id]` starts exactly one manual cycle. Hermes remains an injectable, read-only proposer and Herdr remains an injectable, read-only evidence source. The cycle performs its deterministic trial, persists a redacted artifact and bounded audit rows, and defaults to dry-run. `--apply` only invokes the existing `createEvolutionApplyGate`; it cannot bypass `approval.status === "approved"`, a matching approved `ApprovalRequest`, and `trial.decision === "keep"`. The live-state writer remains the sole apply-gate path.
+
+Keep candidates create an `ApprovalRequest` in the existing approval store with category `task_agent_mutation`. Operators can inspect the redacted candidate, trial result, and previous-cycle summary in the existing dashboard approval detail surface on desktop and mobile, then approve or deny through the existing decision route. A denied, rejected, reverted, or unapproved candidate cannot mutate live state.
+
+The trial check is the operator's own configured project verification command (`settings.testCommand`), run in the project root. An earlier revision always reported `passed: false`, which made a `keep` trial unreachable outside tests and therefore left the approval surface and the apply gate unreachable in production. Output is reduced to duration, byte count, and exit code; it is never persisted as prose. When no command is configured the check stays refusing and says so in the artifact, so an absent configuration is visible rather than masquerading as a failing trial.
+
+Deciding an evolution approval through the dashboard mirrors the outcome onto the artifact's `approval` state. The apply gate authorizes on the persisted artifact, so without that projection an approved request would leave the artifact at `pending` and the single sanctioned writer could never run. The approval row stays authoritative; a projection failure is logged and does not fail the operator's recorded decision.
+
+Cycle controls are durable across process restarts: identical signal observations are idempotent, the per-agent cycle cursor enforces `DEFAULT_EVOLUTION_CYCLE_MIN_INTERVAL_MS` (four hours), and each later artifact carries a redacted `lastCycleSummary`. A new signal inside the window remains persisted for the next eligible cycle rather than bypassing the limit.
+
+A per-agent cycle lease (`.fusion/evolution/{agentId}-cycle.lock`, claimed with an exclusive `wx` create) serializes cycles across processes. The in-process lock alone did not stop a CLI run and a dashboard run from reading the same cursor and both passing the window check. The lease is claimed before the cursor is read, is time-boxed so a crashed holder cannot wedge the lane, and yields a `lease-held` skip.
+
+The acceptance path is exercised with fixture cycles plus a production executor finalization signal, approval-route/UI tests, redaction and apply-gate tests, CLI dry-run/apply-gate tests, and cycle tests for Herdr evidence, dedupe, throttling, summaries, cross-process leases, and worse-than-baseline reverts.
+
 ## Future work (not in this MVP)
 
 The MVP is the sealed loop. The following are explicitly out of scope and
 recorded for follow-up work, not for this change:
 
-- Wiring the cycle into a heartbeat scheduler entry.
-- A human operator UI for the `ApprovalRequest` and the artifact preview.
+- Wiring the cycle into a heartbeat scheduler entry (the cycle is manual in
+  MVP-2; `fn evolution run` is the entry point).
+- ~~A human operator UI for the `ApprovalRequest` and the artifact preview.~~
+  Shipped in MVP-2: the existing approval banner and detail surface render the
+  redacted candidate, trial result, and last-cycle summary.
 - Cross-agent transfer learning (the cycle is per-agent).
 - A metric-store seam so the trial can pull historical baseline metrics
   without re-running the baseline command.

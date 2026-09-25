@@ -176,6 +176,8 @@ export interface EvolutionArtifact {
   approval: EvolutionApproval;
   /** Set when the artifact is published (visible to operators). */
   publishedAt?: string;
+  /** Deterministic, redacted summary of the preceding cycle, when one exists. */
+  lastCycleSummary?: string;
   /** Set ONLY by the apply gate after a recorded human approval. */
   appliedAt?: string;
 }
@@ -199,6 +201,9 @@ export function redactEvolutionArtifact(artifact: EvolutionArtifact): EvolutionA
       summary: redactSecrets(artifact.event.summary),
       taskIds: [...artifact.event.taskIds],
     },
+    ...(artifact.lastCycleSummary !== undefined
+      ? { lastCycleSummary: redactSecrets(artifact.lastCycleSummary) }
+      : {}),
     evidence: {
       ...artifact.evidence,
       signals: [...artifact.evidence.signals],

@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createLogger } from "../process/logger.js";
 import { redactSecrets } from "../secrets/redact-secrets.js";
@@ -63,6 +63,8 @@ export interface AppendEvolutionArtifactInput {
   hypothesis: string;
   candidate: EvolutionArtifact["candidate"];
   trial: EvolutionArtifact["trial"];
+  lastCycleSummary?: string;
+  createdAt?: string;
 }
 
 /** Filter options for reading signals. */
@@ -78,6 +80,46 @@ interface AgentLock {
 
 const DEFAULT_SIGNAL_LIMIT = 100;
 const DEFAULT_ARTIFACT_LIMIT = 50;
+
+/**
+ * FNXC:EvolutionSignalDedupe 2026-09-25-11:05:
+ * How far back `createSignal` looks for an identical observation. Replay is a
+ * near-term event (a retried or duplicated finalization), so a recent window catches
+ * it while keeping the per-finalization read bounded as the log grows.
+ */
+const SIGNAL_DEDUPE_WINDOW = 1_000;
+
+/**
+ * FNXC:EvolutionCycleLease 2026-09-25-10:50:
+ * A cycle lease older than this is assumed to belong to a crashed holder. It bounds how
+ * long one wedged process can hold an agent's evolution lane, and is deliberately far
+ * below the 4h cycle interval so a stale lease is always recoverable well before the next
+ * eligible cycle.
+ */
+export const DEFAULT_CYCLE_LEASE_STALE_MS = 15 * 60_000;
+
+/** Outcome of a cross-process cycle claim. */
+export interface EvolutionCycleClaim {
+  claimed: boolean;
+  /** Idempotent release; a no-op when the claim was not won. */
+  released: () => Promise<void>;
+  /** Present when the claim was refused, for audit/diagnostics. */
+  heldBy?: string;
+  lastCycleAt?: string;
+}
+
+function sameEvolutionSignal(left: EvolutionSignal, right: EvolutionSignal): boolean {
+  return left.agentId === right.agentId
+    && left.taskId === right.taskId
+    && left.outcome === right.outcome
+    && left.source === right.source
+    && left.qualityScore === right.qualityScore
+    && left.reviewVerdict === right.reviewVerdict
+    && left.costTokens === right.costTokens
+    && left.durationMs === right.durationMs
+    && left.failureCategory === right.failureCategory
+    && left.humanFeedback === right.humanFeedback;
+}
 
 /**
  * EvolutionStore persists normalized signals and versioned evolution artifacts in append-only
@@ -146,6 +188,19 @@ export class EvolutionStore extends EventEmitter {
         ...(input.humanFeedback ? { humanFeedback: redactSecrets(input.humanFeedback) } : {}),
       };
 
+      // Identical observations are idempotent at the durable boundary. The
+      // generated id/timestamp are intentionally excluded from the comparison;
+      // replaying the same task finalization must not grow the signal history.
+      //
+      // FNXC:EvolutionSignalDedupe 2026-09-25-11:05:
+      // The dedupe window is bounded to the most recent SIGNAL_DEDUPE_WINDOW entries
+      // rather than the whole file. A replay is a near-term event, so scanning all
+      // history on every task finalization would grow the read cost without making
+      // the guarantee stronger.
+      const existing = await this.getSignals(input.agentId, {}, SIGNAL_DEDUPE_WINDOW);
+      const duplicate = existing.find((candidate) => sameEvolutionSignal(candidate, signal));
+      if (duplicate) return duplicate;
+
       await writeFile(this.signalsPath(input.agentId), `${JSON.stringify(signal)}\n`, { flag: "a" });
 
       this.emit("evolution:signal-created", signal);
@@ -212,7 +267,7 @@ export class EvolutionStore extends EventEmitter {
         id: `evolution-artifact-${randomUUID().slice(0, 8)}`,
         version: nextVersion,
         agentId: input.agentId,
-        createdAt: new Date().toISOString(),
+        createdAt: input.createdAt ?? new Date().toISOString(),
         trigger: input.trigger,
         event: input.event,
         evidence: input.evidence,
@@ -220,6 +275,9 @@ export class EvolutionStore extends EventEmitter {
         candidate: input.candidate,
         trial: input.trial,
         approval: { status: "not-requested" },
+        ...(input.lastCycleSummary !== undefined
+          ? { lastCycleSummary: input.lastCycleSummary }
+          : {}),
       };
       const artifact = redactEvolutionArtifact(draft);
 
@@ -227,6 +285,28 @@ export class EvolutionStore extends EventEmitter {
 
       this.emit("evolution:artifact-created", artifact);
       return artifact;
+    });
+  }
+
+  /**
+   * Return the newest signal ids already persisted for an agent. The cycle uses
+   * this durable read to make signal dedupe survive process restarts instead of
+   * relying only on its in-memory replay set.
+   */
+  async getSeenSignalIds(agentId: string): Promise<readonly string[]> {
+    return (await this.getCycleCursor(agentId))?.seenSignalIds ?? [];
+  }
+
+  /** Return the newest artifact's creation time, if this agent has one. */
+  async getLastCycleAt(agentId: string): Promise<string | undefined> {
+    return (await this.getLatestArtifact(agentId))?.createdAt;
+  }
+
+  /** Delete the cycle cursor without touching signals or artifacts. */
+  async clearCycleCursor(agentId: string): Promise<void> {
+    if (!agentId?.trim()) return;
+    await this.withLock(agentId, async () => {
+      await this.unlinkIfExists(this.cyclePath(agentId));
     });
   }
 
@@ -299,7 +379,100 @@ export class EvolutionStore extends EventEmitter {
     await this.withLock(agentId, async () => {
       await this.unlinkIfExists(this.signalsPath(agentId));
       await this.unlinkIfExists(this.artifactsPath(agentId));
+      await this.unlinkIfExists(this.cyclePath(agentId));
     });
+  }
+
+  /**
+   * FNXC:EvolutionCycleLease 2026-09-25-10:50:
+   * Cross-process claim for one cycle. `withLock` is per-process, so a CLI run and a
+   * dashboard/heartbeat run could both read the same cursor, both pass the 4h window
+   * check, and both append an artifact for the same agent. An exclusive `wx` create is
+   * the atomic primitive the filesystem already gives us, so the claim serializes
+   * ACROSS processes without inventing a second locking service.
+   *
+   * The lease is intentionally time-boxed and self-releasing: a crashed holder must
+   * never wedge the agent's evolution lane permanently. A lease older than
+   * `staleAfterMs` is treated as abandoned and taken over.
+   */
+  async claimCycle(agentId: string, options: { holder: string; nowMs: number; staleAfterMs?: number }): Promise<EvolutionCycleClaim> {
+    const empty = { claimed: false as const, released: async () => {} };
+    if (!agentId?.trim()) return empty;
+    const staleAfterMs = options.staleAfterMs ?? DEFAULT_CYCLE_LEASE_STALE_MS;
+    await mkdir(this.evolutionDir, { recursive: true });
+    const path = this.cycleLeasePath(agentId);
+    const payload = `${JSON.stringify({ holder: options.holder, claimedAtMs: options.nowMs })}\n`;
+
+    // Only one process can win the exclusive create; everyone else observes EEXIST.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await writeFile(path, payload, { flag: "wx" });
+        let released = false;
+        return {
+          claimed: true,
+          released: async () => {
+            if (released) return;
+            released = true;
+            await this.unlinkIfExists(path);
+          },
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const holder = await this.readCycleLease(path);
+        const age = holder ? options.nowMs - holder.claimedAtMs : Number.POSITIVE_INFINITY;
+        if (attempt === 0 && (!holder || age > staleAfterMs)) {
+          // Abandoned lease from a crashed holder: break it once and retry the claim.
+          await this.unlinkIfExists(path);
+          continue;
+        }
+        return { claimed: false, released: empty.released, lastCycleAt: undefined, heldBy: holder?.holder };
+      }
+    }
+    return empty;
+  }
+
+  private cycleLeasePath(agentId: string): string {
+    return join(this.evolutionDir, `${agentId}-cycle.lock`);
+  }
+
+  private async readCycleLease(path: string): Promise<{ holder: string; claimedAtMs: number } | null> {
+    try {
+      const parsed = JSON.parse(await readFile(path, "utf8")) as { holder?: unknown; claimedAtMs?: unknown };
+      if (typeof parsed.holder !== "string" || typeof parsed.claimedAtMs !== "number") return null;
+      return { holder: parsed.holder, claimedAtMs: parsed.claimedAtMs };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      // A truncated/invalid lease reads as absent so a crash mid-write cannot wedge the lane.
+      return null;
+    }
+  }
+
+  /**
+   * Atomically replace the cycle cursor after a successful cycle. This is a
+   * small metadata file rather than a second signal/artifact history, so the
+   * append-only domain records remain unchanged.
+   */
+  async markCycle(agentId: string, input: { ranAt: string; seenSignalIds: readonly string[] }): Promise<void> {
+    if (!agentId?.trim()) return;
+    await this.withLock(agentId, async () => {
+      await mkdir(this.evolutionDir, { recursive: true });
+      const path = this.cyclePath(agentId);
+      const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify({ ranAt: input.ranAt, seenSignalIds: [...input.seenSignalIds] })}\n`, { flag: "wx" });
+      await rename(temporary, path);
+    });
+  }
+
+  async getCycleCursor(agentId: string): Promise<{ ranAt: string; seenSignalIds: string[] } | null> {
+    if (!agentId?.trim()) return null;
+    try {
+      const parsed = JSON.parse(await readFile(this.cyclePath(agentId), "utf8")) as { ranAt?: unknown; seenSignalIds?: unknown };
+      if (typeof parsed.ranAt !== "string") return null;
+      return { ranAt: parsed.ranAt, seenSignalIds: Array.isArray(parsed.seenSignalIds) ? parsed.seenSignalIds.filter((id): id is string => typeof id === "string") : [] };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   }
 
   private signalsPath(agentId: string): string {
@@ -308,6 +481,10 @@ export class EvolutionStore extends EventEmitter {
 
   private artifactsPath(agentId: string): string {
     return join(this.evolutionDir, `${agentId}-evolution.jsonl`);
+  }
+
+  private cyclePath(agentId: string): string {
+    return join(this.evolutionDir, `${agentId}-cycle.json`);
   }
 
   private async getArtifactsUnlocked(agentId: string): Promise<EvolutionArtifact[]> {

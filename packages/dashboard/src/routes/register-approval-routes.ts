@@ -122,6 +122,86 @@ export function registerSandboxProvisioningExecutor(fn: ((request: ApprovalReque
   sandboxProvisioningExecutor = fn;
 }
 
+/*
+FNXC:EvolutionApprovalBridge 2026-09-25-10:30:
+The Evolution cycle creates its approval request with `targetAction.context.source ===
+"evolution-cycle"`, but the apply-gate reads the DECISION from the persisted
+EvolutionArtifact (`artifact.approval.status`). Without this bridge a human approving
+the request left the artifact at `pending` forever, so the single sanctioned writer
+could never apply anything the operator had actually approved. Mirroring the decision
+here keeps the approval store authoritative and the artifact a faithful projection of
+it. Only ids/counts/fixed outcomes are recorded; no candidate prose or diff.
+*/
+async function mirrorEvolutionApprovalDecision(params: {
+  scopedStore: import("@fusion/core").TaskStore;
+  request: ApprovalRequest;
+  decision: "approved" | "denied";
+  actor: ApprovalRequestActorSnapshot;
+  runtimeLogger: ApiRoutesContext["runtimeLogger"];
+}): Promise<void> {
+  const { scopedStore, request, decision, actor } = params;
+  const context = request.targetAction.context;
+  if (request.targetAction.category !== "task_agent_mutation") return;
+  if (!context || context.source !== "evolution-cycle") return;
+
+  const agentId = typeof context.agentId === "string" ? context.agentId.trim() : "";
+  const artifactVersion = typeof context.artifactVersion === "number" ? context.artifactVersion : null;
+  const artifactId = typeof context.artifactId === "string" ? context.artifactId : "";
+  if (!agentId || artifactVersion === null) {
+    params.runtimeLogger.warn("Evolution approval decision missing agentId/artifactVersion context", {
+      approvalRequestId: request.id,
+    });
+    return;
+  }
+
+  try {
+    const { EvolutionStore } = await import("@fusion/core");
+    const store = new EvolutionStore({ rootDir: scopedStore.getFusionDir() });
+    await store.init();
+    const marked = await store.markApprovalState(agentId, artifactVersion, {
+      status: decision === "approved" ? "approved" : "rejected",
+      approvalRequestId: request.id,
+      decidedBy: actor.actorId,
+      ...(request.decidedAt ? { decidedAt: request.decidedAt } : {}),
+    });
+    if (!marked || marked.approval.status === "not-requested") {
+      params.runtimeLogger.warn("Evolution approval decision did not match a pending artifact", {
+        approvalRequestId: request.id,
+        agentId,
+        artifactId,
+        artifactVersion,
+      });
+      return;
+    }
+    void scopedStore.recordRunAuditEvent({
+      // "database": this row is a durable store-backed approval projection, not a
+      // git/filesystem/sandbox mutation. RunAuditDomain has no evolution member.
+      domain: "database",
+      mutationType: `evolution:approval-${decision}`,
+      target: marked.id,
+      agentId,
+      runId: request.runId ?? request.id,
+      ...(request.taskId ? { taskId: request.taskId } : {}),
+      metadata: {
+        approvalRequestId: request.id,
+        artifactId: marked.id,
+        artifactVersion: marked.version,
+        outcome: decision,
+        decidedBy: actor.actorId,
+      },
+    });
+  } catch (error) {
+    // Never fail the operator's decision on a projection failure: the approval row is
+    // already durable and authoritative. Surface the failure so it is not silent.
+    params.runtimeLogger.warn("Evolution artifact approval projection failed", {
+      approvalRequestId: request.id,
+      agentId,
+      artifactVersion,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 function emitProvisioningDecisionAudit(params: {
   scopedStore: import("@fusion/core").TaskStore;
   request: ApprovalRequest;
@@ -400,8 +480,7 @@ export function registerApprovalRoutes(ctx: ApiRoutesContext): void {
       a control that lies. Refuse 409 BEFORE decide() so the request stays pending until
       a server with a real executor handles it.
       */
-      if (
-        body.decision === "approve"
+      if (body.decision === "approve"
         && existing.targetAction.category === "sandbox_provisioning"
         && !sandboxProvisioningExecutor
       ) {
@@ -428,6 +507,14 @@ export function registerApprovalRoutes(ctx: ApiRoutesContext): void {
         }
         throw error;
       }
+
+      await mirrorEvolutionApprovalDecision({
+        scopedStore,
+        request: updated,
+        decision: body.decision === "approve" ? "approved" : "denied",
+        actor,
+        runtimeLogger,
+      });
 
       if (updated.targetAction.category === "agent_provisioning") {
         if (body.decision === "approve") {

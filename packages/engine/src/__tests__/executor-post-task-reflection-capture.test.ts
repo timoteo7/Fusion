@@ -132,4 +132,94 @@ describe("TaskExecutor post-task reflection capture (FN-7528)", () => {
 
     expect(onComplete).toHaveBeenCalledWith(task);
   });
+
+  /**
+   * FNXC:EvolutionSignalCapture 2026-09-25-10:00:
+   * GDPR-075 finalization seam proof. A real executor completion callback must
+   * create one redacted signal while the configured onComplete callback remains
+   * synchronous and unaffected.
+   */
+  it("captures one redacted Evolution signal from production finalization", async () => {
+    const store = createMockStore();
+    store.getSettings.mockResolvedValue({ reflectionEnabled: false, memoryEnabled: false });
+    const createSignal = vi.fn(async (input) => ({
+      id: "evolution-signal-1",
+      timestamp: "2026-09-25T09:00:00.000Z",
+      ...input,
+    }));
+    const executor = new TaskExecutor(store as any, "/tmp/test", {
+      agentStore: { getAgent: vi.fn(async () => ({ id: "agent-1", name: "coder" })) } as any,
+      evolutionStore: { createSignal },
+      onComplete: vi.fn(),
+    });
+    (executor as any).taskStartTimes.set("task-1", 250);
+
+    (executor as any).signalTaskComplete(makeTask({
+      id: "task-1",
+      description: "Never persist this prompt",
+      status: "in-progress",
+      column: "todo",
+      tokenUsage: { inputTokens: 5, outputTokens: 3 },
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(createSignal).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: "agent-1",
+      taskId: "task-1",
+      outcome: "success",
+      source: "execution",
+      costTokens: 8,
+    }));
+    expect(JSON.stringify(createSignal.mock.calls)).not.toContain("Never persist");
+  });
+
+  /**
+   * FNXC:EvolutionSignalCapture 2026-09-25-10:20:
+   * Regression: the completion seam deletes its taskStartTimes entry synchronously,
+   * right after signalTaskComplete returns. A capture that read the start time after
+   * `await agentStore.getAgent(...)` therefore always resolved to undefined and every
+   * production signal silently lost durationMs. Assert the wiring produces a real
+   * duration, which fails if the read moves back behind the await.
+   */
+  it("carries the real task duration into the production signal", async () => {
+    const store = createMockStore();
+    store.getSettings.mockResolvedValue({ reflectionEnabled: false, memoryEnabled: false });
+    const createSignal = vi.fn(async (input) => ({
+      id: "evolution-signal-2",
+      timestamp: "2026-09-25T09:00:00.000Z",
+      ...input,
+    }));
+    const executor = new TaskExecutor(store as any, "/tmp/test", {
+      agentStore: { getAgent: vi.fn(async () => ({ id: "agent-1", name: "coder" })) } as any,
+      evolutionStore: { createSignal },
+      onComplete: vi.fn(),
+    });
+    // Start time far enough in the past that the projected duration is unmistakable.
+    (executor as any).taskStartTimes.set("task-duration", Date.now() - 90_000);
+
+    (executor as any).signalTaskComplete(makeTask({
+      id: "task-duration",
+      status: "in-progress",
+      column: "todo",
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const captured = createSignal.mock.calls[0]?.[0] as { durationMs?: number } | undefined;
+    expect(captured?.durationMs).toBeGreaterThan(89_000);
+  });
+
+  it("retains completion when Evolution signal projection fails", async () => {
+    const store = createMockStore();
+    store.getSettings.mockResolvedValue({ reflectionEnabled: false, memoryEnabled: false });
+    const onComplete = vi.fn();
+    const executor = new TaskExecutor(store as any, "/tmp/test", {
+      agentStore: { getAgent: vi.fn(async () => null) } as any,
+      evolutionStore: { createSignal: vi.fn(async () => { throw new Error("disk unavailable"); }) },
+      onComplete,
+    });
+
+    (executor as any).signalTaskComplete(makeTask({ id: "task-2" }));
+
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
 });

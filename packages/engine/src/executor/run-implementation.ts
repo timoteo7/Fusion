@@ -256,6 +256,7 @@ export type RunImplementationDeps = {
   branchConflictErrorCount: Map<string, number>;
   pausedAborted: Set<string>;
   userCanceledTaskIds: Set<string>;
+  taskStartTimes?: Map<string, number>;
   tokenCapDetector: TokenCapDetector;
   approvalRequestStore: ApprovalRequestStore;
   activeSessions: Map<string, ActiveExecutorSessionState>;
@@ -1177,6 +1178,7 @@ export async function runImplementation(
       executorLog.debug(`${task.id}: executor runtime env injected (${injected.pathEntryCount} PATH entries, ${injected.injectedKeyCount} env keys)`);
 
       deps.options.onStart?.(task, worktreePath);
+      deps.taskStartTimes?.set(task.id, Date.now());
 
       const detail = await deps.store.getTask(task.id);
       executorLog.debug(`${task.id}: fetched task detail (${detail.steps.length} steps, prompt length=${detail.prompt?.length ?? 0})`);

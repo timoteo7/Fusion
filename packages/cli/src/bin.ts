@@ -164,6 +164,7 @@ async function loadCommandHandlers() {
   const { runComputer } = await import("./commands/computer.js");
   const { runResearchCreate, runResearchList, runResearchShow, runResearchExport, runResearchCancel, runResearchRetry } = await import("./commands/research.js");
   const { runExperimentFinalize } = await import("./commands/experiment-finalize.js");
+  const { runEvolutionRun } = await import("./commands/evolution.js");
   const { dispatchUpdateCliArgs } = await import("./commands/update.js");
 
   return {
@@ -308,6 +309,7 @@ async function loadCommandHandlers() {
     runResearchCancel,
     runResearchRetry,
     runExperimentFinalize,
+    runEvolutionRun,
     dispatchUpdateCliArgs,
     runChatInteractive,
     parseChatCliArgs,
@@ -367,6 +369,10 @@ Usage:
   fn task retry <id>                  Retry a failed task (clears error, moves to todo)
   fn task import <owner/repo> [opts]  Import GitHub issues as tasks
   fn task import-gitlab <project-or-group> [opts] Import GitLab project issues, group issues, or merge requests
+
+Evolution:
+  fn evolution run [agent-id] [--apply] [--json] [--project <id|name>]
+                                      Run one redacted evolution cycle; dry-run is the default
 
 PR:
   fn pr create <task-id> [--title <title>] [--base <branch>] [--body <body>] [--draft] [--no-ai] [--reviewer <login>]
@@ -849,6 +855,7 @@ async function main() {
     runResearchCancel,
     runResearchRetry,
     runExperimentFinalize,
+    runEvolutionRun,
     dispatchUpdateCliArgs,
     runChatInteractive,
     parseChatCliArgs,
@@ -1313,6 +1320,24 @@ async function main() {
             console.error(`Unknown subcommand: research ${subcommand || ""}`);
             console.log("Try: fn research create | list | show | export | cancel | retry");
             process.exit(1);
+        }
+        break;
+      }
+
+      case "evolution": {
+        const subcommand = args[1];
+        if (subcommand !== "run") {
+          console.error(`Unknown subcommand: evolution ${subcommand || ""}`);
+          console.log("Try: fn evolution run [agent-id]");
+          process.exit(1);
+        }
+        const result = await runEvolutionRun({
+          agentId: args[2],
+          apply: args.includes("--apply"),
+          projectName,
+        });
+        if (args.includes("--json")) {
+          console.log(JSON.stringify(result, null, 2));
         }
         break;
       }

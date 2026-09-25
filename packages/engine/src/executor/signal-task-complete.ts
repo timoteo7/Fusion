@@ -13,6 +13,10 @@
 import type { Task, TaskStore } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import { triggerTaskMemoryCapture } from "./memory-capture.js";
+import {
+  createTaskEvolutionSignalCapture,
+  type EvolutionSignalCaptureStore,
+} from "../agents/evolution-signal-capture.js";
 
 export type SignalTaskCompleteDeps = {
   store: TaskStore;
@@ -24,6 +28,13 @@ export type SignalTaskCompleteDeps = {
   reflectionService?: {
     captureTaskPerformance: (agentId: string, taskId: string) => Promise<unknown>;
   } | null;
+  agentStore?: {
+    getAgent: (agentId: string) => Promise<unknown | null>;
+  } | null;
+  evolutionStore?: EvolutionSignalCaptureStore | null;
+  getTaskStartTime?: (taskId: string) => number | undefined;
+  getEvolutionSignalCapture?: () => ReturnType<typeof createTaskEvolutionSignalCapture> | undefined;
+  setEvolutionSignalCapture?: (capture: ReturnType<typeof createTaskEvolutionSignalCapture>) => void;
   onComplete?: (task: Task) => void;
 };
 
@@ -37,7 +48,47 @@ export function signalTaskComplete(deps: SignalTaskCompleteDeps, task: Task): vo
   memory-capture.ts).
   */
   triggerTaskMemoryCapture(deps, task, "completion");
+  triggerEvolutionSignalCapture(deps, task);
   deps.onComplete?.(task);
+}
+
+export function triggerEvolutionSignalCapture(
+  deps: SignalTaskCompleteDeps,
+  task: Task,
+): void {
+  const agentId = task.assignedAgentId?.trim();
+  if (!agentId || !deps.evolutionStore || !deps.agentStore) return;
+  const capture = deps.getEvolutionSignalCapture?.()
+    ?? createTaskEvolutionSignalCapture({
+      store: deps.evolutionStore,
+      onError: (error) => executorLog.warn(
+        `${task.id}: Evolution signal capture failed (best-effort, non-blocking): ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    });
+  deps.setEvolutionSignalCapture?.(capture);
+
+  /*
+  FNXC:EvolutionSignalCapture 2026-09-25-10:20:
+  Read the start time SYNCHRONOUSLY, before the first await. The completion seam deletes
+  its taskStartTimes entry immediately after this call returns, so a read taken after
+  `await agentStore.getAgent(...)` always resolved to undefined and every production
+  signal silently lost its durationMs.
+  */
+  const startedAtMs = deps.getTaskStartTime?.(task.id);
+
+  void (async () => {
+    const agent = await deps.agentStore?.getAgent(agentId);
+    if (!agent) return;
+    await capture({
+      task,
+      agent: agent as import("@fusion/core").Agent,
+      ...(startedAtMs !== undefined ? { startedAtMs } : {}),
+    });
+  })().catch((error) => {
+    executorLog.warn(
+      `${task.id}: Evolution signal projection failed (best-effort, non-blocking): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
 }
 
 export function triggerPostTaskReflectionCapture(

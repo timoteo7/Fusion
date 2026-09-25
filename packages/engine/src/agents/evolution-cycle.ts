@@ -25,14 +25,20 @@ import { createHash } from "node:crypto";
 import { createLogger } from "../logger.js";
 import { emitBoundedRunAudit } from "../util/emit-bounded-run-audit.js";
 import type {
+  ApprovalRequest,
+  ApprovalRequestActorSnapshot,
+  ApprovalRequestCreateInput,
   EvolutionArtifact,
   EvolutionCandidate,
   EvolutionSignal,
   EvolutionStore,
   EvolutionTrial,
 } from "@fusion/core";
+import type { HermesAdapter } from "./hermes-adapter.js";
+import type { HerdrAdapter } from "./herdr-adapter.js";
 import {
   EvolutionTrialService,
+  DEFAULT_EVOLUTION_TRIAL_CRITERIA,
   computeEvolutionAuditId,
   type EvolutionTrialResult,
   type RunChecksFn,
@@ -66,8 +72,8 @@ export interface RunEvolutionCycleInput {
 
 /** Outcome of a cycle run. */
 export type RunEvolutionCycleResult =
-  | { outcome: "ran"; artifact: EvolutionArtifact; trial: EvolutionTrialResult }
-  | { outcome: "skipped"; reason: "no-signals" | "throttled" | "no-cluster"; lastCycleAt?: string }
+  | { outcome: "ran"; artifact: EvolutionArtifact; trial: EvolutionTrialResult; approvalRequestId?: string }
+  | { outcome: "skipped"; reason: "no-signals" | "throttled" | "no-cluster" | "no-candidate" | "lease-held"; lastCycleAt?: string }
   | { outcome: "refused"; reason: string };
 
 export interface EvolutionCycleOptions {
@@ -83,6 +89,16 @@ export interface EvolutionCycleOptions {
    * hook lets tests inject a deterministic proposer.
    */
   proposeCandidate?: (cluster: EvolutionSignalCluster) => EvolutionCandidate;
+  /** Optional Hermes proposer. A refusal is a normal skipped cycle, never a throw. */
+  hermesAdapter?: HermesAdapter;
+  /** Optional read-only Herdr evidence collector. Refusal leaves evidence absent. */
+  herdrAdapter?: HerdrAdapter;
+  /** Optional approval request sink for a keep candidate. */
+  approvalStore?: {
+    create(input: ApprovalRequestCreateInput): Promise<ApprovalRequest>;
+  };
+  /** Requester snapshot used for the evolution approval. */
+  approvalRequester?: ApprovalRequestActorSnapshot;
   /** Optional clock for tests. */
   now?: () => Date;
 }
@@ -120,6 +136,10 @@ export class EvolutionCycle {
   private readonly auditHost: EvolutionCycleOptions["auditHost"];
   private readonly minIntervalMs: number;
   private readonly proposeCandidate: (cluster: EvolutionSignalCluster) => EvolutionCandidate;
+  private readonly hermesAdapter?: HermesAdapter;
+  private readonly herdrAdapter?: HerdrAdapter;
+  private readonly approvalStore?: EvolutionCycleOptions["approvalStore"];
+  private readonly approvalRequester?: ApprovalRequestActorSnapshot;
   private readonly now: () => Date;
   private readonly lastCycleAt: Map<string, string> = new Map();
   private readonly lastSeenSignalIds: Map<string, Set<string>> = new Map();
@@ -132,6 +152,10 @@ export class EvolutionCycle {
     this.minIntervalMs = options.minIntervalMs ?? DEFAULT_EVOLUTION_CYCLE_MIN_INTERVAL_MS;
     this.proposeCandidate = options.proposeCandidate ?? defaultProposeCandidate;
     this.now = options.now ?? (() => new Date());
+    this.hermesAdapter = options.hermesAdapter;
+    this.herdrAdapter = options.herdrAdapter;
+    this.approvalStore = options.approvalStore;
+    this.approvalRequester = options.approvalRequester;
     this.trialService = new EvolutionTrialService({
       runChecks: this.runChecks,
       audit: (event) => this.emitCycleAudit(event),
@@ -142,6 +166,11 @@ export class EvolutionCycle {
   /** Read-only peek at the throttle map. Tests use it to assert idempotency. */
   getLastCycleAt(agentId: string): string | undefined {
     return this.lastCycleAt.get(agentId);
+  }
+
+  /** Read the durable cursor used by the next process to enforce the interval. */
+  async getDurableCycleCursor(agentId: string): Promise<{ ranAt: string; seenSignalIds: string[] } | null> {
+    return this.store.getCycleCursor(agentId);
   }
 
   /** Read-only peek at the seen-signal-ids set. Tests use it to assert idempotency. */
@@ -155,16 +184,43 @@ export class EvolutionCycle {
     if (!agentId?.trim()) {
       return { outcome: "refused", reason: "agentId required" };
     }
+    /*
+    FNXC:EvolutionCycleLease 2026-09-25-10:50:
+    Claim the agent's cycle BEFORE the throttle read, not after. Reading the cursor
+    first and claiming afterwards re-opens the exact race the lease exists to close:
+    two processes can read the same cursor, both pass the window check, and then both
+    claim in turn. Claiming first makes the read-then-write sequence atomic across
+    processes, so a concurrent operator run is skipped as `lease-held` instead of
+    double-appending an artifact for the same agent.
+    */
+    const claim = await this.store.claimCycle(agentId, {
+      holder: `evolution-cycle:${process.pid}`,
+      nowMs: this.now().getTime(),
+    });
+    if (!claim.claimed) {
+      return { outcome: "skipped", reason: "lease-held" };
+    }
+    try {
+      return await this.runCycleClaimed(input, agentId);
+    } finally {
+      await claim.released();
+    }
+  }
+
+  private async runCycleClaimed(input: RunEvolutionCycleInput, agentId: string): Promise<RunEvolutionCycleResult> {
     const now = this.now();
     const nowIso = now.toISOString();
-    const lastCycleAt = this.lastCycleAt.get(agentId);
+    const lastCycleAt = this.lastCycleAt.get(agentId)
+      ?? (await this.store.getCycleCursor(agentId))?.ranAt
+      ?? await this.store.getLastCycleAt(agentId);
     const signals = await this.store.getSignals(agentId);
+    const durableSeen = new Set((await this.store.getCycleCursor(agentId))?.seenSignalIds ?? []);
 
-    // Idempotency rule: skip if (interval not elapsed) AND (no new signals since last cycle).
+    // Idempotency rule: a strict interval gate applies to every trigger. New
+    // signals remain persisted for the next eligible cycle; they never bypass
+    // the operator-visible rate limit.
     const intervalOk = !lastCycleAt || (now.getTime() - Date.parse(lastCycleAt)) >= this.minIntervalMs;
-    const seenIds = this.lastSeenSignalIds.get(agentId) ?? new Set<string>();
-    const hasNewSignals = signals.length > 0 && signals.some((s) => !seenIds.has(s.id));
-    if (!intervalOk && !hasNewSignals) {
+    if (!intervalOk) {
       return { outcome: "skipped", reason: "throttled", lastCycleAt };
     }
     if (signals.length === 0) {
@@ -172,6 +228,10 @@ export class EvolutionCycle {
       return { outcome: "skipped", reason: "no-signals", lastCycleAt: nowIso };
     }
 
+    const seenIds = new Set<string>([
+      ...durableSeen,
+      ...(this.lastSeenSignalIds.get(agentId) ?? []),
+    ]);
     // Update the seen-id set so the next tick can tell which signals are new.
     const nextSeen = new Set<string>(seenIds);
     for (const s of signals) nextSeen.add(s.id);
@@ -183,13 +243,38 @@ export class EvolutionCycle {
       return { outcome: "skipped", reason: "no-cluster", lastCycleAt: nowIso };
     }
 
-    const candidate = this.proposeCandidate(cluster);
+    let candidate: EvolutionCandidate;
+    if (this.hermesAdapter) {
+      const proposed = await this.hermesAdapter({
+        source: "cycle",
+        agentId,
+        clusterId: cluster.id,
+        signals: cluster.signals.map((signal) => signal.id),
+      });
+      if (!proposed) {
+        this.lastCycleAt.set(agentId, nowIso);
+        return { outcome: "skipped", reason: "no-candidate", lastCycleAt: nowIso };
+      }
+      candidate = proposed.candidate;
+    } else {
+      candidate = this.proposeCandidate(cluster);
+    }
+
+    let herdrEvidence;
+    if (this.herdrAdapter) {
+      herdrEvidence = await this.herdrAdapter({ agentId });
+    }
+    const previousArtifact = await this.store.getLatestArtifact(agentId);
     const artifact = buildArtifact({
       agentId,
       candidate,
       cluster,
       nowIso,
       trigger: input.trigger ?? "periodic",
+      ...(herdrEvidence ? { herdrEvidence } : {}),
+      ...(previousArtifact ? {
+        lastCycleSummary: `previous cycle ${previousArtifact.id} v${previousArtifact.version}: ${previousArtifact.trial.decision}`,
+      } : {}),
     });
 
     // Run the trial in memory first, then persist the artifact with the trial filled in.
@@ -213,9 +298,57 @@ export class EvolutionCycle {
       hypothesis: finalArtifact.hypothesis,
       candidate: finalArtifact.candidate,
       trial: finalArtifact.trial,
+      createdAt: finalArtifact.createdAt,
+      ...(finalArtifact.lastCycleSummary !== undefined
+        ? { lastCycleSummary: finalArtifact.lastCycleSummary }
+        : {}),
     });
 
+    let approvalRequestId: string | undefined;
+    if (this.approvalStore && finalArtifact.trial.decision === "keep") {
+      const request = await this.approvalStore.create({
+        requester: this.approvalRequester ?? {
+          actorId: `evolution:${agentId}`,
+          actorType: "system",
+          actorName: "Evolution cycle",
+        },
+        targetAction: {
+          category: "task_agent_mutation",
+          action: "apply",
+          summary: `Apply reviewed evolution candidate for ${agentId}`,
+          resourceType: "evolution-artifact",
+          resourceId: persisted.id,
+          context: {
+            source: "evolution-cycle",
+            artifactId: persisted.id,
+            artifactVersion: persisted.version,
+            agentId,
+            candidateChecksum: persisted.candidate.checksum,
+            candidateSummary: persisted.candidate.changeSummary,
+            candidateTarget: persisted.candidate.target,
+            proposedDiffPreview: persisted.candidate.proposedDiff.slice(0, 8_000),
+            trialDecision: persisted.trial.decision,
+            trialRationale: persisted.trial.rationale,
+            baselinePassed: persisted.trial.baselineRun.passed,
+            candidatePassed: persisted.trial.candidateRun.passed,
+            satisfiedCriteria: persisted.trial.decisions,
+            unsatisfiedCriteria: DEFAULT_EVOLUTION_TRIAL_CRITERIA.filter((criterion) => !persisted.trial.decisions.includes(criterion)),
+            ...(persisted.lastCycleSummary ? { lastCycleSummary: persisted.lastCycleSummary } : {}),
+          },
+        },
+      });
+      approvalRequestId = request.id;
+      const marked = await this.store.markApprovalState(agentId, persisted.version, {
+        status: "pending",
+        approvalRequestId: request.id,
+      });
+      if (marked) {
+        Object.assign(persisted, marked);
+      }
+    }
+
     this.lastCycleAt.set(agentId, nowIso);
+    await this.store.markCycle(agentId, { ranAt: nowIso, seenSignalIds: [...nextSeen] });
     evolutionCycleLog.log(
       `cycle ${trialResult.trial.decision} for ${agentId} (cluster=${cluster.id}, signals=${cluster.signals.length})`,
     );
@@ -230,7 +363,12 @@ export class EvolutionCycle {
       unsatisfied: trialResult.audit.unsatisfiedCriteria.length,
     });
 
-    return { outcome: "ran", artifact: persisted, trial: trialResult };
+    return {
+      outcome: "ran",
+      artifact: persisted,
+      trial: trialResult,
+      ...(approvalRequestId ? { approvalRequestId } : {}),
+    };
   }
 
   private async emitCycleAudit(event: import("@fusion/core").EvolutionAuditEvent): Promise<void> {
@@ -288,11 +426,14 @@ interface BuildArtifactParams {
   cluster: EvolutionSignalCluster;
   nowIso: string;
   trigger: EvolutionArtifact["trigger"];
+  herdrEvidence?: import("@fusion/core").HerdrEvidence;
+  lastCycleSummary?: string;
 }
 
 function buildArtifact(params: BuildArtifactParams): EvolutionArtifact {
   const evidence = {
     signals: params.cluster.signals.map((s) => s.id),
+    ...(params.herdrEvidence ? { herdr: params.herdrEvidence } : {}),
   };
   const taskIds = unique(
     params.cluster.signals.map((s) => s.taskId).filter((id): id is string => typeof id === "string"),
@@ -321,6 +462,9 @@ function buildArtifact(params: BuildArtifactParams): EvolutionArtifact {
     candidate: params.candidate,
     trial: placeholderTrial,
     approval: { status: "not-requested" },
+    ...(params.lastCycleSummary !== undefined
+      ? { lastCycleSummary: params.lastCycleSummary }
+      : {}),
   };
 }
 

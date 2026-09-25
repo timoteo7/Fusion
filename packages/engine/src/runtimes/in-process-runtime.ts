@@ -22,6 +22,7 @@ import type {
 import {
   AsyncCentralClaimStore,
   ChatStore,
+  EvolutionStore,
   /* FNXC:HumanMergeApproval 2026-09-17-22:32: FN-514 delivery-hold release identity. */
   describeHumanMergeHoldSignature,
   isEphemeralAgent,
@@ -1788,6 +1789,23 @@ export class InProcessRuntime
       Resolve the project-scoped store once at this composition boundary and share it with both
       consumers; omitting either dependency silently degrades that path to the defensive no-store skip.
       */
+      /*
+      FNXC:EvolutionPipeline 2026-09-25-10:00:
+      GDPR-075 wires the existing finalization seam to the real EvolutionStore. Failure to
+      initialize optional evolution telemetry must not prevent task execution from starting.
+      */
+      let evolutionStore: EvolutionStore | undefined;
+      try {
+        evolutionStore = new EvolutionStore({ rootDir: this.config.workingDirectory });
+        await evolutionStore.init();
+        runtimeLog.log("EvolutionStore initialized for production signal capture");
+      } catch (evolutionStoreErr) {
+        runtimeLog.warn(
+          "EvolutionStore initialization failed (task execution continues without Evolution signals):",
+          evolutionStoreErr instanceof Error ? evolutionStoreErr.message : evolutionStoreErr,
+        );
+      }
+
       const secretsStore = await this.taskStore.getSecretsStore();
       const executorOptions: TaskExecutorOptions = {
         /*
@@ -1810,6 +1828,7 @@ export class InProcessRuntime
         receive — an executor without it can no longer run any classified node at all.
         */
         agentStore: this.agentStore,
+        evolutionStore,
         usageLimitPauser: this.usageLimitPauser,
         credentialRotator: this.credentialRotator,
         stuckTaskDetector: this.stuckTaskDetector,

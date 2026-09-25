@@ -49,6 +49,32 @@ describe("GatedActionApprovalDetails", () => {
     expect(screen.getByText(/"status": "done"/)).toBeInTheDocument();
   });
 
+  it("renders the redacted Evolution candidate and trial context", () => {
+    const targetAction: ApprovalRequestDetail["targetAction"] = {
+      category: "task_agent_mutation",
+      action: "apply",
+      summary: "Apply reviewed evolution candidate",
+      resourceType: "evolution-artifact",
+      resourceId: "artifact-1",
+      context: {
+        source: "evolution-cycle",
+        candidateSummary: "Improve task completion evidence",
+        candidateTarget: "agent/agent-1/instructions.md",
+        proposedDiffPreview: "# redacted diff",
+        trialDecision: "keep",
+        trialRationale: "3/3 criteria satisfied",
+        lastCycleSummary: "previous cycle: keep",
+      },
+    };
+
+    render(<GatedActionApprovalDetails targetAction={targetAction} />);
+
+    expect(screen.getByText("Evolution candidate")).toBeInTheDocument();
+    expect(screen.getByText("Improve task completion evidence")).toBeInTheDocument();
+    expect(screen.getByText("keep")).toBeInTheDocument();
+    expect(screen.getByText("previous cycle: keep")).toBeInTheDocument();
+  });
+
   it("gracefully handles missing context", () => {
     const targetAction: ApprovalRequestDetail["targetAction"] = {
       category: "command_execution",

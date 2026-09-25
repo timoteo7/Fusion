@@ -104,6 +104,7 @@ export { buildPermanentAgentGatingContext as buildPermanentAgentGatingContextImp
 export { resolveInstructionsForRole as resolveInstructionsForRoleImpl } from "./resolve-instructions-for-role.js";
 export {
   signalTaskComplete as signalTaskCompleteImpl,
+  triggerEvolutionSignalCapture as triggerEvolutionSignalCaptureImpl,
   triggerPostTaskReflectionCapture as triggerPostTaskReflectionCaptureImpl,
 } from "./signal-task-complete.js";
 /*

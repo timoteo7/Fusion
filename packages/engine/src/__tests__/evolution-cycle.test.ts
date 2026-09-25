@@ -71,8 +71,8 @@ describe("EvolutionCycle", () => {
   });
 
   it("runs the cycle when signals are present and persists the artifact with the trial", async () => {
-    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure", taskIds: ["t1"] });
-    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure", taskIds: ["t2"] });
+    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure", humanFeedback: "first" });
+    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure", humanFeedback: "second" });
 
     const runChecks = makeRunChecks({
       baseline: { command: "vitest", passed: true, metrics: { passRate: 0.95 } },
@@ -142,7 +142,7 @@ describe("EvolutionCycle", () => {
     expect(runChecks.fn).toHaveBeenCalledTimes(2); // unchanged
   });
 
-  it("runs again when the interval has elapsed and a new signal arrived", async () => {
+  it("enforces the interval even when a new signal arrives, then runs later", async () => {
     await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure" });
     const runChecks = makeRunChecks({
       baseline: { command: "vitest", passed: true, metrics: { passRate: 0.95 } },
@@ -153,11 +153,14 @@ describe("EvolutionCycle", () => {
     const first = await cycle.runCycle({ agentId: "agent-1" });
     expect(first.outcome).toBe("ran");
 
-    // Advance 30s and add a new signal — new signal forces a re-run even if interval not elapsed.
     currentTime += 30_000;
     await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure" });
-    const second = await cycle.runCycle({ agentId: "agent-1" });
-    expect(second.outcome).toBe("ran");
+    const throttled = await cycle.runCycle({ agentId: "agent-1" });
+    expect(throttled).toMatchObject({ outcome: "skipped", reason: "throttled" });
+
+    currentTime += 30_000;
+    const later = await cycle.runCycle({ agentId: "agent-1" });
+    expect(later.outcome).toBe("ran");
   });
 
   it("breaks cluster ties deterministically (smallest source+changeType key wins)", async () => {
@@ -189,6 +192,52 @@ describe("EvolutionCycle", () => {
     expect(runChecks.fn).not.toHaveBeenCalled();
   });
 
+  it("attaches read-only Herdr evidence and creates a pending approval for a keep candidate", async () => {
+    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure" });
+    const approvalCreate = vi.fn(async () => ({ id: "approval-1" }) as never);
+    const herdr = vi.fn(async () => ({ panes: 2, sessions: 1, activeCommands: 0, durationMs: 12 }));
+    const runChecks = makeRunChecks({
+      baseline: { command: "vitest", passed: true, metrics: { passRate: 0.95 } },
+      candidate: { command: "vitest", passed: true, metrics: { passRate: 0.97 } },
+    });
+    const cycle = new EvolutionCycle({
+      store,
+      runChecks: runChecks.fn,
+      now,
+      approvalStore: { create: approvalCreate },
+      herdrAdapter: herdr,
+    });
+
+    const result = await cycle.runCycle({ agentId: "agent-1" });
+    expect(result.outcome).toBe("ran");
+    if (result.outcome !== "ran") return;
+    expect(result.artifact.evidence.herdr).toEqual({ panes: 2, sessions: 1, activeCommands: 0, durationMs: 12 });
+    expect(approvalCreate).toHaveBeenCalledWith(expect.objectContaining({
+      targetAction: expect.objectContaining({
+        category: "task_agent_mutation",
+        context: expect.objectContaining({ source: "evolution-cycle", trialDecision: "keep" }),
+      }),
+    }));
+    expect(result.artifact.approval).toMatchObject({ status: "pending", approvalRequestId: "approval-1" });
+  });
+
+  it("persists a redacted last-cycle summary on the next artifact", async () => {
+    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure", humanFeedback: "first" });
+    const runChecks = makeRunChecks({
+      baseline: { command: "vitest", passed: true, metrics: { passRate: 0.95 } },
+      candidate: { command: "vitest", passed: true, metrics: { passRate: 0.97 } },
+    });
+    let currentTime = Date.parse("2026-09-04T12:00:00.000Z");
+    const cycle = new EvolutionCycle({ store, runChecks: runChecks.fn, now: () => new Date(currentTime), minIntervalMs: 0 });
+    await cycle.runCycle({ agentId: "agent-1" });
+    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure", humanFeedback: "second" });
+    currentTime += 1;
+    const second = await cycle.runCycle({ agentId: "agent-1" });
+    expect(second.outcome).toBe("ran");
+    if (second.outcome !== "ran") return;
+    expect(second.artifact.lastCycleSummary).toContain("previous cycle");
+  });
+
   it("emits a cycle audit row with ids/counts only (never artifact prose)", async () => {
     const auditRows: unknown[] = [];
     const auditHost = { recordRunAuditEvent: (row: unknown) => { auditRows.push(row); return row; } };
@@ -218,5 +267,55 @@ describe("EvolutionCycle", () => {
 
   it("uses the default minimum interval when no override is provided", () => {
     expect(DEFAULT_EVOLUTION_CYCLE_MIN_INTERVAL_MS).toBe(14_400_000);
+  });
+
+  /**
+   * FNXC:EvolutionCycleLease 2026-09-25-10:50:
+   * The durable cursor makes the rate limit survive a restart, but on its own it did
+   * not stop two PROCESSES from reading the same cursor and both passing the window
+   * check. A held lease must skip the cycle instead of double-appending an artifact
+   * for the same agent.
+   */
+  it("skips the cycle while another process holds the agent lease", async () => {
+    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure" });
+    const runChecks = makeRunChecks({
+      baseline: { command: "vitest", passed: true, metrics: { passRate: 0.95 } },
+      candidate: { command: "vitest", passed: true, metrics: { passRate: 0.97 } },
+    });
+    // A separate store instance stands in for a second process: same files, no shared lock map.
+    const otherProcess = new EvolutionStore({ rootDir });
+    await otherProcess.init();
+    const held = await otherProcess.claimCycle("agent-1", { holder: "other-process", nowMs: currentTime });
+    expect(held.claimed).toBe(true);
+
+    const cycle = new EvolutionCycle({ store, runChecks: runChecks.fn, now, minIntervalMs: 0 });
+    const result = await cycle.runCycle({ agentId: "agent-1" });
+
+    expect(result).toEqual({ outcome: "skipped", reason: "lease-held" });
+    expect(runChecks.calls).toHaveLength(0);
+    expect(await store.getArtifacts("agent-1")).toHaveLength(0);
+
+    // Releasing lets the very next cycle proceed: the lease must not wedge the lane.
+    await held.released();
+    const afterRelease = await cycle.runCycle({ agentId: "agent-1" });
+    expect(afterRelease.outcome).toBe("ran");
+  });
+
+  it("reclaims a lease abandoned by a crashed holder", async () => {
+    const crashed = new EvolutionStore({ rootDir });
+    await crashed.init();
+    // Claimed far enough in the past to be unambiguously stale.
+    const stale = await crashed.claimCycle("agent-1", { holder: "crashed", nowMs: currentTime - 60 * 60_000 });
+    expect(stale.claimed).toBe(true);
+
+    await store.createSignal({ agentId: "agent-1", outcome: "failure", source: "execution", failureCategory: "test-failure" });
+    const runChecks = makeRunChecks({
+      baseline: { command: "vitest", passed: true, metrics: { passRate: 0.95 } },
+      candidate: { command: "vitest", passed: true, metrics: { passRate: 0.97 } },
+    });
+    const cycle = new EvolutionCycle({ store, runChecks: runChecks.fn, now, minIntervalMs: 0 });
+
+    const result = await cycle.runCycle({ agentId: "agent-1" });
+    expect(result.outcome).toBe("ran");
   });
 });

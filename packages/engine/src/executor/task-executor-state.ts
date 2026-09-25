@@ -78,6 +78,10 @@ export abstract class TaskExecutorState {
   protected approvalResumeAfterUnwind = new Set<string>();
   protected recoveringCompleted = new Set<string>();
   protected capturedReflectionTaskIds = new Set<string>();
+  /** Process-local callback reused by terminal finalization seams for replay dedupe. */
+  protected evolutionSignalCapture?: ReturnType<typeof import("../agents/evolution-signal-capture.js").createTaskEvolutionSignalCapture>;
+  /** Monotonic start times used only for bounded execution-duration signals. */
+  protected readonly taskStartTimes = new Map<string, number>();
   /** Task ids that already had their Stash memory capture attempted (completion-gated). */
   protected capturedMemoryTaskIds = new Set<string>();
   protected workflowRerunPending = new Set<string>();

@@ -30,16 +30,36 @@ heartbeat gating paths without duplicating rendering logic.
 export function GatedActionApprovalDetails({ targetAction }: GatedActionApprovalDetailsProps) {
   const { t } = useTranslation("app");
   const context = targetAction.context as Record<string, unknown> | undefined;
+  const evolution = context?.source === "evolution-cycle";
   const toolName = readString(context?.toolName) ?? targetAction.resourceId;
   const command = readString(context?.command);
   const cwd = readString(context?.cwd);
   const toolArgs = readToolArgs(context);
+  const candidateSummary = readString(context?.candidateSummary);
+  const candidateTarget = readString(context?.candidateTarget);
+  const proposedDiffPreview = readString(context?.proposedDiffPreview);
+  const trialDecision = readString(context?.trialDecision);
+  const trialRationale = readString(context?.trialRationale);
+  const lastCycleSummary = readString(context?.lastCycleSummary);
   const argsJson = toolArgs && Object.keys(toolArgs).length > 0 ? JSON.stringify(toolArgs, null, 2) : null;
 
   return (
     <section className="card gated-action-approval-details" data-testid="gated-action-approval-details">
-      <h4 className="gated-action-approval-details__title">{t("approvals.gatedActionTitle", "Gated action payload")}</h4>
+      <h4 className="gated-action-approval-details__title">
+        {evolution ? t("approvals.evolutionTitle", "Evolution candidate") : t("approvals.gatedActionTitle", "Gated action payload")}
+      </h4>
       <dl className="gated-action-approval-details__list">
+        {evolution ? (
+          <>
+            {candidateSummary && <div className="gated-action-approval-details__row"><dt>{t("approvals.evolutionCandidate", "Candidate")}</dt><dd>{candidateSummary}</dd></div>}
+            {candidateTarget && <div className="gated-action-approval-details__row"><dt>{t("approvals.evolutionTarget", "Target")}</dt><dd>{candidateTarget}</dd></div>}
+            {proposedDiffPreview && <div className="gated-action-approval-details__row"><dt>{t("approvals.evolutionDiff", "Redacted diff preview")}</dt><dd><pre className="gated-action-approval-details__code"><code>{proposedDiffPreview}</code></pre></dd></div>}
+            {trialDecision && <div className="gated-action-approval-details__row"><dt>{t("approvals.evolutionTrial", "Trial decision")}</dt><dd>{trialDecision}</dd></div>}
+            {trialRationale && <div className="gated-action-approval-details__row"><dt>{t("approvals.evolutionRationale", "Trial rationale")}</dt><dd>{trialRationale}</dd></div>}
+            {lastCycleSummary && <div className="gated-action-approval-details__row"><dt>{t("approvals.evolutionLastCycle", "Last cycle")}</dt><dd>{lastCycleSummary}</dd></div>}
+          </>
+        ) : (
+          <>
         <div className="gated-action-approval-details__row">
           <dt>{t("approvals.gatedActionTool", "Tool")}</dt>
           <dd>{toolName}</dd>
@@ -65,6 +85,8 @@ export function GatedActionApprovalDetails({ targetAction }: GatedActionApproval
             <dt>{t("approvals.gatedActionCwd", "Working directory")}</dt>
             <dd>{cwd}</dd>
           </div>
+        )}
+          </>
         )}
       </dl>
     </section>

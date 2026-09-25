@@ -28,6 +28,7 @@ import express from "express";
 const approvalState = vi.hoisted(() => ({
   requests: new Map<string, Record<string, unknown>>(),
   decide: vi.fn(),
+  markApprovalState: vi.fn(),
 }));
 
 vi.mock("@fusion/core", async (importOriginal) => {
@@ -53,6 +54,18 @@ vi.mock("@fusion/core", async (importOriginal) => {
       async getAgent() { return undefined; }
       async updateAgentState() {}
       async updateAgent() {}
+    },
+    /*
+    FNXC:EvolutionApprovalBridge 2026-09-25-10:30:
+    The bridge is the only path that projects a human decision onto the EvolutionArtifact
+    the apply-gate reads. Captured in-memory so the assertion needs no filesystem.
+    */
+    EvolutionStore: class FakeEvolutionStore {
+      constructor(..._args: unknown[]) {}
+      async init() {}
+      async markApprovalState(agentId: string, version: number, approval: unknown) {
+        return approvalState.markApprovalState(agentId, version, approval);
+      }
     },
   });
 });
@@ -137,6 +150,8 @@ beforeEach(() => {
   approvalState.requests.clear();
   approvalState.requests.set(REQUEST_ID, makeApprovalRequest());
   approvalState.decide.mockReset();
+  approvalState.markApprovalState.mockReset();
+  approvalState.markApprovalState.mockResolvedValue(null);
   approvalState.decide.mockImplementation(async (id: string, status: string, input: { actor: unknown; note?: string }) => ({
     ...makeApprovalRequest(),
     id,
@@ -381,6 +396,108 @@ describe("POST /api/approvals/:id/decision — sandbox provisioning honesty", ()
     expect(res.status).toBe(200);
     expect(approvalState.decide).toHaveBeenCalledWith(REQUEST_ID, "denied", expect.objectContaining({
       actor: { actorId: "user", actorType: "user", actorName: "User" },
+    }));
+  });
+});
+
+/*
+FNXC:EvolutionApprovalBridge 2026-09-25-10:30:
+The Evolution cycle creates its approval request with `context.source === "evolution-cycle"`,
+but the apply-gate authorizes on the persisted artifact's `approval.status`. These tests
+pin the projection both ways: approving an evolution request must move the artifact to
+`approved` (otherwise the single sanctioned writer can never run), and denying must move
+it to `rejected`. A non-evolution request must be untouched, so this bridge cannot leak
+onto unrelated approval categories.
+*/
+describe("POST /api/approvals/:id/decision — Evolution artifact projection", () => {
+  function setEvolutionRequest(overrides: Record<string, unknown> = {}) {
+    const request = makeApprovalRequest({
+      requester: { actorId: "evolution:agent-1", actorType: "system", actorName: "Evolution cycle" },
+      targetAction: {
+        category: "task_agent_mutation",
+        action: "apply",
+        summary: "Apply reviewed evolution candidate for agent-1",
+        resourceType: "evolution-artifact",
+        resourceId: "artifact-1",
+        context: {
+          source: "evolution-cycle",
+          artifactId: "artifact-1",
+          artifactVersion: 1,
+          agentId: "agent-1",
+          trialDecision: "keep",
+        },
+      },
+      ...overrides,
+    });
+    approvalState.requests.set(REQUEST_ID, request);
+    approvalState.decide.mockImplementation(async (id: string, status: string) => ({
+      ...request,
+      id,
+      status,
+      decidedAt: "2026-07-26T00:00:01.000Z",
+    }));
+  }
+
+  it("marks the artifact approved when the operator approves the evolution request", async () => {
+    setEvolutionRequest();
+    approvalState.markApprovalState.mockResolvedValueOnce({
+      id: "artifact-1",
+      version: 1,
+      approval: { status: "approved" },
+    });
+    const { app } = makeApp();
+
+    const res = await postDecision(app, { decision: "approve" });
+
+    expect(res.status).toBe(200);
+    expect(approvalState.markApprovalState).toHaveBeenCalledWith("agent-1", 1, expect.objectContaining({
+      status: "approved",
+      approvalRequestId: REQUEST_ID,
+      decidedBy: "user",
+    }));
+  });
+
+  it("marks the artifact rejected when the operator denies the evolution request", async () => {
+    setEvolutionRequest();
+    approvalState.markApprovalState.mockResolvedValueOnce({
+      id: "artifact-1",
+      version: 1,
+      approval: { status: "rejected" },
+    });
+    const { app } = makeApp();
+
+    const res = await postDecision(app, { decision: "deny" });
+
+    expect(res.status).toBe(200);
+    expect(approvalState.markApprovalState).toHaveBeenCalledWith("agent-1", 1, expect.objectContaining({
+      status: "rejected",
+      approvalRequestId: REQUEST_ID,
+    }));
+  });
+
+  it("leaves unrelated approval categories untouched", async () => {
+    approvalState.requests.set(REQUEST_ID, makeApprovalRequest());
+    const { app } = makeApp();
+
+    const res = await postDecision(app, { decision: "approve" });
+
+    expect(res.status).toBe(200);
+    expect(approvalState.markApprovalState).not.toHaveBeenCalled();
+  });
+
+  it("still returns the operator's decision when the artifact projection fails", async () => {
+    setEvolutionRequest();
+    approvalState.markApprovalState.mockRejectedValueOnce(new Error("evolution store unavailable"));
+    const { app, store } = makeApp();
+
+    const res = await postDecision(app, { decision: "approve" });
+
+    // The approval row is authoritative and durable; a projection failure must not
+    // turn a recorded human decision into an error response.
+    expect(res.status).toBe(200);
+    expect(approvalState.decide).toHaveBeenCalledOnce();
+    expect(store.recordRunAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      mutationType: "evolution:approval-approved",
     }));
   });
 });

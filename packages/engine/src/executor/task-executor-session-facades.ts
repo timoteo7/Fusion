@@ -78,7 +78,12 @@ export abstract class TaskExecutorSessionFacades extends TaskExecutorWorktreePur
   protected accumulateTokenUsage(...args: Parameters<typeof impl.accumulateTokenUsageImpl>): ReturnType<typeof impl.accumulateTokenUsageImpl> { return impl.accumulateTokenUsageImpl(...args); }
   protected tokenUsageWithModelSnapshot(...args: Parameters<typeof impl.tokenUsageWithModelSnapshotImpl>): ReturnType<typeof impl.tokenUsageWithModelSnapshotImpl> { return impl.tokenUsageWithModelSnapshotImpl(...args); }
   protected async extractSessionTokenUsage(...args: Parameters<typeof impl.extractSessionTokenUsageImpl>): ReturnType<typeof impl.extractSessionTokenUsageImpl> { return impl.extractSessionTokenUsageImpl(...args); }
-  protected signalTaskComplete(task: import("@fusion/core").Task): ReturnType<typeof impl.signalTaskCompleteImpl> { return impl.signalTaskCompleteImpl(bags.buildSignalTaskCompleteDeps(this), task); }
+  protected signalTaskComplete(task: import("@fusion/core").Task): ReturnType<typeof impl.signalTaskCompleteImpl> {
+    const deps = bags.buildSignalTaskCompleteDeps(this);
+    const result = impl.signalTaskCompleteImpl(deps, task);
+    this.taskStartTimes.delete(task.id);
+    return result;
+  }
   /*
   FNXC:StashSessionCapture 2026-08-19-05:09:
   (RUFU-122) Terminal-failure capture seam (RUFU-122 requirement 3): the executor
@@ -88,7 +93,13 @@ export abstract class TaskExecutorSessionFacades extends TaskExecutorWorktreePur
   signalTaskComplete so a task is captured at most once across both seams.
   Fire-and-forget: triggerTaskMemoryCapture never throws.
   */
-  protected signalTaskTerminalFailed(task: import("@fusion/core").Task): ReturnType<typeof impl.triggerTaskMemoryCaptureImpl> { return impl.triggerTaskMemoryCaptureImpl(bags.buildSignalTaskTerminalFailedDeps(this), task, "failure"); }
+  protected signalTaskTerminalFailed(task: import("@fusion/core").Task): ReturnType<typeof impl.triggerTaskMemoryCaptureImpl> {
+    const result = impl.triggerTaskMemoryCaptureImpl(bags.buildSignalTaskTerminalFailedDeps(this), task, "failure");
+    const deps = bags.buildSignalTaskCompleteDeps(this);
+    void impl.triggerEvolutionSignalCaptureImpl?.(deps, task);
+    this.taskStartTimes.delete(task.id);
+    return result;
+  }
   protected triggerPostTaskReflectionCapture(task: import("@fusion/core").Task): ReturnType<typeof impl.triggerPostTaskReflectionCaptureImpl> { return impl.triggerPostTaskReflectionCaptureImpl(bags.buildTriggerPostTaskReflectionCaptureDeps(this), task); }
   /** Live complete-chat memory capture: subscribes this executor to the project ChatStore so
    * every conversation's messages are captured (best-effort) into the Stash memory backend.

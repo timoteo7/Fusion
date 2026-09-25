@@ -277,7 +277,7 @@ export function buildRunImplementationDeps(
     get approvalRequestStore() { return host.approvalRequestStore; },
     ...facadeFields(host, [
       "stuckAborted", "executing", "depAborted", "tokenUsageBaselines", "loopRecoveryState",
-      "branchConflictErrorCount", "pausedAborted", "userCanceledTaskIds", "tokenCapDetector",
+      "branchConflictErrorCount", "pausedAborted", "userCanceledTaskIds", "taskStartTimes", "tokenCapDetector",
       "activeSessions", "activeWorktrees", "activeWorkflowGraphAbortControllers", "currentRunContexts",
       "activeWorkflowPrincipals", "effectiveColumnAgentByTask", "graphSeamThinkingLevel", "graphSeamSkillName",
       "graphStepSessionPinned", "outerConcurrencyClaims",
@@ -1106,6 +1106,11 @@ export function buildSignalTaskCompleteDeps(host: any): any {
     rootDir: host.rootDir,
     capturedMemoryTaskIds: host.capturedMemoryTaskIds,
     reflectionService: host.options.reflectionService,
+    agentStore: host.options.agentStore,
+    evolutionStore: host.options.evolutionStore,
+    getTaskStartTime: (taskId: string) => host.taskStartTimes.get(taskId),
+    getEvolutionSignalCapture: () => host.evolutionSignalCapture,
+    setEvolutionSignalCapture: (capture: NonNullable<typeof host.evolutionSignalCapture>) => { host.evolutionSignalCapture = capture; },
     onComplete: host.options.onComplete,
   };
 }

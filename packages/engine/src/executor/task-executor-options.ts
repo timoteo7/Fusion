@@ -55,6 +55,8 @@ export interface TaskExecutorOptions {
   stuckTaskDetector?: StuckTaskDetector;
   /** AgentStore for tracking spawned child agents. If not provided, spawning is disabled. */
   agentStore?: import("@fusion/core").AgentStore;
+  /** GDPR-075 production signal sink; best-effort and never a task completion dependency. */
+  evolutionStore?: import("../agents/evolution-signal-capture.js").EvolutionSignalCaptureStore;
   /** Reflection service used to generate self-reflection insights for agents. */
   reflectionService?: AgentReflectionService;
   /** Plugin runner for invoking plugin hooks and providing plugin tools. */

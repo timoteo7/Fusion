@@ -89,6 +89,7 @@ import {
   resolveFeatureRepairTargets,
   reconcileMissionState,
 } from "@fusion/engine";
+import { runEvolutionRun } from "./commands/evolution.js";
 import * as dashboard from "@fusion/dashboard";
 import { resolve, relative, isAbsolute, sep, basename, extname, join } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -375,6 +376,7 @@ export function resolveExtensionToolTimeoutMs(toolName: string, _params?: unknow
   if (name === "fn_skills_install") return SKILLS_INSTALL_TIMEOUT_MS;
   if (name === "fn_task_plan") return TASK_PLAN_TIMEOUT_MS;
   if (name === "fn_experiment_finalize") return EXPERIMENT_FINALIZE_TIMEOUT_MS;
+  if (name === "fn_evolution_run") return EXPERIMENT_FINALIZE_TIMEOUT_MS;
   if (name === "fn_mission_backfill_assertions") return MISSION_BACKFILL_TIMEOUT_MS;
   if (name.startsWith("fn_task_import_") || name.startsWith("fn_task_browse_")) return IMPORT_BROWSE_TIMEOUT_MS;
   if (name === "fn_web_fetch") return WEB_FETCH_TIMEOUT_MS;
@@ -1005,6 +1007,7 @@ const WITHHELD_FROM_AGENT_EXTENSION_TOOLS: ReadonlySet<string> = new Set([
   "fn_feature_delete",
   "fn_workflow_delete",
   "fn_experiment_finalize",
+  "fn_evolution_run",
   "fn_skills_install",
 ]);
 
@@ -3622,6 +3625,38 @@ export default function kbExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: formatRevealedSecretContent(`Loaded secret '${params.key}' from ${resolvedScope} scope.`, revealed.plaintextValue) }],
         details: { key: params.key, value: revealed.plaintextValue, scope: resolvedScope },
       };
+    },
+  });
+
+  // ── fn_evolution_run ───────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "fn_evolution_run",
+    label: "fn: Run Evolution Cycle",
+    description: "Run one redacted Evolution MVP-2 cycle. Dry-run is the default; apply still requires approved+keep through the existing apply gate.",
+    parameters: Type.Object({
+      agentId: Type.Optional(Type.String({ description: "Agent ID; defaults to the first durable agent" })),
+      apply: Type.Optional(Type.Boolean({ description: "Request an apply-gate evaluation after the cycle" })),
+      json: Type.Optional(Type.Boolean({ description: "Return the cycle result as JSON" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const withheldDenied = denyWithheldToolForAgentPrincipal("fn_evolution_run", ctx as ExtensionCallerContext);
+      if (withheldDenied) return withheldDenied;
+      try {
+        const result = await runEvolutionRun({
+          ...(typeof params.agentId === "string" ? { agentId: params.agentId } : {}),
+          apply: params.apply === true,
+          rootDir: resolveProjectRoot(ctx.cwd),
+          cwd: ctx.cwd,
+        });
+        const text = params.json === true
+          ? JSON.stringify(result, null, 2)
+          : `Evolution cycle ${result.status}${result.reason ? `: ${result.reason}` : "."}`;
+        return { content: [{ type: "text", text }], details: result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: `fn_evolution_run failed: ${message}` }], details: { error: message }, isError: true };
+      }
     },
   });
 
