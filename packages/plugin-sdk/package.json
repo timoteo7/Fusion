@@ -26,7 +26,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit --skipLibCheck",
+    "typecheck": "tsc --build --noEmit",
     "test": "vitest run --silent=passed-only --reporter=dot"
   },
   "devDependencies": {

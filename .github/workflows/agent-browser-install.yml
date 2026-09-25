@@ -33,7 +33,12 @@ jobs:
     # contract; post-job cache save otherwise fails). The composite's skip-install
     # input means the caller installs workspace deps; build the CLI before
     # `pnpm pack` so the pack guard stays intact as a real published-boundary test.
-    timeout-minutes: 15
+    # FNXC:PackFixtureTimeout 2026-09-24-14:11:
+    # ensureDesktopRuntimeAssetsBuilt() gives the @fusion/desktop sub-build a 30-minute
+    # budget (packages/cli/tsup.config.ts). The old 15-minute cap was BELOW that documented
+    # minimum and killed the pack-fixture with SIGTERM ("The operation was canceled").
+    # Matches release.yml (widened to 30 for exactly this reason). Fix (B) - credit: Hermes.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -79,7 +84,12 @@ jobs:
     name: Agent-browser install (${{ matrix.os }})
     needs: pack-fixture
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # FNXC:PackFixtureTimeout 2026-09-24-14:11:
+    # ensureDesktopRuntimeAssetsBuilt() gives the @fusion/desktop sub-build a 30-minute
+    # budget (packages/cli/tsup.config.ts). The old 15-minute cap was BELOW that documented
+    # minimum and killed the pack-fixture with SIGTERM ("The operation was canceled").
+    # Matches release.yml (widened to 30 for exactly this reason). Fix (B) - credit: Hermes.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
