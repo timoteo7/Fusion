@@ -156,7 +156,18 @@ async function mirrorEvolutionApprovalDecision(params: {
 
   try {
     const { EvolutionStore } = await import("@fusion/core");
-    const store = new EvolutionStore({ rootDir: scopedStore.getFusionDir() });
+    /*
+    FNXC:EvolutionStoreLayout 2026-09-25-12:10:
+    This bridge must read the SAME directory the cycle wrote. It resolves the project root
+    and hands it to `EvolutionStore.forProject`, the single owner of the
+    `<projectRoot>/.fusion/evolution` layout, instead of trusting that a caller-supplied
+    `getFusionDir()` is wired to the right project. Previously the bridge trusted
+    `getFusionDir()` while the engine and the CLI constructed the store from the project
+    root, so the two halves addressed different directories: the operator's approval found
+    no artifact, logged "did not match a pending artifact", and the apply gate refused with
+    `approval-pending` forever. Both sides now go through the same constructor.
+    */
+    const store = EvolutionStore.forProject(scopedStore.getRootDir());
     await store.init();
     const marked = await store.markApprovalState(agentId, artifactVersion, {
       status: decision === "approved" ? "approved" : "rejected",

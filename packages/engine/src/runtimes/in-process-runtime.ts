@@ -1793,10 +1793,18 @@ export class InProcessRuntime
       FNXC:EvolutionPipeline 2026-09-25-10:00:
       GDPR-075 wires the existing finalization seam to the real EvolutionStore. Failure to
       initialize optional evolution telemetry must not prevent task execution from starting.
+
+      FNXC:EvolutionStoreLayout 2026-09-25-12:10:
+      `config.workingDirectory` is the PROJECT root, but EvolutionStore's `rootDir` is the
+      fn DATA directory (it appends `evolution/` itself). Constructing it from the project
+      root wrote production signals to `<projectRoot>/evolution`, a directory the CLI cycle
+      and the dashboard approval bridge — which both resolve `<projectRoot>/.fusion/evolution`
+      — never read. `forProject` owns that translation; do not inline `join(root, ".fusion")`
+      here or reintroduce the split-brain layout.
       */
       let evolutionStore: EvolutionStore | undefined;
       try {
-        evolutionStore = new EvolutionStore({ rootDir: this.config.workingDirectory });
+        evolutionStore = EvolutionStore.forProject(this.config.workingDirectory);
         await evolutionStore.init();
         runtimeLog.log("EvolutionStore initialized for production signal capture");
       } catch (evolutionStoreErr) {

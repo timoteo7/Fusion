@@ -143,6 +143,25 @@ export class EvolutionStore extends EventEmitter {
     this.evolutionDir = join(this.rootDir, "evolution");
   }
 
+  /**
+   * FNXC:EvolutionStoreLayout 2026-09-25-12:10:
+   * The single owner of WHERE a project's evolution data lives. `rootDir` is the fn DATA
+   * directory — the store appends `evolution/` itself — but every production call site
+   * naturally holds a PROJECT root, so a raw `new EvolutionStore({ rootDir: projectRoot })`
+   * silently wrote to `<projectRoot>/evolution` while the dashboard approval bridge, which
+   * read `getFusionDir()`, looked in `<projectRoot>/.fusion/evolution`. Reader and writer
+   * never met: an operator-approved artifact stayed `pending` forever and the sole apply-gate
+   * refused with `approval-pending`, so "human approves, then the gate writes" was
+   * unreachable in production while every unit test passed.
+   *
+   * Callers that already hold the `.fusion` directory (e.g. from `TaskStore.getFusionDir()`)
+   * may still use the constructor; every caller that holds a PROJECT ROOT must come here, so
+   * the layout decision cannot drift apart between the engine, the CLI, and the dashboard.
+   */
+  static forProject(projectRoot: string): EvolutionStore {
+    return new EvolutionStore({ rootDir: join(projectRoot, ".fusion") });
+  }
+
   override on(event: "evolution:signal-created", listener: EvolutionStoreEvents["evolution:signal-created"]): this;
   override on(
     event: "evolution:artifact-created",

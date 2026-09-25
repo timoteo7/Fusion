@@ -92,13 +92,22 @@ export async function runEvolutionRun(options: EvolutionRunOptions = {}): Promis
       projectOwner = await resolveProjectStore({ project: options.projectName, cwd: options.cwd });
       taskStore = projectOwner.store;
     }
-    const rootDir = options.rootDir ?? taskStore?.getRootDir();
-    if (!rootDir && !options.runCycle) {
+    const projectRoot = options.rootDir ?? taskStore?.getRootDir();
+    if (!projectRoot && !options.runCycle) {
       return { status: "refused", reason: "project root is required" };
     }
 
     if (!store) {
-      store = new EvolutionStore({ rootDir: rootDir! });
+      /*
+      FNXC:EvolutionStoreLayout 2026-09-25-12:10:
+      `rootDir` here is the PROJECT root (it is also the cwd for the trial verification
+      command), while EvolutionStore's `rootDir` is the fn DATA directory. Constructing it
+      from the project root made this cycle write artifacts to `<projectRoot>/evolution`,
+      which the dashboard approval bridge — which reads `<projectRoot>/.fusion/evolution` —
+      could never find, so an operator approval could never reach the apply gate.
+      `forProject` owns the translation.
+      */
+      store = EvolutionStore.forProject(projectRoot!);
       await store.init();
     }
 

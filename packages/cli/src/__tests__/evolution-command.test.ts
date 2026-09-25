@@ -162,4 +162,79 @@ describe("fn evolution run", () => {
       expect(result.artifact?.trial.baselineRun.command).toBe("node verify.cjs");
     }
   });
+
+  /**
+   * FNXC:EvolutionStoreLayout 2026-09-25-12:10:
+   * The CLI resolves a PROJECT root, but EvolutionStore's `rootDir` is the fn DATA directory.
+   * Constructing the store from the project root wrote every operator-run artifact to
+   * `<projectRoot>/evolution` — a directory the dashboard approval bridge never reads (it reads
+   * `<projectRoot>/.fusion/evolution`). The operator approved, the bridge found no artifact, and
+   * the apply gate refused with `approval-pending` forever. The old test passed because it
+   * injected its own store, so the production construction was never executed.
+   *
+   * This drives the real construction (no injected `store`) and then re-opens the project the
+   * way the dashboard does, so a path disagreement fails here instead of in production.
+   */
+  it("persists a real cycle under .fusion/evolution so the approval bridge can find it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fusion-evolution-cli-"));
+    roots.push(root);
+    const taskStore = {
+      getRootDir: () => root,
+      getFusionDir: () => join(root, ".fusion"),
+      getAsyncLayer: () => undefined,
+      getSettings: async () => ({ testCommand: "node -e process.exit(0)" }),
+      recordRunAuditEvent: async () => undefined,
+    } as unknown as TaskStore;
+
+    // A real signal so the cycle has something to cluster.
+    const seed = new EvolutionStore({ rootDir: join(root, ".fusion") });
+    await seed.init();
+    await seed.createSignal({
+      agentId: "agent-1",
+      taskId: "task-1",
+      outcome: "failure",
+      source: "execution",
+      failureCategory: "test-failure",
+    });
+
+    // No `store` injected: this is the production construction the operator actually runs.
+    const result = await runEvolutionRun({
+      rootDir: root,
+      agentId: "agent-1",
+      taskStore: taskStore as never,
+      log: () => undefined,
+    });
+
+    expect(result.status).toBe("ran");
+    const version = result.artifact?.version ?? 0;
+
+    // On disk, the artifact lives where the store's documented layout says it does.
+    await expect(readFile(join(root, ".fusion", "evolution", "agent-1-evolution.jsonl"), "utf8"))
+      .resolves.toContain(result.artifact?.id ?? "");
+    // The split-brain directory from the pre-fix construction must not exist at all.
+    await expect(readFile(join(root, "evolution", "agent-1-evolution.jsonl"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+
+    // The dashboard's construction must see the artifact the cycle just wrote.
+    const bridgeView = EvolutionStore.forProject(root);
+    await bridgeView.init();
+    const found = await bridgeView.getArtifactByVersion("agent-1", version);
+    expect(found?.id).toBe(result.artifact?.id);
+
+    // And an operator decision must land on that same artifact, unblocking the apply gate.
+    // (This trial reverts, so the cycle created no approval request and the artifact is still
+    // `not-requested`; the point under test is the shared directory, not the keep-trial path,
+    // which the engine cycle tests already cover.)
+    const pending = await bridgeView.markApprovalState("agent-1", version, {
+      status: "pending",
+      approvalRequestId: "approval-1",
+    });
+    expect(pending?.approval.status).toBe("pending");
+    const approved = await bridgeView.markApprovalState("agent-1", version, {
+      status: "approved",
+      approvalRequestId: "approval-1",
+      decidedBy: "user",
+    });
+    expect(approved?.approval.status).toBe("approved");
+  });
 });
