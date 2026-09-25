@@ -182,6 +182,76 @@ throwing before its renamed-lane assertion. The merge-queue-peek addition was
 See `dead-vi-mock-specifiers-fail-silently.md` for the related case where a mock
 factory is unwired rather than a store fake being incomplete.
 
+## FUSI-030: the live-row reader a recovery seam adopted
+
+The tell here is a `TypeError` naming a store method, surfacing from
+`moveTaskToContainedBackwardTarget` (`src/execution/lifecycle-move.ts:35`) rather
+than from the test that was written:
+
+```
+TypeError: store.getTask is not a function
+ ❯ moveTaskToContainedBackwardTarget src/execution/lifecycle-move.ts:35:31
+ ❯ RestartRecoveryCoordinator.safeRequeue src/healing/restart-recovery-coordinator.ts:255
+```
+
+An undefined-property read *inside* production code is the shape this catalogue has
+seen seven times now, and it is the one most likely to send someone into the wrong
+file. The product line is correct and must not change: a recovery caller can hold a
+task snapshot across git and filesystem awaits, so the durable column is re-read
+before a backward target is chosen.
+
+**How the seam acquired the method.** FN-9362 (`aba51f950`) added the live-column
+re-read and repaired the store fakes it knew about — `executor-worktree-conflict`,
+`invariant-wrong-checkout-completion`, `branch-recovery-stale-cached-base`, and
+`foreign-only-contamination-recovery`. Fakes that never reached the seam were not
+in that sweep, so three files kept fakes predating it: `restart-recovery-coordinator`
+(2 cases), `auto-recovery-contamination` (1), and
+`reliability-interactions/auto-revive-and-watchdog` (2).
+
+**The part worth remembering.** That same FN-9362 commit rewrote the *assertions* in
+`auto-revive-and-watchdog.test.ts` to the containment contract and did not add the
+collaborator. So the file shipped carrying correct assertions and a crashing double
+at the same time — which is exactly why "the tests were already updated for this
+seam" is not evidence that the fake is complete. A fixture is updated by whoever
+last touched the *behavior*; nobody owns the fake's *shape*.
+
+**The fix shape.** Add the reader, and derive it from the same rows the lister
+serves so the two cannot drift:
+
+```ts
+const live = new Map<string, Task>([["FN-1", taskA], ["FN-2", taskB]]);
+const store = {
+  listTasks: vi.fn().mockResolvedValue([...live.values()]),
+  getTask: vi.fn(async (id: string) => live.get(id)),
+  // ...
+};
+```
+
+`auto-recovery-contamination.test.ts` already had a `makeTaskStore()` factory, and
+the fix belonged in the factory rather than at its five call sites — the same
+argument that factory's own FNXC comment made about `logEntry` four months earlier.
+That comment was right, and the same omission recurred anyway: in five-literal form
+it would have recurred five times.
+
+**One assertion, not just one fake.** Supplying the reader is necessary but not
+sufficient. With complete doubles, one case still failed, because it asserted a
+backward move to `todo` that FN-217 forbids — recovery reasons are not in the
+closed four-entry revision allow-list, so production retains the card and narrates
+it through `logEntry`. That expectation encoded pre-FN-217 behavior and was
+unreachable by design; it now asserts the shipped contract (reader called, no
+`moveTask`, retention narrated) exactly as the sibling suite already described the
+same rule. Adding the fake and leaving a contradictory assertion would have traded
+one red suite for another.
+
+**The shared helper is still not built, deliberately.** The "Recommended next step"
+above proposes `createTaskStoreFake({ tasks, workflowIr })`; this fix did not build
+it. This is one family in a seven-family regression sweep, and a merge-gate-shaped
+change is not a regression fix. The pattern is recorded here so the fleet can
+decide with all seven in hand. Note what a real helper would have to encode beyond
+this catalogue's three rules: **when a seam adds a collaborator, sweep every fake
+that reaches it — including the ones no failing test currently points at.** That
+sweep is the part that was missed, and no per-file fake can perform it.
+
 ## Related
 
 - `docs/testing.md` — testing lanes and the taxonomy for trim-vs-keep.
