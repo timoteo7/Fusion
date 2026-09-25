@@ -207,11 +207,18 @@ export async function appendAgentLogBatchImpl(store: TaskStore, entries: Array<{
 
     for (const sourceEntry of normalizedEntries) {
       const entry: AgentLogEntry = persistedEntries.get(sourceEntry) ?? { timestamp, ...sourceEntry };
+      // FNXC:AgentLogTaskState 2026-09-23-16:06:
+      // Carry the card's live state (column/status/currentStep) on `agent:log` so SSE consumers and
+      // stall-watchers don't read real agent activity as "stateless" empty events. Without these the
+      // payload has only taskId/text/type, so a watcher keyed on column/status/step sees [null,null,0]
+      // and mislabels active review/triage work as a phantom emitter (FUSI-020/022/023, GDPR-075).
+      const stateCard = store.taskCache.get(entry.taskId) ?? undefined;
       store.emit("agent:log", {
         timestamp: entry.timestamp,
         taskId: entry.taskId,
         text: entry.text,
         type: entry.type,
+        ...(stateCard ? { column: stateCard.column, status: stateCard.status ?? null, currentStep: stateCard.currentStep ?? 0 } : {}),
         ...(entry.detail !== undefined && { detail: entry.detail }),
         ...(entry.agent !== undefined && { agent: entry.agent }),
         ...(entry.durationMs !== undefined && { durationMs: entry.durationMs }),
