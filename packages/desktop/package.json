@@ -27,7 +27,7 @@
     "dev": "tsx scripts/dev.ts",
     "build": "tsx scripts/build.ts",
     "test": "tsx scripts/test.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --build --noEmit",
     "generate:icons": "tsx scripts/generate-icons.ts",
     "pack": "electron-builder --projectDir deploy --dir",
     "dist": "electron-builder --projectDir deploy",

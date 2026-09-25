@@ -17,7 +17,7 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --build --noEmit",
     "gen:cli-catalogs": "node scripts/gen-cli-catalogs.mjs",
     "test": "vitest run --silent=passed-only --reporter=dot"
   },
