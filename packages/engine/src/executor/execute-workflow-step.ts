@@ -54,6 +54,7 @@ import {
   selectUserCommentsForAgentContext,
 } from "../agents/agent-user-comments.js";
 import { buildSessionSkillContext } from "../cli-runtime/session-skill-context.js";
+import { shouldAbortRunawaySession, runawaySessionError, type SessionActivity } from "./session-idle-watchdog.js";
 import {
   extractCommandBinaries,
   formatEnvironmentCapabilitiesSection,
@@ -1136,7 +1137,21 @@ CRITICAL SCOPING RULES — read before doing anything else:
       const questionPromise = new Promise<"await-input">((resolve) => {
         resolveQuestion = resolve;
       });
+      // FNXC:SessionIdleWatchdog 2026-09-23-23:36:
+      // Root cause (operator board): a step session ran 400+ tool calls and NEVER called fn_task_done (FUSI-021/022,
+      // 4h wedge). Watch the session activity here and abort a runaway session (tool budget / idle timeout).
+      const sessionActivity: SessionActivity = { toolCalls: 0, lastActivityAt: Date.now() };
       session.subscribe((event) => {
+        if ((event as { type?: string }).type === "tool" || (event as { type?: string }).type === "tool_use") {
+          sessionActivity.toolCalls += 1;
+          sessionActivity.lastActivityAt = Date.now();
+          const abortReason = shouldAbortRunawaySession(sessionActivity);
+          if (abortReason) {
+            const msg = runawaySessionError(task, abortReason);
+            void session.abort?.().catch(() => undefined);
+            throw new Error(msg);
+          }
+        }
         capture.handleAgentEvent(event);
         if (event.type === "tool_execution_start") {
           agentLogger.onToolStart(event.toolName, event.args as Record<string, unknown> | undefined);
