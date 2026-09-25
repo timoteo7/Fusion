@@ -1,11 +1,16 @@
 {
   "compilerOptions": {
+    /*
+    FNXC:DistLightness 2026-09-23-23:39:
+    Production dist is lighter without source maps (the .map/.d.ts.map files were 5.8M = 21% of the 27M engine dist).
+    Faster startup/IO; no runtime cost. Re-enable for local debugging if needed.
+    */
     "target": "ES2024",
     "module": "Node16",
     "moduleResolution": "Node16",
     "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
+    "declarationMap": false,
+    "sourceMap": false,
     /*
     FNXC:WorkspaceBuild 2026-07-15-03:30:
     Full program tsc of core/engine (~700-1000 files) dominated root builds. Enable incremental so warm rebuilds only recheck changed files.
