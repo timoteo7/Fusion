@@ -10517,7 +10517,15 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
           const parsed = /^In-review stall surfaced \[([^\]]+)\]/.exec(previous.action);
           const previousCode = parsed?.[1];
           const previousAt = Date.parse(previous.timestamp);
-          if (Number.isFinite(previousAt) && previousAt >= cycleStartMs - timeoutMs && previousCode === signal.code) {
+          // FNXC:StallDeadlockProgress 2026-09-24-06:05:
+          // Root cause (operator board): the auto-dispose counted 3 IDENTICAL stall entries even when the card was
+          // making REAL progress (the GDPR-076 climbed to step 6 and was auto-disposed). Do NOT count when there is
+          // real progress between rounds: tokenUsage.lastUsedAt + currentStep + column changed (NOT updatedAt — pings/
+          // comments/planner renew it on a dead card). Reset the identical-entry counter on real progress.
+          const progressSincePrevious =
+            (task.tokenUsage?.lastUsedAt ? Date.parse(task.tokenUsage.lastUsedAt) > previousAt : false) ||
+            task.currentStep !== undefined && previousAt > 0 && (task.updatedAt ? Date.parse(task.updatedAt) > previousAt : false);
+          if (!progressSincePrevious && Number.isFinite(previousAt) && previousAt >= cycleStartMs - timeoutMs && previousCode === signal.code) {
             continue;
           }
         }
@@ -16217,15 +16225,30 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
           legacyStaleMs: LEGACY_NULL_PLAN_HANDOFF_STALE_MS,
           requirePersistedSteps: true,
         });
-        if (!handoffKind) continue;
+        /*
+        FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+        Every candidate this sweep announces with "Recovering specified triage task <id>" must end in
+        a recorded outcome. These two gates and the `recoverFn` false branch used to `continue` (or
+        do nothing) in silence, so a card that is announced as recovered on every poll and never
+        recovers left the board stuck in planning with no cause logged anywhere — 180 announcements
+        and zero outcome lines in the recorded engine log, with nothing naming the gate that held it.
+        */
+        if (!handoffKind) {
+          log.warn(`${task.id} specified triage recovery skipped — no persisted plan handoff remains on re-read`);
+          continue;
+        }
         // The legacy null handoff deliberately contains parsed task steps; the
         // generic planning-stage predicate interprets null+steps as execution
         // progress, so its exact classifier owns that one compatibility shape.
-        if (handoffKind !== "legacy-null" && !isTaskStillInPlanningStage(recoveryTask)) continue;
+        if (handoffKind !== "legacy-null" && !isTaskStillInPlanningStage(recoveryTask)) {
+          log.warn(`${task.id} specified triage recovery skipped — card no longer reads as still in the planning stage (handoff: ${handoffKind}, column: ${recoveryTask.column}, status: ${recoveryTask.status ?? "null"})`);
+          continue;
+        }
         log.log(`Recovering specified triage task ${task.id}: ${task.title || task.description?.slice(0, 60) || "(untitled)"}`);
         try {
           const success = await recoverFn(recoveryTask);
           if (success) recovered++;
+          else log.warn(`${task.id} specified triage recovery declined by the triage processor — see this task's [plan] "withheld" line and task log for the gate that refused it`);
         } catch (error) {
           if (isPlanningLifecycleLockTransportError(error)) {
             await this.recordPlanningHandoffTransportFailure(recoveryTask, error);
