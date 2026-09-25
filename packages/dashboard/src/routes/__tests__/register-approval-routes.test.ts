@@ -59,8 +59,16 @@ vi.mock("@fusion/core", async (importOriginal) => {
     FNXC:EvolutionApprovalBridge 2026-09-25-10:30:
     The bridge is the only path that projects a human decision onto the EvolutionArtifact
     the apply-gate reads. Captured in-memory so the assertion needs no filesystem.
+
+    FNXC:EvolutionStoreLayout 2026-09-25-12:10:
+    The double must mirror the real class's static surface, not just its constructor. The
+    bridge now builds the store with `EvolutionStore.forProject(projectRoot)`, so a double
+    that only had a constructor silently stopped intercepting the call. The real
+    filesystem-backed proof that the two sides address the same directory lives in
+    register-approval-routes-evolution-bridge.test.ts; this suite covers the branching.
     */
     EvolutionStore: class FakeEvolutionStore {
+      static forProject(_projectRoot: string) { return new FakeEvolutionStore(); }
       constructor(..._args: unknown[]) {}
       async init() {}
       async markApprovalState(agentId: string, version: number, approval: unknown) {
