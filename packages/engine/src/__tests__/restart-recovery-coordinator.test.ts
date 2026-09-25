@@ -163,14 +163,16 @@ describe("RestartRecoveryCoordinator", () => {
   });
 
   it("requeues interrupted failed tasks with no progress, then resumes remaining orphans", async () => {
+    const live = new Map<string, Task>([
+      ["FN-1", createTask({ id: "FN-1", status: "failed", error: "Agent finished without calling fn_task_done", steps: [] })],
+      ["FN-2", createTask({ id: "FN-2", steps: [{ id: "s1", title: "x", status: "done" }] as any })],
+    ]);
     const store = {
-      listTasks: vi.fn().mockResolvedValue([
-        createTask({ id: "FN-1", status: "failed", error: "Agent finished without calling fn_task_done", steps: [] }),
-        createTask({ id: "FN-2", steps: [{ id: "s1", title: "x", status: "done" }] as any }),
-      ]),
+      listTasks: vi.fn().mockResolvedValue([...live.values()]),
       updateTask: vi.fn().mockResolvedValue({}),
       logEntry: vi.fn().mockResolvedValue(undefined),
       moveTask: vi.fn().mockResolvedValue(undefined),
+      getTask: vi.fn(async (id: string) => live.get(id)),
     } as unknown as TaskStore;
 
     const executor = {
@@ -181,10 +183,24 @@ describe("RestartRecoveryCoordinator", () => {
     await coordinator.recoverInterruptedRuns();
 
     expect(store.updateTask).toHaveBeenCalledWith("FN-1", expect.objectContaining({ status: "stuck-killed" }));
-    expect(store.moveTask).toHaveBeenCalledWith("FN-1", "todo", expect.objectContaining({
-      moveSource: "engine",
-      lifecycleReason: "self-healing-session-recovery",
-    }));
+    /*
+    FNXC:LifecycleContainment 2026-09-25-17:25:
+    This asserted a backward move to `todo`, which FN-207/FN-217 forbids: only a REVISION may move a card
+    backward, and `moveTaskToContainedBackwardTarget` enforces that with a closed allow-list of four
+    revision reasons. "self-healing-session-recovery" is deliberately not among them -- restart recovery
+    is not a review or verification revision, so the card keeps its current lifecycle role.
+
+    So the card is retained and the retention is narrated, which is what the sibling suite
+    (`auto-revive-and-watchdog.test.ts`) already asserts for the identical reason. Asserting the move
+    again would demand the very backward transition the containment rule exists to prevent. The recovery
+    itself is unchanged and still proven: the stale run metadata is cleared and the orphan resumes.
+
+    The `getTask` assertion is new and deliberate: it proves the LIVE column is re-read rather than
+    resolved from a stale caller snapshot, which is the behavior FN-9362 added to this seam.
+    */
+    expect(store.getTask).toHaveBeenCalledWith("FN-1");
+    expect(store.moveTask).not.toHaveBeenCalled();
+    expect(store.logEntry).toHaveBeenCalledWith("FN-1", expect.stringContaining("has no backward-move authority"));
     expect(executor.resumeOrphaned).toHaveBeenCalledTimes(1);
   });
 
@@ -261,6 +277,12 @@ describe("restart recovery resolves the board's own wip lane", () => {
 
   function renamedStore(tasksByColumn: Record<string, unknown[]>) {
     const selection = { workflowId: "wf-renamed", stepIds: [] as string[] };
+    // FNXC:LifecycleContainment 2026-09-25-17:25: one `live` index feeds both collaborators, so the
+    // reader and the lister cannot answer from different row sets after the FN-9362 live-column re-read.
+    const live = new Map<string, Task>();
+    for (const rows of Object.values(tasksByColumn)) {
+      for (const row of rows as Task[]) live.set(row.id, row);
+    }
     return {
       listWorkflowDefinitions: vi.fn(async () => [{ ir: RENAMED_IR }]),
       getTaskWorkflowSelection: () => selection,
@@ -270,6 +292,7 @@ describe("restart recovery resolves the board's own wip lane", () => {
       updateTask: vi.fn().mockResolvedValue({}),
       logEntry: vi.fn().mockResolvedValue(undefined),
       moveTask: vi.fn().mockResolvedValue(undefined),
+      getTask: vi.fn(async (id: string) => live.get(id)),
     } as unknown as TaskStore;
   }
 
