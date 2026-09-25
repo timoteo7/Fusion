@@ -23,7 +23,7 @@
     "patch:ios-webview": "npx tsx scripts/patch-ios-webview.ts",
     "capacitor:sync:after": "npx tsx scripts/patch-android-manifest.ts && npx tsx scripts/patch-ios-webview.ts",
     "test": "vitest run --silent=passed-only --reporter=dot",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --build --noEmit"
   },
   "dependencies": {
     "@capacitor-community/safe-area": "^7.0.0",

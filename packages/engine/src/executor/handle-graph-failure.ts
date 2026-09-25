@@ -474,7 +474,14 @@ export async function handleGraphFailure(
             graphResumeRetryCount: nextRetries,
           }, deps.getRunContextFor(task.id));
           const scheduleRetry = () => {
-            deps.execute(live).catch((err: unknown) =>
+            void (async () => {
+              const current = await deps.store.getTask(task.id);
+              if (!current || current.deletedAt || current.paused || current.userPaused) {
+                executorLog.log(`${task.id}: skipping Plan Review provider retry because the task is no longer runnable`);
+                return;
+              }
+              await deps.execute(current);
+            })().catch((err: unknown) =>
               executorLog.error(`Failed Plan Review provider retry for ${task.id}:`, err),
             );
           };
@@ -1383,6 +1390,11 @@ export async function handleGraphFailure(
           return;
         }
       }
+      // FNXC:GraphFailureNodeIdentity 2026-09-23-18:13:
+      // Root cause (operator board): a workflow graph that fails at PARSE/COMPILE (before any node runs) has an empty
+      // result.visitedNodeIds, so failedNode ?? "unknown" masked the failing stage as an unresolvable node (FUSI-020/021/022).
+      // Follow-up (this commit documents the root cause + keeps the message compiling): the graph result must CARRY the
+      // failing stage (parse/compile/edge) so this message can name it; until then the stage is visible in the graph log.
       const message = `Workflow graph terminated with failure at node '${failedNode ?? "unknown"}'`;
       const settings = await deps.store.getSettings();
       const maxToolFailureRetries = resolveMaxConsecutiveToolFailureRetries(settings);
