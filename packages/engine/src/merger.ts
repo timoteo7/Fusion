@@ -6513,8 +6513,23 @@ async function tryEarlyEmptyOwnDiffFinalize(input: {
   // 2. aheadCount > 0?
   let aheadCount: number;
   try {
+    // FNXC:WorktreeReclaimStrandedBase 2026-09-23-19:27:
+    // Root cause (operator board): `rev-list --count <target>..<branch>` counts the SHARED fork/main lineage as "ahead"
+    // when the branch tip descends from the merge-base (the forged "194 stranded commits", FUSI-019). Count from the
+    // branch FORK-POINT so shared history is never treated as unsaved/stranded work in the merge path either.
+    let countRange = `${mergeTargetBranch}..${branch}`;
+    try {
+      const { stdout: fp } = await execAsync(
+        `git merge-base --fork-point ${quoteArg(branch)} ${quoteArg(mergeTargetBranch)}`,
+        { cwd: projectRootDir, encoding: "utf-8", timeout: 30_000 },
+      );
+      const forkPoint = fp.trim();
+      if (forkPoint) countRange = `${forkPoint}..${branch}`;
+    } catch {
+      // fall back to the plain target range when fork-point is unavailable
+    }
     const { stdout } = await execAsync(
-      `git rev-list --count ${quoteArg(`${mergeTargetBranch}..${branch}`)}`,
+      `git rev-list --count ${quoteArg(countRange)}`,
       { cwd: projectRootDir, encoding: "utf-8", timeout: 30_000 },
     );
     const parsed = Number.parseInt(stdout.trim(), 10);
