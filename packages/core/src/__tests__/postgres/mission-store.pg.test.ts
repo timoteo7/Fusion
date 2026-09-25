@@ -2308,4 +2308,148 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     });
   });
 
+  /*
+  FNXC:MissionFeatureNoopWrite 2026-09-19-05:48:
+  Symptom verification for the periodic rewrite storm: the affected mission features were rewritten
+  in a fixed order every ~296 s with only `updatedAt` advancing (two sweeps ~3-7 s apart), producing
+  a `feature:updated` frame and a Postgres write/commit per feature while nothing changed. These
+  cases assert the general invariant at the store boundary — a semantic no-op performs no write,
+  emits nothing, records no status event, and leaves `updatedAt` untouched — so they hold for every
+  caller that funnels through `updateFeature`, not only the reported one.
+  */
+  describe("semantic no-op feature writes", () => {
+    const createHierarchy = async (m: AsyncMissionStore, title: string) => {
+      const mission = await m.createMission({ title });
+      const milestone = await m.addMilestone(mission.id, { title: "MS" });
+      const slice = await m.addSlice(milestone.id, { title: "SL" });
+      const feature = await m.addFeature(slice.id, { title: "F" });
+      return { mission, milestone, slice, feature };
+    };
+
+    it("suppresses a 50-pass no-op storm without a write, an event, or an updatedAt bump", async () => {
+      const m = missions();
+      const { feature } = await createHierarchy(m, "No-op storm");
+      const before = await m.getFeature(feature.id);
+      expect(before).toBeDefined();
+      const featureUpdated = vi.fn();
+      const missionEvents = vi.fn();
+      m.on("feature:updated", featureUpdated);
+      m.on("mission:event", missionEvents);
+
+      for (let pass = 0; pass < 50; pass++) {
+        await m.updateFeature(feature.id, {
+          status: before!.status,
+          loopState: before!.loopState,
+          implementationAttemptCount: before!.implementationAttemptCount,
+        });
+      }
+
+      const after = await m.getFeature(feature.id);
+      expect(after!.updatedAt).toBe(before!.updatedAt);
+      expect(after).toEqual(before);
+      expect(featureUpdated).not.toHaveBeenCalled();
+      expect(missionEvents).not.toHaveBeenCalled();
+    });
+
+    it("still writes, bumps, and emits exactly once for a genuine change", async () => {
+      const m = missions();
+      const { feature } = await createHierarchy(m, "Positive control");
+      const before = await m.getFeature(feature.id);
+      const featureUpdated = vi.fn();
+      m.on("feature:updated", featureUpdated);
+
+      // A no-op pass first, so the genuine-change stamp below is separated from the pre-image by
+      // many awaited round trips rather than by a single millisecond.
+      await m.updateFeature(feature.id, { loopState: before!.loopState });
+      const updated = await m.updateFeature(feature.id, { loopState: "implementing", implementationAttemptCount: 1 });
+
+      expect(updated).toMatchObject({ loopState: "implementing", implementationAttemptCount: 1 });
+      expect(updated.updatedAt).not.toBe(before!.updatedAt);
+      expect(Date.parse(updated.updatedAt)).toBeGreaterThan(Date.parse(before!.updatedAt));
+      expect(featureUpdated).toHaveBeenCalledTimes(1);
+      expect(await m.getFeature(feature.id)).toMatchObject({
+        loopState: "implementing",
+        implementationAttemptCount: 1,
+        updatedAt: updated.updatedAt,
+      });
+    });
+
+    it("suppresses no-op payloads through every public writer on the boundary", async () => {
+      const m = missions();
+      const { feature } = await createHierarchy(m, "Public writers");
+      const before = await m.getFeature(feature.id);
+      const featureUpdated = vi.fn();
+      const missionEvents = vi.fn();
+      m.on("feature:updated", featureUpdated);
+      m.on("mission:event", missionEvents);
+
+      // updateFeatureStatus with the status the row already carries.
+      expect(await m.updateFeatureStatus(feature.id, before!.status)).toEqual(before);
+
+      /*
+      `transitionLoopState` rejects same-state calls by design (FEATURE_LOOP_TRANSITIONS has no
+      self-edges), so that writer reaches the boundary with a real transition or not at all. Pin
+      both halves: the rejected arm leaves the row untouched, and the equivalent updates payload
+      is suppressed.
+      */
+      await expect(m.transitionLoopState(feature.id, "idle")).rejects.toThrow(/Invalid loop state transition/);
+      await m.updateFeature(feature.id, { loopState: before!.loopState, status: before!.status, taskId: undefined });
+
+      expect(await m.getFeature(feature.id)).toEqual(before);
+      expect(featureUpdated).not.toHaveBeenCalled();
+      expect(missionEvents).not.toHaveBeenCalled();
+
+      // The retry-budget arm still performs its real transition through the guarded boundary.
+      await m.updateFeature(feature.id, { loopState: "needs_fix", implementationAttemptCount: 3 });
+      await expect(m.transitionLoopState(feature.id, "implementing")).rejects.toThrow(/retry budget/);
+      expect(await m.getFeature(feature.id)).toMatchObject({ loopState: "blocked", implementationAttemptCount: 3 });
+    });
+
+    it("still runs the managed assertion sync for an unchanged title payload", async () => {
+      const m = missions();
+      const { milestone, feature } = await createHierarchy(m, "Assertion sync");
+      const before = await m.getFeature(feature.id);
+      const managed = (await m.listContractAssertions(milestone.id)).find((assertion) => assertion.sourceFeatureId === feature.id);
+      expect(managed).toBeDefined();
+
+      // Drift the managed assertion so a running sync is observable, then ask for a no-op feature
+      // write: the feature row must not move, but the assertion projection must still repair.
+      await m.updateContractAssertion(managed!.id, { title: "drifted title" });
+      const featureUpdated = vi.fn();
+      m.on("feature:updated", featureUpdated);
+
+      const returned = await m.updateFeature(feature.id, { title: before!.title });
+
+      expect(returned.updatedAt).toBe(before!.updatedAt);
+      expect(featureUpdated).not.toHaveBeenCalled();
+      const repaired = (await m.listContractAssertions(milestone.id)).find((assertion) => assertion.sourceFeatureId === feature.id);
+      expect(repaired).toMatchObject({ title: before!.title });
+    });
+
+    it("treats undefined optional columns as the writer's own normalised defaults", async () => {
+      const m = missions();
+      const { feature } = await createHierarchy(m, "Undefined parity");
+      const before = await m.getFeature(feature.id);
+      expect(before).toMatchObject({ loopState: "idle", implementationAttemptCount: 0, validatorAttemptCount: 0 });
+      const featureUpdated = vi.fn();
+      m.on("feature:updated", featureUpdated);
+
+      await m.updateFeature(feature.id, {
+        taskId: undefined,
+        description: undefined,
+        acceptanceCriteria: undefined,
+        loopState: undefined,
+        implementationAttemptCount: undefined,
+        validatorAttemptCount: undefined,
+        lastValidatorRunId: undefined,
+        lastValidatorStatus: undefined,
+        generatedFromFeatureId: undefined,
+        generatedFromRunId: undefined,
+      });
+
+      expect(await m.getFeature(feature.id)).toEqual(before);
+      expect(featureUpdated).not.toHaveBeenCalled();
+    });
+  });
+
 });
