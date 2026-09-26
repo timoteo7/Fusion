@@ -16,6 +16,8 @@ type MergeLaneState = {
   mergeAbortController: AbortController | null;
   mergeRetryTimer: ReturnType<typeof setTimeout> | null;
   prMergeRetryTimers: Map<string, ReturnType<typeof setTimeout>>;
+  mergeRetryResetTaskIds: Set<string>;
+  mergeEnqueueDeferredByRetryReset: Set<string>;
   workspaceBusyReenqueues: Map<string, number>;
   workspaceBusyReenqueueTimers: Set<ReturnType<typeof setTimeout>>;
   manualMergeResolvers: Map<string, unknown[]>;
@@ -54,6 +56,14 @@ export function seedMergeLaneState<T extends object>(
     mergeAbortController: null,
     mergeRetryTimer: null,
     prMergeRetryTimers: new Map(),
+    /* FNXC:MergeRetryReset 2026-09-25-17:45: the merge-retry reset set. The drain reads
+       `.has(task.id)` to short-circuit a task whose retry window was just reset, so a
+       prototype fake without it answers `undefined` — falsy, as if no reset had happened.
+       Empty is the production-equivalent default: a fresh engine has reset nothing. */
+    mergeRetryResetTaskIds: new Set(),
+    /* Same drain-read contract as the set above: the drain consults it when deciding whether a
+       merge enqueue was already deferred by a retry reset. Empty is the production default. */
+    mergeEnqueueDeferredByRetryReset: new Set(),
     workspaceBusyReenqueues: new Map(),
     workspaceBusyReenqueueTimers: new Set(),
     manualMergeResolvers: new Map(),

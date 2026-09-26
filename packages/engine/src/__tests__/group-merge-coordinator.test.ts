@@ -1320,6 +1320,14 @@ function createPostReviewStore(task: Record<string, any>, branchGroup: Record<st
     directMergeCommitStrategy: "auto",
   };
 
+  /*
+  FNXC:PostMergeFinalizationFixture 2026-09-25-17:30:
+  Declared as a local so `moveTaskIf` below can perform the real move. As a sibling property of the
+  returned literal it was not in scope inside its own object, which is what produced
+  `ReferenceError: store is not defined` when the seam reached for `store.moveTask`.
+  */
+  const moveTask = vi.fn(async (_id: string, column: string) => { task.column = column; return task; });
+
   return {
     getTask: vi.fn(async () => task),
     listTasks: vi.fn(async () => [task]),
@@ -1347,11 +1355,16 @@ function createPostReviewStore(task: Record<string, any>, branchGroup: Record<st
       if (patch) Object.assign(task, patch);
       return task;
     }),
-    moveTask: vi.fn(async (_id: string, column: string) => { task.column = column; return task; }),
+    moveTask,
     // FNXC:PostMergeFinalizationFixture 2026-09-23-11:20: Execute FN-9370's live finalization predicate in this group-merge fixture.
+    // FNXC:PostMergeFinalizationFixture 2026-09-25-17:30: this `store` is the object literal the
+    // product receives — there is no outer `store` binding in this factory, so the seam must not
+    // close over one. It previously called `store.moveTask(...)`, which threw
+    // `ReferenceError: store is not defined` and masked the routing behaviour under test. The
+    // local `moveTask` above is the same function; call it directly.
     moveTaskIf: vi.fn(async (_id: string, column: string, predicate: (live: typeof task) => boolean | Promise<boolean>, options?: unknown) => {
       if (!await predicate(task)) return { moved: false, task };
-      return { moved: true, task: await store.moveTask(_id, column, options) };
+      return { moved: true, task: await moveTask(_id, column, options) };
     }),
     logEntry: vi.fn(async () => undefined),
     appendAgentLog: vi.fn(async () => undefined),

@@ -75,8 +75,18 @@ describe("workspace Code Review diff base", () => {
     const { readFile } = await import("node:fs/promises");
 
     const callSite = await readFile(new URL("../executor/run-graph-custom-node.ts", import.meta.url), "utf8");
+    /*
+    FNXC:WorkspaceReviewDiffBase 2026-09-25-17:40:
+    This guard pins the RESOLUTION, not one receiver's variable name. The per-repo base is read
+    from the live task's own workspace worktrees and handed to the step as `diffBaseCommitSha`.
+    The receiver was renamed (`live` -> `workspaceReviewTarget`) when this call site was peeled out,
+    so a literal `live.workspaceWorktrees?.[repoRelPath]?.baseCommitSha` no longer appears even
+    though the threading is intact. Asserting the indexed READ plus the local that carries it
+    keeps the structural guarantee without pinning a name the refactor is free to change.
+    */
     expect(callSite, "the workspace reviewer must resolve its repository's own base")
-      .toContain("live.workspaceWorktrees?.[repoRelPath]?.baseCommitSha");
+      .toContain("workspaceWorktrees?.[repoRelPath]?.baseCommitSha");
+    // The resolved value must actually reach the step options, or the read above is dead code.
     expect(callSite).toContain("diffBaseCommitSha");
 
     const step = await readFile(new URL("../executor/execute-workflow-step.ts", import.meta.url), "utf8");
