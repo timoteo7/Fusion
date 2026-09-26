@@ -112,6 +112,7 @@ describe("SelfHealingManager.reclaimPrConflictForTask", () => {
     const store = makeStore(task);
     vi.spyOn(branchConflicts, "inspectBranchConflict").mockResolvedValue({ kind: "reclaimable", livePath: task.worktree, tipSha: "abc123", taskAttributedCommitCount: 1, strandedCommits: [{ sha: "abc123" }] } as any);
     const manager = new SelfHealingManager(store as any, { rootDir: "/tmp/test" } as any);
+    const rebound = vi.spyOn(manager as any, "reboundTask");
     const result = await manager.reclaimPrConflictForTask(task.id);
     expect(result.outcome).toBe("reclaimed");
     expect(store.updateTask).toHaveBeenCalledWith(task.id, expect.objectContaining({
@@ -119,7 +120,17 @@ describe("SelfHealingManager.reclaimPrConflictForTask", () => {
       branchWriteOrigin: "engine",
       worktree: "/tmp/test/.worktrees/fn-4763",
     }));
-    expect((store.moveTask as any).mock.calls.some((c: any[]) => c[1] === "in-progress")).toBe(true);
+    /*
+    FNXC:PrConflictReclaim 2026-09-26-03:25:
+    The rehome targets the card's OWN lane, not a hardcoded "in-progress"
+    (packages/engine/src/self-healing.ts:4324). A card reclaimed while parked in review must stay in
+    review — moving it into WIP would relaunch execution the operator did not ask for and would move
+    the card backward out of the review lane. This card is paused in in-review, so the rebound is a
+    no-op lane-wise; assert the rehome happened, and that it stayed where it was.
+    */
+    expect((store.moveTask as any).mock.calls.some((c: any[]) => c[1] === "in-progress")).toBe(false);
+    // The rehome ran, and it targeted the card's own review lane.
+    expect(rebound).toHaveBeenCalledWith(task.id, "self-healing-worktree-reclaim", "in-review", expect.any(Object));
   });
 
   it("preserves operator branch ownership during reclaim", async () => {

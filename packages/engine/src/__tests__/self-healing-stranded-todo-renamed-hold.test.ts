@@ -146,9 +146,22 @@ describe("recoverStrandedCompletedTodoTasks under a renamed hold column", () => 
   });
 
   it("falls back to the legacy todo column when the workflow cannot be resolved", async () => {
-    /* Conservative: an unresolvable workflow must behave exactly as it did
-       before this conversion rather than guessing. */
-    const task = strandedTask({ id: "FN-U", column: "todo" });
+    /*
+    Conservative: an unresolvable workflow must behave exactly as it did
+       before this conversion rather than guessing.
+
+    FNXC:StrandedTodoPromoter 2026-09-26-03:20:
+    The card now declares `enabledWorkflowSteps: []`. The store double always reports a workflow
+    selection, so when `getWorkflowDefinition` returns null the resolver SUBSTITUTES the default
+    built-in coding IR rather than throwing — and that IR carries the default-on post-merge
+    verification gate. `resolveNoOpFinalizeGateIds` (packages/engine/src/self-healing.ts:727) then
+    reports a required gate with no passing result and the promoter declines, which is correct
+    product behavior but says nothing about the legacy-column fallback this case exists to pin.
+    The fallback itself is unchanged: `holdColumn` still defaults to "todo" on a resolver throw.
+    This fixture owns no post-merge evidence gate, so it opts out explicitly rather than fabricating
+    a gate result it never earned.
+    */
+    const task = strandedTask({ id: "FN-U", column: "todo", enabledWorkflowSteps: [] });
     const h = harness([task], undefined);
 
     expect(await h.manager.recoverStrandedCompletedTodoTasks()).toBe(1);
