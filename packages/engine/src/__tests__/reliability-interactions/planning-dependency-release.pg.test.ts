@@ -91,7 +91,16 @@ pgDescribe("FN-8768 planning dependency release interactions", () => {
       "",
       "## Steps",
       "",
-      "### Step 1: Implement",
+      /*
+      FNXC:StepIndexBase 2026-09-26-13:20:
+      `validateGeneratedPrompt` requires contiguous 0-based step indices. The fixture shipped
+      `### Step 1`, which the deterministic validator rejects with "Step headings must be
+      contiguous 0-based execution indices (observed: 1)" — so `recoverApprovedTask` bailed at
+      triage.ts:1696 with `deterministicSpecFailure` and returned `false` before the planning
+      lifecycle lock it is meant to exercise was ever touched. Renumbered to `Step 0`; the step
+      body is unchanged.
+      */
+      "### Step 0: Implement",
       "- [ ] Preserve the single-lock finalization invariant.",
       "",
     ].join("\n");
@@ -104,7 +113,20 @@ pgDescribe("FN-8768 planning dependency release interactions", () => {
     const promptPath = getPromptPath(store.getTasksDir(), taskId);
     mkdirSync(dirname(promptPath), { recursive: true });
     writeFileSync(promptPath, prompt, "utf8");
-    await store.updateTask(taskId, { status: "planning", steps: [] });
+    /*
+    FNXC:PostMergeFinalizationFixture 2026-09-26-12:55:
+    FN-9369 added the `post-merge-verification` optional group with `defaultOn: true`, and FN-9370's
+    `getRequiredPostMergeEvidenceBlocker` then refuses the merge until a matching
+    `workflowStepResults` entry with `status === "passed"` exists. This task has none, so
+    `finalizeApprovedTask` was refused and `recoverApprovedTask` returned `false`.
+
+    This case is about the PLANNING lifecycle lock: a persisted plan must be released without
+    reacquiring the lock. It owns no external post-merge evidence gate, so it opts out explicitly.
+    An array is authoritative and overrides `defaultOn` — `isWorkflowOptionalGroupEnabled` returns
+    `enabledWorkflowSteps.includes(groupId)` for any array, and only falls back to `defaultOn` when
+    the field is absent (packages/core/src/workflows/workflow-optional-steps.ts:29).
+    */
+    await store.updateTask(taskId, { status: "planning", steps: [], enabledWorkflowSteps: [] });
     store.taskCache.delete(taskId);
 
     const task = await store.getTask(taskId);
