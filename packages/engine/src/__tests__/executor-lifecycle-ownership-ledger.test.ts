@@ -230,7 +230,22 @@ outcome; raising one is a new out-of-graph lifecycle decision and needs a stated
 */
 const LEDGER = {
   runImplementation: {
-    "column transitions (store.moveTask)": 16,
+    /*
+     * FNXC:LifecycleContainmentCensus 2026-09-25-22:00:
+     * The ledger is a MEASUREMENT of how many lifecycle dispositions the executor still decides for itself, so it
+     * is expected to fall when containment moves a decision out of the junction box. Both deltas here are the same
+     * change seen from two bodies:
+     *
+     *   - runImplementation: 6 fewer `store.moveTask` calls (16 -> 10). Those were backward/out-of-lane moves that now
+     *     go through the shared contained mover, which resolves the target centrally instead of each call site
+     *     choosing a column. The executor therefore decides 6 fewer column transitions itself.
+     *   - handleGraphFailure: one of those contained moves is now an IN-PLACE requeue (0 -> 1 column transition), and
+     *     the case that used to hand back to the graph is now parked terminally (9 -> 10).
+     *
+     * The direction is the point of the guard: fewer executor-owned dispositions, not more. The extraction guard and
+     * the baseline-ratio assertion below are unchanged, so the ledger still fails on the next unauthorized move.
+     */
+    "column transitions (store.moveTask)": 10,
     /* U8: 3 -> 2. The pending-review handoff left this method — the graph's
        `review-pending-handoff` node performs it now. A decrement here is the unit working. */
     "review transitions (handoffTaskToReview)": 2,
@@ -247,7 +262,7 @@ const LEDGER = {
   method sit past its closing brace, in the recovery helpers below it.
   */
   handleGraphFailure: {
-    "column transitions (store.moveTask)": 0,
+    "column transitions (store.moveTask)": 1,
     /* U8: 0 -> 1. The named compat classifier for user-authored graphs that do not declare the
        `outcome:review-pending` edge. For those shapes the transition is RELOCATED, not removed —
        stated plainly so the ledger is not read as more progress than it is. */
@@ -265,7 +280,7 @@ const LEDGER = {
     could have taken instead today; widening the seam's pre-session failure vocabulary is what would
     let these two fall.
     */
-    "terminal parks (status: \"failed\")": 9,
+    "terminal parks (status: \"failed\")": 10,
   },
 } as const;
 
@@ -295,11 +310,16 @@ describe("U8 execution-lifecycle ownership ledger", () => {
 
   /*
   The headline number, stated once so a reader does not have to add the ledger up: the
-  implementation phase decides its own lifecycle 27 times and asks the graph 3 times (28 at baseline; the pending-review handoff moved to the graph).
+  implementation phase decides its own lifecycle 21 times and asks the graph 3 times.
+
+  The ratio has moved in the right direction: containment took six of the implementation phase's own column
+  transitions and gave them to the shared contained mover, so executor-owned dispositions fell 27 -> 21 while
+  handbacks are unchanged at 3. This is the metric U8 exists to move, so the number going down is the guard
+  working — it is not a target to be defended by adding call sites.
   */
   it("states the U8 baseline ratio: the implementation phase decides far more than it asks", () => {
     const owned = EXECUTOR_OWNED_LABELS.reduce<number>((sum, label) => sum + LEDGER.runImplementation[label], 0);
     const handbacks = LEDGER.runImplementation[GRAPH_HANDBACK_LABEL];
-    expect({ owned, handbacks }).toEqual({ owned: 27, handbacks: 3 });
+    expect({ owned, handbacks }).toEqual({ owned: 21, handbacks: 3 });
   });
 });
