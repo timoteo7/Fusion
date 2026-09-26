@@ -9080,10 +9080,22 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
         !isSharedBranchGroupMemberIntegration(t) &&
         // FNXC:Workspace 2026-06-22-14:10 (Phase D review A — workspace single-commit-finalize gate):
         // This no-op finalize classifies one branch against one base over `this.options.rootDir`
-        // and moveTask(done)+emitTaskMerged on it. The `Boolean(t.worktree)` gate already excludes
-        // workspace tasks (their `task.worktree` is null; per-repo worktrees live in
-        // `workspaceWorktrees`); `!isWorkspaceTask(t)` makes that exclusion explicit and defensive.
-        Boolean(t.worktree) &&
+        // and moveTask(done)+emitTaskMerged on it. A workspace task is still excluded: its
+        // `task.worktree` is null while its per-repo worktrees live in `workspaceWorktrees`, so
+        // `!isWorkspaceTask(t)` is what keeps this single-branch proof off a multi-repo card.
+        //
+        // FNXC:NoCommitReviewCard 2026-09-26-15:59:
+        // `Boolean(t.worktree)` ALSO excluded every singular card whose worktree was already gone,
+        // which is the FUSI-005..FUSI-008 shape: a read-only card that committed nothing reached
+        // In Review with no branch and no worktree. The merge door correctly refuses it
+        // (`unprovable-content`, no Git evidence to compare an approval against) and
+        // `recoverMergeableReviewTasks` re-enqueues only `Boolean(t.worktree) || isWorkspaceTask(t)`,
+        // so nothing could ever finalize it: the in-review stall auto-dispose was the only
+        // reachable outcome. Admission is widened to non-workspace cards and the PROOF is pushed
+        // into the loop below, where a worktree-less card finalizes only on a positive
+        // `no-changes-finalized` classification (no branch, no owned commit, base reachable).
+        // This merges nothing: with no branch and no owned commit there is no content that could
+        // merge without approval, and the gate's fail-closed answer is untouched.
         !isWorkspaceTask(t) &&
         t.mergeDetails?.mergeConfirmed !== true &&
         t.status !== "merging" &&
@@ -9100,9 +9112,23 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
       const mergeTargetBranch = await resolveIntegrationBranch(this.options.rootDir, settings);
       for (const task of candidates) {
         const ahead = await this.isBranchAheadOfBase(task, task.mergeDetails?.mergeTargetBranch || mergeTargetBranch);
-        if (!ahead || ahead.aheadCount !== 0) continue;
-
-        const classification = await classifyOwnedLandedEvidenceForSelfHealing(this.options.rootDir, task, ahead.baseRef);
+        if (ahead && ahead.aheadCount !== 0) continue;
+        /*
+        FNXC:NoCommitReviewCard 2026-09-26-15:59:
+        A missing branch used to be indistinguishable from an unreadable one here, because
+        `isBranchAheadOfBase` returns null for both, and the single `!ahead` skip discarded the
+        committed-nothing card along with the genuinely broken ones. Classify against the
+        resolved integration branch instead, and for a worktree-less card refuse everything except
+        the one positive proof that nothing exists to land. A worktree-less card whose branch still
+        EXISTS is left exactly as before (skipped, never rebounced) — recovering a card with real
+        unlanded commits is a different repair and is out of scope here.
+        */
+        const hasWorktree = Boolean(task.worktree);
+        if (!hasWorktree && ahead) continue;
+        if (hasWorktree && !ahead) continue;
+        const baseRef = ahead?.baseRef ?? mergeTargetBranch;
+        const classification = await classifyOwnedLandedEvidenceForSelfHealing(this.options.rootDir, task, baseRef);
+        if (!hasWorktree && classification.kind !== "no-changes-finalized") continue;
 
         if (classification.kind === "unproven") {
           // FN-4811 follow-up: dedupe across engine restarts. The in-memory Set only
@@ -9173,7 +9199,7 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
             mergeCommitMessage,
             mergeConfirmed: true,
             mergedAt,
-            mergeTargetBranch: ahead.baseRef,
+            mergeTargetBranch: baseRef,
           };
           confirmedMergeDetails = mergeDetails;
           await this.store.updateTask(task.id, { mergeDetails });
@@ -9240,7 +9266,15 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
             recovered++;
             continue;
           }
-          const noOpReason = `branch has zero commits ahead of ${classification.baseRef}`;
+          /*
+          FNXC:NoCommitReviewCard 2026-09-26-15:59:
+          Keep the recorded reason truthful per classification. "branch has zero commits ahead of X"
+          is a lie for a card that never had a branch; the no-changes wording is the one
+          `reconcileDoneTaskIntegrity` already records for the same proof on a done card.
+          */
+          const noOpReason = classification.kind === "no-changes-finalized"
+            ? "verification-only finalize: no branch and no owned commits"
+            : `branch has zero commits ahead of ${classification.baseRef}`;
           const mergeDetails: MergeDetails = {
             ...(task.mergeDetails || {}),
             mergeConfirmed: true,
