@@ -60,10 +60,26 @@ describe("custom providers openai-completions regression", () => {
     expect(response.role).toBe("assistant");
   });
 
+  /*
+  FNXC:TranscriptContextShape 2026-09-25-20:30:
+  `TranscriptContext` no longer carries a `systemPrompt` field — it is `{ messages }` only (pi-ai
+  `types.d.ts`), and the instruction is carried as a `system`-role MESSAGE. The two cases below
+  passed `{ systemPrompt, messages: [] }`, so the instruction was dropped before `convertMessages`
+  ever saw it and `params` came back empty: both rows were asserting on an API shape that no longer
+  exists rather than on the role-selection behaviour they exist to pin.
+
+  The behaviour under test is real and worth keeping — `instructionRole` is
+  `model.reasoning && compat.supportsDeveloperRole ? "developer" : "system"` — so the instruction is
+  now supplied the way the product actually supplies it, and both role outcomes are still proven.
+  */
+  const instructionContext = () => ({
+    messages: [{ role: "system", content: "system instruction", timestamp: Date.now() }],
+  }) as never;
+
   it("uses system role when reasoning model explicitly disables developer role compat", () => {
     const params = convertMessages(
       { provider: "openai", reasoning: true, input: ["text"] } as never,
-      { systemPrompt: "system instruction", messages: [] } as never,
+      instructionContext(),
       { supportsDeveloperRole: false } as never,
     );
     expect(params[0]?.role).toBe("system");
@@ -72,7 +88,7 @@ describe("custom providers openai-completions regression", () => {
   it("emits developer role when compat allows it on reasoning models", () => {
     const params = convertMessages(
       { provider: "openai", reasoning: true, input: ["text"] } as never,
-      { systemPrompt: "system instruction", messages: [] } as never,
+      instructionContext(),
       { supportsDeveloperRole: true } as never,
     );
     expect(params[0]?.role).toBe("developer");

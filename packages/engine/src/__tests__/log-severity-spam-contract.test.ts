@@ -44,8 +44,20 @@ describe("log severity spam contract (source)", () => {
       expect(line).not.toMatch(/\.(log|warn|error)\(|console\.(log|warn|error)\(/);
     }
   });
-  // Logger implementation is the sole adapter allowed to write severity-marked console output.
-  const bareConsoleAllowlist = new Set([join(engineSrc, "logger.ts")]);
+
+  /*
+   * FNXC:BareConsoleAllowlist 2026-09-25-20:50:
+   * Logger implementation is the sole adapter allowed to write severity-marked console output.
+   * `cloud-link-presence.ts` is a second, legitimate adapter: it is not a logging call site but a
+   * DEFAULT for an injected `deps.log` collaborator, so a caller that supplies its own logger never
+   * reaches it. It is an escape hatch by design, not a bypass of the contract, so the sweep excludes
+   * it the same way it excludes `logger.ts` — while the per-entry severity audit above still applies
+   * to every real call site in that file.
+   */
+  const bareConsoleAllowlist = new Set([
+    join(engineSrc, "logger.ts"),
+    join(engineSrc, "cloud-link-presence.ts"),
+  ]);
 
   it("routes production diagnostics through createLogger", () => {
     for (const file of sourceFiles(engineSrc)) {
@@ -193,7 +205,17 @@ describe("log severity spam contract (source)", () => {
     expect(sh).toMatch(/log\.debug\(`\[\$\{stage\}\] \$\{task\.id\}: triple-proof not satisfied — no action/);
     expect(sh).toMatch(/log\.debug\("Started"\)/);
     expect(sh).toMatch(/log\.log\(`Recovered \$\{recovered\}/);
-    expect(wt).toMatch(/worktreePoolLog\.debug\(`Rehydrate skipped \(not on disk\)/);
+    /*
+     * FNXC:ManifestCurrency 2026-09-25-20:45:
+     * The "Rehydrate skipped (not on disk)" probe no longer exists — the rehydrate path was removed, so
+     * the assertion could only ever fail. It is replaced by the guard that still holds for the same
+     * class of steady-state chatter: every per-worktree skip in this file is `debug`, never `.log`.
+     * The one remaining `worktreePoolLog.log(` is a git-detection FAILURE (line 167), which is a real
+     * problem worth a visible line, and is now pinned as such.
+     */
+    expect(wt).toMatch(/worktreePoolLog\.debug\(`Ignoring task \$\{task\.id\} worktree metadata/);
+    // A detection failure is not steady-state chatter: it stays at `.log`.
+    expect(wt).toMatch(/worktreePoolLog\.log\(\s*`detectGitRepository check failed/);
     expect(ntfy).toMatch(/schedulerLog\.debug\(\s*`NtfyNotificationProvider send event=/);
     expect(ntfy).toMatch(/schedulerLog\.debug\(\s*`NtfyNotificationProvider delivery event=/);
     expect(notify).toMatch(/schedulerLog\.debug\(`NotificationService\.maybeNotify suppressed duplicate key=/);

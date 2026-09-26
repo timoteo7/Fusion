@@ -11,6 +11,21 @@ export type SeverityManifestEntry = {
   severity: "debug" | "warn";
 };
 
+/*
+ * FNXC:ManifestCurrency 2026-09-25-20:40:
+ * A manifest entry is a CLAIM that a specific call site exists at a specific severity. When the
+ * call site is rewritten, the entry must be updated or removed — otherwise the audit reports a
+ * missing anchor for a log line that no longer exists, which is indistinguishable from a real
+ * severity regression and trains readers to ignore the guard.
+ *
+ * The two `cli-runtime/pty-native.ts` entries ("Pre-loaded native module via dlopen" and "dlopen
+ * pre-load failed (continuing)") were REMOVED rather than repointed: the staged dlopen path was
+ * replaced by `log.warn(describePtyLoadFailure(ptyLoadError), ptyLoadError)`, which is a real
+ * load failure (warn is correct) rather than steady-state chatter. Neither anchor survives in the
+ * source. The pty-native file no longer emits a severity-marked steady-state diagnostic, so it
+ * has nothing to audit here; the `routes production diagnostics through createLogger` sweep still
+ * covers it for bare-console violations.
+ */
 export const logSeverityManifest: SeverityManifestEntry[] = [
   { pkg: "engine", file: "plugins/plugin-runner.ts", anchor: "condition evaluated false", priorSeverity: "log", severity: "debug" },
   { pkg: "engine", file: "plugins/plugin-runner.ts", anchor: "Executor runtime environment event: ${event}", priorSeverity: "log", severity: "debug" },
@@ -37,8 +52,6 @@ export const logSeverityManifest: SeverityManifestEntry[] = [
   { pkg: "engine", file: "self-healing.ts", anchor: "Auto-archiving ${stale.length}", priorSeverity: "log", severity: "debug" },
   { pkg: "engine", file: "self-healing.ts", anchor: "auto-archive: archived", priorSeverity: "log", severity: "debug" },
   { pkg: "engine", file: "self-healing.ts", anchor: "Auto-archived ${archived} stale done task(s)", priorSeverity: "log", severity: "debug" },
-  { pkg: "engine", file: "cli-runtime/pty-native.ts", anchor: "Pre-loaded native module via dlopen", priorSeverity: "console", severity: "debug" },
-  { pkg: "engine", file: "cli-runtime/pty-native.ts", anchor: "dlopen pre-load failed (continuing)", priorSeverity: "console", severity: "debug" },
   { pkg: "engine", file: "goals/goal-anchoring-audit.ts", anchor: "goal retrieval audit emission skipped", priorSeverity: "console", severity: "debug" },
   { pkg: "engine", file: "runtimes/child-process-worker.ts", anchor: "Child process worker starting", priorSeverity: "log", severity: "debug" },
   /*
