@@ -196,25 +196,41 @@ describe("workspace named Code Review remediation routing", () => {
     expect(store.logEntry).toHaveBeenCalledWith("FN-201", "Workspace review remediation superseded by repository scope change");
   });
 
-  it("releases a finding-less revise without inventing work", async () => {
+  /*
+  FNXC:CodeReviewMissingFixSteps 2026-09-25-20:10:
+  A Code Review REVISE with no usable file-scoped Fix steps is no longer RELEASED. It now schedules a
+  named `missingCodeReviewFixSteps` step (append-review-remediation-steps.ts) so the feedback is
+  turned into work instead of vanishing.
+
+  This is the opposite of the contract these rows used to assert, and it is the safer failure mode:
+  releasing silently left a card that had been judged as needing fixes with nothing scheduled to do
+  them. The `no-actionable-findings` release is still reachable for non-Code-Review gates.
+  */
+  it("schedules a named fix step for a finding-less Code Review revise", async () => {
     const { task, store, deps, sendTaskBackForFix } = harness({ findings: [] });
 
     const scheduled = await requestPreMergeOptionalStepFix(deps as never, task.id, task, reviseInfo([]));
 
-    expect(scheduled).toBe(false);
-    expect(sendTaskBackForFix).not.toHaveBeenCalled();
-    expect(store.logEntry).toHaveBeenCalledWith("FN-201", "Review remediation released as non-blocking", "review-remediation-no-actionable-findings");
+    expect(scheduled).toBe(true);
+    // The bounce targets the CONFIRMED REPOSITORY's own worktree, unchanged by this behaviour.
+    expect(sendTaskBackForFix).toHaveBeenCalled();
+    expect(sendTaskBackForFix.mock.calls[0]?.[1]).toBe("/tmp/repo-a");
   });
 
-  it("releases qualified findings outside the confirmed workspace repository scope", async () => {
+  it("schedules work for qualified findings outside the confirmed workspace repository scope", async () => {
     const findings = [{ id: "repo-c:finding-1", title: "Outside", body: "Fix outside scope.", filePath: "repo-c/src/outside.ts", severity: "critical" as const }];
     const { task, store, deps, sendTaskBackForFix } = harness({ findings });
 
     const scheduled = await requestPreMergeOptionalStepFix(deps as never, task.id, task, reviseInfo(findings));
 
-    expect(scheduled).toBe(false);
-    expect(sendTaskBackForFix).not.toHaveBeenCalled();
-    expect(store.logEntry).toHaveBeenCalledWith("FN-201", "Review remediation released as non-blocking", "review-remediation-upstream-out-of-scope:repo-c/src/outside.ts");
+    /*
+    A Code Review REVISE is no longer released on the out-of-scope path either: `appendReviewRemediationSteps`
+    treats every Code Review gate with zero derived steps the same way, by scheduling a named step that
+    carries the reviewer's feedback. The `upstream-out-of-scope` release remains for non-Code-Review gates
+    (see the condition at append-review-remediation-steps.ts:145).
+    */
+    expect(scheduled).toBe(true);
+    expect(sendTaskBackForFix).toHaveBeenCalled();
   });
 
   it("releases when the failed repository has no acquired workspace worktree", async () => {

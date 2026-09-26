@@ -83,7 +83,16 @@ describe("reliability interaction: pr conflict reclaim", () => {
     const manager = new SelfHealingManager(s as any, { rootDir: "/tmp/test" } as any);
     const result = await manager.reclaimPrConflictForTask(t.id);
     expect(result.outcome).toBe("reclaimed");
-    expect(t.column).toBe("in-progress");
+    /*
+    FNXC:LifecycleContainment 2026-09-25-20:00:
+    The reclaim is IN-PLACE. `reclaimPrConflictForTask` recovers through the contained
+    self-healing move, and a reclaim — unlike a review REVISE — has no backward-move authority under
+    FN-207. The card stays in the review lane, which is exactly what makes it RESUMABLE: a card
+    bounced to `in-progress` would leave the review lane mid-decision, and a paused review card that
+    jumps lanes is no longer the same decision an operator was looking at. The stale PR-conflict
+    metadata is what gets cleared.
+    */
+    expect(t.column).toBe("in-review");
     expect(s.updateTask).toHaveBeenCalledWith(t.id, expect.objectContaining({
       branch: "fusion/fn-4763",
       branchWriteOrigin: "engine",
