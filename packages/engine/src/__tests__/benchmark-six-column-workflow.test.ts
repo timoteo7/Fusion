@@ -701,6 +701,13 @@ describe("builtin:coding parity alongside the benchmark (R8)", () => {
       "code-review::code-review-step",
       "merge",
       "post-merge-verification",
+      /*
+      FNXC:PostMergeGroupShape 2026-09-25-16:55:
+      A GROUP node is visited together with its inner step node (`<group>::<group>-step`),
+      exactly as `plan-review` and `code-review` are above. The trace listed only the group,
+      which asserted a traversal the graph never produced.
+      */
+      "post-merge-verification::post-merge-verification-step",
     ]);
     expect(calls).toEqual([
       "plan",
@@ -710,6 +717,9 @@ describe("builtin:coding parity alongside the benchmark (R8)", () => {
       "custom:completion-summary",
       "custom:code-review-step",
       "merge",
+      // Same group-shape reason as the visited-node trace above: the post-merge group's inner
+      // step node dispatches through the custom-node seam like the other review steps do.
+      "custom:post-merge-verification-step",
     ]);
 
     /*

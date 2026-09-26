@@ -28,8 +28,15 @@ describe("WorkflowGraphExecutor built-in coding workflow retries", () => {
     expect(executeCalls).toBe(2);
     expect(result.context["node:execute:outcome"]).toBe("success");
     /*
-     * FNXC:WorkflowGraphTests 2026-06-29-13:50:
-     * Retry coverage must pin the post-cutover builtin:coding node order. The default path now routes planning through the default-on plan-review group before execute, bypasses default-off browser/post-merge groups at the group node, and runs the default-on code-review template before review and the collapsed legacy merge seam.
+     * FNXC:WorkflowGraphTests 2026-06-29-13:50, corrected 2026-09-25-17:20:
+     * Retry coverage must pin the post-cutover builtin:coding node order. The default path routes
+     * planning through the plan-review group before execute, runs the code-review template before
+     * review and the collapsed legacy merge seam, and then expands the post-merge gate.
+     *
+     * The earlier note here said this path "bypasses default-off browser/post-merge groups at the
+     * group node". That was true when post-merge verification was `defaultOn: false`; FN-9369 made
+     * it `defaultOn: true` (`builtin-post-merge-group.ts`), so it now expands like plan-review and
+     * code-review do. Only `browser-verification` is still bypassed at its group node.
      */
     expect(result.visitedNodeIds).toEqual([
       "start",
@@ -46,10 +53,15 @@ describe("WorkflowGraphExecutor built-in coding workflow retries", () => {
       "review",
       "merge",
       "post-merge-verification",
+      // FNXC:PostMergeGroupShape 2026-09-25-17:20: the post-merge group is `defaultOn: true`, so
+      // like plan-review and code-review above it expands and visits its inner step node. The
+      // former `not.toContain` assertion for this node asserted a default-OFF bypass that no
+      // longer exists; keeping it would contradict the trace this case pins.
+      "post-merge-verification::post-merge-verification-step",
     ]);
     expect(result.visitedNodeIds).not.toContain("workflow-step");
+    // browser-verification is still default-OFF, so it alone is bypassed at its group node.
     expect(result.visitedNodeIds).not.toContain("browser-verification::browser-verification-step");
-    expect(result.visitedNodeIds).not.toContain("post-merge-verification::post-merge-verification-step");
   });
 
   it("exhausts execute node retries and routes failure to end", async () => {

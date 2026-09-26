@@ -357,10 +357,15 @@ const EXPECTATIONS: BuiltinExpectation[] = [
       ["triage", "todo", "graph"],
       ["todo", "in-progress", "scheduler"],
       ["in-progress", "in-review", "graph"],
-      // FNXC:WorkspaceReviewSeal 2026-08-21-19:39: completion summary precedes Code Review,
-      // so legacy Coding re-enters execution before the final sealed review episode.
-      ["in-review", "in-progress", "graph"],
-      ["in-progress", "in-review", "graph"],
+      /*
+      FNXC:SealedReviewLane 2026-09-25-17:05:
+      The trailing `in-review -> in-progress -> in-review` episode is gone. `completion-summary`
+      and the Code Review group are now BOTH anchored in `in-review` (see
+      `builtin-stepwise-coding-workflow-ir.ts`, where each is constructed with the `"in-review"`
+      column), so the sealing review and the summary that feeds it run in the same lane as the
+      merge. The card therefore crosses into execution exactly once, via the scheduler, and never
+      bounces back out. The removed hops asserted a re-entry the IR no longer declares.
+      */
       ["in-review", "done", "graph"],
     ],
     finalColumn: "done",

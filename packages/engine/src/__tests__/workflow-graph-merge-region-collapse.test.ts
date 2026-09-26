@@ -89,6 +89,13 @@ const SUCCESS_PATH = [
   "review",
   "merge",
   "post-merge-verification",
+  /*
+  FNXC:PostMergeGroupShape 2026-09-25-16:50:
+  The post-merge group is a real GROUP node, so a successful run visits its inner step node
+  (`<group>::<group>-step`) exactly as `plan-review` and `code-review` do above. The path listed
+  only the group, which asserted a shape the graph never produced.
+  */
+  "post-merge-verification::post-merge-verification-step",
 ];
 // Same path, stopped before the post-merge hop (merge itself failed).
 const MERGE_FAILURE_PATH = SUCCESS_PATH.slice(0, SUCCESS_PATH.indexOf("merge") + 1);

@@ -654,12 +654,36 @@ describe("CE workflow-step executor integration", () => {
         live = { ...live, column };
         return live as any;
       });
+      /*
+      FNXC:PostMergeFinalizationFixture 2026-09-25-16:35:
+      FN-9370 moved the terminal move onto the predicate-fenced `moveTaskIf` seam, so this double
+      must model it: read the live row, run the product's predicate, and only then move. Asserting
+      the retired three-argument `moveTask` shape would pin a call the product no longer makes.
+      */
+      store.moveTaskIf.mockImplementation(async (
+        id: string,
+        column: string,
+        predicate: (liveTask: unknown) => boolean | Promise<boolean>,
+        options?: unknown,
+      ) => {
+        if (!await predicate(live)) return { moved: false, task: live };
+        await store.moveTask(id, column, options as any);
+        return { moved: true, task: live };
+      });
+      store.updateTaskAtomic.mockImplementation(async (
+        _id: string,
+        mutate: (current: unknown) => Record<string, unknown> | undefined | Promise<Record<string, unknown> | undefined>,
+      ) => {
+        const patch = await mutate(live);
+        if (patch) Object.assign(live, patch);
+        return live as any;
+      });
       const { executor } = makeExecutor(store);
 
       const handled = await (executor as any).finalizeMergeConfirmedWorkflowGraphTask("FN-CE-1", "test");
 
       expect(handled).toBe(true);
-      expect(store.moveTask).toHaveBeenCalledWith("FN-CE-1", "done", expect.objectContaining({
+      expect(store.moveTaskIf).toHaveBeenCalledWith("FN-CE-1", "done", expect.any(Function), expect.objectContaining({
         recoveryRehome: true,
         preserveProgress: true,
       }));
