@@ -103,6 +103,24 @@ function createTask(overrides: Partial<Task> = {}): Task {
   } as Task;
 }
 
+/*
+FNXC:EngineTests 2026-09-26-06:40:
+`taskColumnWakeHandler` runs `isPlanningResetHoldClearingUpdate` on every `task:updated` tick, and that
+predicate reads `steps` unguarded, so a partial payload crashed the shared handler before the
+pause-abort assertion ran. Production `store.emit("task:updated", task)` always passes a materialized
+row, so the double was under-specified. Build the payload from the complete task shape instead of
+relaxing the predicate, which would let a real task update impersonate an operator Reset.
+*/
+function updatePayload(overrides: Partial<Task> = {}): Task {
+  return createTask({
+    column: "todo",
+    status: null,
+    workflowStepResults: [],
+    log: [],
+    ...overrides,
+  });
+}
+
 describe("TriageProcessor per-task pause aborts", () => {
   beforeEach(() => {
     resetExecutorMocks();
@@ -132,7 +150,7 @@ describe("TriageProcessor per-task pause aborts", () => {
     processor.start();
     (processor as any).activeSessions.set("FN-PAUSE-2", { abort, dispose });
 
-    emit("task:updated", { id: "FN-PAUSE-2", paused: true });
+    emit("task:updated", updatePayload({ id: "FN-PAUSE-2", paused: true }));
     await Promise.resolve();
 
     expect(abort).toHaveBeenCalledTimes(1);
@@ -154,7 +172,7 @@ describe("TriageProcessor per-task pause aborts", () => {
     processor.start();
     (processor as any).activeSessions.set("FN-USER-PAUSE", { abort, dispose });
 
-    emit("task:updated", { id: "FN-USER-PAUSE", userPaused: true });
+    emit("task:updated", updatePayload({ id: "FN-USER-PAUSE", userPaused: true }));
     await Promise.resolve();
 
     expect(abort).toHaveBeenCalledTimes(1);
@@ -173,8 +191,8 @@ describe("TriageProcessor per-task pause aborts", () => {
     processor.start();
     (processor as any).activeSessions.set("FN-ACTIVE", { abort, dispose });
 
-    expect(() => emit("task:updated", { id: "FN-ACTIVE", paused: false })).not.toThrow();
-    expect(() => emit("task:updated", { id: "FN-MISSING", paused: true })).not.toThrow();
+    expect(() => emit("task:updated", updatePayload({ id: "FN-ACTIVE", paused: false }))).not.toThrow();
+    expect(() => emit("task:updated", updatePayload({ id: "FN-MISSING", paused: true }))).not.toThrow();
 
     expect(abort).not.toHaveBeenCalled();
     expect(dispose).not.toHaveBeenCalled();

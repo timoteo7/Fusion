@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "./executor-test-helpers.js";
 import { TaskExecutor } from "../executor.js";
 import { executorLog } from "../logger.js";
@@ -13,7 +16,7 @@ function refusal() {
   };
 }
 
-function task(retryCount: number) {
+function task(retryCount: number, overrides: Record<string, unknown> = {}) {
   return {
     id: "FN-4946-B",
     title: "Budget",
@@ -28,8 +31,33 @@ function task(retryCount: number) {
     currentStep: 0,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    ...overrides,
   } as any;
 }
+
+/*
+FNXC:EngineTests 2026-09-26-07:05:
+`TaskExecutor.execute` reserves the pinned worktree on the REAL filesystem before it constructs the
+agent session, and that failure is caught into a terminal row rather than thrown — so a fictional root
+never surfaces at the `execute()` call. It resurfaces later as `doneTool.execute` on `undefined`,
+which reads like a missing tool when the tool was never handed over. Any case that drives `execute()`
+must therefore run against a real writable root, with the task's pinned worktree derived from that
+same root so the reservation and the pin agree.
+
+`node:fs` is mocked wholesale by executor-test-helpers, so temp roots come from `node:fs/promises`,
+which is not mocked.
+*/
+let workRoot = "";
+
+beforeEach(async () => {
+  workRoot = await mkdtemp(join(tmpdir(), "fusion-task-done-budget-"));
+  await mkdir(join(workRoot, ".worktrees", "swift-falcon"), { recursive: true });
+});
+
+afterEach(async () => {
+  if (workRoot) await rm(workRoot, { recursive: true, force: true });
+  workRoot = "";
+});
 
 describe("FN-4946 implicit refusal budget handling", () => {
   beforeEach(() => {
@@ -76,7 +104,8 @@ describe("FN-4946 implicit refusal budget handling", () => {
 
   it("shares retry budget with explicit fn_task_done refusals", async () => {
     const store = createMockStore();
-    let currentTask: any = { ...task(2), id: "FN-4946-B2", steps: [{ name: "Step 1", status: "in-progress" }] };
+    const worktree = join(workRoot, ".worktrees", "swift-falcon");
+    let currentTask: any = { ...task(2, { worktree }), id: "FN-4946-B2", steps: [{ name: "Step 1", status: "in-progress" }] };
     let doneTool: any;
 
     store.getTask.mockImplementation(async () => ({ ...currentTask, steps: currentTask.steps.map((s: any) => ({ ...s })) }));
@@ -89,7 +118,7 @@ describe("FN-4946 implicit refusal budget handling", () => {
       return { session: { prompt: vi.fn().mockResolvedValue(undefined), dispose: vi.fn(), subscribe: vi.fn(), on: vi.fn(), state: {} } } as any;
     });
 
-    const executor = new TaskExecutor(store as any, "/repo");
+    const executor = new TaskExecutor(store as any, workRoot);
     await executor.execute(currentTask);
 
     // Burn explicit-path refusal budget from 2 -> 3 (still todo), then implicit refusal should escalate immediately.

@@ -1,9 +1,39 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "./executor-test-helpers.js";
 import { TaskExecutor } from "../executor.js";
 import { reviewStep } from "../execution/reviewer.js";
 import * as worktreePool from "../worktree/worktree-pool.js";
 import { createMockStore, mockedCreateFnAgent, mockedExecSync, resetExecutorMocks } from "./executor-test-helpers.js";
+
+/*
+FNXC:EngineTests 2026-09-26-07:05:
+`TaskExecutor.execute` reserves the pinned worktree on the REAL filesystem before it constructs the
+agent session, and that failure is caught into a terminal row rather than thrown — so a fictional root
+never surfaces at the `execute()` call. It resurfaces later as `doneTool.execute` on `undefined`,
+which reads like a missing tool when the tool was never handed over. The suite therefore runs against
+a real writable root, and the mocked `git rev-parse --show-toplevel` derives from that same root so the
+resolved toplevel cannot disagree with the reservation.
+
+`node:fs` is mocked wholesale by executor-test-helpers, so temp roots come from `node:fs/promises`,
+which is not mocked.
+*/
+let workRoot = "";
+let worktreePath = "";
+
+beforeEach(async () => {
+  workRoot = await mkdtemp(join(tmpdir(), "fusion-revise-verdict-guard-"));
+  worktreePath = join(workRoot, ".worktrees", "swift-falcon");
+  await mkdir(worktreePath, { recursive: true });
+});
+
+afterEach(async () => {
+  if (workRoot) await rm(workRoot, { recursive: true, force: true });
+  workRoot = "";
+  worktreePath = "";
+});
 
 function createTask(overrides: Record<string, unknown> = {}) {
   return {
@@ -11,7 +41,7 @@ function createTask(overrides: Record<string, unknown> = {}) {
     title: "REVISE guard",
     description: "",
     column: "in-progress",
-    worktree: "/repo/.worktrees/swift-falcon",
+    worktree: worktreePath,
     branch: "fusion/fn-4851",
     baseCommitSha: "abc123",
     taskDoneRetryCount: 0,
@@ -39,7 +69,7 @@ async function setup(overrides: Record<string, unknown> = {}) {
     return { session: { prompt: vi.fn().mockResolvedValue(undefined), dispose: vi.fn() } } as any;
   });
 
-  const executor = new TaskExecutor(store as any, "/repo");
+  const executor = new TaskExecutor(store as any, workRoot);
   await executor.execute(createTask() as any);
 
   return { store, doneTool };
@@ -50,7 +80,7 @@ describe("FN-4851 REVISE verdict task-done guard", () => {
     resetExecutorMocks();
     vi.spyOn(worktreePool, "isUsableTaskWorktree").mockResolvedValue(true);
     mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes("rev-parse --show-toplevel")) return Buffer.from("/repo/.worktrees/swift-falcon\n");
+      if (cmd.includes("rev-parse --show-toplevel")) return Buffer.from(`${worktreePath}\n`);
       if (cmd.includes("rev-parse --abbrev-ref HEAD")) return Buffer.from("fusion/fn-4851\n");
       if (cmd.includes("rev-list --count")) return Buffer.from("1\n");
       if (cmd.includes("rev-parse HEAD")) return Buffer.from("def456\n");

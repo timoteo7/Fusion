@@ -37,6 +37,32 @@ function planningTask(overrides: Partial<Task> = {}): Task {
   return { id: "FN-1403", column: "ideas", status: "planning", ...overrides } as Task;
 }
 
+/*
+FNXC:PlanningEvacuation 2026-09-26-06:40:
+`taskColumnWakeHandler` runs `isPlanningResetHoldClearingUpdate` on EVERY `task:updated` tick, and that
+predicate reads `steps` unguarded. A partial literal therefore crashed in the handler before the wake
+assertion ran. `Task.steps` is required and production always emits a materialized row, so the double
+was under-specified — build complete task rows here rather than relaxing the predicate, which would let
+a real task update impersonate an operator Reset.
+*/
+function completeTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: "FN-1403",
+    title: "Planned card",
+    description: "",
+    column: "todo",
+    steps: [],
+    currentStep: 0,
+    status: null,
+    workflowStepResults: [],
+    dependencies: [],
+    log: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  } as Task;
+}
+
 function attachLiveSession(processor: TriageProcessor, taskId: string) {
   const session = { abort: vi.fn().mockResolvedValue(undefined), dispose: vi.fn() };
   (processor as any).activeSessions.set(taskId, session);
@@ -81,7 +107,7 @@ describe("withdrawing a card from planning", () => {
     const processor = new TriageProcessor(store, "/tmp/test");
     const wake = vi.spyOn(processor as any, "requestImmediatePoll").mockImplementation(() => undefined);
 
-    (processor as any).taskColumnWakeHandler({ id: "FN-1403", column: "todo" } as Task);
+    (processor as any).taskColumnWakeHandler(completeTask({ column: "todo" }));
 
     expect(wake).toHaveBeenCalled();
   });
