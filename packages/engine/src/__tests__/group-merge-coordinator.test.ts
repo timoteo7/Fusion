@@ -1349,9 +1349,14 @@ function createPostReviewStore(task: Record<string, any>, branchGroup: Record<st
     }),
     moveTask: vi.fn(async (_id: string, column: string) => { task.column = column; return task; }),
     // FNXC:PostMergeFinalizationFixture 2026-09-23-11:20: Execute FN-9370's live finalization predicate in this group-merge fixture.
-    moveTaskIf: vi.fn(async (_id: string, column: string, predicate: (live: typeof task) => boolean | Promise<boolean>, options?: unknown) => {
+    // FNXC:MergeMockDrift 2026-09-26-07:22: this fake took `(task, branchGroup)`, not a store, so
+    // delegating to `store.moveTask` left a dangling reference that threw only once the predicate
+    // passed. Apply the column directly, matching the `moveTask` fake above, so the fixture cannot
+    // reintroduce a reference it does not close over.
+    moveTaskIf: vi.fn(async (_id: string, column: string, predicate: (live: typeof task) => boolean | Promise<boolean>) => {
       if (!await predicate(task)) return { moved: false, task };
-      return { moved: true, task: await store.moveTask(_id, column, options) };
+      task.column = column;
+      return { moved: true, task };
     }),
     logEntry: vi.fn(async () => undefined),
     appendAgentLog: vi.fn(async () => undefined),

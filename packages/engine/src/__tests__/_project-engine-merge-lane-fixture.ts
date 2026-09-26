@@ -1,6 +1,8 @@
 type MergeLaneState = {
   mergeQueue: string[];
   mergeActive: Set<string>;
+  mergeRetryResetTaskIds: Set<string>;
+  mergeEnqueueDeferredByRetryReset: Set<string>;
   capacityDeferredMergeTaskIds: Set<string>;
   capacityDeferredMergeReasons: Map<string, string>;
   capacityDeferredMerges: Map<string, unknown>;
@@ -37,6 +39,15 @@ export function seedMergeLaneState<T extends object>(
   const defaults: MergeLaneState = {
     mergeQueue: [],
     mergeActive: new Set(),
+    /*
+    FNXC:MergeRetryAdmission 2026-09-26-07:20:
+    `internalEnqueueMerge` reads the retry-reset fence before any capacity check, so these two sets
+    must be seeded here with the rest of the admission state — otherwise a release-path fake throws
+    `Cannot read properties of undefined (reading 'has')` at the first enqueue and never reaches the
+    behaviour under test.
+    */
+    mergeRetryResetTaskIds: new Set(),
+    mergeEnqueueDeferredByRetryReset: new Set(),
     capacityDeferredMergeTaskIds: new Set(),
     capacityDeferredMergeReasons: new Map(),
     capacityDeferredMerges: new Map(),
