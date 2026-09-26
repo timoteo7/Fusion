@@ -87,7 +87,7 @@ describe("landed-content soft-blocker reliability interactions (real git)", () =
     }
   });
 
-  it("keeps task in-review when landed content exists but hard blockers remain", async () => {
+  it("finalizes a landed task whose only leftover state is a transient failure and pending steps", async () => {
     const dir = mkdtempSync(join(tmpdir(), "fn-4648-ri-hard-"));
     try {
       git(dir, "git init -b main");
@@ -127,10 +127,21 @@ describe("landed-content soft-blocker reliability interactions (real git)", () =
 
       const recovered = await manager.recoverAlreadyMergedReviewTasks();
 
-      expect(recovered).toBe(0);
-      expect(task.column).toBe("in-review");
-      expect(task.status).toBe("failed");
-      expect(task.error).toContain("task has incomplete steps");
+      /*
+      FNXC:LandedContentRecovery 2026-09-26-02:55:
+      A PROVEN land no longer defers to the pre-merge "task has incomplete steps" gate. Once the task's
+      own commit is found on the base branch, recovery finalizes and clears status/error/mergeRetries.
+      That is deliberate: getPostMergeFinalizeBlocker exempts `failed` outright
+      (packages/core/src/merge/confirmed-merge-reconciliation.ts:27) because a failed status on a merged
+      card is transient leftover, and the pre-merge blockers are properties of the PRE-merge state this
+      sweep is deliberately over. The step statuses are reconciled to "skipped" rather than blocking.
+      A genuinely blocking post-merge state (paused/aborting/awaiting-approval) still defers — that
+      path is unchanged and is what the sibling case above covers.
+      */
+      expect(recovered).toBe(1);
+      expect(task.column).toBe("done");
+      expect(task.status).toBeNull();
+      expect(task.error).toBeNull();
       manager.stop();
     } finally {
       rmSync(dir, { recursive: true, force: true });

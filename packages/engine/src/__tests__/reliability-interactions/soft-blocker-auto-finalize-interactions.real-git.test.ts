@@ -124,7 +124,7 @@ describe("soft-blocker auto-finalize reliability interactions (real git)", () =>
     }
   });
 
-  it("preserves hard blockers, then finalizes via recoverMergedReviewTasks when blocker clears", async () => {
+  it("finalizes a landed task on the first sweep; the deferred-then-cleared handoff is gone", async () => {
     const dir = mkdtempSync(join(tmpdir(), "fn-4653-ri-hard-handoff-"));
     try {
       git(dir, "git init -b main");
@@ -145,26 +145,23 @@ describe("soft-blocker auto-finalize reliability interactions (real git)", () =>
 
       const firstSweep = await manager.recoverAlreadyMergedReviewTasks();
 
-      expect(firstSweep).toBe(0);
-      expect(task.column).toBe("in-review");
-      expect(task.paused).toBe(true);
-      expect(task.status).toBe("failed");
-      expect(task.error).toContain("task has incomplete steps");
-      expect(task.mergeDetails?.mergeConfirmed).toBe(true);
-      expect(
-        auditEvents.some((event: any) => event?.mutationType === "task:auto-recover-finalize-already-on-main"),
-      ).toBe(false);
-
-      task.steps = [];
-      task.error = "stale failure";
-
-      const secondSweep = await manager.recoverMergedReviewTasks();
-
-      expect(secondSweep).toBe(1);
+      /*
+      FNXC:LandedContentRecovery 2026-09-26-02:58:
+      This case used to prove a TWO-phase handoff: the first sweep parked the card with
+      "task has incomplete steps", an operator cleared the steps, and a later recoverMergedReviewTasks
+      finalized it. That parking no longer exists. A PROVEN land — the task's own commit found on the
+      base branch — finalizes on the first sweep, because getPostMergeFinalizeBlocker exempts `failed`
+      outright (packages/core/src/merge/confirmed-merge-reconciliation.ts:27) and the pre-merge step
+      gate describes the PRE-merge state this sweep is deliberately over. Step statuses are reconciled
+      to "skipped" instead of blocking. The genuinely-blocking post-merge states (paused, aborting,
+      awaiting-approval) still defer, which is what the sibling case above covers.
+      */
+      expect(firstSweep).toBe(1);
       expect(task.column).toBe("done");
       expect(task.paused).toBe(false);
       expect(task.status).toBeNull();
       expect(task.error).toBeNull();
+      expect(task.mergeDetails?.mergeConfirmed).toBe(true);
       expect(
         auditEvents.some((event: any) => event?.mutationType === "task:auto-recover-finalize-already-on-main"),
       ).toBe(true);
