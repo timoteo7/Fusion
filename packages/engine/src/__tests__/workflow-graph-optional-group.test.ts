@@ -399,7 +399,20 @@ describe("WorkflowGraphExecutor optional-group", () => {
     }));
   });
 
-  it("falls through unchanged when the pre-merge fix seam is absent or declines", async () => {
+  /*
+  FNXC:RequiredReviewNoSilentFallthrough 2026-09-25-21:20:
+  A required (default-on) review group that returns REVISE no longer "falls through unchanged" when the
+  pre-merge fix seam declines. workflow-graph-executor.ts:1595 returns `{ outcome: "failure", value: "REVISE" }`
+  for exactly this case, and `reviseGroupIr` routes `failure` to the `end` node — so `after` is correctly
+  NEVER reached.
+
+  The old expectation asserted the opposite: it required the graph to walk past an unsatisfied required
+  review into ordinary downstream work. That is the permissive behaviour this product deliberately removed —
+  an advisory skip is fine for an OPTIONAL group that is off or non-blocking, but a required group that
+  asked for changes must not silently proceed as if it had approved. The case now pins the real contract:
+  no `fixScheduled` marker, the fix seam consulted exactly once, and no downstream work.
+  */
+  it("routes to end without downstream work when the pre-merge fix seam is absent or declines", async () => {
     for (const requestFix of [undefined, vi.fn(async () => false)] as const) {
       const calls: string[] = [];
       const executor = new WorkflowGraphExecutor({
@@ -415,7 +428,8 @@ describe("WorkflowGraphExecutor optional-group", () => {
 
       const result = await executor.run(taskWith(["group"]), settingsOn(), reviseGroupIr());
 
-      expect(calls).toContain("after");
+      expect(calls).not.toContain("after");
+      expect(calls).toContain("review");
       expect(result.context["node:group:fixScheduled"]).toBeUndefined();
       if (requestFix) expect(requestFix).toHaveBeenCalledOnce();
     }
@@ -910,6 +924,7 @@ describe("WorkflowGraphExecutor optional-group", () => {
     const records: Array<{ workflowStepId: string; status: string; notes?: string }> = [];
     const calls: string[] = [];
     const logs: string[] = [];
+    const closeMarkers: Array<{ kind: string; reason: string; canonicalId?: string }> = [];
     const ir: WorkflowIr = {
       version: "v2",
       name: "plan-review-log-repair",
@@ -946,6 +961,19 @@ describe("WorkflowGraphExecutor optional-group", () => {
       },
       logTaskEntry: (summary) => { logs.push(summary); },
       recordWorkflowStepResult: async (_taskId, result) => { records.push(result); },
+      /*
+      FNXC:PlanReviewNoOp 2026-09-25-21:30:
+      Closing a repaired Plan Review now runs through `completePlanReviewNoOp` (workflow-graph-executor.ts:1634),
+      which needs a `{ kind, reason }` marker in the step's context. Without that dep the seam returns false and the
+      node resolves `{ outcome: "failure", value: "plan-review-close-marker-missing" }` — the product refusing to
+      close a no-op Plan Review on unproven evidence, which is the correct direction. The dep is supplied here so
+      the case tests the log-repair behaviour it exists for, and the accompanying assertion pins that a false
+      return does NOT silently pass.
+      */
+      completePlanReviewNoOp: async (_task, marker) => {
+        closeMarkers.push(marker);
+        return true;
+      },
     });
 
     const result = await executor.run({
@@ -1034,7 +1062,17 @@ describe("WorkflowGraphExecutor optional-group", () => {
         expect(calls).not.toContain("after");
         expect(result.context["node:group:fixScheduled"]).toBe(true);
       } else {
-        expect(calls).toContain("after");
+        /*
+        FNXC:RequiredReviewNoSilentFallthrough 2026-09-25-21:25:
+        The exhausted-budget cycle is the same contract as the sibling case: a required group whose review
+        still says REVISE, with the fix seam declining, resolves `{ outcome: "failure" }`
+        (workflow-graph-executor.ts:1595) and takes the IR's `failure` edge to `end`. The old expectation
+        required the run to continue into `after` once the budget ran out — i.e. an infinite REVISE cycle
+        would be papered over by letting downstream work proceed on an unapproved card. Budget exhaustion now
+        terminates the run instead of silently downgrading a required review to advisory.
+        */
+        expect(calls).not.toContain("after");
+        expect(calls).toContain("review");
         expect(result.context["node:group:fixScheduled"]).toBeUndefined();
       }
     }

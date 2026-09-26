@@ -64,7 +64,17 @@ describe("engine lifecycle move reason census", () => {
       .flatMap(directMoveWindows)
       .length;
 
-    expect(count).toBe(53);
+    /*
+    FNXC:MoveAuthorityCensus 2026-09-25-21:40:
+    The census is a ratchet, not a stability claim: it exists so that ADDING a new direct move authority cannot
+    land unnoticed, which means the number is expected to move when the production surface changes. One authority
+    was consolidated (the `self-healing-dependency-rebound` backward target is now served by the shared contained
+    resolver in `reboundTask`, so the per-module `reboundColumn` binding it used to declare is gone), taking the
+    count from 53 to 52.
+
+    The guard remains a guard: it still fails on the NEXT addition, which is the only behaviour that matters.
+    */
+    expect(count).toBe(52);
   });
 
   it("requires direct backward-target moves to carry a registered reason", () => {
