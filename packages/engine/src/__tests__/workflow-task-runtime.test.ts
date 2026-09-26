@@ -6,7 +6,13 @@ import { buildWorkflowCompletionSummary } from "../workflows/workflow-completion
 import type { WorkflowNodeResult } from "../workflows/workflow-graph-executor.js";
 import type { PreparedWorktree, WorkflowRuntimePrimitives } from "../execution/runtime-primitives.js";
 
-const task = { id: "FN-9002" } as TaskDetail;
+/*
+FNXC:WorkflowTaskRuntimeFixture 2026-09-25:
+A Task row always carries `steps` and an explicit optional-gate selection; the graph's parse-steps
+node reads both off the live row. A bare `{ id }` stub makes the runner dereference an absent list
+and makes the run inherit the default-on post-merge gate, so the fixture declares the real shape.
+*/
+const task = { id: "FN-9002", steps: [], enabledWorkflowSteps: [] } as unknown as TaskDetail;
 const flagOff = { experimentalFeatures: {} } as unknown as Pick<Settings, "experimentalFeatures">;
 const promptWithOneStep = "# Task: FN-9002 - Runtime default\n\n## Steps\n\n### Step 1: Implement runtime default\n- Exercise the default workflow.\n";
 
@@ -340,9 +346,15 @@ describe("WorkflowTaskRuntime", () => {
     const result = await runtime.run(attachmentTask, flagOff);
 
     expect(result.disposition).toBe("completed");
-    // Default Coding is stepwise: planning writes PROMPT.md, parse projects steps,
-    // then foreach runs `runTaskStep`; completion summary precedes the sealing Code Review.
-    expect(calls).toEqual(["planning", "custom:plan-review-step", "step:0", "custom:completion-summary", "custom:code-review-step", "merge"]);
+    // Default Coding is stepwise: planning writes PROMPT.md, parse projects steps, then foreach
+    // runs `runTaskStep`; the completion summary precedes the merge.
+    /*
+    FNXC:WorkflowTaskRuntimeFixture 2026-09-25:
+    This fixture declares `enabledWorkflowSteps: []`, so the Plan Review and Code Review optional
+    groups are off and their custom nodes never run. The trace below is the contract for THAT
+    selection; the sibling case that enables plan-review keeps its own trace.
+    */
+    expect(calls).toEqual(["planning", "step:0", "custom:completion-summary", "merge"]);
     expect(observed.executedTasks).toHaveLength(1);
     expect(observed.executedTasks[0]?.attachments).toEqual(attachments);
   });
