@@ -418,6 +418,112 @@ describe("AcpRuntimeAdapter custom-tools bridge (FNXC:AcpCustomTools)", () => {
     }
   });
 
+  /*
+  FNXC:AcpMcpWireShape 2026-09-25-14:51:
+  ACP session/new must receive the tool bridge plus resolved Fusion MCP definitions in ACP wire
+  form. Verify the adapter normalizes all supported transports at the protocol boundary.
+  */
+  it("normalizes resolved MCP definitions and appends the Fusion tool bridge", async () => {
+    let captured: { mcpServers?: unknown[] } | undefined;
+    const spy = vi.spyOn(provider, "newAcpSession").mockImplementation(async (_connection, opts) => {
+      captured = opts;
+      return { sessionId: "mcp-wire-session" };
+    });
+    const adapter = makeAdapter();
+    let session: AcpSession | undefined;
+    try {
+      const created = await adapter.createSession(makeOptions({
+        customTools: [{ name: "fn_task_list", execute: async () => "ok" }],
+        mcpServers: [
+          { name: "stdio", transport: "stdio", command: "node", args: ["server.js"], env: { TOKEN: "secret" } },
+        ],
+      }));
+      session = created.session;
+      expect(captured?.mcpServers).toEqual([
+        { name: "stdio", command: "node", args: ["server.js"], env: [{ name: "TOKEN", value: "secret" }] },
+        expect.objectContaining({ name: "fusion-custom-tools", command: process.execPath }),
+      ]);
+    } finally {
+      if (session) await adapter.dispose(session);
+      spy.mockRestore();
+    }
+  });
+
+  /*
+  FNXC:AcpMcpRemoteSessionWire 2026-09-25-16:20:
+  Remote MCP servers reach the agent only through the session/new wire, so the capability gate
+  and the name/value header shape are both invisible unless observed at that boundary. These
+  cases forward http and sse servers with ACP name/value headers when the agent advertises
+  remote support, and assert they are withheld when it does not — with a stdio server in the
+  same session proving "withheld by the gate" is distinct from "never forwarded".
+  */
+  it("forwards remote MCP servers with their headers when the agent advertises support", async () => {
+    let captured: { mcpServers?: unknown[] } | undefined;
+    const spy = vi.spyOn(provider, "newAcpSession").mockImplementation(async (_connection, opts) => {
+      captured = opts;
+      return { sessionId: "mcp-remote-session" };
+    });
+    const adapter = makeAdapter({ acpEnvAllowList: ["ACP_FIXTURE_MCP_CAPABILITIES"] });
+    let session: AcpSession | undefined;
+    try {
+      const created = await adapter.createSession(makeOptions({
+        taskEnv: { ACP_FIXTURE_MCP_CAPABILITIES: "1" },
+        mcpServers: [
+          { type: "http", name: "remote-http", url: "https://mcp.example/http", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+          { type: "sse", name: "remote-sse", url: "https://mcp.example/sse", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+        ],
+      }));
+      session = created.session;
+      expect(captured?.mcpServers).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "http",
+          name: "remote-http",
+          url: "https://mcp.example/http",
+          headers: [{ name: "Authorization", value: "Bearer secret" }],
+        }),
+        expect.objectContaining({
+          type: "sse",
+          name: "remote-sse",
+          url: "https://mcp.example/sse",
+          headers: [{ name: "Authorization", value: "Bearer secret" }],
+        }),
+      ]));
+    } finally {
+      if (session) await adapter.dispose(session);
+      spy.mockRestore();
+    }
+  });
+
+  it("withholds remote MCP servers when the agent advertises no remote capability", async () => {
+    let captured: { mcpServers?: unknown[] } | undefined;
+    const spy = vi.spyOn(provider, "newAcpSession").mockImplementation(async (_connection, opts) => {
+      captured = opts;
+      return { sessionId: "mcp-ungated-session" };
+    });
+    const adapter = makeAdapter();
+    let session: AcpSession | undefined;
+    try {
+      const created = await adapter.createSession(makeOptions({
+        mcpServers: [
+          { type: "http", name: "remote-http", url: "https://mcp.example/http", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+          { type: "sse", name: "remote-sse", url: "https://mcp.example/sse", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+          { name: "stdio", transport: "stdio", command: "node", args: ["server.js"], env: { TOKEN: "secret" } },
+        ],
+      }));
+      session = created.session;
+      const names = (captured?.mcpServers as Array<{ name: string }> | undefined ?? [])
+        .map((server) => server.name);
+      expect(names).not.toContain("remote-http");
+      expect(names).not.toContain("remote-sse");
+      // The stdio server in the same session still forwards, so the remote entries are
+      // absent because of the capability gate, not because forwarding itself is broken.
+      expect(names).toContain("stdio");
+    } finally {
+      if (session) await adapter.dispose(session);
+      spy.mockRestore();
+    }
+  });
+
   it("does not add a bridge when no customTools are supplied", async () => {
     let captured: { mcpServers?: unknown[] } | undefined;
     const spy = vi

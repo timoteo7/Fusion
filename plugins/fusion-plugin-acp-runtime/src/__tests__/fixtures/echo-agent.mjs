@@ -17,6 +17,8 @@
 //                                   (agent_message_chunk, agent_thought_chunk,
 //                                   tool_call, tool_call_update[completed], plan)
 //                                   before resolving the turn.
+//   ACP_FIXTURE_MCP_CAPABILITIES=1 — advertise http/sse in
+//                                   agentCapabilities.mcpCapabilities.
 
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
@@ -43,9 +45,16 @@ class EchoAgent {
     const versionOverride = process.env.ACP_FIXTURE_PROTOCOL_VERSION;
     const protocolVersion =
       versionOverride !== undefined ? Number(versionOverride) : PROTOCOL_VERSION;
+    const mcpCapabilities =
+      process.env.ACP_FIXTURE_MCP_CAPABILITIES === "1"
+        ? { http: true, sse: true }
+        : undefined;
     const response = {
       protocolVersion,
-      agentCapabilities: { loadSession: process.env.ACP_FIXTURE_LOAD_SESSION === "1" },
+      agentCapabilities: {
+        loadSession: process.env.ACP_FIXTURE_LOAD_SESSION === "1",
+        ...(mcpCapabilities ? { mcpCapabilities } : {}),
+      },
     };
     if (process.env.ACP_FIXTURE_REQUIRE_AUTH === "1") {
       response.authMethods = [{ id: "api-key", name: "API Key", description: null }];
