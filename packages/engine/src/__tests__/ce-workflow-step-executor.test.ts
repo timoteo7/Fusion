@@ -43,7 +43,7 @@ vi.mock("../worktree/review-diff-fingerprint.js", async (importOriginal) => ({
 import { TaskExecutor } from "../executor.js";
 import type { PluginRunner } from "../plugins/plugin-runner.js";
 import { WorkflowGraphExecutor } from "../workflows/workflow-graph-executor.js";
-import { MERGE_BOUNDARY_UNPROVEN_VALUE } from "../workflows/workflow-merge-nodes.js";
+import { MERGE_BOUNDARY_RECOVERY_VALUE } from "../workflows/workflow-merge-nodes.js";
 import { WorktreeBaseRefreshError } from "../worktree/worktree-acquisition.js";
 import {
   createMockStore,
@@ -761,17 +761,26 @@ describe("CE workflow-step executor integration", () => {
       );
 
       /*
-      FNXC:WorkflowMerge 2026-08-23-23:50:
-      FN-9157 made an unprovable merge boundary its own TERMINAL failure value
+      FNXC:WorkflowMerge 2026-09-26-11:05:
+      FN-9157 first made an unprovable merge boundary its own terminal failure value
       (`MERGE_BOUNDARY_UNPROVEN_VALUE`) instead of the retryable `implementation-incomplete`
-      classification, precisely so a card that cannot prove implementation is parked rather than
-      re-entering the bounded merge retry. The property this case owns — the requester is never
-      called and the card never reaches review — is unchanged.
+      classification, so a card that cannot prove implementation is parked rather than re-entering
+      the bounded merge retry. FN-9345 then split that into two: the old constant is now LEGACY —
+      it exists only to classify stranded rows written before the change
+      (`packages/engine/src/workflows/workflow-merge-nodes.ts:5-6`) — while a freshly computed
+      unprovable boundary emits the graph-native remediation value
+      `MERGE_BOUNDARY_RECOVERY_VALUE` ("merge-boundary-evidence-recovery"), which routes the card
+      back through evidence recovery instead of parking it. The property this case owns — the
+      requester is never called and the card never reaches review — is unchanged, and the
+      contextPatch shows which remediation graph is being asked for.
       */
       expect(result).toEqual(expect.objectContaining({
         outcome: "failure",
-        value: MERGE_BOUNDARY_UNPROVEN_VALUE,
+        value: MERGE_BOUNDARY_RECOVERY_VALUE,
       }));
+      expect((result as any).contextPatch).toMatchObject({
+        "workflow:merge-boundary-recovery-code": "no-node-result",
+      });
       expect(mergeRequester).not.toHaveBeenCalled();
       /*
       FNXC:WorkflowMerge 2026-07-30-11:40:

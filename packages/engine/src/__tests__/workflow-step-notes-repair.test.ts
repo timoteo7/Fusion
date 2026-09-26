@@ -252,8 +252,20 @@ describe("workflow-step verdict note repair", () => {
     });
 
     const first = await (executor as any).executeWorkflowStep(subject, step, subject.worktree, {});
+    /*
+    FNXC:ReviewConvergence 2026-09-26-11:20:
+    A review step now reuses its recorded result by the optional-GROUP id, not the graph node id:
+    `effectiveWorkflowStepId = optionalGroupId ?? workflowStep.id.replace(/^graph:/, "")`
+    (packages/engine/src/executor/execute-workflow-step.ts:276), and `findReusableReviewResult` is
+    keyed on that value. A row persisted under the node id (`plan-review-step`) is therefore not
+    found, the reuse branch is skipped, and a SECOND review session runs — which is why this case
+    saw two agent calls and the fresh reviewer's notes instead of the `reused-empty` notice. Key the
+    stored row the way the product keys its lookup: by group id. The property under test is
+    unchanged — an unchanged review whose persisted record carries no usable notes must narrate the
+    `reused-empty` notice rather than shipping empty prose to the operator.
+    */
     subject.workflowStepResults = [{
-      workflowStepId: "plan-review-step",
+      workflowStepId: "plan-review",
       workflowStepName: "Plan Review",
       phase: "pre-merge",
       status: "passed",
