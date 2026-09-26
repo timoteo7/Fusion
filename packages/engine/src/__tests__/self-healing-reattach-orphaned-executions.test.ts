@@ -201,9 +201,19 @@ describe("FN-6336: reattach orphaned assigned in-progress executions", () => {
   it("is registered after agent and stale-run recovery in startup and periodic self-healing loops", () => {
     const source = readFileSync("src/self-healing.ts", "utf8");
     const startup = source.slice(source.indexOf("async runStartupRecovery"), source.indexOf("  stop(): void"));
-    const periodicStart = source.lastIndexOf("recover-ghost-review");
-    const periodicEnd = source.indexOf("reconcile-task-worktree-metadata", periodicStart);
+    /*
+    FNXC:SelfHealingReattachOrder 2026-09-26-06:45:
+    Both loops register the sweep as a NAMED ENTRY, so slice from the first entry name to the one
+    that follows the reattach. The previous periodic anchors (`recover-ghost-review` →
+    `reconcile-task-worktree-metadata`) no longer bracket that run — they resolved to the same
+    offset, so the slice was EMPTY and the ordering assertions read indexOf() of absent text
+    against each other. Anchor on the entries themselves so the guard keeps measuring the real
+    registration order rather than a window that silently moved.
+    */
+    const periodicStart = source.lastIndexOf('name: "recover-orphaned-agents"');
+    const periodicEnd = source.indexOf('name: "recover-running-on-inactive-tasks"', periodicStart);
     const periodic = source.slice(periodicStart, periodicEnd);
+    expect(periodic.length, "periodic recovery slice must not be empty").toBeGreaterThan(0);
 
     for (const block of [startup, periodic]) {
       const orphanedAgents = block.indexOf("recover-orphaned-agents");
