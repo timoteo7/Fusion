@@ -10,6 +10,15 @@ Run `FUSION_UPDATE_MERGE_INVENTORY=1 pnpm --filter @fusion/engine exec vitest ru
 src/__tests__/merge-orphan-durable-write-inventory-drift.test.ts` to update derivable structure.
 It preserves human verdicts only by call-site id; new rows deliberately receive `pending:classify`
 and stay red until a reviewer supplies a real lifecycle classification.
+
+FNXC:MergeReliability 2026-09-26-05:40:
+The 52 rows the FN-9370/FN-9371 merge-finalization seams added are now classified. Fifty are
+out-of-frontier: an exported-symbol call-graph walk seeded from the three entry points
+(runAiMerge, landWorkspaceTask, landOneRepo) reaches none of their enclosing symbols, and their
+module importers are the executor, self-healing, and project-engine lanes rather than a merge
+landing path. The two inside finalizeProvenAutoMergeTask are checkpoint-covered/already-fenced,
+because the terminal move is the predicate-fenced store.moveTaskIf and the later
+store.updateTaskAtomic only runs after that fence returned moved:true.
 */
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";

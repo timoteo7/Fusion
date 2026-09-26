@@ -3595,7 +3595,7 @@
     },
     {
       "callSiteId": "packages/engine/src/agent-tools.ts::createTaskFileScopeAddTool::store.appendAgentLog::#1",
-      "callSiteFingerprint": "store .appendAgentLog(taskId,`Added to File Scope: ${toAdd.join(\", \")}${params.reason ? ` — ${params.reason}` : \"\"}`,\"status\")",
+      "callSiteFingerprint": "store .appendAgentLog(taskId,`Added to File Scope: ${toAdd.join(\", \")}${params.reason ? ` \u2014 ${params.reason}` : \"\"}`,\"status\")",
       "file": "packages/engine/src/agent-tools.ts",
       "enclosingSymbolPath": "createTaskFileScopeAddTool",
       "writer": "store.appendAgentLog",
@@ -3779,17 +3779,15 @@
       "writer": "store.logEntry",
       "ordinal": 2,
       "lineHint": 3592,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to createTaskRetryTool; this chat retry tool belongs to the interactive task-execution closure and is reached only through agent tool dispatch, not through a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/agent-tools.ts::createTaskRetryTool::store.moveTask::#1",
@@ -4207,17 +4205,15 @@
       "writer": "store.createTask",
       "ordinal": 1,
       "lineHint": 272,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to materializeEvalFollowUps; this eval follow-up materializer runs in the evaluation harness and is never invoked by a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/hold-release.ts::issueRelease>result::store.moveTaskIf::#1",
@@ -4257,7 +4253,7 @@
     },
     {
       "callSiteId": "packages/engine/src/execution/lifecycle-move.ts::moveTaskToContainedBackwardTarget::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,`Lifecycle recovery retained in '${column}' — ${reason} has no backward-move authority`)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Lifecycle recovery retained in '${column}' \u2014 ${reason} has no backward-move authority`)",
       "file": "packages/engine/src/execution/lifecycle-move.ts",
       "enclosingSymbolPath": "moveTaskToContainedBackwardTarget",
       "writer": "store.logEntry",
@@ -4277,7 +4273,7 @@
     },
     {
       "callSiteId": "packages/engine/src/execution/lifecycle-move.ts::moveTaskToContainedBackwardTarget::store.logEntry::#2",
-      "callSiteFingerprint": "store.logEntry(taskId,`Lifecycle rebound contained in '${column}' — the workflow declares no adjacent backward destination`)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Lifecycle rebound contained in '${column}' \u2014 the workflow declares no adjacent backward destination`)",
       "file": "packages/engine/src/execution/lifecycle-move.ts",
       "enclosingSymbolPath": "moveTaskToContainedBackwardTarget",
       "writer": "store.logEntry",
@@ -4297,7 +4293,7 @@
     },
     {
       "callSiteId": "packages/engine/src/execution/lifecycle-move.ts::moveTaskWithLifecycleReason::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,`Lifecycle move deferred: ${task.column} → ${toColumn} (backward) — ${summary} (destination at capacity; retrying later))",
+      "callSiteFingerprint": "store.logEntry(taskId,`Lifecycle move deferred: ${task.column} \u2192 ${toColumn} (backward) \u2014 ${summary} (destination at capacity; retrying later))",
       "file": "packages/engine/src/execution/lifecycle-move.ts",
       "enclosingSymbolPath": "moveTaskWithLifecycleReason",
       "writer": "store.logEntry",
@@ -4351,23 +4347,21 @@
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep::store.logEntry::#1",
-      "callSiteFingerprint": "options.store.logEntry(options.taskId,`${reviewType} review skipped — ${reason} active`)",
+      "callSiteFingerprint": "options.store.logEntry(options.taskId,`${reviewType} review skipped \u2014 ${reason} active`)",
       "file": "packages/engine/src/execution/reviewer.ts",
       "enclosingSymbolPath": "reviewStep",
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 243,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep::store.logEntry::#2",
@@ -4377,37 +4371,33 @@
       "writer": "store.logEntry",
       "ordinal": 2,
       "lineHint": 799,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep>buildPauseUnavailableResult::store.logEntry::#1",
-      "callSiteFingerprint": "options.store.logEntry(options.taskId,`${reviewType} review aborted before spawn — ${reason} active`)",
+      "callSiteFingerprint": "options.store.logEntry(options.taskId,`${reviewType} review aborted before spawn \u2014 ${reason} active`)",
       "file": "packages/engine/src/execution/reviewer.ts",
       "enclosingSymbolPath": "reviewStep>buildPauseUnavailableResult",
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 499,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep>createReviewerSession::store.appendAgentLog::#1",
@@ -4417,17 +4407,15 @@
       "writer": "store.appendAgentLog",
       "ordinal": 1,
       "lineHint": 625,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep>createReviewerSession::store.logEntry::#1",
@@ -4437,17 +4425,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 624,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep>logFallbackRetry::store.logEntry::#1",
@@ -4457,17 +4443,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 766,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep>resetReviewerFallbackRetryCount::store.updateTask::#1",
@@ -4477,17 +4461,15 @@
       "writer": "store.updateTask",
       "ordinal": 1,
       "lineHint": 779,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep>runAttempt::store.logEntry::#1",
@@ -4497,17 +4479,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 755,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/reviewer.ts::reviewStep>runAttemptOnce::store.logEntry::#1",
@@ -4517,17 +4497,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 680,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to reviewStep; this reviewer lane is reached through review-step dispatch from the engine runtime, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/execution/session-token-usage.ts::accumulateSessionTokenUsage::store.updateTask::#1",
@@ -4757,17 +4735,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 290,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to createAuthoritativeWorkflowSeams; these workflow graph seams are constructed by the executor, and the executor is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/create-authoritative-workflow-seams.ts::createAuthoritativeWorkflowSeams::store.logEntry::#2",
@@ -4777,17 +4753,15 @@
       "writer": "store.logEntry",
       "ordinal": 2,
       "lineHint": 594,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to createAuthoritativeWorkflowSeams; these workflow graph seams are constructed by the executor, and the executor is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/create-authoritative-workflow-seams.ts::createAuthoritativeWorkflowSeams::store.logEntry::#3",
@@ -4797,17 +4771,15 @@
       "writer": "store.logEntry",
       "ordinal": 3,
       "lineHint": 618,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to createAuthoritativeWorkflowSeams; these workflow graph seams are constructed by the executor, and the executor is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/create-authoritative-workflow-seams.ts::createAuthoritativeWorkflowSeams::store.logEntry::#4",
@@ -4817,17 +4789,15 @@
       "writer": "store.logEntry",
       "ordinal": 4,
       "lineHint": 662,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to createAuthoritativeWorkflowSeams; these workflow graph seams are constructed by the executor, and the executor is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/deterministic-verification.ts::runExecutorDeterministicVerification::store.logEntry::#1",
@@ -4837,17 +4807,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 42,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runExecutorDeterministicVerification; deterministic verification is an executor stage entered from project-engine, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/deterministic-verification.ts::runExecutorDeterministicVerification::store.logEntry::#2",
@@ -4857,21 +4825,19 @@
       "writer": "store.logEntry",
       "ordinal": 2,
       "lineHint": 82,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runExecutorDeterministicVerification; deterministic verification is an executor stage entered from project-engine, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/review-empty-content-close.ts::terminalizeEmptyReviewContent::store.logEntry::#1",
-      "callSiteFingerprint": "deps.store.logEntry(taskId,`No reviewable content — terminal park recorded for ${fence.stepName}`,`Gate ${fence.workflowStepId} rejected a provably empty diff. No remediation round can help until new work exists.`,deps.getRunContextFor(taskId))",
+      "callSiteFingerprint": "deps.store.logEntry(taskId,`No reviewable content \u2014 terminal park recorded for ${fence.stepName}`,`Gate ${fence.workflowStepId} rejected a provably empty diff. No remediation round can help until new work exists.`,deps.getRunContextFor(taskId))",
       "file": "packages/engine/src/executor/review-empty-content-close.ts",
       "enclosingSymbolPath": "terminalizeEmptyReviewContent",
       "writer": "store.logEntry",
@@ -4913,17 +4879,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 193,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to recoverMergeBoundaryEvidenceGap; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::recoverMergeBoundaryEvidenceGap::store.logEntry::#2",
@@ -4933,17 +4897,15 @@
       "writer": "store.logEntry",
       "ordinal": 2,
       "lineHint": 197,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to recoverMergeBoundaryEvidenceGap; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::recoverMergeBoundaryEvidenceGap::store.logEntry::#3",
@@ -4953,17 +4915,15 @@
       "writer": "store.logEntry",
       "ordinal": 3,
       "lineHint": 236,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to recoverMergeBoundaryEvidenceGap; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::recoverMergeBoundaryEvidenceGap::store.updateTaskAtomic::#1",
@@ -4973,17 +4933,15 @@
       "writer": "store.updateTaskAtomic",
       "ordinal": 1,
       "lineHint": 154,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to recoverMergeBoundaryEvidenceGap; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::recoverMergeBoundaryEvidenceGap::store.updateTaskAtomic::#2",
@@ -4993,17 +4951,15 @@
       "writer": "store.updateTaskAtomic",
       "ordinal": 2,
       "lineHint": 259,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to recoverMergeBoundaryEvidenceGap; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::recoverMergeBoundaryEvidenceGap>moved::store.moveTask::#1",
@@ -5013,17 +4969,15 @@
       "writer": "store.moveTask",
       "ordinal": 1,
       "lineHint": 253,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to recoverMergeBoundaryEvidenceGap; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::recoverMergeBoundaryEvidenceGap>moved::store.moveTaskIf::#1",
@@ -5033,17 +4987,15 @@
       "writer": "store.moveTaskIf",
       "ordinal": 1,
       "lineHint": 248,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to recoverMergeBoundaryEvidenceGap; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::releaseBoundaryRecoveryClaim::store.updateTaskAtomic::#1",
@@ -5053,17 +5005,15 @@
       "writer": "store.updateTaskAtomic",
       "ordinal": 1,
       "lineHint": 273,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to releaseBoundaryRecoveryClaim; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::routeGraphFailureToExecutionResume::store.logEntry::#1",
@@ -5073,17 +5023,15 @@
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 412,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to routeGraphFailureToExecutionResume; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::routeGraphFailureToExecutionResume::store.logEntry::#2",
@@ -5093,17 +5041,15 @@
       "writer": "store.logEntry",
       "ordinal": 2,
       "lineHint": 452,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to routeGraphFailureToExecutionResume; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::routeGraphFailureToExecutionResume::store.updateTask::#1",
@@ -5113,17 +5059,15 @@
       "writer": "store.updateTask",
       "ordinal": 1,
       "lineHint": 454,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to routeGraphFailureToExecutionResume; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/route-graph-failure-to-execution-resume.ts::seedBoundaryRecoveryContinuation>seeded::store.replaceActiveTaskWorkflowContinuation::#1",
@@ -5133,37 +5077,33 @@
       "writer": "store.replaceActiveTaskWorkflowContinuation",
       "ordinal": 1,
       "lineHint": 301,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to seedBoundaryRecoveryContinuation; graph-failure routing is entered from executor/handle-graph-failure, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#1",
-      "callSiteFingerprint": "deps.store.logEntry(live.id,`Workflow input received for step '${node.id}' — resuming`,undefined,deps.getRunContextFor(live.id))",
+      "callSiteFingerprint": "deps.store.logEntry(live.id,`Workflow input received for step '${node.id}' \u2014 resuming`,undefined,deps.getRunContextFor(live.id))",
       "file": "packages/engine/src/executor/run-graph-custom-node.ts",
       "enclosingSymbolPath": "runGraphCustomNode",
       "writer": "store.logEntry",
       "ordinal": 1,
       "lineHint": 378,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#10",
@@ -5173,37 +5113,33 @@
       "writer": "store.logEntry",
       "ordinal": 10,
       "lineHint": 1049,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#2",
-      "callSiteFingerprint": "deps.store.logEntry(live.id,`Fast mode — custom graph node '${node.id}' skipped`,undefined,deps.getRunContextFor(live.id))",
+      "callSiteFingerprint": "deps.store.logEntry(live.id,`Fast mode \u2014 custom graph node '${node.id}' skipped`,undefined,deps.getRunContextFor(live.id))",
       "file": "packages/engine/src/executor/run-graph-custom-node.ts",
       "enclosingSymbolPath": "runGraphCustomNode",
       "writer": "store.logEntry",
       "ordinal": 2,
       "lineHint": 425,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#3",
@@ -5213,17 +5149,15 @@
       "writer": "store.logEntry",
       "ordinal": 3,
       "lineHint": 492,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#4",
@@ -5233,17 +5167,15 @@
       "writer": "store.logEntry",
       "ordinal": 4,
       "lineHint": 505,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#5",
@@ -5253,57 +5185,51 @@
       "writer": "store.logEntry",
       "ordinal": 5,
       "lineHint": 566,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#6",
-      "callSiteFingerprint": "deps.store.logEntry(live.id,`Workflow node '${node.id}': column agent '${columnAgentId}' (${columnAgentMode}) not applied — raw CLI execution runs n,undefined,deps.getRunContextFor(live.id))",
+      "callSiteFingerprint": "deps.store.logEntry(live.id,`Workflow node '${node.id}': column agent '${columnAgentId}' (${columnAgentMode}) not applied \u2014 raw CLI execution runs n,undefined,deps.getRunContextFor(live.id))",
       "file": "packages/engine/src/executor/run-graph-custom-node.ts",
       "enclosingSymbolPath": "runGraphCustomNode",
       "writer": "store.logEntry",
       "ordinal": 6,
       "lineHint": 647,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#7",
-      "callSiteFingerprint": "deps.store.logEntry(live.id,`Workflow node '${node.id}': agent '${cfg.agentId}' not found — using default model`,undefined,deps.getRunContextFor(live.id))",
+      "callSiteFingerprint": "deps.store.logEntry(live.id,`Workflow node '${node.id}': agent '${cfg.agentId}' not found \u2014 using default model`,undefined,deps.getRunContextFor(live.id))",
       "file": "packages/engine/src/executor/run-graph-custom-node.ts",
       "enclosingSymbolPath": "runGraphCustomNode",
       "writer": "store.logEntry",
       "ordinal": 7,
       "lineHint": 687,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#8",
@@ -5313,17 +5239,15 @@
       "writer": "store.logEntry",
       "ordinal": 8,
       "lineHint": 953,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.logEntry::#9",
@@ -5333,17 +5257,15 @@
       "writer": "store.logEntry",
       "ordinal": 9,
       "lineHint": 1011,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.updateTask::#1",
@@ -5353,17 +5275,15 @@
       "writer": "store.updateTask",
       "ordinal": 1,
       "lineHint": 374,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.updateTask::#2",
@@ -5373,17 +5293,15 @@
       "writer": "store.updateTask",
       "ordinal": 2,
       "lineHint": 377,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.updateTask::#3",
@@ -5393,17 +5311,15 @@
       "writer": "store.updateTask",
       "ordinal": 3,
       "lineHint": 732,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/run-graph-custom-node.ts::runGraphCustomNode::store.updateTask::#4",
@@ -5413,17 +5329,15 @@
       "writer": "store.updateTask",
       "ordinal": 4,
       "lineHint": 1055,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to runGraphCustomNode; custom graph nodes are executed by the executor, which is entered from project-engine rather than from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/executor/workspace-config-resolver.ts::normalizeWorkspaceTaskRouting::store.updateTask::#1",
@@ -5465,7 +5379,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/auto-merge-finalization.ts::finalizeProvenAutoMergeTask::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,`Auto-merge finalization repaired column mismatch: ${latest.column} → ${completeColumn} after proven merge; cleared stal)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Auto-merge finalization repaired column mismatch: ${latest.column} \u2192 ${completeColumn} after proven merge; cleared stal)",
       "file": "packages/engine/src/merge/auto-merge-finalization.ts",
       "enclosingSymbolPath": "finalizeProvenAutoMergeTask",
       "writer": "store.logEntry",
@@ -5531,17 +5445,17 @@
       "writer": "store.updateTaskAtomic",
       "ordinal": 1,
       "lineHint": 447,
-      "owningEntryPoint": "indeterminate",
+      "owningEntryPoint": "runAiMerge",
       "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
+        "checkpoint-covered: reached from runAiMerge via merge/merger-ai.ts finalizeTask"
       ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
+      "axis1": "checkpoint-covered",
+      "axis1Evidence": "This atomic write runs only after the predicate-fenced store.moveTaskIf at auto-merge-finalization.ts:406 returned moved:true, so the row it patches is already fenced and owned by this finalization pass.",
       "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "axis2Final": "already-fenced",
+      "observedInSuite": "layerB-observed",
+      "executionProof": "static:per-call-site merge write fence or ownership checkpoint",
+      "followUpTaskId": "none:no-follow-up-required"
     },
     {
       "callSiteId": "packages/engine/src/merge/auto-merge-finalization.ts::finalizeProvenAutoMergeTask>move::store.moveTaskIf::#1",
@@ -5551,17 +5465,17 @@
       "writer": "store.moveTaskIf",
       "ordinal": 1,
       "lineHint": 406,
-      "owningEntryPoint": "indeterminate",
+      "owningEntryPoint": "runAiMerge",
       "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
+        "checkpoint-covered: reached from runAiMerge via merge/merger-ai.ts finalizeTask"
       ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
+      "axis1": "checkpoint-covered",
+      "axis1Evidence": "FN-9370 moved the terminal completion move onto the predicate-fenced store.moveTaskIf seam; the predicate re-reads the live row and re-checks durable merge proof and post-merge evidence before the move is applied.",
       "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "axis2Final": "already-fenced",
+      "observedInSuite": "layerB-observed",
+      "executionProof": "static:per-call-site merge write fence or ownership checkpoint",
+      "followUpTaskId": "none:no-follow-up-required"
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::finalizeMerged::store.recordBranchGroupMemberLanded::#1",
@@ -5931,7 +5845,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::landWorkspaceTask::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (empty-merge no-landed-proof guard, workspace): ${reason} — contained recovery target ${reboundColumn},JSON.stringify({ lane: \"ai-empty-merge-workspace\", repoCount: repos.length, landedCount, repos: repos.map((r) => r.repo))",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (empty-merge no-landed-proof guard, workspace): ${reason} \u2014 contained recovery target ${reboundColumn},JSON.stringify({ lane: \"ai-empty-merge-workspace\", repoCount: repos.length, landedCount, repos: repos.map((r) => r.repo))",
       "file": "packages/engine/src/merge/merger-ai.ts",
       "enclosingSymbolPath": "landWorkspaceTask",
       "writer": "store.logEntry",
@@ -6261,7 +6175,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::runAiMerge::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} — contained recovery target ${reboundColumn} with progre,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, branch, int)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} \u2014 contained recovery target ${reboundColumn} with progre,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, branch, int)",
       "file": "packages/engine/src/merge/merger-ai.ts",
       "enclosingSymbolPath": "runAiMerge",
       "writer": "store.logEntry",
@@ -6285,7 +6199,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::runAiMerge::store.logEntry::#2",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} — contained recovery target ${reboundColumn} with progre,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, branch, int)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} \u2014 contained recovery target ${reboundColumn} with progre,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, branch, int)",
       "file": "packages/engine/src/merge/merger-ai.ts",
       "enclosingSymbolPath": "runAiMerge",
       "writer": "store.logEntry",
@@ -6309,7 +6223,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::runAiMerge::store.logEntry::#3",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (empty-merge no-landed-proof guard): ${reason} — contained recovery target ${reboundColumn} with progr,JSON.stringify({ branch, integrationBranch, lane: \"ai-empty-merge\", baseCommitSha: task.baseCommitSha }, null, 2))",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (empty-merge no-landed-proof guard): ${reason} \u2014 contained recovery target ${reboundColumn} with progr,JSON.stringify({ branch, integrationBranch, lane: \"ai-empty-merge\", baseCommitSha: task.baseCommitSha }, null, 2))",
       "file": "packages/engine/src/merge/merger-ai.ts",
       "enclosingSymbolPath": "runAiMerge",
       "writer": "store.logEntry",
@@ -6333,7 +6247,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::runAiMerge::store.logEntry::#4",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (overseer failed-executor veto): ${vetoReason} — contained recovery target ${reboundColumn} with progr,JSON.stringify({ executorSignal: executorMemory?.signal, executorSignalObservedAt: executorMemory?.observedAt, branch, i)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (overseer failed-executor veto): ${vetoReason} \u2014 contained recovery target ${reboundColumn} with progr,JSON.stringify({ executorSignal: executorMemory?.signal, executorSignalObservedAt: executorMemory?.observedAt, branch, i)",
       "file": "packages/engine/src/merge/merger-ai.ts",
       "enclosingSymbolPath": "runAiMerge",
       "writer": "store.logEntry",
@@ -6513,7 +6427,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::runPushAfterMergeStep::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote failed after merge — task finalized anyway; local ${integrationBranch} may diverge from ${pushOutcome.re,\"PushToRemoteFailed\")",
+      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote failed after merge \u2014 task finalized anyway; local ${integrationBranch} may diverge from ${pushOutcome.re,\"PushToRemoteFailed\")",
       "file": "packages/engine/src/merge/merger-ai.ts",
       "enclosingSymbolPath": "runPushAfterMergeStep",
       "writer": "store.logEntry",
@@ -6561,7 +6475,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merge/merger-ai.ts::runPushAfterMergeStep::store.logEntry::#3",
-      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote threw after merge — task finalized anyway; local ${integrationBranch} may diverge from origin: ${message,\"PushToRemoteFailed\")",
+      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote threw after merge \u2014 task finalized anyway; local ${integrationBranch} may diverge from origin: ${message,\"PushToRemoteFailed\")",
       "file": "packages/engine/src/merge/merger-ai.ts",
       "enclosingSymbolPath": "runPushAfterMergeStep",
       "writer": "store.logEntry",
@@ -6857,17 +6771,15 @@
       "writer": "store.seedWorkspaceCodeReviewContinuationIfIdle",
       "ordinal": 1,
       "lineHint": 62,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to rerouteUnrunPreMergeGateToReview; its only callers are self-healing.ts, project-engine.ts, and executor/handle-graph-failure.ts, none of which a merge landing path reaches.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/merge/stale-content-review-reroute.ts::rerouteSingularStaleContentToReview>result::store.seedWorkspaceCodeReviewContinuationIfIdle::#1",
@@ -6877,17 +6789,15 @@
       "writer": "store.seedWorkspaceCodeReviewContinuationIfIdle",
       "ordinal": 1,
       "lineHint": 67,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to rerouteSingularStaleContentToReview; its only callers are self-healing.ts and project-engine.ts, none of which a merge landing path reaches.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/merge/workspace-land-failure.ts::persistWorkspaceRepoLandFailure::store.mergeWorkspaceWorktreeEntry::#1",
@@ -6911,7 +6821,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.appendAgentLog::#1",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`Pre-merge auto-prerebase: ${branch} → local HEAD ${mainHead.slice(0, 8)} (${prerebaseDecision.reason})`,\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`Pre-merge auto-prerebase: ${branch} \u2192 local HEAD ${mainHead.slice(0, 8)} (${prerebaseDecision.reason})`,\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.appendAgentLog",
@@ -6931,7 +6841,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.appendAgentLog::#2",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`Pre-merge rebase: ${branch} → ${remoteRef}`,\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`Pre-merge rebase: ${branch} \u2192 ${remoteRef}`,\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.appendAgentLog",
@@ -7031,7 +6941,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.appendAgentLog::#7",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,summaryParts.join(\" · \"),\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,summaryParts.join(\" \u00b7 \"),\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.appendAgentLog",
@@ -7249,7 +7159,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.logEntry::#18",
-      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote failed after merge — task marked done anyway; local main may diverge from origin: ${pushResult.error}`,\"PushToRemoteFailed\")",
+      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote failed after merge \u2014 task marked done anyway; local main may diverge from origin: ${pushResult.error}`,\"PushToRemoteFailed\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.logEntry",
@@ -7289,7 +7199,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.logEntry::#2",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} — moving back to todo with progress preserved`,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, classificat)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} \u2014 moving back to todo with progress preserved`,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, classificat)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.logEntry",
@@ -7309,7 +7219,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.logEntry::#20",
-      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote threw after merge — task marked done anyway; local main may diverge from origin: ${err.message}`,\"PushToRemoteFailed\")",
+      "callSiteFingerprint": "store.logEntry(taskId,`Push to remote threw after merge \u2014 task marked done anyway; local main may diverge from origin: ${err.message}`,\"PushToRemoteFailed\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.logEntry",
@@ -7369,7 +7279,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.logEntry::#5",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked: unproven ownership evidence (${classification.reason}); no owned landed commit was found — auto-retry,JSON.stringify(classification.details, null, 2))",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked: unproven ownership evidence (${classification.reason}); no owned landed commit was found \u2014 auto-retry,JSON.stringify(classification.details, null, 2))",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.logEntry",
@@ -7449,7 +7359,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.logEntry::#9",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} — moving back to todo with progress preserved`,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, classificat)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} \u2014 moving back to todo with progress preserved`,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, classificat)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask",
       "writer": "store.logEntry",
@@ -7495,17 +7405,15 @@
       "writer": "store.publishTaskOverlapDeliveries",
       "ordinal": 1,
       "lineHint": 9639,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to aiMergeTask; aiMergeTask is the soft-deprecated legacy merge pipeline; the unified entry points do not call it (packages/engine/src/merge/merger-ai.ts:6).",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask::store.transitionMergeRequestState::#1",
@@ -7979,7 +7887,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.appendAgentLog::#10",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`In-merge verification fix attempt ${fixAttempt} failed`,\"tool_error\",`${fixAttemptDurationMs}ms — verification still fails`,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`In-merge verification fix attempt ${fixAttempt} failed`,\"tool_error\",`${fixAttemptDurationMs}ms \u2014 verification still fails`,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.appendAgentLog",
@@ -7999,7 +7907,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.appendAgentLog::#11",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Verification fix finalize: task already landed on main — recovered\",\"tool_result\",`via=${finalized.strategy} sha=${finalized.mergeSha?.slice(0, 8)}`,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Verification fix finalize: task already landed on main \u2014 recovered\",\"tool_result\",`via=${finalized.strategy} sha=${finalized.mergeSha?.slice(0, 8)}`,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.appendAgentLog",
@@ -8019,7 +7927,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.appendAgentLog::#2",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`Verification failed — attempting in-merge fix (up to ${maxFixRetries} attempts)`,\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`Verification failed \u2014 attempting in-merge fix (up to ${maxFixRetries} attempts)`,\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.appendAgentLog",
@@ -8059,7 +7967,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.appendAgentLog::#4",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`In-merge verification fix succeeded on attempt ${fixAttempt}`,\"tool_result\",`${fixAttemptDurationMs}ms — verification now passes`,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`In-merge verification fix succeeded on attempt ${fixAttempt}`,\"tool_result\",`${fixAttemptDurationMs}ms \u2014 verification now passes`,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.appendAgentLog",
@@ -8079,7 +7987,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.appendAgentLog::#5",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`In-merge verification fix attempt ${fixAttempt} failed`,\"tool_error\",`${fixAttemptDurationMs}ms — verification still fails`,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`In-merge verification fix attempt ${fixAttempt} failed`,\"tool_error\",`${fixAttemptDurationMs}ms \u2014 verification still fails`,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.appendAgentLog",
@@ -8099,7 +8007,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.appendAgentLog::#6",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Verification fix finalize: task already landed on main — recovered\",\"tool_result\",`via=${finalized.strategy} sha=${finalized.mergeSha?.slice(0, 8)}`,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Verification fix finalize: task already landed on main \u2014 recovered\",\"tool_result\",`via=${finalized.strategy} sha=${finalized.mergeSha?.slice(0, 8)}`,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.appendAgentLog",
@@ -8119,7 +8027,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.appendAgentLog::#7",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Build verification failed — attempting in-merge fix\",\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Build verification failed \u2014 attempting in-merge fix\",\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.appendAgentLog",
@@ -8199,7 +8107,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.logEntry::#10",
-      "callSiteFingerprint": "store.logEntry(taskId,`[timing] In-merge verification fix attempt ${fixAttempt} — verification still fails (${fixAttemptDurationMs}ms)`)",
+      "callSiteFingerprint": "store.logEntry(taskId,`[timing] In-merge verification fix attempt ${fixAttempt} \u2014 verification still fails (${fixAttemptDurationMs}ms)`)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.logEntry",
@@ -8239,7 +8147,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.logEntry::#12",
-      "callSiteFingerprint": "store.logEntry(taskId,\"Build failed — retrying merge attempt\")",
+      "callSiteFingerprint": "store.logEntry(taskId,\"Build failed \u2014 retrying merge attempt\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.logEntry",
@@ -8259,7 +8167,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.logEntry::#2",
-      "callSiteFingerprint": "store.logEntry(taskId,`Verification failed during merge — attempting in-merge fix (up to ${maxFixRetries} attempts)`)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Verification failed during merge \u2014 attempting in-merge fix (up to ${maxFixRetries} attempts)`)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.logEntry",
@@ -8299,7 +8207,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.logEntry::#4",
-      "callSiteFingerprint": "store.logEntry(taskId,`[timing] In-merge verification fix succeeded on attempt ${fixAttempt} in ${fixAttemptDurationMs}ms — verification now p)",
+      "callSiteFingerprint": "store.logEntry(taskId,`[timing] In-merge verification fix succeeded on attempt ${fixAttempt} in ${fixAttemptDurationMs}ms \u2014 verification now p)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.logEntry",
@@ -8319,7 +8227,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.logEntry::#5",
-      "callSiteFingerprint": "store.logEntry(taskId,`[timing] In-merge verification fix attempt ${fixAttempt} — verification still fails (${fixAttemptDurationMs}ms)`)",
+      "callSiteFingerprint": "store.logEntry(taskId,`[timing] In-merge verification fix attempt ${fixAttempt} \u2014 verification still fails (${fixAttemptDurationMs}ms)`)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.logEntry",
@@ -8359,7 +8267,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>mergeAttempt::store.logEntry::#7",
-      "callSiteFingerprint": "store.logEntry(taskId,`Build verification failed during merge — attempting in-merge fix`)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Build verification failed during merge \u2014 attempting in-merge fix`)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>mergeAttempt",
       "writer": "store.logEntry",
@@ -8535,7 +8443,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::aiMergeTask>runLocalBaseRebase::store.appendAgentLog::#1",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`Pre-merge rebase: ${branch} → local HEAD ${localHead.slice(0, 8)}${label ? ` (${label})` : \"\"}`,\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`Pre-merge rebase: ${branch} \u2192 local HEAD ${localHead.slice(0, 8)}${label ? ` (${label})` : \"\"}`,\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "aiMergeTask>runLocalBaseRebase",
       "writer": "store.appendAgentLog",
@@ -8695,7 +8603,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::attemptInMergeVerificationFix::store.appendAgentLog::#2",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,`Fix agent made no changes — skipping verification re-run`,\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,`Fix agent made no changes \u2014 skipping verification re-run`,\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "attemptInMergeVerificationFix",
       "writer": "store.appendAgentLog",
@@ -8715,7 +8623,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::attemptInMergeVerificationFix::store.appendAgentLog::#3",
-      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Out-of-scope verification failure detected — not retrying\",\"status\",undefined,\"merger\")",
+      "callSiteFingerprint": "store.appendAgentLog(taskId,\"Out-of-scope verification failure detected \u2014 not retrying\",\"status\",undefined,\"merger\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "attemptInMergeVerificationFix",
       "writer": "store.appendAgentLog",
@@ -8795,7 +8703,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::attemptInMergeVerificationFix::store.logEntry::#2",
-      "callSiteFingerprint": "store.logEntry(taskId,`In-merge fix agent made no changes — skipping verification re-run (attempt ${fixAttemptNumber ?? \"unknown\"})`)",
+      "callSiteFingerprint": "store.logEntry(taskId,`In-merge fix agent made no changes \u2014 skipping verification re-run (attempt ${fixAttemptNumber ?? \"unknown\"})`)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "attemptInMergeVerificationFix",
       "writer": "store.logEntry",
@@ -9151,7 +9059,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::runAiAgentForCommit::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,\"Context limit reached during merge after auto-compaction — retrying with reduced prompt\")",
+      "callSiteFingerprint": "store.logEntry(taskId,\"Context limit reached during merge after auto-compaction \u2014 retrying with reduced prompt\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "runAiAgentForCommit",
       "writer": "store.logEntry",
@@ -9547,7 +9455,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::runDeterministicVerification::store.logEntry::#8",
-      "callSiteFingerprint": "store.logEntry(taskId,`Deterministic test verification failed (exit ${testResult.exitCode}) — see prior [verification] entry for truncated out,\"VerificationError\")",
+      "callSiteFingerprint": "store.logEntry(taskId,`Deterministic test verification failed (exit ${testResult.exitCode}) \u2014 see prior [verification] entry for truncated out,\"VerificationError\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "runDeterministicVerification",
       "writer": "store.logEntry",
@@ -9567,7 +9475,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::runDeterministicVerification::store.logEntry::#9",
-      "callSiteFingerprint": "store.logEntry(taskId,`Deterministic build verification failed (exit ${buildResult.exitCode}) — see prior [verification] entry for truncated o,\"VerificationError\")",
+      "callSiteFingerprint": "store.logEntry(taskId,`Deterministic build verification failed (exit ${buildResult.exitCode}) \u2014 see prior [verification] entry for truncated o,\"VerificationError\")",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "runDeterministicVerification",
       "writer": "store.logEntry",
@@ -9805,7 +9713,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::sweepAutostashOrphans::store.logEntry::#1",
-      "callSiteFingerprint": "store .logEntry(taskId,`Cleaned up ${subsumed.length} subsumed autostash orphan(s) — their content already on HEAD`,subsumed.map((o) => `${o.ref}@${o.sha.slice(0, 7)} (${o.label})`).join(\"\\n\"))",
+      "callSiteFingerprint": "store .logEntry(taskId,`Cleaned up ${subsumed.length} subsumed autostash orphan(s) \u2014 their content already on HEAD`,subsumed.map((o) => `${o.ref}@${o.sha.slice(0, 7)} (${o.label})`).join(\"\\n\"))",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "sweepAutostashOrphans",
       "writer": "store.logEntry",
@@ -9825,7 +9733,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::sweepAutostashOrphans::store.logEntry::#2",
-      "callSiteFingerprint": "store .logEntry(taskId,`${live.length} autostash orphan(s) still hold uncommitted dev work — recover manually`,live .map( (o) => `${o.ref}@${o.sha.slice(0, 7)} (${o.label})\\n recover: git stash apply ${o.sha}`, ) .join(\"\\n\\n\"))",
+      "callSiteFingerprint": "store .logEntry(taskId,`${live.length} autostash orphan(s) still hold uncommitted dev work \u2014 recover manually`,live .map( (o) => `${o.ref}@${o.sha.slice(0, 7)} (${o.label})\\n recover: git stash apply ${o.sha}`, ) .join(\"\\n\\n\"))",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "sweepAutostashOrphans",
       "writer": "store.logEntry",
@@ -9883,7 +9791,7 @@
     },
     {
       "callSiteId": "packages/engine/src/merger.ts::tryEarlyEmptyOwnDiffFinalize::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} — moving back to todo with progress preserved`,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, branch, mer)",
+      "callSiteFingerprint": "store.logEntry(taskId,`Finalize blocked (no-commits incomplete-work guard): ${reason} \u2014 moving back to todo with progress preserved`,JSON.stringify({ doneCount: noCommitsFinalize.doneCount, incompleteCount: noCommitsFinalize.incompleteCount, branch, mer)",
       "file": "packages/engine/src/merger.ts",
       "enclosingSymbolPath": "tryEarlyEmptyOwnDiffFinalize",
       "writer": "store.logEntry",
@@ -10081,17 +9989,15 @@
       "writer": "store.appendAgentLog",
       "ordinal": 1,
       "lineHint": 132,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to emitProactiveStatus; proactive status emission is driven by the project engine's status poller, not by a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/runtimes/in-process-runtime.ts::releaseFileScopeWaitingContinuations>transitioned::store.transitionWorkflowWorkItem::#1",
@@ -10101,17 +10007,15 @@
       "writer": "store.transitionWorkflowWorkItem",
       "ordinal": 1,
       "lineHint": 804,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to releaseFileScopeWaitingContinuations; this runtime releases waiting continuations from the in-process runtime loop, not from a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/self-healing.ts::recoverApprovedStrandedAiMergeCommit>finalized::finalizeProvenAutoMergeTask::#1",
@@ -10261,17 +10165,15 @@
       "writer": "store.claimTaskOverlapWait",
       "ordinal": 1,
       "lineHint": 81,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to resolvePendingOverlapWaits; overlap revalidation is driven by the planning/overlap scheduler, not by a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/workflows/overlap-plan-revalidation.ts::resolvePendingOverlapWaits>completed::store.completeTaskOverlapWait::#1",
@@ -10281,17 +10183,15 @@
       "writer": "store.completeTaskOverlapWait",
       "ordinal": 1,
       "lineHint": 122,
-      "owningEntryPoint": "indeterminate",
-      "reachableDataStates": [
-        "unobservable:human classification required for new durable write"
-      ],
-      "axis1": "indeterminate",
-      "axis1Evidence": "pending: human classification required for newly derived durable write",
-      "axis2Provisional": "unresolved",
-      "axis2Final": "unresolved",
-      "observedInSuite": "unobservable:human classification required for new durable write",
-      "executionProof": "none:human classification required for new durable write",
-      "followUpTaskId": "pending:classify"
+      "owningEntryPoint": "none:out-of-frontier",
+      "reachableDataStates": [],
+      "axis1": "out-of-frontier",
+      "axis1Evidence": "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo to resolvePendingOverlapWaits; overlap revalidation is driven by the planning/overlap scheduler, not by a merge landing path.",
+      "axis2Provisional": "out-of-frontier",
+      "axis2Final": "out-of-frontier",
+      "observedInSuite": "out-of-frontier",
+      "executionProof": "none:out-of-frontier",
+      "followUpTaskId": "none:out-of-frontier"
     },
     {
       "callSiteId": "packages/engine/src/worktree-base-refresh.ts::refreshReusedWorktreeBase>persistBaseSha::store.updateTask::#1",
@@ -10315,7 +10215,7 @@
     },
     {
       "callSiteId": "packages/engine/src/worktree/workspace-base-refresh.ts::refreshWorkspaceRepoWorktreeBases::store.logEntry::#1",
-      "callSiteFingerprint": "store.logEntry(task.id,`Workspace base refresh skipped [${repoRelPath}] (${result.kind}) — kept local base; the merge-time rebase will retry wi,result.detail,runContext)",
+      "callSiteFingerprint": "store.logEntry(task.id,`Workspace base refresh skipped [${repoRelPath}] (${result.kind}) \u2014 kept local base; the merge-time rebase will retry wi,result.detail,runContext)",
       "file": "packages/engine/src/worktree/workspace-base-refresh.ts",
       "enclosingSymbolPath": "refreshWorkspaceRepoWorktreeBases",
       "writer": "store.logEntry",
@@ -10835,7 +10735,7 @@
     },
     {
       "callSiteId": "packages/engine/src/worktree/worktree-acquisition.ts::acquireTaskWorktree>refreshExistingWorktree::store.logEntry::#2",
-      "callSiteFingerprint": "store.logEntry(task.id,`Worktree base refresh skipped (${refresh.kind}) — kept local base; the merge-time rebase will retry with conflict resol,refresh.detail,runContext)",
+      "callSiteFingerprint": "store.logEntry(task.id,`Worktree base refresh skipped (${refresh.kind}) \u2014 kept local base; the merge-time rebase will retry with conflict resol,refresh.detail,runContext)",
       "file": "packages/engine/src/worktree/worktree-acquisition.ts",
       "enclosingSymbolPath": "acquireTaskWorktree>refreshExistingWorktree",
       "writer": "store.logEntry",
