@@ -44,6 +44,11 @@ keeps sole ownership otherwise):
  - a task with no worktree is normal here, not an error;
  - a rejected move degrades to a warning — a finished run is never failed by
    this bookkeeping.
+
+store-double-exempt: the mover under test is `advanceNoMergeWorkflowToCompleteColumn`, which is
+the no-merge counterpart of the two merge-proof-gated movers. By construction this file proves
+`finalizeProvenAutoMergeTask` does NOT fire for a no-merge workflow, so the terminal-move and
+atomic-write seams are never reached and modelling them would invert the file's own claim.
 */
 
 /** A no-merge workflow with entirely non-default column ids — proves the mover

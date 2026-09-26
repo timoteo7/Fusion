@@ -30,6 +30,11 @@ deliberately instead of drifting.
 
 LANE. `.pg.test.ts`, `pgDescribe`-skipped without PostgreSQL, so the merge gate is
 unaffected. Shared throwaway per-file database; never port 4040; no temp-root walk.
+
+store-double-exempt: this file drives the REAL `TaskStore` through the shared PostgreSQL
+harness (`createSharedPgTaskStoreTestHarness`). There is no double here, so the real
+`moveTaskIf` predicate fencing and real `updateTaskAtomic` reducer are what run — which is
+the point: a double could only re-assert this file's own fixture.
 */
 import { beforeAll, beforeEach, afterEach, afterAll, expect, it } from "vitest";
 import "@fusion/core"; // registers the built-in column traits

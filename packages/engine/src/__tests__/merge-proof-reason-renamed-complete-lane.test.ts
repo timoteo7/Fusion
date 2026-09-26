@@ -17,6 +17,10 @@ argument, because the contract this pins is the WIRING: the caller already resol
 `isCompleteColumn` for its own guard one line earlier, and the defect was that it did not hand that
 answer down. A test that passed the argument directly would assert my own parameter works and prove
 nothing about the seam.
+
+store-double-exempt: this file's subject is the merge REFUSAL. Every case here stops at the
+`validateWorkflowDoneMergeProof` guard, so `moveTaskIf` and `updateTaskAtomic` are never reached —
+modelling them here would assert a path the file exists to prove does not run.
 */
 
 import { describe, expect, it, vi } from "vitest";

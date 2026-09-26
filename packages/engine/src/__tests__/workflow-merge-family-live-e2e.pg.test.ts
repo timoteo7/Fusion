@@ -24,6 +24,11 @@ SUBSTITUTION BOUNDARY. Only the merge PROOF is seeded (`mergeConfirmed`), which 
 what a real merger would have written. Everything downstream — column resolution,
 the move, its guards, persistence — is real, and every assertion reads the persisted
 row back through `getTask`.
+
+store-double-exempt: this file drives the REAL `TaskStore` through the shared PostgreSQL
+harness (`createSharedPgTaskStoreTestHarness`). There is no double here, so the real
+`moveTaskIf` predicate fencing and real `updateTaskAtomic` reducer are what run — which is
+the point: a double could only re-assert this file's own fixture.
 */
 import { beforeAll, beforeEach, afterEach, afterAll, describe, expect, it } from "vitest";
 import "@fusion/core"; // registers the built-in column traits

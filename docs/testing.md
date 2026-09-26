@@ -31,6 +31,23 @@ The Full Suite remains push-only and non-blocking, retains SHA-keyed no-cancel c
 
 Run `35837857934` reported nine direct stale-fixture failures after FN-9370 changed auto-merge finalization to require `moveTaskIf`. The affected production-shaped stores in `merger-ai-dependency-install.slow.test.ts` and `workspace-merger-idempotency.slow.test.ts` now evaluate the live predicate and return its conditional move result. This is separate from the Pipeline smoke overrun and the shard failures; no timeout, retry, skip, or coverage reduction is permitted as a disposition.
 
+### Test store doubles must model the product's write contracts
+
+<!-- FNXC:TestDoubleWriteContracts 2026-09-25-14:20: A test store double that omits a write seam the product calls fails at the call, and one that returns a bare row where the product reads a compare-and-set result fails SILENTLY — the run looks completed while nothing was persisted. Both shapes produced the FUSI-031 `assertion-other` family (136 cases / 83 files) on main push #3158. -->
+A test store double must satisfy the same write contracts the product depends on. Two distinct failure shapes exist, and the second is the dangerous one:
+
+1. **A missing seam throws.** The product calls `store.moveTaskIf(id, column, predicate, options)` for a predicate-fenced terminal move and `store.updateTaskAtomic(id, mutate)` for a fenced reducer write. A double that omits either throws a `TypeError` mid-finalization and abandons a card that already landed. `moveTaskIf` must read the **live** row, execute the predicate against it, and only then move — returning `{ moved: false, task }` when the predicate refuses.
+2. **A bare return value fails silently.** Where the product reads a compare-and-set result (for example `completeValidatorRunIfStillRunning` in `mission-execution-loop.ts` proceeds only when the store reports `completionApplied === true`), a double returning the plain row leaves the field `undefined`, every downstream side effect is skipped, and the assertion "expected undefined to be defined" is the only symptom. Model the confirmation field, not just the row.
+
+**Placement.** Define both seams **inside the same object literal the product receives**. A factory that returns a nested `store: { ... }` will make a seam written at the factory's top level throw `ReferenceError: store is not defined`.
+
+**Evidence gates are declared, never inherited.** The `post-merge-verification` optional group is `defaultOn: true`, and `isWorkflowOptionalGroupEnabled` (`packages/core/src/workflows/workflow-optional-steps.ts`) treats an explicit list — including `[]` — as authoritative. A fixture that owns no external post-merge evidence gate must therefore declare `enabledWorkflowSteps: []` explicitly; an absent list silently inherits the default-on gate and blocks completion. Use the opt-out only for fixtures that genuinely own no gate: a fixture whose subject IS the gate asserts against the blocker, and a local scenario that cannot produce a hosted Full Suite record (Pipeline smoke) disables only that external delivery gate.
+
+**Lifecycle recovery is in-place.** Under FN-207 containment, recovery resolves relative to the live source role and RETAINS the source column (`auto-recover-worktree-session.ts` binds `recoveryColumn` to `task.column`). A test asserting a backward move to `todo` asserts a retired contract; assert the retained lane plus the cleared stale metadata instead.
+
+`finalize-proven-auto-merge-store-double-guard.test.ts` enforces the first two shapes mechanically across the engine test surface. A file that legitimately needs neither seam must say why in a `store-double-exempt:` comment naming the concrete reason.
+
+
 ### Required post-landing Full Suite evidence
 
 The default-on workflow `post-merge-verification` gate makes Full Suite evidence a blocking task-completion requirement for merge-capable built-ins without changing branch protection. The gate must refuse approval until the delivery record identifies the landed SHA, the first Full Suite push-to-main run at or after that SHA with its run ID and SHA, successful conclusions for Pipeline smoke and Test shards 1/4 through 4/4, and all four `test-timings-shard-1` through `test-timings-shard-4` artifacts. A pre-landing run, an unrelated main run, partial artifacts, or local verification are not substitutes; record the verified GitHub-hosted evidence in the task delivery record before final approval.
