@@ -280,9 +280,35 @@ function skillLoadWarnings(store: ReturnType<typeof createMockStore>): string[] 
     .filter((message: string) => message.includes("[skill-load]"));
 }
 
+/**
+ * Worktrees this case has "registered" in the mocked repo. A case that expects warm reuse
+ * pushes its pinned path here so `git worktree list` reports it on the task's own branch.
+ */
+const registeredWorktrees: Array<{ path: string; branch: string }> = [];
+
 /** captureModifiedFiles / git diff calls go through the mocked execSync→exec. */
 function quietGit() {
-  mockedExecSync.mockImplementation(() => Buffer.from(""));
+  /*
+  FNXC:PinnedBranchProbe 2026-09-25-16:20:
+  `pinnedWorktreeBranchMatches` (worktree/worktree-acquisition.ts) treats an EMPTY
+  `git worktree list` enumeration as a transient probe failure and THROWS, because `false`
+  there drives a destructive in-place reclaim of a warm worktree. A blanket empty buffer is
+  therefore not a neutral "quiet git" — it is a fail-closed signal, and every warm-reuse case
+  in this file failed on it with `expected 'failure' to be 'success'`.
+
+  Model the repo the way git reports it: the root plus whatever this case registered, so the
+  enumeration is non-empty and the probe can actually compare branches.
+  */
+  const root = "/tmp/test";
+  mockedExecSync.mockImplementation((cmd: string) => {
+    if (cmd.includes("worktree list")) {
+      return Buffer.from(
+        `worktree ${root}\nHEAD abc123\nbranch refs/heads/main\n\n`
+        + registeredWorktrees.map((entry) => `worktree ${entry.path}\nHEAD abc123\nbranch refs/heads/${entry.branch}\n\n`).join(""),
+      );
+    }
+    return Buffer.from("");
+  });
 }
 
 describe("CE workflow-step executor integration", () => {
@@ -293,6 +319,7 @@ describe("CE workflow-step executor integration", () => {
   beforeEach(() => {
     resetExecutorMocks();
     mockedExistsSync.mockReturnValue(true);
+    registeredWorktrees.length = 0;
     quietGit();
   });
 
@@ -518,6 +545,7 @@ describe("CE workflow-step executor integration", () => {
       ["reacquires a stale worktree", "/tmp/test/.worktrees/stale-code-review", "/tmp/test/.worktrees/acquired-code-review", 1],
     ])("prepares an inline-fix Code Review node when it %s", async (_scenario, existingWorktree, expectedWorktree, acquisitionCount) => {
       mockedExistsSync.mockImplementation((path) => path !== "/tmp/test/.worktrees/stale-code-review");
+      registeredWorktrees.push({ path: "/tmp/test/.worktrees/stale-code-review", branch: "fusion/fn-ce-1" });
       const store = createMockStore();
       let live = baseStepTask({
         worktree: existingWorktree,
