@@ -519,15 +519,35 @@ describe("SelfHealingManager temp-dir AI merge worktree sweep", () => {
     ]));
   });
 
-  it("retains a worktree for an archived task outside a physical terminal lane", async () => {
-    const stale = tempMergeDir("fusion-ai-merge-fn-999-archivedtask");
+  /*
+  FNXC:TempWorktreeSweep 2026-09-26-02:20:
+  This case used "archived" to mean "a lane the board does not model as terminal". That stopped being
+  true: `archived` is one of the two TERMINAL_ROLES (packages/core/src/project-lane-vocabulary.ts:180),
+  so the sweep resolves it through resolveProjectColumnsForRoles and grants the done-task grace. Assert
+  the real contract with a genuinely non-terminal lane, and keep the archived case as a positive one.
+  */
+  it("retains a worktree for a task in a non-terminal lane", async () => {
+    const stale = tempMergeDir("fusion-ai-merge-fn-999-nonterminal");
     makeDoneTaskStale(stale);
-    const { manager, audits } = makeManager({}, taskWithColumn("archived"));
+    const { manager, audits } = makeManager({}, taskWithColumn("blocked"));
 
     await expect(sweep(manager)).resolves.toBe(0);
 
     expect(existsSync(stale)).toBe(true);
     expect(sweepAudits(audits)).toEqual([]);
+  });
+
+  it("reaps a worktree for an archived task, which is a terminal role", async () => {
+    const stale = tempMergeDir("fusion-ai-merge-fn-999-archivedtask");
+    makeDoneTaskStale(stale);
+    const { manager, audits } = makeManager({}, taskWithColumn("archived"));
+
+    await expect(sweep(manager)).resolves.toBe(1);
+
+    expect(existsSync(stale)).toBe(false);
+    expect(sweepAudits(audits)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ metadata: expect.objectContaining({ success: true, reason: "done-task-stale" }) }),
+    ]));
   });
 
   it("keeps fresh worktree for deleted task until minimum age floor", async () => {

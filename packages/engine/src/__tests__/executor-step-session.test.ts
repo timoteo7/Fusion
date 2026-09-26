@@ -432,7 +432,16 @@ describe("Workflow Steps Execution", () => {
       log: [],
       prompt: "# test\n## Steps\n### Step 0: Preflight\n- [ ] check",
       sessionFile: "/tmp/stale-session.jsonl",
-      worktree: "/tmp/test/.worktrees/fn-assistant-stale",
+      /*
+      FNXC:ExecutorSessionRecovery 2026-09-26-02:30:
+      No `worktree` on purpose. A resumed task-pinned worktree makes acquisition run
+      pinnedWorktreeBranchMatches, which THROWS when `git worktree list` enumerates nothing
+      (packages/engine/src/worktree/worktree-acquisition.ts:314 — a probe failure must never be read as
+      a proven mismatch, or a flaky signal would trigger destructive reclaim). The literal "/tmp/test" this
+      file reuses is not a git repo, so the run died in acquisition before ever reaching the
+      assistant-continuation branch under test. These cases are about session recovery, not worktree
+      pinning, so they carry no worktree.
+      */
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -469,7 +478,7 @@ describe("Workflow Steps Execution", () => {
     const onError = vi.fn();
     const executor = createRoutingExecutor(store, "/tmp/test", { onError });
     const markGraphExecuteSelfRequeued = vi.spyOn(executor as any, "markGraphExecuteSelfRequeued");
-    (executor as any).activeWorktrees.set("FN-ASSISTANT-STALE", new Set([task.worktree]));
+    (executor as any).activeWorktrees.set("FN-ASSISTANT-STALE", new Set([task.id]));
 
     await executor.execute(task as any);
 
@@ -508,7 +517,7 @@ describe("Workflow Steps Execution", () => {
       log: [],
       prompt: "# test\n## Steps\n### Step 0: Preflight\n- [ ] check",
       sessionFile: "/tmp/stale-session.jsonl",
-      worktree: "/tmp/test/.worktrees/fn-assistant-stale-exhausted",
+      // No `worktree` for the same reason as the case above — see the FNXC note there.
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
