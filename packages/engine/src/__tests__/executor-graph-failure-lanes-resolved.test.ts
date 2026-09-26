@@ -333,18 +333,33 @@ describe("the execution-resume router's gate reads the same board as its destina
     id, column, worktree: "/wt", steps: [{ name: "s", status: "pending" }], workflowStepResults: [],
   });
 
-  it("admits a review-lane card", async () => {
+  /*
+  FNXC:LifecycleContainment 2026-09-25-19:50:
+  These two rows asserted that "has unfinished steps" was by itself enough to let the router claim a
+  card and send it back to the implementation lane. It is no longer enough. The gate now requires a
+  NAMED recovery — an in-place resume (`implementation-incomplete` on a WIP-lane card) or a
+  merge-boundary evidence repair — and refuses everything else with an explicit log line:
+  "automatic recovery cannot move '<column>' backward; card remains in place".
+
+  That refusal is the containment contract of FN-207: automatic recovery has no backward-move
+  authority, so a review-lane or hold-lane card is LEFT IN PLACE rather than bounced to WIP. The
+  lane resolution this describe block exists for is unchanged and still proven by the WIP case below
+  and by the intake refusal — what changed is that reaching the resolved lane is no longer sufficient
+  to be moved there. The rows are retained as refusals so a gate that returned true unconditionally
+  would still fail.
+  */
+  it("REFUSES a review-lane card, leaving it in place (containment)", async () => {
     const live = withIncompleteSteps("checking", "FN-18");
     const { executor } = harness(RENAMED_IR, live);
 
-    expect(await routeResume(executor, live, "other")).toBe(true);
+    expect(await routeResume(executor, live, "other")).toBe(false);
   });
 
-  it("admits a HOLD-lane card that still has unfinished steps", async () => {
+  it("REFUSES a HOLD-lane card that still has unfinished steps (containment)", async () => {
     const live = withIncompleteSteps("queued", "FN-19");
     const { executor } = harness(RENAMED_IR, live);
 
-    expect(await routeResume(executor, live, "other")).toBe(true);
+    expect(await routeResume(executor, live, "other")).toBe(false);
   });
 
   it("admits a WIP-lane card after a premature merge attempt", async () => {
