@@ -30,6 +30,20 @@ It asserts CODE CONSTRUCTS, never comment prose or date stamps, per
 
 A file that legitimately needs neither seam carries a `store-double-exempt:` marker naming the
 concrete reason. A bare marker with no reason fails here rather than passing silently.
+
+FNXC:StoreDoubleWriteContractGuard 2026-09-26-05:50:
+Enrollment is an import check, not a substring. Naming the entry point in a comment or a prose
+assertion does not make a fixture drive merge finalization, and enrolling those files made this
+guard demand seams from tests that never call the product — the false positive that teaches authors
+to ignore a guard.
+
+The third clause is the evidence selection, and it is scoped to what a scan can actually prove. Not
+every finalization fixture needs `enabledWorkflowSteps: []`; several reach a completed column
+without ever consulting the post-merge gate, and demanding the field there would be the same false
+positive in a new coat. What IS provable is that a declared selection is an ARRAY, because a
+non-array value is not "no gate" — it is "inherit the default-on gate", which is the failure this
+family came from. Probed by injecting `enabledWorkflowSteps: POST_MERGE_VERIFICATION_GROUP_ID`
+into an enrolled fixture: the clause fails, and reverting returns it to green.
 */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -50,6 +64,11 @@ const ATOMIC_REDUCER_WRITE = "updateTaskAtomic";
 
 /** A double that models neither seam must say why, in these words, with a reason. */
 const EXEMPTION_MARKER = "store-double-exempt:";
+
+/** The evidence opt-out that stops a fixture inheriting the default-on post-merge gate. An
+ * explicit list — including an empty one — is authoritative; only a MISSING list falls back to
+ * the workflow-authored default (`core/src/workflows/workflow-optional-steps.ts`). */
+const EVIDENCE_SELECTION = "enabledWorkflowSteps";
 
 type SeamDefect = { seam: string; defect: string };
 
@@ -244,8 +263,23 @@ function inspectSeam(tree: ts.SourceFile, seam: string): SeamDefect[] {
   return [];
 }
 
+/** True when the file IMPORTS the product entry point, which is what makes its store double the
+ * thing under test. Enrollment must read the import, not the raw text: several fixtures name the
+ * function only inside a comment or a prose assertion, and a substring scan enrolls those too, so
+ * the guard demands seams from files that never call the product at all. */
+function importsFinalizationEntry(tree: ts.SourceFile): boolean {
+  for (const statement of tree.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    if (!statement.moduleSpecifier.text.endsWith("merge/auto-merge-finalization.js")) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings && ts.isNamedImports(bindings)
+      && bindings.elements.some((element) => element.name.text === FINALIZATION_ENTRY)) return true;
+  }
+  return false;
+}
+
 const files = readTestFiles();
-const finalizationFixtures = files.filter((file) => file.source.includes(FINALIZATION_ENTRY));
+const finalizationFixtures = files.filter((file) => importsFinalizationEntry(file.tree));
 
 describe("merge finalization store doubles model the product's write contracts", () => {
   it("finds the finalization fixtures it is meant to police", () => {
@@ -275,4 +309,30 @@ describe("merge finalization store doubles model the product's write contracts",
       ).toEqual([]);
     },
   );
+
+  it("never declares a non-array evidence selection", () => {
+    // `isWorkflowOptionalGroupEnabled` treats an ARRAY as authoritative and a missing list as
+    // "inherit the default". A fixture that builds a selection as anything else — a string, a
+    // set, a bare identifier — silently falls back to the default-on post-merge gate and blocks
+    // completion, which is exactly the drift this family came from.
+    const offenders = finalizationFixtures.filter((file) => {
+      let malformed: string | undefined;
+      const visit = (node: ts.Node): void => {
+        if (malformed) return;
+        if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)
+          && node.name.text === EVIDENCE_SELECTION
+          && !ts.isArrayLiteralExpression(node.initializer)) {
+          malformed = `${file.relative} assigns a non-array ${EVIDENCE_SELECTION}`;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(file.tree);
+      return Boolean(malformed);
+    }).map((file) => file.relative);
+    expect(
+      offenders,
+      "an evidence selection must be an array literal so it is authoritative over the "
+      + "workflow-authored default; a non-array value inherits the default-on post-merge gate.",
+    ).toEqual([]);
+  });
 });
