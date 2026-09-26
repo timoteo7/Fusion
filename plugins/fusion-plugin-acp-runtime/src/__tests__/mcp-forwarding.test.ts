@@ -39,4 +39,52 @@ describe("toAcpMcpServers", () => {
     ]);
   });
 
+  /*
+  FNXC:AcpMcpNameValueShapes 2026-09-25-16:20:
+  Every name/value field may arrive as an ACP { name, value } array, not only as a Fusion
+  resolved record. Assert the concrete entries, never just the length, so an empty array —
+  the credential-loss symptom — can never satisfy these tests. These cases fail against the
+  pre-fix mapEntries(record.headers) / mapEntries(record.env) conversion.
+  */
+  it("keeps ACP name/value header arrays on both remote transports", () => {
+    expect(toAcpMcpServers([
+      { name: "remote-http", transport: "streamable-http", url: "https://mcp.example/http", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+      { name: "remote-sse", transport: "sse", url: "https://mcp.example/sse", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+    ])).toEqual([
+      { type: "http", name: "remote-http", url: "https://mcp.example/http", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+      { type: "sse", name: "remote-sse", url: "https://mcp.example/sse", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+    ]);
+  });
+
+  it("keeps ACP name/value env arrays on the resolved-stdio branch", () => {
+    expect(toAcpMcpServers([
+      { name: "explicit", transport: "stdio", command: "node", args: [], env: [{ name: "TOKEN", value: "secret" }] },
+    ])).toEqual([
+      { name: "explicit", command: "node", args: [], env: [{ name: "TOKEN", value: "secret" }] },
+    ]);
+  });
+
+  it("still maps record-shaped headers and env identically", () => {
+    expect(toAcpMcpServers([
+      { name: "record-http", transport: "http", url: "https://mcp.example/http", headers: { Authorization: "Bearer secret" } },
+      { name: "record-stdio", transport: "stdio", command: "node", args: [], env: { TOKEN: "secret" } },
+    ])).toEqual([
+      { type: "http", name: "record-http", url: "https://mcp.example/http", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+      { name: "record-stdio", command: "node", args: [], env: [{ name: "TOKEN", value: "secret" }] },
+    ]);
+  });
+
+  it("keeps name/value arrays whether or not remote capabilities are advertised", () => {
+    const servers = [
+      { name: "remote-http", transport: "http", url: "https://mcp.example/http", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+      { name: "remote-sse", transport: "sse", url: "https://mcp.example/sse", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+    ];
+    const expected = [
+      { type: "http", name: "remote-http", url: "https://mcp.example/http", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+      { type: "sse", name: "remote-sse", url: "https://mcp.example/sse", headers: [{ name: "Authorization", value: "Bearer secret" }] },
+    ];
+    expect(toAcpMcpServers(servers)).toEqual(expected);
+    expect(toAcpMcpServers(servers, { http: true, sse: true })).toEqual(expected);
+  });
+
 });

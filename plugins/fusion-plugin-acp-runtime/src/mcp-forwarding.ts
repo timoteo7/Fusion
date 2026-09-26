@@ -56,6 +56,16 @@ function mapEntries(value: unknown): { name: string; value: string }[] {
     .map(([name, value]) => ({ name, value }));
 }
 
+/*
+FNXC:AcpMcpNameValueShapes 2026-09-25-16:20:
+Every name/value field on the ACP wire may arrive either as a record (Fusion's resolved
+definitions) or as an ACP name/value array (AcpMcpServer, which types headers and env as
+{ name, value }[]). mapLegacyEnv normalizes both, so a single helper serves the remote headers
+at session/new, the resolved-stdio env, and the legacy stdio bridge. Dropping the array form
+silently strips the Authorization header, so the remote server reaches the session
+unauthenticated and fails at runtime with no conversion error. The capability gate and the
+empty-url skip are unchanged — only the name/value shape is normalized.
+*/
 function mapLegacyEnv(value: unknown): { name: string; value: string }[] {
   if (!Array.isArray(value)) return mapEntries(value);
   return value
@@ -117,7 +127,7 @@ export function toAcpMcpServers(
         name,
         command,
         args: stringList(record.args),
-        env: mapEntries(record.env),
+        env: mapLegacyEnv(record.env),
       });
       continue;
     }
@@ -130,7 +140,7 @@ export function toAcpMcpServers(
         type: transport === "sse" ? "sse" : "http",
         name,
         url,
-        headers: mapEntries(record.headers),
+        headers: mapLegacyEnv(record.headers),
       });
     }
   }
