@@ -2311,11 +2311,27 @@ export class ProjectEngine {
             || task.status !== "failed"
             || (await this.resolveTaskColumnFlags(store, task, new Map()))?.countsTowardWip !== true) return false;
           let resumed = false;
+          /*
+          FNXC:PlannerOversightRetryResume 2026-09-26-14:50:
+          The in-place arm guards its `updateTaskAtomic` with an optimistic-concurrency check on
+          `current.updatedAt === task.updatedAt`, where `task` is the caller's snapshot. But
+          `moveTaskToContainedBackwardTarget` writes a `logEntry` on exactly this no-backward-authority
+          path ("Lifecycle recovery retained in '<column>' — … has no backward-move authority"), and
+          `logEntry` bumps the row's `updatedAt`. The guard therefore compared the caller's snapshot
+          against a row the seam had just advanced, ALWAYS failed, and `resumed` stayed false — so a
+          failed executor in a WIP column could never be resumed and the FN-7551 retry entry was
+          never emitted, even though the controller had decided `retry_step`.
+
+          Re-read the row after the recovery attempt so the guard compares live state against live
+          state. The move never happened (this is the in-place arm), so the re-read is the same
+          column by construction; column and status are still re-checked inside the predicate.
+          */
+          const liveRetryRow = await store.getTask(task.id).catch(() => task) ?? task;
           await store.updateTaskAtomic(task.id, (current) => {
-            if (current.column !== task.column || current.status !== "failed"
-              || current.error !== task.error || current.updatedAt !== task.updatedAt
+            if (current.column !== liveRetryRow.column || current.status !== "failed"
+              || current.error !== liveRetryRow.error || current.updatedAt !== liveRetryRow.updatedAt
               || current.paused || current.userPaused || current.deletedAt
-              || executor?.isTaskLiveForOverseerRetry?.(task.id) === true) return null;
+              || executor?.isTaskLiveForOverseerRetry?.(task.id) === true) { return null; }
             resumed = true;
             return { status: "queued", error: null, sessionFile: null };
           });

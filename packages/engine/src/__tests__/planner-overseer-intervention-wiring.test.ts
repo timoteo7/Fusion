@@ -155,10 +155,25 @@ pgDescribe("FN-7551 — overseer decision points populate the intervention timel
 
   it("failed executor with no error source dispatches retry_step and emits a retry entry with attemptCount/attemptLimit", async () => {
     const task = await seedTask("in-progress");
+    /*
+    FNXC:LifecycleContainment 2026-09-26-14:30:
+    FN-207 removed backward-move authority from `self-healing-stranded-recovery`: only the four
+    `revisionReasons` may move a task back, everything else resolves to
+    `{ moved: false, reason: "in-place-recovery" }` (packages/engine/src/execution/lifecycle-move.ts).
+    The retry handler's bounce is therefore in-place — it clears the failed status via
+    `updateTaskAtomic` and only when `task.status === "failed"` AND the column counts toward WIP.
+    The seeded card had no status, so the in-place arm bailed and the retry entry was never emitted,
+    even though the controller had already decided `retry_step`.
+
+    A FAILED EXECUTOR is exactly a card carrying `status: "failed"`; seeding it without the status
+    asserted an older contract where the bounce was a real column move.
+    */
+    await store.updateTask(task.id, { status: "failed" });
+    const failedTask = (await store.getTask(task.id))!;
     const { controllerWithSnapshot } = wireRealEngineOverseer(store);
     const controller = controllerWithSnapshot(observation({ taskId: task.id, stage: "executor", signal: "failed", sources: [] }));
 
-    const decision = await controller.tick(task);
+    const decision = await controller.tick(failedTask);
     expect(decision?.action).toBe("retry_step");
 
     const timeline = await getPlannerInterventionTimeline(store, task.id);
