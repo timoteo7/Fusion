@@ -70,7 +70,17 @@ function createStore(task: Task, taskSequence?: Task[]) {
     getTask: vi.fn(async () => {
       const current = sequence[Math.min(taskIdx, sequence.length - 1)] ?? task;
       taskIdx += 1;
-      return current;
+      /*
+      FNXC:PostMergeFinalizationFixture 2026-09-26-13:40:
+      FN-9369 added the `post-merge-verification` optional group with `defaultOn: true`, and
+      FN-9370's `getRequiredPostMergeEvidenceBlocker` then refuses completion until a matching
+      `workflowStepResults` entry with `status === "passed"` exists. This card has none.
+      It owns no external post-merge evidence gate — its subject is the ALREADY-ON-MAIN
+      post-finalize verification no-op — so it opts out explicitly. An array is authoritative
+      and overrides `defaultOn`; only an ABSENT field falls back to it
+      (`isWorkflowOptionalGroupEnabled`, packages/core/src/workflows/workflow-optional-steps.ts:29).
+      */
+      return { ...current, enabledWorkflowSteps: [] };
     }),
     updateTask: vi.fn(async (_id: string, updates: Partial<Task>) => Object.assign(task, updates)),
     addTaskComment: vi.fn(async (_id: string, comment: string) => {
@@ -173,7 +183,16 @@ describe("post-finalize verification failure reliability interactions (real git)
       const preFinalizeTask = {
         ...task,
         column: "in-review",
-        status: "merging",
+        /*
+        FNXC:PostMergeFinalizationFixture 2026-09-26-13:40:
+        This row pre-marked the card `status: "merging"`, but `merging` is now a
+        HARD_BLOCKING_TASK_STATUSES member (packages/core/src/merge/task-merge.ts), so
+        `getTaskMergeBlocker` refused at the door, the merge body never ran, the injected
+        verification error never happened, and the log stayed empty. A card AWAITING merge is
+        `status: null` — the engine sets `merging` itself once the merge is dispatched, and the
+        sequencing below (preFinalize -> done) is what proves that transition.
+        */
+        status: null,
         mergeDetails: undefined,
       } as unknown as Task;
       const { store, comments, logs } = createStore(task, [preFinalizeTask, task]);

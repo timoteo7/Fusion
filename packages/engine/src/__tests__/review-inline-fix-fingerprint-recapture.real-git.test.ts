@@ -61,7 +61,19 @@ function codeReviewStep(id = "code-review") {
     prompt: "Review the implementation.",
     toolMode: "readonly",
     enabled: true,
-    optionalGroupId: "code-review",
+    /*
+    FNXC:ReviewGateIdentity 2026-09-26-13:55:
+    `executeWorkflowStep` keys content-binding review state on
+    `effectiveWorkflowStepId = optionalGroupId ?? id` (packages/engine/src/executor/execute-workflow-step.ts:262),
+    and `findReusableReviewResult` matches on that key. This helper hardcoded
+    `optionalGroupId: "code-review"`, so `codeReviewStep("security-review")` still resolved to the
+    CODE-REVIEW gate and legitimately reused the code-review result for the current fingerprint —
+    returning the inline-fix reviewer's `APPROVE_WITH_NOTES` where the test asserted a fresh
+    `APPROVE` from the newly installed reviewer. The `id` argument is now the gate identity, so a
+    caller asking for a distinct gate gets a distinct review; the default single-argument call
+    behaves exactly as before.
+    */
+    optionalGroupId: id,
     reviewKind: "code",
   } as any;
 }
