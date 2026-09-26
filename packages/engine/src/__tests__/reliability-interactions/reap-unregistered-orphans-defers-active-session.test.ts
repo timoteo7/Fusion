@@ -95,17 +95,46 @@ describe("FN-4811 / FN-5065: reapUnregisteredOrphans defers active-session paths
     manager.stop();
   });
 
-  it("FN-5065 control: removes unregistered orphan when no FN-4811 active session is registered", async () => {
+  it("FN-5065 control: preserves an unregistered orphan when no FN-4811 active session is registered", async () => {
     const repo = makeRepo();
     tempRoots.push(repo);
     const orphanPath = makeUnregisteredOrphan(repo, "fn-5065-control");
+
+    /*
+    FNXC:UnregisteredOrphanReap 2026-09-26-03:10:
+    This control used to expect the orphan to be REMOVED. It is not, and cannot be: PR #3519
+    ("preserve worktree content during automatic cleanup", f082398be) made the reap a deliberately
+    NON-RECURSIVE rmdirSync (packages/engine/src/self-healing.ts:16918) so the sweep can never destroy
+    an operator's uncommitted work in a checkout Git has forgotten. An unregistered linked worktree
+    necessarily still holds its `.git` gitdir pointer — that pointer IS the ownership proof
+    `isReclaimableWorktreeCandidate` requires (packages/engine/src/worktree/worktree-paths.ts:48) — plus
+    the checkout, so the removal branch is unreachable for a real orphan by design. The FN-5065
+    invariant this file guards (never reap a path bound to a live session) is unaffected; what changed
+    is that the control now pins preservation rather than removal.
+    */
+    const manager = new SelfHealingManager(makeStore() as any, { rootDir: repo } as any);
+    const cleaned = await (manager as any).reapUnregisteredOrphans();
+
+    expect(cleaned).toBe(0);
+    expect(existsSync(orphanPath)).toBe(true);
+    manager.stop();
+  });
+
+  it("fails closed and preserves an unregistered orphan that still holds content", async () => {
+    const repo = makeRepo();
+    tempRoots.push(repo);
+    const orphanPath = makeUnregisteredOrphan(repo, "fn-5065-content");
     writeFileSync(join(orphanPath, "stale.txt"), "stale\n", "utf-8");
 
     const manager = new SelfHealingManager(makeStore() as any, { rootDir: repo } as any);
     const cleaned = await (manager as any).reapUnregisteredOrphans();
 
-    expect(cleaned).toBe(1);
-    expect(existsSync(orphanPath)).toBe(false);
+    // Deliberate: a non-recursive rmdir cannot delete a directory with content, so an operator's
+    // uncommitted work is never destroyed by the sweep. Covering this is what made the control's
+    // old `stale.txt` a false signal.
+    expect(cleaned).toBe(0);
+    expect(existsSync(orphanPath)).toBe(true);
+    expect(existsSync(join(orphanPath, "stale.txt"))).toBe(true);
     manager.stop();
   });
 });
