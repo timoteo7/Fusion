@@ -153,6 +153,12 @@ pgDescribe("file-scope lease: the converted call site against the unconverted on
     The scheduler's own sites DO pass literal `true`, correctly — they have already filtered to a
     role-resolved bucket, so the answer is a fact about the loop rather than about the card. The check
     below is scoped to `self-healing.ts` for exactly that reason.
+
+    Repinned when the mirrors moved from a raw `<set>.has(task.column)` answer to the shared
+    `resolveLeaseRolesFor(blocker)` result. The property this case protects is unchanged and in fact
+    strengthened: the three role answers must come from a RESOLVED source, never a literal `true`
+    (the original defect) and never an unresolved set membership test. `roles.isWipColumn` is that
+    resolved source, and `resolveLeaseRolesFor` is what resolves it.
     */
     const source = readFileSync(join(__dirname, "..", "self-healing.ts"), "utf8");
 
@@ -165,9 +171,17 @@ pgDescribe("file-scope lease: the converted call site against the unconverted on
 
     for (const site of mirrorCalls) {
       const optionsWindow = site.slice(0, site.indexOf("});"));
-      expect(optionsWindow).toMatch(/isWipColumn:\s*\w+\.has\(\w+\.column\)/);
-      expect(optionsWindow).toMatch(/isReviewColumn:\s*\w+\.has\(\w+\.column\)/);
-      expect(optionsWindow).toMatch(/isTerminalColumn:\s*\w+\.has\(\w+\.column\)/);
+      // The roles object must be resolved for the card under classification, not reused from a
+      // sibling iteration and not hardcoded. `site` begins AT the `classifyFileScopeLease(` token, so
+      // the resolution is looked up in the source text immediately preceding that call.
+      const callStart = source.indexOf(`classifyFileScopeLease(${site.slice(0, site.indexOf(","))}`);
+      expect(source.slice(Math.max(0, callStart - 400), callStart)).toMatch(/resolveLeaseRolesFor\(/);
+      expect(optionsWindow).toMatch(/isWipColumn:\s*roles\.isWipColumn/);
+      expect(optionsWindow).toMatch(/isReviewColumn:\s*roles\.isReviewColumn/);
+      expect(optionsWindow).toMatch(/isTerminalColumn:\s*roles\.isTerminalColumn/);
+      // The original defect in its converted-call-shape form: a literal answer for a card that is
+      // merely resting somewhere.
+      expect(optionsWindow).not.toMatch(/isWipColumn:\s*true/);
     }
   });
 });

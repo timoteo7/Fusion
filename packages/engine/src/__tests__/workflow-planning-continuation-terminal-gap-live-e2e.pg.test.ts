@@ -182,7 +182,7 @@ pgDescribe("planning-continuation terminal columns, measured on a live store", (
     expect(resolved.kind === "orphan" ? resolved.reason : null).toBe("task-terminal");
   });
 
-  it("AUDIT — the inner predicate is threaded; one of the two classifier call sites still is not", async () => {
+  it("AUDIT — the inner predicate is threaded at every classifier call site", async () => {
     /*
     NOT driven: reaching the drain needs the runtime's full dependency set. Asserted against the
     module's SYNTAX and labelled as such.
@@ -247,7 +247,15 @@ pgDescribe("planning-continuation terminal columns, measured on a live store", (
     change to either site lands here again.
     */
     const innerCalls = callArguments("isPlanningContinuationTaskDispatchable");
-    expect(innerCalls).toHaveLength(1);
-    expect(innerCalls[0]?.length).toBe(2);
+    /*
+    Repinned when FUSI-031's own product fix (route continuation admission through the terminal-lane
+    guard) threaded the inner predicate at the SECOND classifier call site as well, closing the gap
+    this case was written to name. The audit's real invariant is that EVERY call site passes the
+    resolved terminal columns — the old `toHaveLength(1)` asserted the gap's shape, so it failed on
+    the fix and would have passed again the moment the gap reopened. Assert the invariant instead:
+    every site is threaded, and there is at least one so the audit cannot pass vacuously.
+    */
+    expect(innerCalls.length).toBeGreaterThanOrEqual(1);
+    for (const args of innerCalls) expect(args.length).toBe(2);
   });
 });
