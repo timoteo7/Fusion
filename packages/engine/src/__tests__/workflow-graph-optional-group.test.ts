@@ -944,11 +944,23 @@ describe("WorkflowGraphExecutor optional-group", () => {
           },
         },
         { id: "execute", kind: "prompt", config: { prompt: "execute" } },
+        /*
+        FNXC:PlanReviewNoOp 2026-09-26-09:00:
+        FN-8841 made a CLOSE_NO_OP Plan Review terminal through a dedicated `plan-review-no-op`
+        node rather than a direct success traversal; the built-ins in
+        `packages/core/src/workflows/builtin-workflows.ts` add `plan-review -> plan-review-no-op`
+        on `outcome:close-no-op` and `plan-review-no-op -> end` on success. Without that route the
+        executor holds the close as `terminal-route-unavailable`, which is why this log-repair case
+        reported failure. Mirror the built-in shape.
+        */
+        { id: "plan-review-no-op", kind: "action", config: { workflowAction: "plan-review-no-op" } },
         { id: "end", kind: "end" },
       ],
       edges: [
         { from: "start", to: "plan-review" },
         { from: "plan-review", to: "execute", condition: "success" },
+        { from: "plan-review", to: "plan-review-no-op", condition: "outcome:close-no-op" },
+        { from: "plan-review-no-op", to: "end", condition: "success" },
         { from: "execute", to: "end" },
       ],
     };
@@ -960,7 +972,17 @@ describe("WorkflowGraphExecutor optional-group", () => {
         },
       },
       logTaskEntry: (summary) => { logs.push(summary); },
-      recordWorkflowStepResult: async (_taskId, result) => { records.push(result); },
+      /*
+      FNXC:AuthoritativeGateResult 2026-09-26-09:20:
+      FN-2026-09-12-22:54 made the durable receipt the routing authority for a required gate: a
+      legacy void-returning seam still counts as `applied` but carries no `persistedResult`, so the
+      log-repair branch's `repairedResult?.status === "passed"` check can never pass and the gate
+      fails closed as `gate-persistence-unavailable`. Return the receipt the product now reads.
+      */
+      recordWorkflowStepResult: async (_taskId, result) => {
+        records.push(result);
+        return { scopeCurrent: true, persisted: true, disposition: "applied" as const, persistedResult: result };
+      },
       /*
       FNXC:PlanReviewNoOp 2026-09-25-21:30:
       Closing a repaired Plan Review now runs through `completePlanReviewNoOp` (workflow-graph-executor.ts:1634),
