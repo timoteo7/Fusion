@@ -224,11 +224,20 @@ pgDescribe("refineTask / duplicateTask backend mode (PostgreSQL)", () => {
 
       const refined = await h.store.refineTask(source.id, "Please add stronger review coverage");
 
-      expect((await h.store.getTask(control.id)).enabledWorkflowSteps).toEqual(["plan-review", "code-review"]);
-      expect((await h.store.getTask(refined.id)).enabledWorkflowSteps).toEqual(["plan-review", "code-review"]);
+      /*
+      FNXC:PostMergeGroupDefault 2026-09-25-19:10:
+      The seeded default set now includes the post-merge verification group, which FN-9369 made
+      `defaultOn: true` in `builtin-post-merge-group.ts`. What this case actually proves is that
+      `refineTask` seeds a card IDENTICALLY to `createTask` — that is why the control is asserted
+      beside it — so the set is written once and both cards are compared against it. Hard-coding a
+      list that omits the group would have made the two disagree again.
+      */
+      const seededDefaults = ["plan-review", "code-review", "post-merge-verification"];
+      expect((await h.store.getTask(control.id)).enabledWorkflowSteps).toEqual(seededDefaults);
+      expect((await h.store.getTask(refined.id)).enabledWorkflowSteps).toEqual(seededDefaults);
       expect(await h.store.getTaskWorkflowSelectionAsync(refined.id)).toEqual({
         workflowId: "builtin:coding",
-        stepIds: ["plan-review", "code-review"],
+        stepIds: seededDefaults,
       });
     } finally {
       await teardown();
@@ -244,7 +253,19 @@ pgDescribe("refineTask / duplicateTask backend mode (PostgreSQL)", () => {
   `builtin:coding` rather than producing an unseeded task, so this case now asserts the surviving
   invariant: refine and create agree on whatever the EFFECTIVE default seeds.
   */
-  it("refineTask persists empty default workflow groups and falls back to the effective default", async () => {
+  /*
+  FNXC:PostMergeGroupDefault 2026-09-25-19:20:
+  There is no longer a default-on-group-free built-in. `builtin:marketing` is merge-capable, so
+  `withPostMergeVerificationNode` seeds the post-merge group there too, and "persists empty default
+  workflow groups" is no longer a reachable state to assert.
+
+  What this case is really about is the SECOND half — that clearing the configured default falls back
+  to the EFFECTIVE default (`builtin:coding`) rather than producing an unseeded task. That property is
+  workflow-agnostic, so it is now carried entirely by the control comparisons below: a refinement must
+  be seeded exactly like a freshly created card, whatever the effective default happens to be. That is
+  a strictly stronger statement than pinning a group list that a future default would invalidate.
+  */
+  it("refineTask persists the EFFECTIVE default's own group set and falls back when cleared", async () => {
     const h = await makeHarness();
     try {
       await h.store.setDefaultWorkflowId("builtin:marketing");
@@ -255,10 +276,17 @@ pgDescribe("refineTask / duplicateTask backend mode (PostgreSQL)", () => {
       });
       const marketingRefinement = await h.store.refineTask(marketingSource.id, "Update the campaign copy");
 
-      expect((await h.store.getTask(marketingRefinement.id)).enabledWorkflowSteps).toEqual([]);
+      // The seeded set is whatever the EFFECTIVE default declares — marketing is merge-capable, so it
+      // carries the post-merge group — and a refinement agrees with a freshly created marketing card.
+      const marketingControl = await h.store.createTask({ description: "Fresh marketing control" });
+      expect((await h.store.getTask(marketingRefinement.id)).enabledWorkflowSteps).toEqual(
+        (await h.store.getTask(marketingControl.id)).enabledWorkflowSteps,
+      );
+      // The selection mirrors the seeded group set rather than being empty; compare it against the
+      // control so the assertion stays true when the effective default's groups change again.
       expect(await h.store.getTaskWorkflowSelectionAsync(marketingRefinement.id)).toEqual({
         workflowId: "builtin:marketing",
-        stepIds: [],
+        stepIds: (await h.store.getTask(marketingControl.id)).enabledWorkflowSteps,
       });
 
       await h.store.setDefaultWorkflowId(null);
