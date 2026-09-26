@@ -1,10 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "../executor-test-helpers.js";
 import { TaskExecutor } from "../../executor.js";
 import { createFnAgent } from "../../pi.js";
 import { createMockStore, resetExecutorMocks } from "../executor-test-helpers.js";
 
 const mockedCreateFnAgent = vi.mocked(createFnAgent);
+
+/*
+FNXC:EngineTests 2026-09-26-08:05:
+The executor now creates a session workspace under its root, so a hard-coded `/repo` is a real
+EACCES on any host that is not root: the run died at `mkdir '/repo'` before the implementation
+session was ever created, which is why the session counter read 0. Use a real temp root so the
+case exercises the retry budget it claims to test.
+*/
+const repoRoot = mkdtempSync(join(tmpdir(), "fusion-pending-review-skip-"));
 
 function makeTask(overrides: Record<string, unknown> = {}) {
   return {
@@ -75,7 +87,7 @@ describe("reliability interactions: FN-5436 executor pending-review skip", () =>
     store.getTask.mockResolvedValue(task);
     sessionThatCompletesStepsWithoutCallingTaskDone(store, "FN-5436-RI-A");
 
-    const executor = new TaskExecutor(store as any, "/repo");
+    const executor = new TaskExecutor(store as any, repoRoot);
     await executor.execute(task);
 
     expect(store.updateTask).not.toHaveBeenCalledWith("FN-5436-RI-A", {
@@ -96,7 +108,7 @@ describe("reliability interactions: FN-5436 executor pending-review skip", () =>
     const task = makeTask({ id: "FN-5436-RI-B", paused: true });
     store.getTask.mockResolvedValue(task);
 
-    const executor = new TaskExecutor(store as any, "/repo");
+    const executor = new TaskExecutor(store as any, repoRoot);
     await executor.execute(task);
 
     expect(store.moveTask).toHaveBeenCalledWith("FN-5436-RI-B", "todo", { preserveProgress: true });
@@ -136,7 +148,7 @@ describe("reliability interactions: FN-5436 executor pending-review skip", () =>
       },
     }) as any);
 
-    const executor = new TaskExecutor(store as any, "/repo");
+    const executor = new TaskExecutor(store as any, repoRoot);
     await executor.execute(task);
 
     expect(store.updateTask).not.toHaveBeenCalledWith("FN-5436-RI-C", {
@@ -167,7 +179,7 @@ describe("reliability interactions: FN-5436 executor pending-review skip", () =>
     store.getTask.mockResolvedValue(task);
     sessionThatCompletesStepsWithoutCallingTaskDone(store, "FN-5436-RI-D");
 
-    const executor = new TaskExecutor(store as any, "/repo");
+    const executor = new TaskExecutor(store as any, repoRoot);
     await executor.execute(task);
 
     /*
@@ -201,7 +213,7 @@ describe("reliability interactions: FN-5436 executor pending-review skip", () =>
     });
     store.getTask.mockResolvedValue(task);
 
-    const executor = new TaskExecutor(store as any, "/repo");
+    const executor = new TaskExecutor(store as any, repoRoot);
     await executor.execute(task);
 
     /*
