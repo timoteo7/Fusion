@@ -421,7 +421,16 @@ pgDescribe("promoteBranchGroup with a real TaskStore (FN-7534 archived-member re
 
   beforeEach(async () => {
     rootDir = makeRepo();
-    harness = await createTaskStoreForTest({ prefix: "fusion_branch_group_archive" });
+    /*
+    FNXC:GroupMergePgProjectScope 2026-09-26-00:31:
+    This walk moves a card, and a move through a merge-class node appends a Patchnode entry
+    inside `transactionImmediate`. That write is project-scoped by construction — it refuses an
+    empty project id (`packages/core/src/task-store/async/async-patchnode.ts:51`) — so the
+    harness's project-agnostic default (RLS bypass, empty-string partition) kills the whole
+    promotion at the move instead of testing anything. Binding a project id is what
+    `patchnode-ledger.pg.test.ts` does for the same reason.
+    */
+    harness = await createTaskStoreForTest({ prefix: "fusion_branch_group_archive", projectId: "branch-group-archive-test" });
     store = harness.store;
   });
 

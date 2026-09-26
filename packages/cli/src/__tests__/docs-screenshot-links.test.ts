@@ -63,10 +63,20 @@ describe("docs screenshot links", () => {
       }
     }
 
-    // FN-9295: artifacts-doc-edit.png and artifacts-gallery.png are not referenced by any
-    // markdown files; removed from expected list to match actual docs.
+    /*
+    FNXC:DocsScreenshotInventory 2026-09-26-00:12:
+    The expected list mirrors the docs that exist today, so it must be repinned whenever a doc
+    gains or drops a screenshot reference. `artifacts-gallery.png` and `artifacts-doc-edit.png`
+    were removed from this list under FN-9295 while unreferenced, then legitimately returned when
+    the redesigned category gallery landed them in docs/dashboard-guide.md — so they are back.
+    The two structural guards below (every reference exists on disk, every reference is
+    git-tracked) are the durable part of this contract; this list is the inventory of what is
+    currently published.
+    */
     expect(screenshotReferences.map(({ repoPath }) => repoPath).sort()).toEqual([
       "docs/screenshots/agents-view.png",
+      "docs/screenshots/artifacts-doc-edit.png",
+      "docs/screenshots/artifacts-gallery.png",
       "docs/screenshots/chat-view.png",
       "docs/screenshots/dashboard-overview.png",
       "docs/screenshots/dashboard-overview.png",
