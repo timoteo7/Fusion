@@ -236,6 +236,13 @@ describe("the other merge-lane surfaces on a renamed board", () => {
       options: { getTaskMergeBlocker: blocker, getMergeStrategy: vi.fn(() => "direct") },
       runtime: { getTaskStore: () => store },
       canMergeTask: (ProjectEngine.prototype as unknown as { canMergeTask: (...args: unknown[]) => boolean }).canMergeTask,
+      /*
+      FNXC:MergeAuthorityHarness 2026-09-26-07:40:
+      The gate probe is a collaborator of the sweep, not its subject. Stubbing it to "unblocked" is
+      what leaves `canMergeTask` as the surface that must hand the blocker the resolved lane — with the
+      real probe in place this case would pass on a path that never consults the injected blocker.
+      */
+      resolveMergeGateBlocker: vi.fn(async () => undefined),
       allowInReviewMergeProcessing: vi.fn(async () => true),
       loadMergeSweepBatch: vi.fn(async () => ({})),
       classifyMergeSweepCandidate: vi.fn(async () => ({ admit: true })),
@@ -271,6 +278,10 @@ describe("the other merge-lane surfaces on a renamed board", () => {
       hasMergeResolvers: vi.fn(() => false),
       allowInReviewMergeProcessing: vi.fn(async () => true),
       canMergeTask: (ProjectEngine.prototype as unknown as { canMergeTask: (...args: unknown[]) => boolean }).canMergeTask,
+      /* FNXC:MergeAuthorityHarness 2026-09-26-07:40: the dequeue's gate probe, as a collaborator of
+         the drain. Returning "unblocked" leaves `canMergeTask` as the surface that must forward the
+         resolved lane, rather than a path that never reaches the injected blocker. */
+      resolveMergeGateBlocker: vi.fn(async () => undefined),
       schedulePrMergeRetry: vi.fn(),
       clearActiveMergeClaim: vi.fn(),
       clearMergeActive: vi.fn(),
