@@ -102,8 +102,22 @@ function scriptedSeams(log: SeamLog) {
 }
 
 pgDescribe("live lifecycle E2E: real graph + real PostgreSQL store", () => {
+  /*
+  FNXC:LifecycleE2EProjectBinding 2026-09-25-23:10:
+  Bind a project id. The `merge` seam reached from this graph walk is a real merge-class node, and
+  since FN-227 (`55edb7adb`) the merge path appends a Patchnode daily-notes entry inside
+  `transactionImmediate`. That write is PROJECT-SCOPED by construction —
+  `appendPatchnodeEntryInTransaction` in `packages/core/src/task-store/async/async-patchnode.ts:51`
+  throws `Patchnode transaction write requires projectId` on an empty id rather than writing an
+  unscoped row. The shared harness defaults to the project-agnostic `projectId: ""` every core
+  suite relies on, so this suite — which actually drives a merge lane — must opt in, exactly as
+  `patchnode-ledger.pg.test.ts` does. Without it the walk dies in the interpreter at the merge
+  node and every scenario fails on `afterRun` still being the REVIEW column, with a reason that
+  names neither a column nor an assertion.
+  */
   const h: SharedPgTaskStoreHarness = createSharedPgTaskStoreTestHarness({
     prefix: "fusion_lifecycle_live_e2e",
+    projectId: "lifecycle-live-e2e",
   });
 
   beforeAll(h.beforeAll);
@@ -747,7 +761,24 @@ pgDescribe("live lifecycle E2E: real graph + real PostgreSQL store", () => {
   by elimination ("the column that is not intake and not review") behaves differently
   there.
   */
-  describe("scenario 6 — a REVISE verdict routes the card back to wip", () => {
+  /*
+  FNXC:ReviewReworkContainment 2026-09-25-23:30 (scenario 6's premise corrected):
+  This scenario used to be titled "routes the card back to wip", and its fixture genuinely did
+  that: the REVISE took a `review → exec` rework edge, so the card left the review column for the
+  wip column and the assertion below was `afterRevise === wip`-shaped. That move is no longer legal.
+  FN-207's lifecycle-direction policy runs inside the move lock, and a graph node-column move
+  carries `lifecycleReason: "workflow-graph-node-column"`, which `ENGINE_BACKWARD_MOVE_REASONS`
+  does not sanction for `review → wip`. The walk now dies with
+  `Unsanctioned lifecycle move: '<review>' (review) → '<wip>' (wip)`.
+
+  Production keeps remediation INSIDE the review column instead: the built-in coding IR routes
+  `code-review --failure--> code-review-remediation` and marks only the return edge
+  `kind: "rework"`. `_workflow-vocabulary-fixture.ts` now declares that same shape, so the card
+  never leaves review — which is the point: the rework loop is still driven end to end, and now
+  inside the lane the policy permits. The scenario is renamed to describe what is actually proven
+  rather than a move the product deliberately forbids.
+  */
+  describe("scenario 6 — a REVISE verdict reworks IN the review column, then completes", () => {
     async function driveRevise(taskId: string, v: Vocabulary, key: string, merged: boolean) {
       const { workflowId } = await seedWorkflow(v, key, merged, true);
       await seedTask(taskId, v, workflowId);
@@ -768,22 +799,22 @@ pgDescribe("live lifecycle E2E: real graph + real PostgreSQL store", () => {
     }
 
     /*
-    MEASURED, and it corrected the assertion I first wrote. A REVISE does not leave the
-    card resting in wip: the rework edge re-enters `exec` WITHIN THE SAME run, review is
-    called again, approves, and the card finishes at complete. So the observable proof
-    that rework happened is the SEAM SEQUENCE — execute appears twice, the second time
-    after a review — not an intermediate column, which the run has already moved past by
-    the time the leg returns.
+    MEASURED, and it corrected the assertion twice over. A REVISE does not leave the card
+    resting anywhere: the rework edge re-enters implementation WITHIN THE SAME run, review is
+    called again, approves, and the card finishes at complete. So the observable proof that
+    rework happened is the SEAM SEQUENCE — implementation runs a SECOND time, after a review —
+    not an intermediate column, which the run has already moved past by the time the leg returns.
 
-    Asserting the final column alone would have been satisfied by a graph that ignored
-    the REVISE entirely and went straight to merge, which is exactly the failure this
-    scenario is for.
+    Asserting the final column alone would have been satisfied by a graph that ignored the REVISE
+    entirely and went straight to merge, which is exactly the failure this scenario is for. The
+    `review` column is the containment proof: the card is still IN review when the second review
+    runs, so the rework never took the unsanctioned `review → wip` move.
     */
-    it("re-enters exec on a REVISE and only completes after the second review (renamed board)", async () => {
+    it("reworks in the review column on a REVISE and only completes after the second review (renamed board)", async () => {
       const r = await driveRevise("FN-E2E-REV", RENAMED_VOCAB, "revise-renamed", false);
 
       expect(r.afterRelease).toBe(RENAMED_VOCAB.wip);
-      // The rework edge was traversed: execute ran a SECOND time, after a review.
+      // The rework edge was traversed: implementation ran a SECOND time, after a review.
       expect(r.calls).toEqual(["planning", "execute", "review", "execute", "review", "merge"]);
       // And the loop resolved rather than spinning — the card reached complete.
       expect(r.afterRevise).toBe(RENAMED_VOCAB.complete);

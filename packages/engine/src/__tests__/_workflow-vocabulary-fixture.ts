@@ -181,15 +181,50 @@ export function lifecycleIr(v: Vocabulary, id: string, options: LifecycleIrOptio
         id: "exec",
         kind: "prompt",
         column: v.wip,
-        /* `reworkRegion` is required by the IR validator for any rework-edge TARGET
-           ("only legal ... into a top-level rework region head") — the same shape the
-           builtin coding IR uses on `merge-attempt`. Declared only when the rework edge
-           exists, so the non-rework IR stays byte-identical. */
-        config: options.reviewRework
-          ? { seam: "execute", reworkRegion: true, maxReworkCycles: 3 }
-          : { seam: "execute" },
+        config: { seam: "execute" },
       },
-      { id: "review", kind: "prompt", column: v.review, config: { seam: "review" } },
+      /*
+      `reworkRegion` marks THIS node as a legal rework-edge TARGET — the IR validator rejects any
+      `kind: "rework"` edge whose head lacks it ("only legal ... into a top-level rework region
+      head", `packages/core/src/workflows/workflow-ir.ts:1806`). The built-in Code Review group
+      carries exactly this (`builtin-code-review-group.ts:120`), so the fixture's review node does
+      too, and only when the rework option asks for a loop.
+      */
+      {
+        id: "review",
+        kind: "prompt",
+        column: v.review,
+        config: options.reviewRework
+          ? { seam: "review", reworkRegion: true, maxReworkCycles: 3 }
+          : { seam: "review" },
+      },
+      /*
+      FNXC:ReviewRework 2026-09-25-23:25 (rework shape corrected):
+      A REVISE used to re-enter `exec`, dragging the card from the review column back to the wip
+      column. That move is now REJECTED: FN-207's direction policy runs inside the move lock
+      (`packages/core/src/task-store/moves.ts:743`) and a `review → wip` step is only permitted for
+      a named revision reason (`ENGINE_BACKWARD_MOVE_REASONS` in
+      `packages/core/src/workflows/workflow-lifecycle-direction.ts:106` —
+      `code-review-revise-remediation` and friends). A graph node-column move carries
+      `lifecycleReason: "workflow-graph-node-column"`
+      (`packages/engine/src/workflow-column-boundary-hooks.ts:102`), which is not one of them, and
+      `bypassGuards: true` does NOT relax it — that flag only skips the plugin-gate recheck.
+
+      Production already models remediation correctly: the built-in coding IR routes
+      `code-review --failure--> code-review-remediation` into a remediation node IN THE REVIEW
+      COLUMN and marks only the RETURN edge `kind: "rework"`
+      (`packages/core/src/workflows/builtin-coding-workflow-ir.ts:202`). The card never leaves
+      review. This fixture now matches that shape, so the rework loop is still driven end to end
+      while the card stays in a lane the lifecycle policy actually permits.
+      */
+      ...(options.reviewRework
+        ? [{
+            id: "review-remediation",
+            kind: "prompt",
+            column: v.review,
+            config: { seam: "execute" },
+          } as const]
+        : []),
       /* A real merge-class node. The IR validator REFUSES a `merge-blocker` column with no
          reachable merge-class node ("the gate can never clear without one") — discovered by this
          file, and worth keeping: it means the review column here is a genuinely gated one rather
@@ -205,7 +240,10 @@ export function lifecycleIr(v: Vocabulary, id: string, options: LifecycleIrOptio
       { from: "review", to: "merge-gate", condition: "success" },
       { from: "merge-gate", to: "end", condition: "success" },
       ...(options.reviewRework
-        ? [{ from: "review", to: "exec", condition: "failure", kind: "rework" }]
+        ? [
+            { from: "review", to: "review-remediation", condition: "failure" },
+            { from: "review-remediation", to: "review", condition: "success", kind: "rework" },
+          ]
         : []),
     ],
   } as WorkflowIr;
