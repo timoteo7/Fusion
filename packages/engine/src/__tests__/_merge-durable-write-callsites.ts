@@ -352,6 +352,20 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   resolveOrphanedWorkspaceLandIntent: { kind: "writer", reason: "persists workspace land write-ahead intent state" },
   resolveWorkspaceLandIntent: { kind: "writer", reason: "persists workspace land write-ahead intent state" },
   withValidWorkspaceLease: { kind: "writer", reason: "runs caller mutations transactionally under a validated workspace lease fence" },
+  /*
+  FNXC:MergeReliability 2026-09-25-22:40:
+  Task overlap-wait surface (`packages/core/src/task-store/overlap-wait-ops.ts`). Three of the four are
+  fenced durable writers over `project.taskOverlapWaits`: `claimTaskOverlapWaitImpl:261` bumps phase,
+  owner, and attempt behind an `(episodeId, expectedRevision)` fence; `completeTaskOverlapWaitImpl:342`
+  writes the receipt and additionally appends a deduped task-log entry at `:369`;
+  `publishTaskOverlapDeliveriesImpl:150` replaces the persisted delivery snapshot. All three run inside
+  `transactionImmediate`, so an orphaned merge body reaching one would mutate coordination state it no
+  longer owns. `listTaskOverlapWaitsImpl:173` is a single unguarded SELECT with no write path and stays
+  a non-writer — an orphaned body may read.
+  */
+  claimTaskOverlapWait: { kind: "writer", reason: "persists fenced overlap-wait claim phase, owner, and attempt" },
+  completeTaskOverlapWait: { kind: "writer", reason: "persists the overlap-wait receipt and its deduped task-log entry" },
+  publishTaskOverlapDeliveries: { kind: "writer", reason: "persists the overlap-wait delivery snapshot" },
 };
 const NON_WRITER_REASONS: Record<string, string> = Object.fromEntries([
   "__invokeHandoffMergeQueueFailureInjectorForTesting",
@@ -625,6 +639,7 @@ const NON_WRITER_REASONS: Record<string, string> = Object.fromEntries([
   "listSpecDriftReports",
   "listSpecLocks",
   "listStrandedRefinements",
+  "listTaskOverlapWaits",
   "listTaskRecommendations",
   "listTasks",
   "listTasksByBranchGroup",

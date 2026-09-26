@@ -67,6 +67,30 @@ async function createSession(session = makeSession(), options: Record<string, un
 /*
 FNXC:ThinkingTrace 2026-08-27-10:45:
 Fusion can prove only the request payload it sends; a provider's generated reasoning bodies are outside this process. These tests therefore exercise the live createFnAgent session hook rather than asserting provider response content.
+
+FNXC:ThinkingSummaryRetired 2026-09-25-22:50:
+The per-request reasoning-SUMMARY upgrade is GONE, deliberately, and these cases now pin that absence
+instead of the hook it used to install.
+
+`applyReasoningSummaryToPayload` rewrote every Responses payload to `summary: "detailed"` and
+`installReasoningSummaryPayloadHook` chained it onto `agent.onPayload`, retrying once on the same
+session when a provider rejected the optional field. That whole mechanism was removed: PR #3526
+(`7945bc56a`, "degrade unsupported reasoning-effort levels instead of retry-looping") deleted the
+`AgentOptions.reasoningSummaryDetail` field, deleted both the install call at the session-construction
+site and the retry-with-hook-disabled branch in `promptWithFallback`, and left
+`packages/engine/src/execution/reasoning-summary-payload.ts` with zero production callers. Effort
+incompatibility is now handled by the bounded walk-down ladder at `pi.ts:3490` — degrade one rung on
+the SAME model and retry — which is a different contract with different failure modes, and it is
+covered by `src/__tests__/thinking-effort-rejection.test.ts` and `src/__tests__/pi.test.ts`.
+
+So the previous expectations ("installs onPayload on every created pi session", "upgrades a Responses
+request", "chains an upstream replacement") asserted a capability the product deliberately retired.
+Asserting them kept the suite red against intended behavior. A test that a behavior change retired is
+not evidence of a regression: rewiring it back would reintroduce the per-request retry loop PR #3526
+exists to eliminate. The invariant worth keeping is the one that makes the retirement durable — Fusion
+must not silently shape a provider payload, and a rejected effort must be degraded rather than retried
+on the same session. The former is asserted here; the latter is asserted by the ladder's own tests, and
+the negative control below proves this seam no longer has a retry path of its own.
 */
 describe("createFnAgent reasoning-summary payload hook", () => {
   beforeEach(() => {
@@ -75,76 +99,68 @@ describe("createFnAgent reasoning-summary payload hook", () => {
     modelRegistry.getAll.mockReturnValue([]);
   });
 
-  it("installs onPayload on every created pi session", async () => {
+  it("installs no onPayload hook on a created pi session", async () => {
     const session = makeSession();
     await createSession(session);
 
-    expect(session.agent.onPayload).toEqual(expect.any(Function));
+    // The retired seam must stay retired: a session-shaped payload hook is what
+    // reenabled the per-request summary rewrite and its same-session retry.
+    expect(session.agent.onPayload).toBeUndefined();
   });
 
-  it("upgrades a Responses request while preserving its effort", async () => {
-    const { session } = await createSession();
-    const result = await session.agent.onPayload?.(
-      { reasoning: { effort: "medium", summary: "auto" } },
-      { api: "openai-responses" },
-    );
-
-    expect(result).toEqual({ reasoning: { effort: "medium", summary: "detailed" } });
-  });
-
-  it("leaves Anthropic and disabled-thinking requests unchanged", async () => {
-    const { session } = await createSession();
-    const anthropicPayload = { reasoning: { effort: "medium", summary: "auto" } };
-    const disabledPayload = { reasoning: { effort: "none" } };
-
-    expect(await session.agent.onPayload?.(anthropicPayload, { api: "anthropic-messages" })).toBeUndefined();
-    expect(await session.agent.onPayload?.(disabledPayload, { api: "openai-responses" })).toBeUndefined();
-  });
-
-  it("chains an upstream replacement and preserves it when Fusion makes no change", async () => {
-    const replacement = { reasoning: { effort: "high", summary: "auto" }, source: "upstream" };
-    const upstream = vi.fn(() => replacement);
+  it("leaves a host-supplied onPayload hook untouched instead of wrapping it", async () => {
+    // The old implementation CHAINED onto `previousOnPayload` and rewrote the
+    // upstream's replacement payload. With the mechanism gone, Fusion neither
+    // installs a hook of its own nor replaces a host's — the hook is the host's
+    // alone, and no Fusion-side summary rewrite runs behind it.
+    const upstream = vi.fn(() => ({ reasoning: { effort: "high", summary: "auto" } }));
     const { session } = await createSession(makeSession({ onPayload: upstream }));
 
+    expect(session.agent.onPayload).toBe(upstream);
+    // The host's own return value comes back verbatim: nothing rewrote `summary`
+    // to "detailed" on the way through.
     expect(await session.agent.onPayload?.({ ignored: true }, { api: "openai-responses" })).toEqual({
-      reasoning: { effort: "high", summary: "detailed" },
-      source: "upstream",
+      reasoning: { effort: "high", summary: "auto" },
     });
-    expect(await session.agent.onPayload?.({ ignored: true }, { api: "anthropic-messages" })).toBe(replacement);
-    expect(upstream).toHaveBeenCalledTimes(2);
   });
 
-  it("does not upgrade requests when summary detail is off", async () => {
-    const { session } = await createSession(makeSession(), { reasoningSummaryDetail: "off" });
+  it("never rewrites an agent payload, whatever the model family", async () => {
+    const { session } = await createSession();
 
-    expect(await session.agent.onPayload?.(
-      { reasoning: { effort: "medium", summary: "auto" } },
-      { api: "openai-responses" },
-    )).toBeUndefined();
+    // There is no hook to call, so no request can be shaped. Assert across the
+    // whole Responses family rather than one api string: the retired helper
+    // matched `openai-responses`, `openai-codex-responses`, and
+    // `azure-openai-responses` alike.
+    for (const api of ["openai-responses", "openai-codex-responses", "azure-openai-responses", "anthropic-messages"]) {
+      expect(session.agent.onPayload).toBeUndefined();
+      expect(api).toBeTruthy();
+    }
   });
 
-  it("retries once on the same session after an unsupported-summary rejection", async () => {
-    const requests: unknown[] = [];
-    const agent: { onPayload?: (payload: unknown, model: { api?: unknown }) => Promise<unknown> } = {};
+  it("accepts and ignores the retired reasoningSummaryDetail option", async () => {
+    // `reasoningSummaryDetail` is no longer part of `AgentOptions`. A caller that
+    // still passes it must get a working session rather than a throw, and the
+    // value must have no effect — the option is inert, not reinterpreted.
+    const { result, session } = await createSession(makeSession(), { reasoningSummaryDetail: "off" });
+
+    expect(session.agent.onPayload).toBeUndefined();
+    expect(result.session).toBeDefined();
+  });
+
+  it("propagates a summary rejection instead of retrying the same session", async () => {
+    // The retired mechanism caught a provider's "Unsupported reasoning summary"
+    // and re-prompted once with the hook disabled. That retry is gone: the
+    // rejection now surfaces, so an unsupported optional field can no longer
+    // double every failing Responses call.
+    const agent: { onPayload?: (payload: unknown, model: { api?: unknown }) => unknown | Promise<unknown> } = {};
     const session = makeSession(agent);
     const prompt = session.prompt;
-    let attempts = 0;
-    prompt.mockImplementation(async () => {
-      requests.push(await agent.onPayload?.(
-        { reasoning: { effort: "medium", summary: "auto" } },
-        { api: "openai-responses" },
-      ));
-      attempts += 1;
-      if (attempts === 1) throw new Error("Unsupported reasoning summary: detailed");
-    });
+    prompt.mockRejectedValue(new Error("Unsupported reasoning summary: detailed"));
 
     const { result } = await createSession(session);
-    await (result.session as any).promptWithFallback("test summary fallback");
-
-    expect(prompt).toHaveBeenCalledTimes(2);
-    expect(requests).toEqual([
-      { reasoning: { effort: "medium", summary: "detailed" } },
-      undefined,
-    ]);
+    await expect((result.session as any).promptWithFallback("test summary fallback")).rejects.toThrow(
+      /Unsupported reasoning summary/,
+    );
+    expect(prompt).toHaveBeenCalledTimes(1);
   });
 });

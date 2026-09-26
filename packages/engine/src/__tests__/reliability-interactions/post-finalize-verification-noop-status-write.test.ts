@@ -85,6 +85,38 @@ function createStore(task: Task, sequence: Task[]) {
     updateTask: vi.fn(async () => undefined),
     addTaskComment: vi.fn(async () => undefined),
     moveTask: vi.fn(async () => undefined),
+    /*
+    FNXC:PostMergeFinalizationFixture 2026-09-25-22:15:
+    FN-9370's terminal finalization is predicate-fenced and then writes atomically. Without both seams this
+    double throws a TypeError INSIDE the merge, which the engine swallows — so the merge exits before any
+    disposition is reached, `logs` comes back empty, and the no-op assertions below fail for a reason that has
+    nothing to do with the behaviour they exist to pin. The file had zero store calls at all, which is the
+    signature of that swallow rather than of a genuine no-op.
+
+    `moveTaskIf` must read the LIVE row (via the same advancing `getTask` sequence the product uses) and run the
+    predicate against it; a stub that ignored the predicate would pass these tests while hiding exactly the
+    race the seam was added to close.
+    */
+    moveTaskIf: vi.fn(async (
+      id: string,
+      column: string,
+      predicate: (live: Task) => boolean | Promise<boolean>,
+      options?: unknown,
+    ) => {
+      const live = await store.getTask(id) as Task;
+      if (!await predicate(live)) return { moved: false, task: live };
+      await store.moveTask(id, column, options);
+      return { moved: true, task: { ...live, column } };
+    }),
+    updateTaskAtomic: vi.fn(async (
+      _id: string,
+      mutate: (current: Task) => Partial<Task> | undefined | Promise<Partial<Task> | undefined>,
+    ) => {
+      const current = await store.getTask(_id) as Task;
+      const patch = await mutate(current);
+      if (patch) await store.updateTask(_id, patch);
+      return { ...current, ...(patch ?? {}) };
+    }),
     logEntry: vi.fn(async (_id: string, message: string) => {
       logs.push(message);
     }),
@@ -177,10 +209,23 @@ describe("post-finalize verification noop status-write guard", () => {
     // cap-reached "already-done task" wording. Pin the fast-path message text here;
     // the no-op count (1) and the task:post-finalize-verification-no-op audit are
     // unchanged across both paths.
+    /*
+    FNXC:FastPathNoopLogShape 2026-09-25-22:10:
+    The fast-path message now carries the landed commit and the truncated error tail
+    (project-engine.ts:5315), which is a strict diagnostic improvement. The old `includes()` matched the
+    message up to `no action` and therefore matched the NEW text too — but it also matched a
+    PREFIX-only, truncated-into-existence variant, so it proved less than it looked like it proved.
+
+    The assertion is now pinned to the stable prefix AND to the diagnostic fields the product just started
+    emitting, so a future rewrite that drops `commit=` fails loudly instead of silently passing on the prefix.
+    */
     const noopLogs = logs.filter((entry) =>
       entry.includes("[verification] post-finalize verification failed for already-on-main fast-path; no action"),
     );
     expect(noopLogs).toHaveLength(1);
+    // The landed commit is surfaced on this path: the operator must be able to find what is on main.
+    expect(noopLogs[0]).toContain("commit=abcdef12");
+    expect(noopLogs[0]).toContain("error=");
 
     const noopAudits = audits.filter((event) => event.mutationType === "task:post-finalize-verification-no-op");
     expect(noopAudits).toHaveLength(1);
