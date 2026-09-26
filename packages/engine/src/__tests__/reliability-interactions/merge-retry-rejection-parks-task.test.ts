@@ -818,17 +818,31 @@ describe("routeGraphMergeFailureToRetry — rejected merge requester", () => {
       status: null,
       error: null,
     };
-    let current = task;
     let resolveBoundary: ((value: { task: TaskDetail; blocked: { reason: string; code: "no-node-result"; missingInstanceCount: number } }) => void) | undefined;
     const boundaryPrepared = new Promise<{ task: TaskDetail; blocked: { reason: string; code: "no-node-result"; missingInstanceCount: number } }>((resolve) => {
       resolveBoundary = resolve;
     });
     const store = createMockStore();
+    /*
+    FNXC:MergeRetryReliability 2026-09-26-07:10:
+    FN-2026-09-04-03:01 made the boundary park a PREDICATE-FENCED atomic write: the reducer returns
+    null when `columnMovedAt` no longer matches the value read when the retry started, because that
+    field changes on every lane move. This case exists to prove an operator requeue during the
+    backoff window is NOT clobbered.
+
+    The previous double kept its row in a local `current` the product never reads, so the fence
+    never saw the replacement at all — the case passed (or failed) for reasons unrelated to the
+    property under test. Point `getTask` at the same live row the atomic reducer reads, so the
+    fence is genuinely exercised, and assert the PARK outcome rather than a raw call count: a
+    fenced-out write still calls `updateTaskAtomic`, it just applies no patch.
+    */
+    let current: TaskDetail = task;
     const updateTaskAtomic = vi.fn(async (_id: string, reducer: (row: TaskDetail) => Partial<TaskDetail> | null) => {
       const patch = reducer(current);
       if (patch) current = { ...current, ...patch };
       return current;
     });
+    (store as any).getTask = vi.fn(async () => current);
     (store as any).updateTaskAtomic = updateTaskAtomic;
     const route = routeGraphMergeFailureToRetry({
       store,
@@ -850,8 +864,12 @@ describe("routeGraphMergeFailureToRetry — rejected merge requester", () => {
     });
 
     expect(await route).toBe(true);
+    // The atomic write IS attempted — the fence, not a missing call, is what refuses it: the
+    // row moved (columnMovedAt 03:01 → 03:02) while the backoff was running.
     expect(updateTaskAtomic).toHaveBeenCalledTimes(1);
     expect(current).toEqual(replacement);
+    expect(current.status).toBeNull();
+    expect(current.error).toBeNull();
     expect(store.updateTask.mock.calls.some(
       (call: unknown[]) => (call[1] as Record<string, unknown>)?.status === "failed",
     )).toBe(false);

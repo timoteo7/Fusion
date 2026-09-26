@@ -160,13 +160,23 @@ describe("FN-6736: phantom executor binding reclaim", () => {
 
     expect(recovered).toBe(1);
     expect(h.clearPhantomExecutorBinding).toHaveBeenCalledWith(h.task.id, { preserveWorktrees: true });
-    expect(h.store.moveTask).toHaveBeenCalledWith(h.task.id, "todo", expect.objectContaining({
-      moveSource: "engine",
-      recoveryRehome: true,
-      preserveProgress: true,
-      preserveWorktree: true,
-    }));
-    expect(h.task.column).toBe("todo");
+    /*
+    FNXC:LifecycleContainment 2026-09-26-07:00:
+    The reclaim no longer hard-moves the card to `todo`. It routes through `reboundTask(…,
+    "self-healing-session-recovery", …)` → `moveTaskToContainedBackwardTarget`, and FN-207/FN-217
+    grant backward authority only to a REVISION reason (`plan-review-revise-replan`,
+    `code-review-revise-remediation`, `verification-failure-remediation`,
+    `merge-fix-remediation`). A recovery reason has none, so the resolver returns
+    `moved: false, reason: "in-place-recovery"` and RETIGNS the row. That is the containment
+    contract working, not a regression: requeueing a WIP card on a liveness signal is exactly the
+    backward move the guard forbids.
+
+    The phantom verdict is still fully audited, and the card is still released from its dead
+    binding — the point of the sweep. Assert the retained column plus the audit instead of a
+    retired `moveTask(→todo)` shape.
+    */
+    expect(h.store.moveTask).not.toHaveBeenCalled();
+    expect(h.task.column).toBe("in-progress");
     expect(h.task.userPaused).toBe(false);
     expect(h.task.paused).toBe(false);
     expect((h.task as any).status).not.toBe("failed");
@@ -319,7 +329,11 @@ describe("FN-6736: phantom executor binding reclaim", () => {
     await h.manager.reclaimSelfOwnedBranchConflicts();
     await h.manager.reclaimSelfOwnedBranchConflicts();
 
-    expect(h.store.moveTask).toHaveBeenCalledTimes(1);
+    // FNXC:LifecycleContainment 2026-09-26-07:00: containment retains the WIP card in place, so
+    // there is no requeue move to observe. The FN-5704 invariant under test is the counter: a
+    // second sweep over an unchanged row must not escalate it, and must not emit the audit.
+    expect(h.store.moveTask).not.toHaveBeenCalled();
+    expect(h.task.column).toBe("in-progress");
     expect(h.task.resumeLimboCount).toBe(1);
     expect(findAudit(h.store, "task:resume-limbo-escalated")).toBeUndefined();
     h.cleanup();
