@@ -27,8 +27,36 @@ vi.mock("../worktree/worktree-backend.js", () => ({
   removeWorktree: removeWorktreeMock,
 }));
 
+import { POST_MERGE_VERIFICATION_GROUP_ID } from "@fusion/core";
 import { finalizeProvenAutoMergeTask } from "../merge/auto-merge-finalization.js";
 import { cleanupLandedTaskWorktree, cleanupLandedWorkspaceTaskWorktrees } from "../merge/post-landing-worktree-cleanup.js";
+
+/**
+ * FNXC:PostMergeEvidenceFake 2026-09-26-06:05:
+ * FN-9370 made a confirmed merge NOT sufficient to finalize. `getRequiredPostMergeEvidenceBlocker`
+ * (packages/core/src/merge/confirmed-merge-reconciliation.ts:40) refuses completion while an enabled
+ * gate-mode post-merge group has no APPROVE result. This fake's store exposes `getTaskWorkflowSelection`,
+ * which is the guard's own trigger, and the built-in group is `defaultOn: true` — so a task with no
+ * post-merge evidence is legitimately blocked. That is correct shipped behaviour, so the FIXTURE declares
+ * its evidence position rather than the assertion being relaxed.
+ *
+ * Option (a) from the spec: declare the evidence satisfied, which keeps the guard on the exercised path
+ * and proves finalization still completes once evidence exists. Option (b) (declare no gate enabled) would
+ * have exercised only the guard's early-out and left FN-9370 untested in this file.
+ *
+ * The group id is imported from @fusion/core rather than pasted, so a future rename of the built-in
+ * post-merge group cannot silently strand this fake on a literal.
+ */
+const APPROVED_POST_MERGE_EVIDENCE = [
+  {
+    workflowStepId: POST_MERGE_VERIFICATION_GROUP_ID,
+    workflowStepName: "Post-merge verification",
+    phase: "post-merge" as const,
+    source: "optional-group" as const,
+    status: "passed" as const,
+    verdict: "APPROVE" as const,
+  },
+];
 
 function createFinalizationStore(options: { column?: string; worktree?: string | null } = {}) {
   const task: any = {
@@ -41,7 +69,11 @@ function createFinalizationStore(options: { column?: string; worktree?: string |
     mergeRetries: 0,
     worktree: options.worktree === undefined ? "/repo/.worktrees/fn-251" : options.worktree,
     steps: [],
-    workflowStepResults: [],
+    /* FNXC:PostMergeEvidenceFake 2026-09-26-06:05: an explicit enable list keeps the fixture's
+       position independent of the built-in `defaultOn` flag; `undefined` would also enable the gate
+       today, but only by falling back to a default that a future edit could change. */
+    enabledWorkflowSteps: [POST_MERGE_VERIFICATION_GROUP_ID],
+    workflowStepResults: [...APPROVED_POST_MERGE_EVIDENCE],
     mergeDetails: { mergeConfirmed: true, commitSha: "abc123" },
   };
   const callOrder: string[] = [];
@@ -50,9 +82,47 @@ function createFinalizationStore(options: { column?: string; worktree?: string |
     Object.assign(task, patch);
     return task;
   });
-  const moveTask = vi.fn(async (_id: string, column: string) => {
+  /* FNXC:PostMergeEvidenceFence 2026-09-26-06:05: accepts the third MoveTaskOptions argument the
+     finalizer's conditional move passes; the existing assertions below already expect it. */
+  const moveTask = vi.fn(async (_id: string, column: string, _options?: unknown) => {
     callOrder.push("move");
     task.column = column;
+    return task;
+  });
+  /*
+  FNXC:PostMergeEvidenceFence 2026-09-26-06:05:
+  FN-9370 moved terminal finalization onto a conditional fence: `moveTaskIf` re-reads the live row,
+  re-evaluates the post-merge evidence guard under that read, and moves only if the predicate passes.
+  This fake had only `moveTask`, so the finalizer threw `store.moveTaskIf is not a function` and every
+  completion path in this file failed before asserting anything. Modelled on the real contract in
+  packages/core/src/task-store/moves.ts:284 (`{ task, moved }` is the applied/skip signal; a refused
+  predicate returns `moved: false` WITHOUT moving and WITHOUT recording a call). The predicate is
+  awaited and honoured rather than stubbed true, so the refusal cases below genuinely exercise the fence.
+  */
+  const moveTaskIf = vi.fn(async (
+    _id: string,
+    toColumn: string,
+    predicate: (live: unknown) => boolean | Promise<boolean>,
+    options?: unknown,
+  ) => {
+    if (!await predicate(task) || task.column === toColumn) {
+      return { task, moved: false };
+    }
+    return { task: await moveTask(_id, toColumn, options), moved: true };
+  });
+  /*
+  FNXC:PostMergeEvidenceFence 2026-09-26-06:05:
+  The post-move reconciliation is applied through `updateTaskAtomic` (read -> updater -> apply). The
+  updater is run for real against the live row; a null/undefined patch is a no-op, matching
+  updateTaskAtomicImpl in packages/core/src/task-store/task-mutation-ops.ts:380.
+  */
+  const updateTaskAtomic = vi.fn(async (
+    _id: string,
+    updater: (current: unknown) => Record<string, unknown> | null | undefined | Promise<Record<string, unknown> | null | undefined>,
+  ) => {
+    const updates = await updater(task);
+    if (!updates || Object.values(updates).every((value) => value === undefined)) return task;
+    Object.assign(task, updates);
     return task;
   });
   const logEntry = vi.fn().mockResolvedValue(task);
@@ -61,6 +131,8 @@ function createFinalizationStore(options: { column?: string; worktree?: string |
     callOrder,
     updateTask,
     moveTask,
+    moveTaskIf,
+    updateTaskAtomic,
     logEntry,
     store: {
       getTask: vi.fn(async () => task),
@@ -70,6 +142,8 @@ function createFinalizationStore(options: { column?: string; worktree?: string |
       getCompletionHandoffAcceptedMarker: vi.fn(async () => null),
       updateTask,
       moveTask,
+      moveTaskIf,
+      updateTaskAtomic,
       logEntry,
       recordRunAuditEvent: vi.fn(),
     },
@@ -383,6 +457,115 @@ describe("cleanupLandedTaskWorktree", () => {
     expect(result.outcome).toBe("already-done");
     expect(updateTask).toHaveBeenCalledWith(task.id, { worktree: null });
     expect(moveTask).not.toHaveBeenCalled();
+  });
+
+  /*
+  FNXC:PostMergeEvidenceGuard 2026-09-26-06:05:
+  FN-9370's guard is the reason every case above now carries approved post-merge evidence. Without an
+  assertion of its REFUSAL path, a future change that disabled or short-circuited the guard would leave
+  this file fully green while merged work reached `done` without the required post-landing Full Suite
+  evidence. This case is the guard's own coverage, and it is the one place the fake is deliberately
+  left in the shape the spec called incomplete.
+  */
+  it("refuses to finalize while an enabled post-merge gate has not approved", async () => {
+    const { store, task, moveTask, updateTask } = createFinalizationStore();
+    task.workflowStepResults = [];
+
+    const result = await finalizeProvenAutoMergeTask({
+      store: store as never,
+      taskId: task.id,
+      rootDir: "/repo",
+      source: "workflow-graph-merge-finalize",
+    });
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe(
+      `required post-merge evidence gate '${POST_MERGE_VERIFICATION_GROUP_ID}' has not reported`,
+    );
+    // A refused finalization must not half-apply: no completion move, no worktree pointer clear.
+    expect(moveTask).not.toHaveBeenCalled();
+    expect(updateTask).not.toHaveBeenCalledWith(task.id, { worktree: null });
+    expect(task.column).toBe("in-review");
+  });
+
+  it("refuses to finalize when the post-merge gate reported a non-approving verdict", async () => {
+    const { store, task, moveTask } = createFinalizationStore();
+    task.workflowStepResults = [
+      { ...APPROVED_POST_MERGE_EVIDENCE[0], verdict: "REVISE" },
+    ];
+
+    const result = await finalizeProvenAutoMergeTask({
+      store: store as never,
+      taskId: task.id,
+      rootDir: "/repo",
+      source: "workflow-graph-merge-finalize",
+    });
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe(
+      `required post-merge evidence gate '${POST_MERGE_VERIFICATION_GROUP_ID}' is not approved`,
+    );
+    expect(moveTask).not.toHaveBeenCalled();
+  });
+
+  it("refuses to finalize when the post-merge gate itself failed", async () => {
+    const { store, task, moveTask } = createFinalizationStore();
+    task.workflowStepResults = [
+      { ...APPROVED_POST_MERGE_EVIDENCE[0], status: "failed" },
+    ];
+
+    const result = await finalizeProvenAutoMergeTask({
+      store: store as never,
+      taskId: task.id,
+      rootDir: "/repo",
+      source: "workflow-graph-merge-finalize",
+    });
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe(
+      `required post-merge evidence gate '${POST_MERGE_VERIFICATION_GROUP_ID}' is not approved`,
+    );
+    expect(moveTask).not.toHaveBeenCalled();
+  });
+
+  /*
+  FNXC:PostMergeEvidenceGuard 2026-09-26-06:05:
+  An explicitly DISABLED gate is not required evidence. This is the boundary case of the guard's
+  `isWorkflowOptionalGroupEnabled` check and is distinct from option (b) above: the default fixture
+  keeps the gate ENABLED and approved, while this case proves that a task which never opted in is not
+  blocked by a gate it does not owe evidence for.
+  */
+  it("finalizes without post-merge evidence when the gate was explicitly disabled", async () => {
+    const { store, task, moveTask } = createFinalizationStore();
+    task.enabledWorkflowSteps = [];
+    task.workflowStepResults = [];
+
+    const result = await finalizeProvenAutoMergeTask({
+      store: store as never,
+      taskId: task.id,
+      rootDir: "/repo",
+      source: "workflow-graph-merge-finalize",
+    });
+
+    expect(result.outcome).toBe("done");
+    expect(moveTask).toHaveBeenCalledWith(task.id, "done", expect.any(Object));
+  });
+
+  it("accepts APPROVE_WITH_NOTES as satisfying the post-merge gate", async () => {
+    const { store, task, moveTask } = createFinalizationStore();
+    task.workflowStepResults = [
+      { ...APPROVED_POST_MERGE_EVIDENCE[0], verdict: "APPROVE_WITH_NOTES" },
+    ];
+
+    const result = await finalizeProvenAutoMergeTask({
+      store: store as never,
+      taskId: task.id,
+      rootDir: "/repo",
+      source: "workflow-graph-merge-finalize",
+    });
+
+    expect(result.outcome).toBe("done");
+    expect(moveTask).toHaveBeenCalledWith(task.id, "done", expect.any(Object));
   });
 
   it("uses empty settings when a minimal store has no settings reader", async () => {
