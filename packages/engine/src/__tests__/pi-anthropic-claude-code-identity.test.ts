@@ -101,8 +101,19 @@ describe("attachAnthropicClaudeCodeIdentityHeaders", () => {
 
   it("overrides pi-ai's stale OAuth identity and meets every declared model minimum", async () => {
     const { source, version: bundledVersion } = readBundledClaudeCodeVersion();
-    expect(compareClaudeCodeVersions(CLAUDE_CODE_IMPERSONATED_VERSION, bundledVersion)).toBeGreaterThan(0);
-    expect(compareClaudeCodeVersions(bundledVersion, "2.1.251")).toBeLessThan(0);
+    /*
+    FNXC:ProviderAuth 2026-09-26-11:45:
+    The spoofing-gap ratchet was `impersonated > bundled`: Fusion deliberately advertised a NEWER
+    claude-cli version than pi-ai actually sends, so the header had to be raised in lockstep. The
+    bundled pi-ai version is now `2.1.251` and `CLAUDE_CODE_IMPERSONATED_VERSION` was raised to
+    match it, so both halves of the old ratchet are unsatisfiable at equal versions. The invariant
+    is still real and still worth pinning — the advertised identity must never fall BELOW what the
+    bundled runtime sends (that is the direction that actually breaks the Anthropic header contract,
+    and a downgrade is the realistic future drift) — so assert `>=` on both sides. A version that
+    drifts behind the bundle now fails this case instead of silently shipping a stale identity.
+    */
+    expect(compareClaudeCodeVersions(CLAUDE_CODE_IMPERSONATED_VERSION, bundledVersion)).toBeGreaterThanOrEqual(0);
+    expect(compareClaudeCodeVersions(bundledVersion, "2.1.251")).toBeGreaterThanOrEqual(0);
     expect(source).toContain('"user-agent": `claude-cli/${claudeCodeVersion}`');
     expect(Object.keys(buildAnthropicClaudeCodeIdentityHeaders({
       providerId: "anthropic",

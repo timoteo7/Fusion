@@ -190,8 +190,22 @@ describe("workspace implementation base-refresh enablement", () => {
       { requiresWorktree: false },
     );
 
+    /*
+    FNXC:WorkspaceBoundary 2026-09-26-11:55:
+    `prepareGraphNodeExecution` now returns at its first line when the requirement does not need a
+    worktree (`packages/engine/src/executor/prepare-graph-node-execution.ts:126`), so a node
+    prepared with `requiresWorktree: false` never reaches the acquisition seam at all. The old
+    expectation that the seam is called a SECOND time with `false` pinned a path that no longer
+    runs: it asserted the product was still doing work it now skips before it starts.
+
+    The property this case owns is unchanged and is the one that matters — the graph refresh flag
+    forwarded to acquisition is true ONLY for a code node. Pin that directly: a write-capable code
+    node forwards `true`, and a node that does not need a worktree forwards nothing because it is
+    never prepared. The write-capable-but-not-code path is the one the previous two-call sequence
+    was actually reaching, and it is covered by the case below.
+    */
+    expect(ensureGraphCustomNodeWorktree).toHaveBeenCalledTimes(1);
     expect(ensureGraphCustomNodeWorktree).toHaveBeenNthCalledWith(1, live, settings, "implementation", true);
-    expect(ensureGraphCustomNodeWorktree).toHaveBeenNthCalledWith(2, live, settings, "review", false);
   });
 
   it("passes the graph refresh flag into workspace acquisition", async () => {

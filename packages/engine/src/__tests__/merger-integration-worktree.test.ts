@@ -20,7 +20,6 @@ import {
   resolveMergeIntegrationRoot,
 } from "../merge/merger-integration-worktree.js";
 import * as worktreePool from "../worktree/worktree-pool.js";
-import { PoolDoubleLeaseError } from "../worktree/worktree-pool.js";
 
 describe("resolveMergeIntegrationRoot", () => {
   it("defaults to reusing the task worktree", () => {
@@ -722,11 +721,23 @@ describe("acquireReuseHandoff", () => {
     );
   });
 
+  /*
+  FNXC:MergeHandoff 2026-09-26-11:35:
+  `PoolDoubleLeaseError` was deleted from `worktree-pool.ts`; nothing in production constructs or
+  catches it any more, so `new PoolDoubleLeaseError(...)` here built a TypeError against `undefined`
+  and the test failed on the missing class rather than on any lease behavior. A lease that does not
+  hand back THIS task is no longer a distinct exception — it is classified by the same
+  `lease-handoff-failed` / `no-lease` branch as any other mis-acquisition, and the holder plus the
+  queue head are carried in the refusal payload
+  (`packages/engine/src/merge/merger-integration-worktree.ts:682-691`). Keep the case as the
+  invariant that a pool double-lease is refused, not merged through, and that its diagnostics stay
+  structured: the refusal names the task it actually got and the queue head it lost to.
+  */
   it("surfaces pool double-lease failures with structured diagnostics", async () => {
     const store = createStore();
-    store.acquireMergeQueueLease.mockImplementation(() => {
-      throw new PoolDoubleLeaseError("/tmp/task-worktree", "FN-1234", "FN-5279", "acquire");
-    });
+    // The pool already handed the lease to a different task (FN-1234) instead of this one.
+    store.acquireMergeQueueLease.mockReturnValue({ taskId: "FN-1234" });
+    store.peekMergeQueueHead.mockReturnValue({ taskId: "FN-1234", leasedBy: "merger-reuse-handoff", column: "in-review" });
 
     const refusal = await expectRefusal(
       acquireReuseHandoff({
@@ -737,12 +748,13 @@ describe("acquireReuseHandoff", () => {
         worktreePath: "/tmp/task-worktree",
       }),
       "lease-handoff-failed",
-      "pool-double-lease",
+      "no-lease",
     );
     expect(refusal.payload).toMatchObject({
-      existingHolder: "FN-1234",
-      path: "/tmp/task-worktree",
-      phase: "acquire",
+      acquiredTaskId: "FN-1234",
+      queueHeadTaskId: "FN-1234",
+      queueHeadLeasedBy: "merger-reuse-handoff",
+      worktreePath: "/tmp/task-worktree",
     });
   });
 
