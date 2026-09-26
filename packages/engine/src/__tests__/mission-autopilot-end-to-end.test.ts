@@ -151,7 +151,29 @@ function makeHarness({
     ensureFeatureAssertionLinked: vi.fn(async () => (withAssertions ? [{ id: "CA-1", milestoneId: milestone.id, title: "generated assert", assertion: "works", status: "pending", orderIndex: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }] : [])),
     listGoalIdsForMission: vi.fn(async () => []),
     startValidatorRun: vi.fn(async () => ({ id: "VR-001", featureId: feature.id, milestoneId: milestone.id, sliceId: "SL-001", status: "running", triggerType: "task_completion", implementationAttempt: 1, validatorAttempt: 1, startedAt: new Date().toISOString(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })),
-    completeValidatorRun: vi.fn(),
+    /*
+    FNXC:MissionValidation 2026-09-26-08:40:
+    `completeValidatorRun` now returns a resolution envelope and the loop branches on
+    `completion.completionApplied` before it credits the pass, so a bare `vi.fn()` that resolves
+    undefined makes every completion look like a lost race. Model the real envelope.
+    */
+    completeValidatorRun: vi.fn(async (runId: string, status: string, summary?: string) => {
+      // FNXC:MissionValidation 2026-09-26-08:45: the real store persists the resolution, so the
+      // in-memory feature the assertions read back must reflect it.
+      const next = { ...feature, loopState: status === "passed" ? "passed" as const : feature.loopState, lastValidatorStatus: status, updatedAt: new Date().toISOString() };
+      features.set(feature.id, next);
+      // Route the status through the same recompute the store uses, so the slice cascade runs.
+      if (status === "passed") missionStore.updateFeatureStatus(feature.id, "done");
+      const settled = features.get(feature.id)!;
+      return ({
+      completionApplied: true,
+      runId,
+      status,
+      summary,
+      run: { id: runId, featureId: feature.id, milestoneId: milestone.id, sliceId: "SL-001", status, summary, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+      feature: settled,
+      });
+    }),
     recordValidatorFailures: vi.fn(),
     createGeneratedFixFeature: vi.fn(),
     triageFeature: vi.fn(),
@@ -210,7 +232,15 @@ describe("mission autopilot end-to-end wiring", () => {
     expect(h.missionStore.getFeatureByTaskId("FN-001")?.status).toBe("done");
     expect(processSpy).toHaveBeenCalledWith("FN-001");
     expect(h.missionStore.startValidatorRun).toHaveBeenCalledWith("F-001", "task_completion", "FN-001");
-    expect(h.missionStore.completeValidatorRun).toHaveBeenCalledWith("VR-001", "passed", "ok");
+    // FNXC:MissionValidation 2026-09-26-08:40: the completion call now carries the resolution
+    // envelope as a 5th argument; assert the arguments actually passed, not the 3-arg shape.
+    expect(h.missionStore.completeValidatorRun).toHaveBeenCalledWith(
+      "VR-001",
+      "passed",
+      "ok",
+      undefined,
+      expect.objectContaining({ featureId: "F-001" }),
+    );
     expect(h.slices.get("SL-001").status).toBe("complete");
     expect(h.activateSpy).toHaveBeenCalledWith("M-001");
     expect(h.slices.get("SL-002").status).toBe("active");
@@ -275,7 +305,14 @@ describe("mission autopilot end-to-end wiring", () => {
     await h.emitTaskMoved("done");
     await vi.waitFor(() => expect(h.slices.get("SL-001").status).toBe("complete"));
 
-    expect(h.missionStore.startValidatorRun).not.toHaveBeenCalled();
+    /*
+    FNXC:MissionValidation 2026-09-26-08:40:
+    A feature with no linked assertions no longer SKIPS validation. `runFeatureValidation` lazily
+    ensures store-managed assertion linkage and, when nothing derivable remains, still opens a
+    direct-pass run so the direct-milestone path can prove its siblings. So the invariant here is
+    "an unasserted feature still completes and still advances the slice", not "no run is opened".
+    */
+    expect(h.missionStore.startValidatorRun).toHaveBeenCalledWith("F-001", "task_completion", "FN-001");
     expect(h.slices.get("SL-001").status).toBe("complete");
     expect(h.activateSpy).toHaveBeenCalledWith("M-001");
     expect(h.slices.get("SL-002").status).toBe("active");
@@ -288,7 +325,16 @@ describe("mission autopilot end-to-end wiring", () => {
     await h.loop.processTaskOutcome("FN-001");
 
     expect(h.missionStore.startValidatorRun).toHaveBeenCalledWith("F-001", "task_completion", "FN-001");
-    expect(h.missionStore.completeValidatorRun).toHaveBeenCalledWith("VR-001", "passed", "ok");
+    // FNXC:MissionValidation 2026-09-26-08:40: the completion call now carries the resolution
+    // envelope as a 5th argument, and the loop reads the feature back off the response rather
+    // than re-reading the store, so assert the argument list that is actually passed.
+    expect(h.missionStore.completeValidatorRun).toHaveBeenCalledWith(
+      "VR-001",
+      "passed",
+      "ok",
+      undefined,
+      expect.objectContaining({ featureId: "F-001" }),
+    );
     expect(h.missionStore.getFeature("F-001")?.status).toBe("done");
     expect(h.slices.get("SL-001").status).toBe("complete");
     expect(h.activateSpy).toHaveBeenCalledWith("M-001");
@@ -324,9 +370,14 @@ describe("mission autopilot end-to-end wiring", () => {
     });
 
     await h.emitTaskMoved("done");
-    await vi.waitFor(() => expect(h.missionStore.completeValidatorRun).toHaveBeenCalledWith("VR-001", "error", "runtime unavailable"));
+    // FNXC:MissionValidation 2026-09-26-08:40: the completion call carries the resolution
+    // envelope as a 5th argument, so match the argument list actually passed.
+    const effects = expect.objectContaining({ featureId: "F-001" });
+    await vi.waitFor(() => expect(h.missionStore.completeValidatorRun)
+      .toHaveBeenCalledWith("VR-001", "error", "runtime unavailable", undefined, effects));
 
-    expect(h.missionStore.completeValidatorRun).toHaveBeenCalledWith("VR-001", "error", "runtime unavailable");
+    expect(h.missionStore.completeValidatorRun)
+      .toHaveBeenCalledWith("VR-001", "error", "runtime unavailable", undefined, effects);
     expect(h.missionStore.logMissionEvent).toHaveBeenCalledWith(
       "M-001",
       "error",
