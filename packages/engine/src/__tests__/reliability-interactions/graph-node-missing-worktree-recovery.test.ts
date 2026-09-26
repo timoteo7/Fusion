@@ -66,14 +66,29 @@ function planReviewGraphFailure(context: Record<string, unknown>) {
 function trackingStore(initial: TaskDetail) {
   const store = createMockStore();
   let live = initial;
-  store.getTask.mockImplementation(async () => live as any);
-  store.updateTask.mockImplementation(async (_id: string, updates: Record<string, unknown>) => {
-    live = { ...live, ...updates } as TaskDetail;
+  const writeThrough = (next: TaskDetail) => {
+    live = next;
     return live as any;
+  };
+  store.getTask.mockImplementation(async () => live as any);
+  store.updateTask.mockImplementation(async (_id: string, updates: Record<string, unknown>) =>
+    writeThrough({ ...live, ...updates } as TaskDetail));
+  store.updateTaskAtomic.mockImplementation(async (
+    _id: string,
+    mutate: (current: TaskDetail) => Record<string, unknown> | null | Promise<Record<string, unknown> | null>,
+  ) => {
+    const patch = await mutate(live);
+    return writeThrough({ ...live, ...(patch ?? {}) } as TaskDetail);
   });
   store.moveTask.mockImplementation(async (_id: string, column: string) => {
-    live = { ...live, column } as TaskDetail;
+    writeThrough({ ...live, column } as TaskDetail);
   });
+  /*
+  FNXC:MissingWorktreeRecovery 2026-09-25:
+  Terminal graph-failure persistence lands through the atomic reducer seam, so a tracking double
+  that only mirrors `updateTask` never observes the visible park. Both write lanes must reach the
+  same live row the assertions read.
+  */
   return { store, getLive: () => live };
 }
 
@@ -144,7 +159,7 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
     mockedExecSync.mockReturnValue("" as any);
   });
 
-  it("requeues to todo with cleared worktree metadata instead of terminal-parking", async () => {
+  it("retains the source lane with cleared worktree metadata instead of terminal-parking", async () => {
     const initial = makeTask();
     const { store, getLive } = trackingStore(initial);
     const executor = new TaskExecutor(store, "/tmp/test");
@@ -155,7 +170,14 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
     }));
 
     const live = getLive();
-    expect(live.column).toBe("todo");
+    /*
+    FNXC:MissingWorktreeRecovery 2026-09-25:
+    FN-207 lifecycle containment retired the backward move to `todo`. Recovery is in-place: the
+    task RETAINS its source lane and only the stale session metadata is cleared, so a WIP card
+    never steps backward into hold. The invariant under test is unchanged (no terminal park,
+    stale metadata cleared, budget consumed); only the retired target column is corrected.
+    */
+    expect(live.column).toBe("in-progress");
     expect(live.status).toBeNull();
     expect(live.worktree).toBeNull();
     expect(live.branch).toBeNull();
@@ -165,11 +187,7 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
       expect.objectContaining({ status: "failed" }),
       expect.anything(),
     );
-    expect(store.moveTask).toHaveBeenCalledWith(
-      initial.id,
-      "todo",
-      expect.objectContaining({ moveSource: "engine", recoveryRehome: true }),
-    );
+    expect(store.moveTask).not.toHaveBeenCalledWith(initial.id, "todo", expect.anything());
   });
 
   it("recovers when the refusal is only present under the materialized instance error key", async () => {
@@ -181,7 +199,7 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
       "node:plan-review::plan-review-step:error": MISSING_WT_ERROR,
     }));
 
-    expect(getLive().column).toBe("todo");
+    expect(getLive().column).toBe("in-progress");
     expect(getLive().worktree).toBeNull();
   });
 
@@ -257,7 +275,8 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
     );
 
     expect(handled).toBe(true);
-    expect(getLive().column).toBe("todo");
+    // FNXC:MissingWorktreeRecovery 2026-09-25: in-place recovery retains the source lane.
+    expect(getLive().column).toBe("in-progress");
   });
 
   it("leaves auto-merge-off in-review tasks terminal for human merge (FN-5147)", async () => {
@@ -294,7 +313,12 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
     );
 
     expect(handled).toBe(true);
-    expect(getLive().column).toBe("todo");
+    /*
+    FNXC:MissingWorktreeRecovery 2026-09-25:
+    The recovery is in-place, so a review-lane card RETAINS `in-review`. The FN-5147 gate under
+    test is "auto-merge-off review cards are left alone", not "review cards are moved backward".
+    */
+    expect(getLive().column).toBe("in-review");
   });
 
   it.each([

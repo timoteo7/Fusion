@@ -43,6 +43,13 @@ function createFinalizationStore(options: { column?: string; worktree?: string |
     steps: [],
     workflowStepResults: [],
     mergeDetails: { mergeConfirmed: true, commitSha: "abc123" },
+    /*
+    FNXC:PostMergeFinalizationFixture 2026-09-25:
+    This finalization-focused fixture owns no external post-merge evidence gate. An absent
+    enabledWorkflowSteps would inherit the default-on post-merge-verification group and block
+    completion, so the opt-out is declared explicitly rather than left to the workflow default.
+    */
+    enabledWorkflowSteps: [],
   };
   const callOrder: string[] = [];
   const updateTask = vi.fn(async (_id: string, patch: Record<string, unknown>) => {
@@ -50,7 +57,7 @@ function createFinalizationStore(options: { column?: string; worktree?: string |
     Object.assign(task, patch);
     return task;
   });
-  const moveTask = vi.fn(async (_id: string, column: string) => {
+  const moveTask = vi.fn(async (_id: string, column: string, _options?: unknown) => {
     callOrder.push("move");
     task.column = column;
     return task;
@@ -70,6 +77,29 @@ function createFinalizationStore(options: { column?: string; worktree?: string |
       getCompletionHandoffAcceptedMarker: vi.fn(async () => null),
       updateTask,
       moveTask,
+      /*
+      FNXC:PostMergeFinalizationFixture 2026-09-25:
+      FN-9370's terminal finalization is predicate-fenced. Both seams below must live inside the
+      same object literal the product receives — this factory returns a nested `store`, so a seam
+      defined at the factory's top level would close over an undefined `store` binding.
+      */
+      moveTaskIf: vi.fn(async (
+        id: string,
+        column: string,
+        predicate: (live: unknown) => boolean | Promise<boolean>,
+        moveOptions?: unknown,
+      ) => {
+        if (!await predicate(task)) return { moved: false, task };
+        return { moved: true, task: await moveTask(id, column, moveOptions) };
+      }),
+      updateTaskAtomic: vi.fn(async (
+        _id: string,
+        mutate: (current: unknown) => Record<string, unknown> | undefined | Promise<Record<string, unknown> | undefined>,
+      ) => {
+        const patch = await mutate(task);
+        if (patch) Object.assign(task, patch);
+        return task;
+      }),
       logEntry,
       recordRunAuditEvent: vi.fn(),
     },
