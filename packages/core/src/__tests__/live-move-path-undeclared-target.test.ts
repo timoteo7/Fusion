@@ -39,6 +39,7 @@ import {
 } from "../__test-utils__/pg-test-harness.js";
 import { resolveWorkflowIrForTask } from "../workflows/workflow-ir-resolver.js";
 import { workflowHasColumn } from "../workflows/workflow-transitions.js";
+import { resolveContainedBackwardTargetForTask } from "../workflows/workflow-lifecycle-traits.js";
 
 pgDescribe("live move path — which targets it accepts after the Planning merge", () => {
   const h: SharedPgTaskStoreHarness = createSharedPgTaskStoreTestHarness({
@@ -158,7 +159,7 @@ pgDescribe("live move path — which targets it accepts after the Planning merge
     expect(await column(task.id)).toBe("archived");
   });
 
-  it("still allows a recovery re-home to reach the workflow's REBOUND TARGET past adjacency", async () => {
+  it("REFUSES a recovery re-home out of a terminal lane, and still reaches a declared rebound target", async () => {
     /*
     FNXC:MergedPlanningColumn 2026-07-30-10:20 (PR #2601 review — greptile P2):
 
@@ -179,10 +180,39 @@ pgDescribe("live move path — which targets it accepts after the Planning merge
     the literals on the conversion backlog, so that is bug-compatibility, not an
     invariant, and pinning it would cement the bug.
 
-    What recovery genuinely needs, and what is pinned instead: a recovery re-home
-    reaches the workflow's declared rebound target even from a column ADJACENCY
-    would refuse to leave. `done -> todo` is rejected by the legacy table and must
-    still succeed under `recoveryRehome`.
+    What recovery genuinely needs, and what is pinned below instead: a stranded
+    card reaches a target the workflow DECLARES, even from a column ADJACENCY
+    would refuse to leave. That reach is the contained resolver's job now, not a
+    raw `recoveryRehome` store move — the FUSI-036 note below says why.
+
+    FNXC:LifecycleContainment 2026-09-26-00:00 (FUSI-036 — census family
+    `lifecycle-transition-forbidden`, F2):
+
+    RECOVERYREHOME IS AN ADJACENCY BYPASS, NEVER A CONTAINMENT BYPASS. This case
+    was the second census row of that family: it asked a real PG store to perform
+    `archived (rank 5) -> todo (hold, rank 1)` under `recoveryRehome: true` and
+    expected it to SUCCEED, which is a rank gap of 4.
+
+    The refusal is the contract, not a regression to relax. `recoveryRehome` skips
+    exactly two things in `task-store/moves.ts` — the unknown-column rejection for a
+    legacy recovery target, and the column-graph adjacency check — because the card
+    is already stranded in a lane its workflow may not declare. It never reaches the
+    structural deny-list, which `evaluateTransitionInvariants` runs independently of
+    every bypass flag (moves.ts:743, with the FNXC note at :736). F2 fires on the
+    rank gap; F4 would independently forbid leaving a terminal lane. No
+    `lifecycleReason` can authorize either, because the deny-list is evaluated
+    BEFORE reason registration: "an engine reason may explain a legal step backward
+    but can never authorize a structurally forbidden route"
+    (workflow-lifecycle-direction.ts:62-66). Relaxing this assertion to make it
+    green would be the barred appeasement, in the costume of a test fix.
+
+    So the two conflated claims are split. The STORE half now pins the refusal and
+    that the card did not move. The CAPABILITY half the case was written to protect
+    — a stranded card reaching a target the workflow declares — now goes through the
+    contained resolver (`resolveContainedBackwardTargetForTask`), which is the seam
+    FN-207 actually introduced for it. The engine-side wrapper
+    (`moveTaskToContainedBackwardTarget`, engine/src/execution/lifecycle-move.ts) is
+    deliberately NOT imported here: core must not reach into engine.
     */
     const store = h.store();
     /*
@@ -195,25 +225,60 @@ pgDescribe("live move path — which targets it accepts after the Planning merge
     const task = await store.createTask({ description: "recovery rehome", enabledWorkflowSteps: [] });
 
     /* `archived -> todo` is the discriminating pair: the legacy table's `archived`
-       row is `["done"]` only, so ordinary adjacency refuses it while recovery must
-       still reach the rebound target. (`done -> todo` would NOT discriminate — the
-       table permits it, so the assertion would pass with the flag removed.) */
+       row is `["done"]` only, so ordinary adjacency refuses it while a recovery
+       re-home used to be expected to reach the rebound target. (`done -> todo` would
+       NOT discriminate — the table permits it, so the assertion would pass with the
+       flag removed.) */
     await store.moveTask(task.id, "in-progress" as never, { moveSource: "user" } as never);
     await store.moveTask(task.id, "in-review" as never, { moveSource: "user" } as never);
     await store.moveTask(task.id, "done" as never, { moveSource: "user" } as never);
     await store.moveTask(task.id, "archived" as never, { moveSource: "user" } as never);
     expect(await column(task.id)).toBe("archived");
 
+    // Guard 1 of 2: ADJACENCY. The legacy `VALID_TRANSITIONS` row for `archived` is
+    // `["done"]`, so a plain engine move to `todo` is refused before any lifecycle
+    // policy is consulted. Named explicitly so it cannot be confused with the refusal below.
     await expect(
       store.moveTask(task.id, "todo" as never, { moveSource: "engine" } as never),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/Valid targets/);
     expect(await column(task.id)).toBe("archived");
 
-    await store.moveTask(task.id, "todo" as never, {
-      moveSource: "engine",
-      recoveryRehome: true,
-    } as never);
+    // Guard 2 of 2: LIFECYCLE CONTAINMENT. `recoveryRehome` legitimately bypasses
+    // guard 1 — that is its whole purpose — and is then stopped by F2. The rejection
+    // names the rule and both roles so a future rank-table change fails HERE, loudly,
+    // rather than as an unexplained refusal.
+    await expect(
+      store.moveTask(task.id, "todo" as never, {
+        moveSource: "engine",
+        recoveryRehome: true,
+      } as never),
+    ).rejects.toThrow(/Forbidden lifecycle path F2: 'archived' \(archived\) → 'todo' \(hold\)/);
 
-    expect(await column(task.id)).toBe("todo");
+    // And the card held: a refused containment is a no-op, not a partial move.
+    expect(await column(task.id)).toBe("archived");
+
+    // ── The capability this case still exists to protect ──────────────────────
+    // A card stranded in a lane its workflow does not declare can still reach a
+    // target the workflow DOES declare — that is the rescue path FN-207 replaced raw
+    // `recoveryRehome` with. Measured against the default lineage (all three below
+    // verified against the live resolver, not inferred):
+    //   in-review  (review) -> in-progress (wip)     one rank, the declared target
+    //   in-progress (wip)   -> todo (hold)           one rank, the declared target
+    //   archived   (terminal) -> undefined           the card holds where it is
+    // The third is the load-bearing one: from a terminal lane the resolver declares
+    // NO backward target, which is precisely why the store-level move above has no
+    // contained target to reach and the guard is the correct answer. It mirrors the
+    // engine-side case at lifecycle-forbidden-paths.test.ts:243 ("keeps restart
+    // recovery in review when the workflow declares no WIP lane").
+    const storeForResolver = store as never;
+    await expect(
+      resolveContainedBackwardTargetForTask(storeForResolver, task.id, "in-review"),
+    ).resolves.toBe("in-progress");
+    await expect(
+      resolveContainedBackwardTargetForTask(storeForResolver, task.id, "in-progress"),
+    ).resolves.toBe("todo");
+    await expect(
+      resolveContainedBackwardTargetForTask(storeForResolver, task.id, "archived"),
+    ).resolves.toBeUndefined();
   });
 });

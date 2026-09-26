@@ -14,6 +14,14 @@ WHAT IT WOULD HAVE CAUGHT: a card bounced out of the renamed review lane kept it
 `getTaskMergeBlocker` reads that array, so the card could re-enter review and merge with
 its re-review never run.
 
+FNXC:LifecycleContainment 2026-09-26-00:00 (FUSI-036): since FN-207 that hazard is
+prevented TWICE over, and this file now pins both halves. The role-resolved clear still
+runs wherever a bounce is allowed at all (the `moveSource: "user"` cases), AND an
+automatic bounce out of a review lane into a hold lane is refused outright by the F2
+rank rule — so the shape that made the hazard reachable cannot be created by a machine.
+Neither half subsumes the other: drop the guard and the stale-result case goes red; drop
+the clear and the user-sourced case goes red.
+
 The flag-ON path is the one under test — `isWorkflowColumnsCompatibilityFlagEnabled`
 reads the RAW experimental flag, so without enabling it this suite would exercise the
 legacy inline branch (which is deliberately left name-based as the parity reference) and
@@ -27,6 +35,7 @@ import {
   createSharedPgTaskStoreTestHarness,
 } from "../../__test-utils__/pg-test-harness.js";
 import type { WorkflowIr } from "../../workflows/workflow-ir-types.js";
+import { getTaskMergeBlocker } from "../../merge/task-merge.js";
 
 /** Standard lifecycle traits under non-default column names, with a reopen edge. */
 function renamedBoardIr(): WorkflowIr {
@@ -151,13 +160,102 @@ pgDescribe("a renamed board gets the same reopen effects as the default lineage"
     return { store, taskId: task.id };
   }
 
-  it("clears the stale review result when the renamed review lane bounces to the renamed hold lane", async () => {
+  it("REFUSES the engine-sourced bounce out of the renamed review lane, and the card stays merge-blocked", async () => {
+    /*
+    FNXC:LifecycleContainment 2026-09-26-00:00 (FUSI-036 — census family
+    `lifecycle-transition-forbidden`, F2):
+
+    THE REFUSAL IS THE HAZARD CONTROL, NOT A LOSS OF COVERAGE. This case is the
+    first census row of its family: the store was asked to bounce `checking
+    (review, rank 3) -> queued (hold, rank 1)` under `moveSource: "engine"` and
+    expected to land. That is a rank gap of 2, so F2 fires, and the move supplies
+    no `lifecycleReason` at all — so even the sanctioned-reason check would reject
+    it independently. `AGENTS.md` allows a backward step out of review only via
+    Code Review / verification / merge-fix REVISE, and only to WIP, never to a hold
+    lane. The guard is right; the expectation was the regression.
+
+    WHICH OF THE TWO HALVES OF THE ORIGINAL CASE IS ACTUALLY TRUE AFTER THE
+    REFUSAL — the spec asked for this to be measured, not assumed, so it was:
+
+      1. The reopen clear does NOT run on a refused move. `evaluateTransitionInvariants`
+         throws at moves.ts:751, long before `applyDefaultWorkflowMoveEffects` at
+         moves.ts:1052, so `workflowStepResults`, `branch`, `summary`, `status`,
+         and `error` all survive. The assertions below inverted from "emptied" to
+         "intact" for that reason, and are kept rather than deleted.
+
+      2. The card is still MERGE-BLOCKED where it sits, and the hazard is
+         unreachable anyway. `getTaskMergeBlocker` reads `workflowStepResults`, and
+         the surviving `passed` result is what would let a card merge without a
+         re-review — but only for a card sitting OUTSIDE the review lane. This one
+         never left `checking`, so the result is in the lane it was earned in, and
+         the card is blocked by its own `failed` status. The negative half is
+         measured too, and it is the real proof: the same card, read as if it had
+         moved AND had its status cleared, is merge-ELIGIBLE (`undefined`). That is
+         the exact shape the reopen clear used to prevent, and it is now
+         unreachable from an automatic path because the move that would create it
+         is refused.
+
+    A renamed review lane obeys the same rank rule as `in-review` because roles come
+    from each column's own trait flags, not from column ids. That is the property
+    this file exists to prove, and F2 firing on `checking` is now its proof.
+
+    The guard is scoped, not blanket: the sibling case below moves the same card
+    with `moveSource: "user"` and still lands, because
+    `evaluateLifecycleDirectionPostcondition` returns `null` immediately for a
+    non-engine, non-scheduler source. A human may still pull a card back to a hold
+    lane; an automatic path may not.
+    */
     const { store, taskId } = await seedCardInCheck();
 
-    const moved = await store.moveTask(taskId, "queued", { moveSource: "engine" });
+    await expect(
+      store.moveTask(taskId, "queued", { moveSource: "engine" }),
+    ).rejects.toThrow(/Forbidden lifecycle path F2: 'checking' \(review\) → 'queued' \(hold\)/);
+
+    // The card did not move, and the reopen clear never ran (half 1 above), so
+    // every field the original case watched for clearing is still exactly as seeded.
+    const held = await store.getTask(taskId);
+    expect(held.column).toBe("checking");
+    expect(held.workflowStepResults ?? []).toHaveLength(1);
+    expect(held.branch ?? null).not.toBeNull();
+    expect(held.summary ?? null).not.toBeNull();
+    expect(held.status ?? null).not.toBeNull();
+    expect(held.error ?? null).not.toBeNull();
+
+    // The safety property, stated as an assertion (half 2 above). Resolved review
+    // lanes, exactly as `moves.ts` hands them to the merge door, so this is the
+    // board's own review identity and not the literal `in-review` fallback.
+    const reviewColumns = new Set(["checking"]);
+    expect(getTaskMergeBlocker(held as never, { reviewColumns })).toBeTruthy();
+
+    // The negative control that makes the positive one mean something: the SAME
+    // card with a stale `passed` result, read as though it had left the review lane
+    // with its status cleared, is merge-eligible. That is the hazard the reopen
+    // clear used to prevent by emptying `workflowStepResults`, and it is exactly
+    // what the refusal now makes unreachable.
+    const hazard = { ...held, column: "queued", status: undefined, error: undefined };
+    expect(getTaskMergeBlocker(hazard as never, {
+      skipColumnIdentityCheck: true,
+      requiredPreMergeStepIds: new Set(),
+    })).toBeUndefined();
+  });
+
+  /*
+  The reopen-hook coverage the refused case can no longer carry, kept where the
+  guard does not apply. `moveSource: "user"` returns `null` from the containment
+  postcondition immediately, so the bounce lands and
+  `applyReopenFieldClears` runs its role-resolved clear: the `passed` result,
+  branch, summary, status, and error are all dropped. Without this case the file
+  would pin the refusal but no longer prove the clear works anywhere — a guard that
+  refuses everything would pass it.
+  */
+  it("still clears the stale review result on a user-sourced bounce into the renamed hold lane", async () => {
+    const { store, taskId } = await seedCardInCheck();
+
+    const moved = await store.moveTask(taskId, "queued", { moveSource: "user" });
 
     expect(moved.column).toBe("queued");
-    // The safety assertion: a surviving `passed` result satisfies getTaskMergeBlocker.
+    // The safety assertion, on the path where a human is doing the pulling:
+    // a surviving `passed` result satisfies getTaskMergeBlocker.
     expect(moved.workflowStepResults ?? []).toHaveLength(0);
     expect(moved.branch ?? null).toBeNull();
     expect(moved.summary ?? null).toBeNull();
