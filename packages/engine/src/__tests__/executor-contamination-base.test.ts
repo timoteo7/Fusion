@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "./executor-test-helpers.js";
 import { TaskExecutor } from "../executor.js";
 import { createMockStore, mockedCreateFnAgent, mockedExec, resetExecutorMocks } from "./executor-test-helpers.js";
@@ -64,6 +64,18 @@ describe("resolveContaminationBaseRef (FN-4417)", () => {
 });
 
 describe("branch cross-contamination recovery (FN-4428/FN-4499)", () => {
+  /*
+  FNXC:EngineTests 2026-09-26-09:40:
+  Every case in this block queues `vi.spyOn(branchConflicts, ...).mockResolvedValueOnce(...)` for
+  the same module functions, and nothing restored those spies between cases. A case that queues
+  FEWER responses than the executor asks for then consumes the PREVIOUS case's response, so the
+  recovered `shasToDrop` came from an unrelated test's fixture and the escalation case saw a drop
+  it never set up. Restore the spies per case so each case's doubles are the ones it declared.
+  */
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     resetExecutorMocks();
     mockedExec.mockImplementation(((_cmd: any, _opts: any, cb: any) => {
