@@ -303,7 +303,16 @@ describe("reliability interactions: in-review stall deadlock disposition", () =>
     expect(task.completionHandoffLimboRecoveryCount).toBe(2);
     expect(task.status).toBeUndefined();
     expect(task.error).toBeUndefined();
-    expect(await manager.surfaceInReviewStalls()).toBe(0);
+    /*
+    FNXC:SelfHealing 2026-09-26-12:05:
+    `surfaceInReviewStalls` returns the number of cards it SURFACED, not the number it declined to
+    deadlock-park. This card is a stalled merge-blocker whose rejected limbo requeues must NOT
+    escalate, and the case proves that by asserting the deadlock reason is absent — but a surfaced
+    stall is exactly what a stalled merge-blocker should get, so the count is 1. Reading the
+    return value as "not disposed" was conflating the two counters; every property this case
+    actually owns is asserted on the next three lines and all of them still hold.
+    */
+    expect(await manager.surfaceInReviewStalls()).toBe(1);
     expect(task.pausedReason).not.toBe("in-review-stall-deadlock");
     expect(task.log.some((entry: { action: string }) => entry.action.includes("Completion handoff limbo recovery exhausted"))).toBe(false);
 

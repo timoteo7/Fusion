@@ -49,7 +49,17 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     title: "t",
     description: "d",
     column: "in-review",
-    status: "merging",
+    /*
+    FNXC:PostMergeFinalizationFixture 2026-09-26-12:40:
+    This fixture pre-marked the task `status: "merging"` so the merge door would see an in-flight
+    card. `merging` is now a HARD_BLOCKING_TASK_STATUSES member
+    (packages/core/src/merge/task-merge.ts), which is correct: a merge already in flight must not be
+    admitted to ANOTHER merge, or two merges would race the same worktree. The admission-time state
+    of a card awaiting merge is `null`, not `merging` — the engine sets `merging` itself once the
+    merge is dispatched. With `merging` set here, `getTaskMergeBlocker` refused at the door, the
+    merge body never ran, and the injected verification error never happened, leaving the log empty.
+    */
+    status: null,
     dependencies: [],
     steps: [],
     currentStep: 0,
@@ -77,10 +87,32 @@ function createStore(task: Task, sequence: Task[]) {
       // no `merger.mode` pin needed (dispatch ignores it).
     } as Settings)),
     listTasks: vi.fn(async () => [task]),
+    /*
+    FNXC:PostMergeFinalizationFixture 2026-09-26-12:20:
+    The already-on-main fast path resolves the board's COMPLETE lane before it will treat a task as
+    landed (`resolveTaskLifecycleColumns` at packages/engine/src/project-engine.ts:5289). This double
+    declared no workflow selection, so the resolver reported no complete lane, `completeColumnOnErr`
+    was `null`, and the fast path fell through to the bounce path by design — no log, no audit, and
+    both no-op assertions below failed while the product was behaving exactly as its own comment
+    says it should. Give the double the builtin coding selection so the board declares a complete
+    lane and the fast path is reachable. The selection read is the only seam the fast path needs;
+    it does not weaken any assertion.
+    */
+    /*
+    FNXC:PostMergeFinalizationFixture 2026-09-26-12:30:
+    FN-9369's post-merge verification group is `defaultOn: true`, and FN-9370's
+    `getRequiredPostMergeEvidenceBlocker` refuses a merge whose enabled post-merge gate has no
+    matching `workflowStepResults` entry with `status === "passed"`. This task owns no external
+    post-merge evidence gate — the case is about the ALREADY-ON-MAIN verification no-op, not about
+    the post-merge gate — so it must opt out explicitly. An array is authoritative and overrides
+    `defaultOn` (`isWorkflowOptionalGroupEnabled`, packages/core/src/workflows/workflow-optional-steps.ts:29).
+    Without it `canMergeTask` refuses at the merge door and the merge body never runs, so the
+    injected verification error never happens and both no-op assertions below fail on an empty log.
+    */
     getTask: vi.fn(async () => {
       const current = sequence[Math.min(taskIdx, sequence.length - 1)] ?? task;
       taskIdx += 1;
-      return current;
+      return { ...current, enabledWorkflowSteps: [] };
     }),
     updateTask: vi.fn(async () => undefined),
     addTaskComment: vi.fn(async () => undefined),
