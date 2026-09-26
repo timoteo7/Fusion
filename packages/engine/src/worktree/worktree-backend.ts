@@ -247,6 +247,9 @@ async function resolveWorktreeBackendMarkerPath(worktreePath: string): Promise<s
   const { stdout } = await execAsync(`git rev-parse --git-path ${JSON.stringify(WORKTREE_BACKEND_MARKER)}`, {
     cwd: worktreePath,
     encoding: "utf-8",
+    // A hung `git rev-parse` (a stuck hook, a locked index) would otherwise wedge the worker
+    // indefinitely — this file shells out to git on every worktree-persistence path.
+    timeout: NATIVE_TIMEOUT_MS,
   });
   const markerPath = stdout.trim();
   return isAbsolute(markerPath) ? markerPath : resolve(worktreePath, markerPath);
