@@ -78,7 +78,10 @@ describeIfGit("workspace acquire durable lease authority", () => {
 
     const acquired = await acquireWorkspaceRepoWorktree({ repoRelPath: "repo-a", workspaceRootDir: fixture.rootDir, task: task("MRG-051"), store: durable.store, settings, registry, holderLiveProbe: () => true });
 
-    expect(acquired.worktreePath).toContain(".worktrees");
+    // FNXC:WorktreeRootDefault 2026-09-25-18:45: the managed worktree root is
+    // `<projectRoot>/.fusion/worktrees` (`resolveWorktreesDirLayout`). What this case proves — the
+    // acquire returns a path INSIDE the managed worktree root — is unchanged; only the root moved.
+    expect(acquired.worktreePath).toContain(".fusion/worktrees");
     expect((durable.store as any).acquireWorkspaceLease).toHaveBeenCalledTimes(2);
     expect(registry.lookupByPath(path)).toBeNull();
   }, 30_000);

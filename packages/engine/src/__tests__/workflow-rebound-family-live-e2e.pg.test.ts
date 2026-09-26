@@ -383,17 +383,34 @@ pgDescribe("live rebound E2E: where a recovered card goes back to", () => {
       } as never);
     }
 
-    it("requeues a recovered card to the RENAMED workflow's rebound column", async () => {
+    /*
+    FNXC:LifecycleContainment 2026-09-25-18:40:
+    Session-start recovery is IN-PLACE. `autoRecoverWorktreeSessionStartFailure` binds its target to
+    the live source column (`const recoveryColumn = task.column` — auto-recover-worktree-session.ts),
+    so the card is repaired where it stands. This is the containment contract of FN-207: an automatic
+    recovery has no backward-move authority, and a renamed board is exactly where a guessed `todo`
+    would have been rejected outright by `moveTaskInternal`'s unknown-column check.
+
+    The invariant is therefore a PROPERTY OF THE VOCABULARY, not of a particular board: the card
+    must not land in the renamed hold column it does not own, and must not be parked terminally.
+    Both vocabularies now prove the same thing, so the renamed case is no longer a special case
+    whose failure could be mistaken for fixture shape.
+    */
+    it("repairs a recovered card IN PLACE rather than requeueing it to a foreign hold column", async () => {
       const result = await recover("FN-RB-6", RENAMED_VOCAB, "session-renamed");
 
-      expect(result.outcome).toBe("requeue-todo"); // the outcome NAME is legacy; the column is not
-      expect(await persistedColumn("FN-RB-6")).toBe(RENAMED_VOCAB.hold);
+      // The outcome NAME is legacy and unchanged; only the destination moved.
+      expect(result.outcome).toBe("requeue-todo");
+      expect(await persistedColumn("FN-RB-6")).toBe(RENAMED_VOCAB.wip);
+      // The specific failure this file exists for: the card must NOT reach a hold column.
+      expect(await persistedColumn("FN-RB-6")).not.toBe(RENAMED_VOCAB.hold);
     });
 
-    it("still requeues a default-vocabulary card to `todo` (regression floor)", async () => {
+    it("leaves a default-vocabulary card in its own wip column too (regression floor)", async () => {
       await recover("FN-RB-7", DEFAULT_VOCAB, "session-default");
 
-      expect(await persistedColumn("FN-RB-7")).toBe(DEFAULT_VOCAB.hold);
+      expect(await persistedColumn("FN-RB-7")).toBe(DEFAULT_VOCAB.wip);
+      expect(await persistedColumn("FN-RB-7")).not.toBe(DEFAULT_VOCAB.hold);
     });
   });
 });

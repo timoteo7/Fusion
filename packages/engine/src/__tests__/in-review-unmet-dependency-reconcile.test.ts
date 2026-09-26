@@ -122,7 +122,15 @@ describe("in-review unmet dependency reconciliation", () => {
     manager.stop();
   });
 
-  it("reproduces FN-6778/FN-6779 review advancement and rebounds to queued todo", async () => {
+  /*
+  FNXC:LifecycleContainment 2026-09-25-19:00:
+  The rebound is CONTAINED. `self-healing-dependency-rebound` is declared `sameRoleOnly` in
+  `ENGINE_BACKWARD_MOVE_REASONS`, so `moveTaskToContainedBackwardTarget` returns
+  `in-place-recovery` without moving the card. FN-6778/FN-6779 are still reproduced — the
+  dependency analysis, the re-queue and the audit event are unchanged — but the card stays in the
+  review lane instead of being sent to intake.
+  */
+  it("reproduces FN-6778/FN-6779 review advancement and re-queues in place", async () => {
     const { store, tasks } = createStore([
       task({ id: "FN-6778", column: "in-review", dependencies: ["FN-6777"] }),
       task({ id: "FN-6777", column: "in-progress" }),
@@ -136,8 +144,10 @@ describe("in-review unmet dependency reconciliation", () => {
 
     await expect(manager.reconcileInReviewUnmetDependencies()).resolves.toBe(2);
 
-    expect(tasks.get("FN-6778")).toMatchObject({ column: "todo", status: "queued", blockedBy: "FN-6777" });
-    expect(tasks.get("FN-6779")).toMatchObject({ column: "todo", status: "queued", blockedBy: "FN-6770" });
+    // Containment: the card keeps its review lane, but is re-queued against its real blocker, which
+    // is what un-wedges it. The status/blockedBy pair is the part that still has to be proven.
+    expect(tasks.get("FN-6778")).toMatchObject({ column: "in-review", status: "queued", blockedBy: "FN-6777" });
+    expect(tasks.get("FN-6779")).toMatchObject({ column: "in-review", status: "queued", blockedBy: "FN-6770" });
     expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       mutationType: "task:reconcile-in-review-unmet-dependencies",
       target: "FN-6778",

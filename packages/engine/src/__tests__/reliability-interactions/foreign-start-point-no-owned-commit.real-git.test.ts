@@ -91,7 +91,14 @@ describe("foreign start-point no-owned-commit interactions (real git)", () => {
       const result = await aiMergeTask(store, dir, task.id);
 
       expect(result.merged).toBe(false);
-      expect(task.column).toBe("todo");
+      /*
+      FNXC:LifecycleContainment 2026-09-25-18:50:
+      An unproven merge is finalized IN PLACE, not bounced back to the intake lane. The card starts in
+      `in-review` and containment leaves it there, so a merge that cannot prove it owns a commit is
+      parked for an operator IN the review lane where they can act on it. Backward authority belongs
+      to a revision; an automatic merge gate is not one.
+      */
+      expect(task.column).toBe("in-review");
       expect(events.some((event: any) => event?.mutationType === "task:finalize-unproven-blocked")).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
