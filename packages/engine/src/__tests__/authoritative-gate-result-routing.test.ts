@@ -56,7 +56,15 @@ describe("authoritative gate-result routing", () => {
         config: { ...node.config, reviewKind: "code" },
       } : node),
     });
-    expect(terminalRows).toMatchObject([{ status: "passed", verdict: "APPROVE", verdictRequired: true, reviewKind: "code" }]);
+    /*
+    FNXC:AuthoritativeGateResult 2026-09-26-09:30:
+    `verdictRequired` is no longer persisted on the terminal row: the executor now reads the
+    durable `verdict` off the receipt the writer returns, so the authority is the verdict itself
+    rather than a second flag carried alongside it. The routing assertion below still pins the
+    important half — the gate fails closed on the unapproved durable row.
+    */
+    expect(terminalRows).toMatchObject([{ status: "passed", verdict: "APPROVE", reviewKind: "code" }]);
+    expect(terminalRows[0]).not.toHaveProperty("verdictRequired");
     expect(result).toMatchObject({
       outcome: "failure",
       context: { "node:review:outcome": "failure", "node:review:value": "gate-result-not-approved" },
