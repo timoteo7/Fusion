@@ -607,8 +607,35 @@ export async function admitPlanningContinuation(input: {
   // snapshot belongs inside the serialized coordinator drain below.
   const taskAlreadyActive = (await persistedTopLevelAgentTaskIdsFromStore(input.store, [input.task]))
     .includes(input.task.id);
+  /*
+  FNXC:WorkflowLifecycleColumns 2026-09-26-07:35:
+  Both dispatch sites below called `input.dispatch()` directly, which bypassed
+  `dispatchPlanningContinuationIfCurrent` — the guard that re-reads the durable row, resolves the
+  task's OWN lifecycle columns, and refuses a card sitting in its board's terminal lane. PR #3615
+  added that guard precisely because a renamed board's COMPLETE card was being admitted to
+  Plan Review again, but wiring it only into the dispatch site left the ADMISSION path unguarded,
+  so the regression it closed was live on the real route.
+
+  Both branches now go through the same guarded seam. `dispatchPlanningContinuationIfCurrent`
+  returns false when the card is no longer current (terminal lane, paused, approval-held, or the
+  work item gone) — so treat that as "not selected" rather than admitting a slot we will not use.
+  A declined dispatch must not consume a coordinator reservation, so the reservation is released.
+  */
+  const dispatchGuarded = async (): Promise<{ dispatched: boolean; settled: Promise<void> | null }> => {
+    // `dispatchPlanningContinuationIfCurrent` owns the currency/terminal verdict; the run promise
+    // is captured here so the coordinator reservation is released when it SETTLES, not before.
+    const run: { current: Promise<void> | null } = { current: null };
+    const dispatched = await dispatchPlanningContinuationIfCurrent({
+      store: input.store,
+      task: input.task,
+      item: input.item,
+      dispatch: () => { run.current = input.dispatch(); },
+    });
+    return { dispatched, settled: run.current ? run.current.catch(() => {}) : null };
+  };
   if (taskAlreadyActive) {
-    void input.dispatch().catch(() => {});
+    const outcome = await dispatchGuarded();
+    if (!outcome.dispatched) return false;
     return true;
   }
   // This snapshot is intentionally created lazily inside the coordinator drain.
@@ -640,19 +667,21 @@ export async function admitPlanningContinuation(input: {
           // cannot release capacity owned by that still-running workflow.
           return true;
         }
+        // FNXC:WorkflowLifecycleColumns 2026-09-26-07:35: a declined guard must not leave a
+        // reservation behind — the coordinator would hold capacity for a run that never starts.
+        const outcome = await dispatchGuarded();
+        if (!outcome.dispatched) {
+          planningContinuationRuns.delete(runKey);
+          projectAdmissionCoordinator.releaseReservation(input.task.id);
+          return true;
+        }
         selected = true;
         planningContinuationRuns.add(runKey);
         // Keep the coordinator reservation for the whole resumed run. The task
         // can remain canonically inactive until its first workflow node writes a
         // pending lease; releasing at executor entry recreates the over-cap gap.
-        let run: Promise<void>;
-        try {
-          run = input.dispatch();
-        } catch (error) {
-          planningContinuationRuns.delete(runKey);
-          throw error;
-        }
-        void run
+        const settled = outcome.settled ?? Promise.resolve();
+        void settled
           .finally(() => {
             planningContinuationRuns.delete(runKey);
             projectAdmissionCoordinator.releaseReservation(input.task.id);

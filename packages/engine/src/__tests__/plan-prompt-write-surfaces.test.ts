@@ -71,7 +71,14 @@ describe("planning prompt-write surfaces", () => {
     const result = await runTool(createTriagePromptWriteTool(store, TASK_ID));
 
     expect(updateTask).toHaveBeenCalledTimes(1);
-    expect(getTask).toHaveBeenCalledTimes(2);
+    /*
+    FNXC:PromptWriteEvidence 2026-09-26-07:25:
+    The property under test is the security one: a store that returns a row with no `prompt` must
+    never be reported as a verified write. The exact `getTask` read count was incidental to an
+    earlier re-read and is now one lower, so pin the OUTCOME instead of the traversal — the
+    evidence is absent from the result text, and the write result is never claimed verified.
+    */
     expect(getText(result)).toContain("could not be verified");
+    expect(getText(result)).not.toContain(`Updated PROMPT.md for ${TASK_ID}.`);
   });
 });
