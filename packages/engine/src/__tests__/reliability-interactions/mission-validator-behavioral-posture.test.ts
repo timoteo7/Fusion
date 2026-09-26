@@ -180,7 +180,14 @@ function createMockMissionStore() {
         const loopState = status === "passed" ? "passed" : status === "failed" ? "needs_fix" : status === "blocked" ? "blocked" : "validating";
         features.set(run.featureId, { ...feature, loopState: loopState as any, lastValidatorStatus: status, updatedAt: now() });
       }
-      return updated;
+      /*
+      FNXC:MissionValidatorDouble 2026-09-25:
+      Validation completion is a compare-and-set: the loop only proceeds to emit its persisted
+      event when the store confirms it OWNED and APPLIED the transition. A double that returns the
+      bare run row leaves `completionApplied` undefined, so every downstream event is silently
+      skipped — the run looks completed while nothing was recorded.
+      */
+      return { ...updated, completionApplied: true, taskUnchanged: true, featureUnchanged: true };
     }),
     recordValidatorFailures: vi.fn(() => []),
     createGeneratedFixFeature: vi.fn((sourceFeatureId: string, runId: string) => {
