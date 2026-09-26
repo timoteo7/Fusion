@@ -147,9 +147,17 @@ describe("planning-slot release wakes", () => {
 
     await (processor as any).poll();
     completion.reject(new Error("planner transport failed"));
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    /*
+    FNXC:PlanningSlotRelease 2026-09-26-07:45:
+    The invariant is "wakes exactly once and leaks no unhandled rejection", not a microtask count.
+    A rejection needs one more turn through the promise chain than a resolution, so a fixed
+    `await Promise.resolve()` N-times silently under-drains when the chain length changes and
+    fails on timing rather than on behavior.
+
+    This suite runs on fake timers, so a real `setTimeout` never fires — advance the installed
+    clock AND drain microtasks, which covers any number of chain turns deterministically.
+    */
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(planLog.error).toHaveBeenCalledWith(
       "FN-242: admitted planning promise rejected:",
