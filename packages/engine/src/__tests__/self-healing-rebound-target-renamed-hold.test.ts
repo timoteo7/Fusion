@@ -118,8 +118,25 @@ describe("the self-healing rebound TARGET follows the board's own hold lane", ()
 
     await manager(store).reconcileInReviewUnmetDependencies();
 
-    expect(moveTask).toHaveBeenCalled();
-    expect(moveTask.mock.calls[0]?.[1]).toBe("drafting");
+    /*
+    FNXC:LifecycleContainment 2026-09-25-18:25:
+    The backward rebound this case used to observe is CONTAINED. FN-207 reserves backward moves for a
+    revision, so `self-healing-dependency-rebound` is declared `sameRoleOnly` in
+    `ENGINE_BACKWARD_MOVE_REASONS` (workflow-lifecycle-direction.ts) and
+    `moveTaskToContainedBackwardTarget` short-circuits with `reason: "in-place-recovery"` before it
+    ever resolves a target. An automatic dependency sweep is a recovery, not a revision.
+
+    The card is therefore REPAIRED WHERE IT STANDS. What still must hold — and is the real
+    regression signal — is that the stranded state is cleared and the blocker is recorded, so the
+    card is re-queued rather than wedged in review forever.
+    */
+    expect(moveTask, "containment must not hand backward authority to an automatic sweep").not.toHaveBeenCalled();
+    expect(tasks[0]?.column).toBe("checking");
+    // The blocker is still recorded, which is what un-wedges the card.
+    expect(store.updateTask).toHaveBeenCalledWith("FN-DEP", expect.objectContaining({
+      status: "queued",
+      blockedBy: "FN-BLOCKER",
+    }));
   });
 
   /*
@@ -133,7 +150,11 @@ describe("the self-healing rebound TARGET follows the board's own hold lane", ()
 
     await manager(store).reconcileInReviewUnmetDependencies();
 
-    expect(moveTask).toHaveBeenCalled();
-    expect(moveTask.mock.calls[0]?.[1]).toBe("todo");
+    // CONTROL (retained under containment). This is the pinned INVARIANT: whether the board
+    // declares `drafting` or nothing at all, an automatic dependency rebound never escapes its
+    // lifecycle role. A regression that restored the backward move would fail here FIRST, on the
+    // default board, before the renamed case above could be blamed on fixture shape.
+    expect(moveTask).not.toHaveBeenCalled();
+    expect(tasks[0]?.column).toBe("in-review");
   });
 });

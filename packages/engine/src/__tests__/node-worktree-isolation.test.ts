@@ -84,7 +84,11 @@ describe("every workflow node runs in the task worktree, never the shared checko
     await (executor as any).runGraphCustomNode(node, live, { reviewerInlineFixes: false }, undefined);
 
     expect(captured.worktreePath).not.toBe(ROOT);
-    expect(captured.worktreePath).toContain(`${ROOT}/.worktrees/`);
+    // FNXC:WorktreeRootDefault 2026-09-25-18:00: the unconfigured worktree root is
+    // `<projectRoot>/.fusion/worktrees` (`resolveWorktreesDirLayout`), not the retired `.worktrees`.
+    // What this case proves is unchanged: the node runs in an ISOLATED task worktree, never the
+    // shared checkout, and the isolation is now under the current managed root.
+    expect(captured.worktreePath).toContain(`${ROOT}/.fusion/worktrees/`);
   });
 
   it("reuses an existing usable worktree instead of acquiring another", async () => {

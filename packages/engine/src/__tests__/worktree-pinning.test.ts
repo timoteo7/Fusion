@@ -25,9 +25,13 @@ describe("worktree-pinning", () => {
   });
 
   describe("pinnedWorktreePathForTask", () => {
-    it("derives <rootDir>/.worktrees/<task-id> by default", () => {
+    it("derives <rootDir>/.fusion/worktrees/<task-id> by default", () => {
+      // FNXC:WorktreeRootDefault 2026-09-25-17:55: the unconfigured default is
+      // `<projectRoot>/.fusion/worktrees` (see `resolveWorktreesDirLayout`), not the retired
+      // `<rootDir>/.worktrees`. The test NAME encoded the retired root, so it is corrected with
+      // the expectation — a name that contradicts what the assertion proves is its own drift.
       expect(pinnedWorktreePathForTask("FN-7996", undefined, "/repo")).toBe(
-        join("/repo", ".worktrees", "fn-7996"),
+        join("/repo", ".fusion", "worktrees", "fn-7996"),
       );
     });
 
@@ -73,7 +77,15 @@ describe("worktree-pinning", () => {
         "/legacy/recover-fn-8400",
         {},
         "/repo",
-      )).toBe("/repo/.worktrees/fn-8400");
+      /*
+      FNXC:WorktreeRootDefault 2026-09-25-17:55:
+      With no `worktreesDir` configured, worktrees default to `<projectRoot>/.fusion/worktrees`
+      (documented in `packages/core/src/types/settings/settings-scope.ts` and resolved by
+      `resolveWorktreesDirLayout`). The retired default was `<rootDir>/.worktrees`. Both cases below
+      assert the CURRENT root; the surrounding invariant — the task ID wins over any stale
+      source-metadata basename — is unchanged and still proven.
+      */
+      )).toBe("/repo/.fusion/worktrees/fn-8400");
     });
 
     it("does not preserve a legacy basename", () => {
@@ -82,7 +94,15 @@ describe("worktree-pinning", () => {
         "/legacy/recover-fn-8400",
         {},
         "/repo",
-      )).toBe("/repo/.worktrees/fn-8400");
+      /*
+      FNXC:WorktreeRootDefault 2026-09-25-17:55:
+      With no `worktreesDir` configured, worktrees default to `<projectRoot>/.fusion/worktrees`
+      (documented in `packages/core/src/types/settings/settings-scope.ts` and resolved by
+      `resolveWorktreesDirLayout`). The retired default was `<rootDir>/.worktrees`. Both cases below
+      assert the CURRENT root; the surrounding invariant — the task ID wins over any stale
+      source-metadata basename — is unchanged and still proven.
+      */
+      )).toBe("/repo/.fusion/worktrees/fn-8400");
     });
   });
 });

@@ -102,7 +102,17 @@ describe("reliability interactions: self-healing", () => {
     const recovered = await mgr.recoverMissingWorktreeReviewFailures();
 
     expect(recovered).toBe(1);
-    expect(tasks.get(taskId)?.column).toBe("todo");
+    /*
+    FNXC:LifecycleContainment 2026-09-25-18:05:
+    Recovery is IN-PLACE. `autoRecoverWorktreeSessionStartFailure` binds its target to the live
+    source column (`const recoveryColumn = task.column` — see auto-recover-worktree-session.ts), so
+    a card in `in-review` is repaired where it stands rather than bounced backward to `todo`. FN-207
+    containment reserves backward moves for a revision; an automatic recovery is not one.
+
+    The stale-metadata clears below are the real payload of this case and they are unchanged — the
+    card is only recovered if `worktree`, `branch` and the retry counter are actually reset.
+    */
+    expect(tasks.get(taskId)?.column).toBe("in-review");
     expect(tasks.get(taskId)?.worktree ?? null).toBeNull();
     expect(tasks.get(taskId)?.branch ?? null).toBeNull();
     expect(store.logEntry).toHaveBeenCalledWith(
