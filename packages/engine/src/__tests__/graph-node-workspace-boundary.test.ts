@@ -61,8 +61,28 @@ describe("graph node workspace session boundary", () => {
     expect(resolveGraphNodeSessionBoundary({ ...base, legacyWorkspaceLayout: true })).toBeUndefined();
   });
 
-  it("keeps Plan Review on its deliberate shared-root boundary", () => {
-    expect(resolveGraphNodeSessionBoundary({ ...base, writeCapable: false, isPlanReview: true })).toBeUndefined();
+  /*
+  FNXC:CodeOrganization 2026-09-26-10:35:
+  `resolveGraphNodeSessionBoundary` no longer branches on `isPlanReview`: it accepts the flag and
+  then ignores it, returning the same `workspace-task-dir` descriptor for every confirmed-repository
+  workspace node. The "Plan Review gets a deliberately wider, shared-root boundary" carve-out is
+  retired — Plan Review is now read-only like any other reporting node, bounded to the task dir and
+  its acquired children. Keep the case as the invariant that the retired carve-out stays retired:
+  Plan Review must NOT get a different (wider) descriptor than its peers.
+  */
+  it("gives Plan Review the same task-dir boundary as every other workspace node", () => {
+    expect(resolveGraphNodeSessionBoundary({ ...base, writeCapable: false, isPlanReview: true })).toEqual(
+      resolveGraphNodeSessionBoundary({ ...base, writeCapable: false }),
+    );
+    expect(resolveGraphNodeSessionBoundary({ ...base, writeCapable: false, isPlanReview: true })).toEqual({
+      kind: "workspace-task-dir",
+      writableRoot: "/ws/.fusion/worktrees/mult-012",
+      projectRoot: "/ws",
+      repoRoots: [
+        { repoRelPath: "repo1", repoRootDir: "/ws/repo1" },
+        { repoRelPath: "repo2", repoRootDir: "/ws/repo2" },
+      ],
+    });
   });
 
   /*

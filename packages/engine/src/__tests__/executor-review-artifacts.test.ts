@@ -103,7 +103,23 @@ describe("TaskExecutor feature-video completion handoff", () => {
     expect(handoffTaskToReview).toHaveBeenCalledTimes(3);
     for (const args of handoffTaskToReview.mock.calls) {
       expect(args[3]).toBe(started);
-      expect(args[3]).toMatchObject({ mode: "input", locale: "fr" });
+    }
+    /*
+    FNXC:TaskOutputLanguage 2026-09-26-10:45:
+    This used to assert `locale: "fr"` as well as the `mode`. FN-9241 dropped the
+    collision-prone French tokens (`plus`, `par`, `est`) from the detector's stopword list
+    (see `packages/core/src/i18n/detect-content-language.ts`), and this short sentence now clears
+    only two French stopwords, so detection reports low confidence and `resolveTaskOutputLanguage`
+    correctly resolves `locale: undefined` while keeping `mode: "input"`. Asserting `"fr"` here
+    was asserting detector tuning, not the property this case exists to prove. The property is
+    that the graph-start snapshot is what every handoff sees — the later Spanish description and the
+    French interface setting must not retarget an in-flight session. Pin that, plus the interface
+    locale genuinely not being consulted in input mode.
+    */
+    expect(started.mode).toBe("input");
+    expect(started.locale).not.toBe("fr");
+    for (const args of handoffTaskToReview.mock.calls) {
+      expect(args[3]).toMatchObject({ mode: "input" });
     }
   });
 });

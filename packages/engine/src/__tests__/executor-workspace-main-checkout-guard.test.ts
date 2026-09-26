@@ -321,13 +321,26 @@ describeIfGit("workspace main-checkout guard", () => {
     writeFileSync(file, "operator dirt\n");
     const old = new Date(Date.now() - 120_000);
     await import("node:fs/promises").then(({ utimes }) => utimes(file, old, old));
-    const nested = path.join(fixture.repoPath("repo-a"), ".worktrees", "task", "nested.ts");
+    /*
+    FNXC:Workspace 2026-09-26-10:55:
+    Task worktrees moved from `<repo>/.worktrees` to `<repo>/.fusion/worktrees`
+    (`resolveWorktreesDirLayout`, packages/core/src/tasks/worktree-layout.ts:64), and the guard's
+    `excluded` predicate tests containment in the CURRENT worktrees dir
+    (packages/engine/src/executor/workspace-main-checkout-guard.ts:116). A `.worktrees` directory
+    inside a repo is therefore no longer a Fusion-managed location at all — it is ordinary
+    operator dirt, and reporting it as such is correct. This case still guards the real property:
+    the CURRENT managed location is excluded from the warning, and the old dirt is a warning and
+    never a violation.
+    */
+    const nested = path.join(fixture.repoPath("repo-a"), ".fusion", "worktrees", "task", "nested.ts");
     mkdirSync(path.dirname(nested), { recursive: true });
     writeFileSync(nested, "ignored\n");
     const activeTask = task({ firstExecutionAt: new Date(Date.now() + 600_000).toISOString(), executionStartedAt: new Date(Date.now() + 600_000).toISOString() });
     const result = await detectWorkspaceMainCheckoutWork({ rootDir: fixture.rootDir, settings }, activeTask, fixture.repos, []);
     expect(result.violations).toEqual([]);
     expect(result.warnings).toContainEqual(expect.objectContaining({ repo: "repo-a", reason: "pre-existing-dirt", files: ["old.txt"] }));
+    // The managed task worktree is excluded, so it appears in no warning's file list.
+    for (const warning of result.warnings) expect(warning.files).not.toContain(".fusion/worktrees/task/nested.ts");
     rmSync(path.dirname(path.dirname(nested)), { recursive: true, force: true });
   });
 });
