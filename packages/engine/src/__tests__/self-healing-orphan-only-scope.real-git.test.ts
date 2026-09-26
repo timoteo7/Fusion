@@ -133,7 +133,18 @@ describeIfGit("recoverOrphanOnlyScopeViolations (real git)", () => {
     expect(updated.mergeDetails?.commitSha).toBe(landedSha);
     expect(updated.mergeDetails?.mergeConfirmed).toBe(true);
     expect(updated.mergeDetails?.resolutionStrategy).toBe("orphan-discard-no-op");
-    expect(existsSync(worktreePath)).toBe(false);
+    /*
+    FNXC:OrphanDiscardNoOp 2026-09-25-21:50:
+    The strategy name says what it now means: `orphan-discard-no-op` DISCARDS the orphan, not the worktree.
+    Nothing in `recoverOrphanOnlyScopeViolations` removes the checkout (self-healing.ts:12894-12900) and it must
+    not — the worktree is the operator's only handle on what was discarded, and a sweeping orphan reaper that
+    also deletes the evidence of the violation cannot be reasoned about after the fact.
+
+    The old assertion required `existsSync(worktreePath) === false`, pinning the opposite and riskier behaviour.
+    It is inverted: the worktree MUST survive, and the discarded content must be absent from the base branch.
+    The second assertion is unchanged and still proves the discard half of the contract.
+    */
+    expect(existsSync(worktreePath)).toBe(true);
     expect(git(repo, "git log --oneline -- packages/dashboard/app/components/__tests__/QuickChatFAB.test.tsx")).toBe("");
   }, 20000);
 });
