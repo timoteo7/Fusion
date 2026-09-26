@@ -129,7 +129,9 @@ describe("reconcileUnprovenReviewApprovals", () => {
     expect(row.workflowStepResults?.find((entry) => entry.workflowStepId === "documentation-delivery")).toEqual(sibling);
     const mergeContent = { kind: "singular" as const, diff: { state: "fingerprint" as const, fingerprint: "current" } };
     expect(getTaskMergeBlocker(row, { requiredPreMergeStepIds: new Set(["code-review"]), mergeContent }))
-      .toBe("task has enabled pre-merge workflow steps without a current approval");
+      // The blocker now names WHICH gate is unsatisfied, so an operator reading a merge rejection can
+      // tell an unapproved review from a sibling gate (packages/core/src/merge/task-merge.ts:518).
+      .toBe("task has enabled pre-merge workflow steps without a current approval (gate 'code-review')");
     expect(getTaskMergeBlocker(row)).toBe("task has failed pre-merge workflow steps");
     expect(store.logEntry).toHaveBeenCalledWith(row.id, expect.stringContaining("code-review"));
     expect(auditEvents).toHaveLength(1);

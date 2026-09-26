@@ -122,6 +122,12 @@ describe("TriageProcessor per-task pause aborts", () => {
     expect((processor as any).processing.has(task.id)).toBe(false);
   });
 
+  /*
+  FNXC:TriagePauseAbort 2026-09-26-02:40:
+  These emits carry a full Task, not a `{ id, paused }` fragment. The wake handler now runs
+  isPlanningResetHoldClearingUpdate over the row (packages/engine/src/triage.ts:960), which reads
+  `task.steps`, so a bare payload threw before the pause-abort branch under test was ever reached.
+  */
   it("aborts and disposes an active specify session on task:updated pause without moving to todo", async () => {
     const { store, emit } = createEventedStore();
     const stuckTaskDetector = { untrackTask: vi.fn() };
@@ -132,7 +138,7 @@ describe("TriageProcessor per-task pause aborts", () => {
     processor.start();
     (processor as any).activeSessions.set("FN-PAUSE-2", { abort, dispose });
 
-    emit("task:updated", { id: "FN-PAUSE-2", paused: true });
+    emit("task:updated", createTask({ id: "FN-PAUSE-2", paused: true }));
     await Promise.resolve();
 
     expect(abort).toHaveBeenCalledTimes(1);
@@ -154,7 +160,7 @@ describe("TriageProcessor per-task pause aborts", () => {
     processor.start();
     (processor as any).activeSessions.set("FN-USER-PAUSE", { abort, dispose });
 
-    emit("task:updated", { id: "FN-USER-PAUSE", userPaused: true });
+    emit("task:updated", createTask({ id: "FN-USER-PAUSE", userPaused: true }));
     await Promise.resolve();
 
     expect(abort).toHaveBeenCalledTimes(1);
@@ -173,8 +179,8 @@ describe("TriageProcessor per-task pause aborts", () => {
     processor.start();
     (processor as any).activeSessions.set("FN-ACTIVE", { abort, dispose });
 
-    expect(() => emit("task:updated", { id: "FN-ACTIVE", paused: false })).not.toThrow();
-    expect(() => emit("task:updated", { id: "FN-MISSING", paused: true })).not.toThrow();
+    expect(() => emit("task:updated", createTask({ id: "FN-ACTIVE", paused: false }))).not.toThrow();
+    expect(() => emit("task:updated", createTask({ id: "FN-MISSING", paused: true }))).not.toThrow();
 
     expect(abort).not.toHaveBeenCalled();
     expect(dispose).not.toHaveBeenCalled();
@@ -197,8 +203,8 @@ describe("TriageProcessor per-task pause aborts", () => {
     (processor as any).activeSessions.set("FN-RENAMED-WIP", retained);
     (processor as any).activeSessions.set("FN-UNKNOWN", evacuated);
 
-    emit("task:updated", { id: "FN-RENAMED-WIP", column: "building", status: "planning" }, { lanes: { hold: "drafting", intake: "inbox", wip: "building" } });
-    emit("task:updated", { id: "FN-UNKNOWN", column: "building", status: "planning" });
+    emit("task:updated", createTask({ id: "FN-RENAMED-WIP", column: "building", status: "planning" }), { lanes: { hold: "drafting", intake: "inbox", wip: "building" } });
+    emit("task:updated", createTask({ id: "FN-UNKNOWN", column: "building", status: "planning" }));
 
     expect(retained.dispose).not.toHaveBeenCalled();
     expect(evacuated.dispose).toHaveBeenCalledOnce();
@@ -217,7 +223,7 @@ describe("TriageProcessor per-task pause aborts", () => {
     const abortCallsAfterStop = abort.mock.calls.length;
     const disposeCallsAfterStop = dispose.mock.calls.length;
 
-    emit("task:updated", { id: "FN-PAUSE-STOP", paused: true });
+    emit("task:updated", createTask({ id: "FN-PAUSE-STOP", paused: true }));
 
     expect(abort).toHaveBeenCalledTimes(abortCallsAfterStop);
     expect(dispose).toHaveBeenCalledTimes(disposeCallsAfterStop);
