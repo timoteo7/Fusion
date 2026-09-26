@@ -53,7 +53,15 @@ describe("reliability interactions: secrets env materialization", () => {
     execFileSync("git", ["add", ".gitignore", "README.md"], { cwd: root });
     execFileSync("git", ["commit", "-qm", "base"], { cwd: root });
     const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-    const worktree = join(root, "linked");
+    /*
+    FNXC:SecretsEnvMaterialization 2026-09-26-06:05:
+    A task-pinned worktree is only honored at its canonical task-ID path. `acquirePinnedWorktree`
+    re-derives any other pointer to `pinnedWorktreePathForTask` and resumes the DERIVED path, so a
+    fixture that pins an arbitrarily named directory never reaches warm reuse — it silently falls
+    into the fresh-create branch and then trips the repo-root guard. Model the real pin: the
+    worktree lives at the task's own slug under the configured worktrees root.
+    */
+    const worktree = join(root, ".worktrees", "fn-1");
     execFileSync("git", ["worktree", "add", "-b", "fusion/fn-1", worktree, base], { cwd: root });
     const secretsStore = { listEnvExportable: vi.fn().mockResolvedValue([{ id: "1", key: "A", exportKey: "ALPHA", scope: "project", plaintextValue: "v" }]) } as any;
     await writeSecretsEnvFile({ rootDir: root, worktreePath: worktree, taskId: "FN-1", settings: { secretsEnv: { enabled: true, filename: ".secrets.env" } }, worktreeSource: "fresh", secretsStore });
@@ -105,8 +113,23 @@ describe("reliability interactions: secrets env materialization", () => {
   load-bearing: when a leaked worktree IS reaped, its env artifacts go with it. Ground it on the
   FN-6782 dangling-`.git`-pointer orphan — the leak form that remains reapable — rather than on the
   now-protected bare directory.
+
+  FNXC:SecretsEnvMaterialization 2026-09-26-06:35:
+  FN-3519 (f082398be) then made the dangling-`.git` orphan UNREAPABLE. It replaced the recursive
+  `rmSync` in `reapOrphanWorktrees` with a non-recursive `rmdirSync` and stated the invariant
+  explicitly: "No destructive reclamation of corrupt/dangling metadata when safety cannot be
+  proven... prefer a recoverable disk leak over possible user-data loss." A dangling pointer means
+  Git cannot enumerate the checkout's content, so that content is unverifiable — precisely what
+  FN-3519 refuses to delete. The reap now only ever removes an EMPTY residue directory, and the
+  companion negative ("preserves a dir with a dangling .git pointer") pins that.
+
+  So the FN-6782 form this test was grounded on no longer reaches the removal call. The secrets
+  invariant is still load-bearing, so this now pins the CURRENT contract: the reap must NOT
+  destroy a leaked checkout it cannot prove is clean, and the leaked `.env` must survive with it.
+  Losing the reap is a deliberate, reviewed trade — a disk leak over user-data loss — not a
+  regression to fix in the product.
   */
-  it("orphan reap reclaims orphaned env artifacts", async () => {
+  it("orphan reap preserves a leaked checkout whose cleanliness Git cannot prove", async () => {
     const root = tmpRepo();
     const worktreesDir = join(root, ".worktrees");
     const orphan = join(worktreesDir, "ghost");
@@ -117,7 +140,11 @@ describe("reliability interactions: secrets env materialization", () => {
     writeFileSync(join(orphan, ".fusion-secrets-env.fingerprint"), "abc\n.env\n");
 
     const removed = await reapOrphanWorktrees(root);
-    expect(removed).toBe(1);
-    expect(existsSync(orphan)).toBe(false);
+
+    // FN-3519: unverifiable content is preserved rather than destructively reclaimed.
+    expect(removed).toBe(0);
+    expect(existsSync(orphan)).toBe(true);
+    // The env artifacts ride along untouched — nothing leaked, and nothing destroyed.
+    expect(readFileSync(join(orphan, ".env"), "utf8")).toBe("A=1\n");
   });
 });
