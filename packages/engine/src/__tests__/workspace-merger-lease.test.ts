@@ -34,6 +34,7 @@ import { WorkspaceEnvironmentError } from "../merge/workspace-integration-target
 import { ensureTenancyFenceRef, mergeDispatchFenceRef, WorkspaceFenceRefError } from "../merge/workspace-fence-ref.js";
 import { activeSessionRegistry } from "../agents/active-session-registry.js";
 import { createWorkspaceFixture, hasGit, type WorkspaceFixture } from "./_workspace-fixture.js";
+import { saveWorkspaceConfig } from "@fusion/core";
 
 const describeIfGit = hasGit ? describe : describe.skip;
 
@@ -171,15 +172,48 @@ the fenced-land behaviour under test runs:
     confirmed, review-approved scope.
 */
 function mergeReadyWorkspacePatch(workspaceWorktrees: NonNullable<Task["workspaceWorktrees"]>): Partial<Task> {
+  /*
+  FNXC:RepositoryScope 2026-09-26-14:10:
+  `repositoryScope` is NOT a column `updateTask` writes — it has its own store seam,
+  `updateTaskRepositoryScope` (packages/core/src/store.ts:2311). Passing it inside an `updateTask`
+  patch silently persisted nothing, so the live row read back `repositoryScope: undefined` and
+  `captureWorkspaceReviewEvidence` classified every modified repository as out-of-scope. Landing
+  then failed at the FN-RepositoryScope fence with a bare
+  `Workspace repositories modified outside confirmed scope` Error, which fired BEFORE the
+  durable-repo-lease fencing these three cases are actually about — so the kinded
+  `WorkspaceMergeTechnicalError` they assert never happened.
+
+  `mergeReadyWorkspacePatch` now returns the scope separately so each call site persists it through
+  the real seam. Returning it inside the patch would keep re-introducing the same silent no-op.
+  */
   return {
     branch: BRANCH,
     branchWriteOrigin: "engine",
     enabledWorkflowSteps: [],
     steps: [{ name: "Implementation", status: "done" }],
-    repositoryScope: workspaceRepositoryScope(workspaceWorktrees),
     modifiedFiles: Object.keys(workspaceWorktrees).map((repoRel) => `${repoRel}/feature.txt`),
     workspaceWorktrees,
   } as Partial<Task>;
+}
+
+/** `repositoryScope` persists only through its own store seam — see `mergeReadyWorkspacePatch`. */
+async function applyMergeReadyWorkspacePatch(
+  store: TaskStore,
+  taskId: string,
+  workspaceWorktrees: NonNullable<Task["workspaceWorktrees"]>,
+  workspaceRootDir: string,
+): Promise<void> {
+  await store.updateTask(taskId, mergeReadyWorkspacePatch(workspaceWorktrees));
+  /*
+  `updateTaskRepositoryScopeImpl` derives `repositories` from the workspace config read at
+  `store.getRootDir()` — NOT from the argument — and writes `undefined` when that config lists no
+  repos (packages/core/src/task-store/task-mutation-ops.ts:792). The workspace fixture writes its
+  config under `fx.rootDir` while the shared PG store is rooted at the harness dir, so the seam
+  found no repos and silently dropped the scope. Republish the fixture's config at the store's root
+  so the seam and the land path agree on which repositories are in scope.
+  */
+  await saveWorkspaceConfig(store.getRootDir(), { repos: Object.keys(workspaceWorktrees) });
+  await store.updateTaskRepositoryScope(taskId, workspaceRepositoryScope(workspaceWorktrees));
 }
 
 function makeTask(id: string, workspaceWorktrees: Task["workspaceWorktrees"]): Task {
@@ -257,9 +291,9 @@ pgDescribeIfGit("workspace land dispatch finalization (PostgreSQL)", () => {
       { description: "cross-node repo-b dispatch fence", column: "in-review" },
       { taskId, applyDefaultWorkflowSteps: false },
     );
-    await store.updateTask(taskId, mergeReadyWorkspacePatch(Object.fromEntries(fx.repos.map((repoRel) => [repoRel, {
+    await applyMergeReadyWorkspacePatch(store, taskId, Object.fromEntries(fx.repos.map((repoRel) => [repoRel, {
       worktreePath: fx.repoPath(repoRel), branch: BRANCH,
-    }]))));
+    }])), fx.rootDir);
     const task = (await store.getTask(taskId))!;
     const predecessor = await store.acquireWorkspaceLease({
       leaseKey: `merge-dispatch:${taskId}`,
@@ -343,8 +377,9 @@ pgDescribeIfGit("workspace land dispatch finalization (PostgreSQL)", () => {
       { description: "repository lease successor takeover", column: "in-review" },
       { taskId, applyDefaultWorkflowSteps: false },
     );
-    await store.updateTask(taskId, mergeReadyWorkspacePatch({ [repoRel]: { worktreePath: repo, branch: BRANCH } }));
+    await applyMergeReadyWorkspacePatch(store, taskId, { [repoRel]: { worktreePath: repo, branch: BRANCH } }, fx.rootDir);
     const task = (await store.getTask(taskId))!;
+    console.log("PROBE41 live scope=", JSON.stringify(task.repositoryScope)?.slice(0,200), "wt=", JSON.stringify(task.workspaceWorktrees)?.slice(0,160));
     const tipBefore = fx.git(repoRel, "git rev-parse main");
     const realRenew = store.renewWorkspaceLease.bind(store);
     const recordIntent = vi.spyOn(store, "recordWorkspaceLandIntent");
@@ -434,7 +469,7 @@ pgDescribeIfGit("workspace land dispatch finalization (PostgreSQL)", () => {
       { description: "production workspace dispatch finalization", column: "in-review" },
       { taskId, applyDefaultWorkflowSteps: false },
     );
-    await store.updateTask(taskId, mergeReadyWorkspacePatch({ "repo-a": { worktreePath: repo, branch: BRANCH } }));
+    await applyMergeReadyWorkspacePatch(store, taskId, { "repo-a": { worktreePath: repo, branch: BRANCH } }, fx.rootDir);
     const task = (await store.getTask(taskId))!;
     const tipBefore = fx.git("repo-a", "git rev-parse refs/heads/main");
     const predecessor = await store.acquireWorkspaceLease({
@@ -552,7 +587,7 @@ describeIfGit("landWorkspaceTask — per-repo land lease (Phase C U3, KTD4)", ()
     }
     const task = makeTask("FN-9059", Object.fromEntries(fx.repos.map((repoRel) => [repoRel, {
       worktreePath: fx.repoPath(repoRel), branch: BRANCH,
-    }])));
+    }])), fx.rootDir);
     const store = createStore(task);
     let token = 0n;
     Object.assign(store, {
