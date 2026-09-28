@@ -56,12 +56,38 @@ describe("fn skills get", () => {
   });
 
   it("prints a guide and version from the same built CLI entry point", async () => {
-    const guide = await execFile(process.execPath, [builtCli, "skills", "get", "computer-use"], { cwd: cliRoot });
-    const version = await execFile(process.execPath, [builtCli, "--version"], { cwd: cliRoot });
+    /*
+    FNXC:SkillsGet 2026-09-28-07:30 (FUSI-035):
+    Run the three cold CLI spawns CONCURRENTLY. Each spawn of the built entry point costs ~1.9-2.2s
+    on this host, so awaiting them back to back needed ~6.0s against Vitest's default 5s per-test
+    budget and timed out 3/3 (the 2026-09-25 main Full Suite census recorded this as a runtime-Error).
+    No individual subprocess exceeds the budget — the serial composition did. The three calls are
+    independent (guide and --version share no state; the unknown-skill call is its own process), so
+    Promise.all collapses the body to roughly the slowest single spawn. Do NOT "fix" this with a
+    per-test timeout argument or a `testTimeout` bump: that is appeasement, and the measured fix is
+    concurrency. If a future environment cannot fit the concurrent form in 5s, reduce the number of
+    subprocesses instead of raising the ceiling.
+    */
+    const spawn = (args: string[]) =>
+      execFile(process.execPath, [builtCli, ...args], { cwd: cliRoot })
+        .then((value) => ({ value }), (error) => ({ error }));
+    const [guideOutcome, versionOutcome, unknownOutcome] = await Promise.all([
+      spawn(["skills", "get", "computer-use"]),
+      spawn(["--version"]),
+      spawn(["skills", "get", "definitely-not-a-skill"]),
+    ]);
+
+    // Unwrap with the same assertions the serial form made, unchanged in strength.
+    if ("error" in guideOutcome) throw guideOutcome.error;
+    if ("error" in versionOutcome) throw versionOutcome.error;
+    const guide = guideOutcome.value;
+    const version = versionOutcome.value;
     for (const heading of COMPUTER_USE_GUIDE_HEADINGS) expect(guide.stdout).toContain(heading);
     expect(guide.stdout).toContain(`# Fusion computer-use guide (v${version.stdout.trim()})`);
 
-    await expect(execFile(process.execPath, [builtCli, "skills", "get", "definitely-not-a-skill"], { cwd: cliRoot }))
-      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("computer-use") });
+    expect("error" in unknownOutcome).toBe(true);
+    const unknownError = (unknownOutcome as { error: { code?: number; stderr?: string } }).error;
+    expect(unknownError.code).toBe(1);
+    expect(unknownError.stderr).toContain("computer-use");
   });
 });

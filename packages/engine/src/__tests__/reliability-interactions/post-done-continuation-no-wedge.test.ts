@@ -61,6 +61,24 @@ function createStore(task: Task, settingsOverrides: Record<string, unknown> = {}
     Object.assign(task, normalized, { updatedAt: new Date(Date.now()).toISOString() });
     return task;
   });
+  /*
+  FNXC:EngineTests 2026-09-28-08:05 (FUSI-035):
+  Terminal graph-failure persistence goes through `store.updateTaskAtomic` (handle-graph-failure.ts:153).
+  Without it the call throws, and the bounded retry lane's `catch` then awaits `setTimeout(1000)` — which
+  this describe's `vi.useFakeTimers()` never advances, so `executor.execute` never settles and the case
+  burned the full 30s timeout. That is the runtime-Error the 2026-09-25 main Full Suite census recorded.
+  Same missing-seam class as the `startStep` and `getRootDir` notes above. Model the production accept
+  shape, INCLUDING its conditional contract: a mutator returning `null` means "row is no longer
+  eligible, write nothing", and must not be coerced into a patch. Do NOT fix the hang by advancing
+  timers or raising the budget — the executor genuinely never settled.
+  */
+  (emitter as any).updateTaskAtomic = vi.fn().mockImplementation(
+    async (_taskId: string, mutate: (current: Task) => Partial<Task> | null) => {
+      const patch = await mutate(task);
+      if (patch) Object.assign(task, patch, { updatedAt: new Date(Date.now()).toISOString() });
+      return task;
+    },
+  );
   (emitter as any).moveTask = vi.fn().mockImplementation(async (_taskId: string, column: Task["column"]) => {
     task.column = column;
     task.updatedAt = new Date(Date.now()).toISOString();
