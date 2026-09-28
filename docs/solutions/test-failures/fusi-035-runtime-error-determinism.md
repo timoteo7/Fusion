@@ -36,6 +36,18 @@ All six in-scope cases were re-run three times each after the repairs, using the
 - Case 4: ✓ 5 passed / ✓ 5 passed / ✓ 5 passed
 - Case 5: ✓ / ✓ / ✓
 - Case 6: ✓ / ✓ / ✓ (previously `Test timed out in 5000ms.`)
+
+### Case 6 under load
+
+The first attempt used three concurrent spawns. That is correct in isolation (2.4–2.9s) but it still
+failed at **5011ms** under real CPU contention, reproducing during a concurrent `pnpm test:gate` run
+and under 12 busy-loop processes. Per the standing rule the budget was not raised; the third spawn was
+removed instead, deriving the version from the `package.json` that the built entry point's guide
+header and `fn --version` both read. Re-measured:
+
+- clean: ✓ 3165ms / ✓ 2485ms / ✓ 2587ms
+- during a real concurrent `pnpm test:gate` run: ✓ 3220ms / ✓ 2733ms / ✓ 2842ms
+
 - Case 7: ✓ / ✓ / ✓ (previously `Command failed: git symbolic-ref -d refs/remotes/origin/HEAD`)
 
 ## Quarantine
