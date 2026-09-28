@@ -94,25 +94,37 @@ describe("reclaimable worktree placement", () => {
     expect(git(rootDir, ["worktree", "list", "--porcelain"])).toContain(`worktree ${realpathSync(sourcePath)}`);
   });
 
-  it("chooses a task-scoped target when the legacy basename is occupied", async () => {
+  it("refuses to relocate into an occupied task-ID path instead of clobbering it", async () => {
+    /*
+    FNXC:WorktreeReclaimPlacement 2026-09-28-07:12 (FUSI-035):
+    The shipped contract is a REFUSAL, not a disambiguated fallback. `relocateReclaimableWorktreeIntoRoot`
+    throws `Refusing to relocate <task> worktree into its occupied task-ID path` when the target exists
+    (worktree-pool.ts:457) because `git worktree move` into an occupied directory would clobber an
+    unrelated checkout — no disambiguation helper exists anywhere under packages/engine/src/worktree/.
+    This test used to assert a `${targetPath}-fn-8400` sibling, pinning a design the product never shipped;
+    the 2026-09-25 main Full Suite census recorded it as a runtime-Error (the throw escaping an awaited
+    call). Repointed at the shipped behavior under AGENTS.md's "a behavior change owns every test that
+    asserts the old behavior". Do NOT "fix" this by adding a disambiguation branch to the product: the
+    sibling case above already proves the occupant survives, and that is the invariant worth keeping.
+    */
     const { rootDir, sourcePath, targetPath } = createRepositoryFixture();
     mkdirSync(targetPath, { recursive: true });
     writeFileSync(join(targetPath, "owner.txt"), "unrelated path\n");
-    const disambiguatedPath = `${targetPath}-fn-8400`;
 
-    const result = await relocateReclaimableWorktreeIntoRoot({
+    await expect(relocateReclaimableWorktreeIntoRoot({
       rootDir,
       sourcePath,
       targetPath,
       taskId: "FN-8400",
       settings: { worktreeNaming: "random" },
       isPathActive: async () => false,
-    });
+    })).rejects.toThrow(/Refusing to relocate FN-8400 worktree into its occupied task-ID path/);
 
-    expect(result).toEqual({ kind: "ready", path: disambiguatedPath, relocated: true });
+    // The occupant is untouched, and the still-registered source was never moved.
     expect(readFileSync(join(targetPath, "owner.txt"), "utf8")).toBe("unrelated path\n");
-    expect(readFileSync(join(disambiguatedPath, "preserved.txt"), "utf8")).toBe("uncommitted task work\n");
-    expect(git(rootDir, ["worktree", "list", "--porcelain"])).toContain(`worktree ${realpathSync(disambiguatedPath)}`);
+    expect(existsSync(join(targetPath, "preserved.txt"))).toBe(false);
+    expect(existsSync(sourcePath)).toBe(true);
+    expect(git(rootDir, ["worktree", "list", "--porcelain"])).toContain(`worktree ${realpathSync(sourcePath)}`);
   });
 
   it("rejects a relocation target outside the configured root before touching the source", async () => {

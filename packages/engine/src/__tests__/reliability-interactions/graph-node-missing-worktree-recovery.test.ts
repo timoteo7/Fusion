@@ -16,6 +16,7 @@ import {
   resetExecutorMocks,
 } from "../executor-test-helpers.js";
 import { MAX_WORKTREE_SESSION_RETRIES } from "../../self-healing.js";
+import { pinnedWorktreePathForTask } from "../../worktree/worktree-pinning.js";
 
 /*
 FNXC:MissingWorktreeRecovery 2026-07-16-18:40:
@@ -348,6 +349,26 @@ describe("Plan Review missing-worktree repo-root fallback (FN-7996)", () => {
       config: { name: "Plan Review", prompt: "Review the plan." },
     };
     const live = makeTask({ worktree: "/tmp/stale-wt" });
+    /*
+    FNXC:NodeWorktreeIsolation 2026-09-28-07:45 (FUSI-035):
+    Model a real registered worktree for the task-pinned path. `pinnedWorktreeBranchMatches`
+    (worktree-acquisition.ts:314) throws when `git worktree list --porcelain` enumerates nothing,
+    because `false` drives DESTRUCTIVE reclaim and must mean a proven mismatch, never a probe failure.
+    That fail-safe guard is correct and stays. The fixture was the defect: every describe here set
+    `mockedExecSync` to return "", so the acquisition's internal probe (a real
+    `describeRegisteredWorktrees` call the export mock cannot intercept, per resetExecutorMocks'
+    FNXC:EngineTests 2026-09-19-20:57) parsed zero entries and the guard fired before the assertion
+    under test could run — the runtime-Error the 2026-09-25 main Full Suite census recorded.
+    Do NOT relax the throw to make this pass: that would let a transient git failure reclaim a
+    valid warm worktree. Derive the porcelain path from the product's own pinning helper so this
+    listing cannot drift from the layout acquisition actually probes.
+    */
+    mockedExecSync.mockReturnValue([
+      `worktree ${pinnedWorktreePathForTask(live.id, undefined, "/tmp/test")}`,
+      "HEAD 1111111111111111111111111111111111111111",
+      `branch refs/heads/${live.branch}`,
+      "",
+    ].join("\n") as any);
     store.getTask.mockResolvedValue(live as any);
     const result = await (executor as any).runGraphCustomNode(node, live, {}, undefined);
 
@@ -355,10 +376,18 @@ describe("Plan Review missing-worktree repo-root fallback (FN-7996)", () => {
     // Not the stale path, and — the point of the change — not the shared repo root either.
     expect(captured.worktreePath).not.toBe("/tmp/stale-wt");
     expect(captured.worktreePath).not.toBe("/tmp/test");
-    expect(captured.worktreePath).toContain("/tmp/test/.worktrees/");
+    expect(captured.worktreePath).toContain(pinnedWorktreePathForTask(live.id, undefined, "/tmp/test"));
+    /*
+    FNXC:NodeWorktreeIsolation 2026-09-28-08:20 (FUSI-035):
+    Assert the message the seam emits TODAY. FN-258 (14babc48f) folded the old bespoke
+    "…re-acquiring a task worktree instead of running in the shared checkout" line into the generic
+    `ensureGraphCustomNodeWorktree` acquisition notice, so that literal no longer exists anywhere in
+    packages/engine/src. The invariant is unchanged and still asserted by the three path assertions
+    above; this line now pins the shipped acquisition notice so the re-acquire stays observable.
+    */
     expect(store.logEntry).toHaveBeenCalledWith(
       live.id,
-      expect.stringContaining("re-acquiring a task worktree instead of running in the shared checkout"),
+      expect.stringContaining("requires a task worktree — acquiring worktree before node execution"),
       undefined,
       undefined,
     );

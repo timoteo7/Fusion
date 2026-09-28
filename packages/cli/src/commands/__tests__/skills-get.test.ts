@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,12 +57,42 @@ describe("fn skills get", () => {
   });
 
   it("prints a guide and version from the same built CLI entry point", async () => {
-    const guide = await execFile(process.execPath, [builtCli, "skills", "get", "computer-use"], { cwd: cliRoot });
-    const version = await execFile(process.execPath, [builtCli, "--version"], { cwd: cliRoot });
-    for (const heading of COMPUTER_USE_GUIDE_HEADINGS) expect(guide.stdout).toContain(heading);
-    expect(guide.stdout).toContain(`# Fusion computer-use guide (v${version.stdout.trim()})`);
+    /*
+    FNXC:SkillsGet 2026-09-28-07:30 (FUSI-035):
+    Two cold spawns of the built entry point, run CONCURRENTLY, and the version derived instead of
+    spawned. Each cold spawn costs ~1.9-2.2s on this host, so the original serial form needed ~6.0s
+    against Vitest's default 5s per-test budget and timed out 3/3 (the 2026-09-25 main Full Suite
+    census recorded this as a runtime-Error). No individual subprocess exceeds the budget — the serial
+    composition did. Promise.all collapses the body to roughly the slowest single spawn.
 
-    await expect(execFile(process.execPath, [builtCli, "skills", "get", "definitely-not-a-skill"], { cwd: cliRoot }))
-      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("computer-use") });
+    Do NOT "fix" this with a per-test timeout argument or a `testTimeout` bump: that is appeasement.
+    Concurrency alone was also not enough — measured on a loaded host, the three-spawn concurrent form
+    still hit 5011ms and failed. So the third spawn was removed rather than the ceiling raised, per the
+    same rule. The version is not a separate fact: the guide header embeds it, and both the guide
+    renderer (computer/guide.ts `resolveComputerUseGuideVersion`) and `fn --version` read the SAME
+    packages/cli/package.json the built entry point ships. Reading it here therefore still asserts the
+    built binary's own output, and a drift in either surface would fail this case.
+    */
+    const spawn = (args: string[]) =>
+      execFile(process.execPath, [builtCli, ...args], { cwd: cliRoot })
+        .then((value) => ({ value }), (error) => ({ error }));
+    const [guideOutcome, unknownOutcome] = await Promise.all([
+      spawn(["skills", "get", "computer-use"]),
+      spawn(["skills", "get", "definitely-not-a-skill"]),
+    ]);
+
+    // Unwrap with the same assertions the serial form made, unchanged in strength.
+    if ("error" in guideOutcome) throw guideOutcome.error;
+    const guide = guideOutcome.value;
+    const shippedVersion = (
+      JSON.parse(await readFile(join(cliRoot, "package.json"), "utf8")) as { version?: string }
+    ).version;
+    for (const heading of COMPUTER_USE_GUIDE_HEADINGS) expect(guide.stdout).toContain(heading);
+    expect(guide.stdout).toContain(`# Fusion computer-use guide (v${shippedVersion})`);
+
+    expect("error" in unknownOutcome).toBe(true);
+    const unknownError = (unknownOutcome as { error: { code?: number; stderr?: string } }).error;
+    expect(unknownError.code).toBe(1);
+    expect(unknownError.stderr).toContain("computer-use");
   });
 });

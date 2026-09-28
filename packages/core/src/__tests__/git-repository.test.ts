@@ -210,7 +210,22 @@ describe("ensureGitRepositoryForProjectPath", () => {
     This Git build creates origin/HEAD for a local single-branch clone. Remove it explicitly
     so the fixture exercises the remote-tracking tier rather than the higher origin-head tier.
     */
-    await git(clonePath, ["symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
+    /*
+    FNXC:IntegrationBranchReadiness 2026-09-28-07:14 (FUSI-035):
+    Not every Git creates that ref. On git 2.55.0 a fresh `--single-branch` clone of a LOCAL path has
+    no symbolic `refs/remotes/origin/HEAD`, and `symbolic-ref -d` exits 128 with
+    "Cannot delete refs/remotes/origin/HEAD, not a symbolic ref" — aborting the fixture before the
+    assertion it exists to make (the 2026-09-25 main Full Suite census recorded this as a runtime-Error).
+    Treat "not a symbolic ref" as already-absent so the case runs on BOTH Git layouts. The delete stays:
+    it is what forces the remote-tracking tier instead of the origin-head tier, which is the whole point.
+    */
+    try {
+      await git(clonePath, ["symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/not a symbolic ref|no such ref/i.test(message)) throw error;
+    }
+    await expect(git(clonePath, ["rev-parse", "--verify", "refs/remotes/origin/HEAD"])).rejects.toThrow();
     await git(clonePath, ["checkout", "--detach", "HEAD"]);
     await git(clonePath, ["branch", "-D", "develop"]);
 

@@ -35,7 +35,16 @@ describe("CLI quiet prompt and result source contracts", () => {
   });
 
   it("keeps all audited result writers attached to the output seam", () => {
-    for (const file of ["task.ts", "org-import.ts", "workflow.ts", "research.ts", "experiment-finalize.ts", "update.ts"]) {
+    /*
+    FNXC:CliTests 2026-09-28-07:10 (FUSI-035):
+    The audited list is curated, not scanned, so every entry must be a file that still exists.
+    `research.ts` was removed with the fn research CLI in 74ffa19ef, and `readFileSync` on a deleted
+    path fails at runtime (ENOENT) before either contract regex is ever evaluated — which is what the
+    2026-09-25 main Full Suite census recorded for this case. Drop the retired entry; never convert the
+    loop into a directory scan, because the curated list IS the audit boundary. A file deleted from
+    packages/cli/src/commands must be dropped here in the same commit that deletes it.
+    */
+    for (const file of ["task.ts", "org-import.ts", "workflow.ts", "experiment-finalize.ts", "update.ts"]) {
       const source = readFileSync(join(cliRoot, "commands", file), "utf8");
       expect(source, file).toMatch(/import\s*\{[^}]*\bresult\b[^}]*\}\s*from\s*["']\.\.\/output\.js["']/);
       expect(source, file).toMatch(/(?:result|outputResult)\(/);
