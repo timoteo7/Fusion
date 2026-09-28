@@ -62,7 +62,9 @@ Nothing. `scripts/lib/test-quarantine.json` still holds `"entries": []`, and
   `graph-node unusable-worktree failure recovery (FN-7996)` describe. Verified pre-existing by running
   a baseline copy of the unmodified HEAD file: **6 failures before this branch, 5 after** — the fix
   removed exactly the case-2 row and nothing else. Those 5 are the `assertion-other` rows FUSI-031
-  owns.
+  owns, and on `fusion/fusi-031` they are green while the case-2 row is red — the exact inverse of
+  this branch, so the two cards split the file without overlapping: FUSI-031 edits lines 66–313, this
+  branch edits lines 16 and 348–393.
 - `git-repository.test.ts > keeps the baseline branch for an unborn repository with fetched refs` fails
   on this branch. Verified pre-existing: a baseline copy of the unmodified HEAD file fails it
   identically. Different case, different shape from census row 7, not owned by FUSI-035.
