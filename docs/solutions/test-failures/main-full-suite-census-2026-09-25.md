@@ -50,6 +50,16 @@ between. The original intake window (2026-09-23 02:01Z-04:38Z, 6 runs) is a
 subset of this unbroken red period; the failing job set is unchanged:
 `Test shard 1/4`-`4/4` plus `Pipeline smoke tier`.
 
+**Re-measuring the streak — two traps.** Count with `.total_count` (or the
+run-number arithmetic `last_run - 1396`), never with `gh api --paginate`: the
+paginated walk of this 1762-run window returns 1000 items and silently reads
+as a shorter streak. And the streak is **frozen at #3158** — as of
+2026-09-28T05:40Z upstream `main` has produced no Full Suite run after it
+(`per_page=100` ceiling = #3158, zero runs above), and the newest run of *any*
+workflow on `main` is an unrelated dependabot `github_actions` update at
+2026-09-27T02:12:31Z. A re-measurement that reports "still 1762" is therefore
+confirming a static number, not a lane that is still being exercised.
+
 ## Census — 233 named failing cases across 117 files
 
 Extracted from the #3158 job logs: every `FAIL <project> <file> > <suite > case>`
@@ -270,6 +280,15 @@ run above. Per-file, the 17 addresses are exactly: 3 + 2 + 2 + 1 + 7 + 2.
 this task's File Scope and are carried by FUSI-030…037, so the Full Suite lane
 stays red on main until those land. The next main push run turning green is the
 operator-visible confirmation and cannot be produced by this branch alone.
+
+**That confirmation has two open links, not one.** (1) A human with upstream
+write access must port `3088670` to `Runfusion/Fusion`. (2) Upstream `main` must
+then *produce* a Full Suite run at all — as of 2026-09-28T05:40Z it has produced
+none after #3158, so there is no "next main push run" to cite and no operator can
+currently observe the lane at all. Neither link is an agent action, and even
+after both close the lane stays red until the 216 carried cases in FUSI-030…037
+land. Do not treat "the port is done" as completion: it is necessary, not
+sufficient.
 
 ## Remaining follow-ups (out of this task's scope)
 
