@@ -377,9 +377,17 @@ describe("Plan Review missing-worktree repo-root fallback (FN-7996)", () => {
     expect(captured.worktreePath).not.toBe("/tmp/stale-wt");
     expect(captured.worktreePath).not.toBe("/tmp/test");
     expect(captured.worktreePath).toContain(pinnedWorktreePathForTask(live.id, undefined, "/tmp/test"));
+    /*
+    FNXC:NodeWorktreeIsolation 2026-09-28-08:20 (FUSI-035):
+    Assert the message the seam emits TODAY. FN-258 (14babc48f) folded the old bespoke
+    "…re-acquiring a task worktree instead of running in the shared checkout" line into the generic
+    `ensureGraphCustomNodeWorktree` acquisition notice, so that literal no longer exists anywhere in
+    packages/engine/src. The invariant is unchanged and still asserted by the three path assertions
+    above; this line now pins the shipped acquisition notice so the re-acquire stays observable.
+    */
     expect(store.logEntry).toHaveBeenCalledWith(
       live.id,
-      expect.stringContaining("re-acquiring a task worktree instead of running in the shared checkout"),
+      expect.stringContaining("requires a task worktree — acquiring worktree before node execution"),
       undefined,
       undefined,
     );
