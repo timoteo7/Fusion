@@ -35,7 +35,9 @@ describe("CLI quiet prompt and result source contracts", () => {
   });
 
   it("keeps all audited result writers attached to the output seam", () => {
-    for (const file of ["task.ts", "org-import.ts", "workflow.ts", "research.ts", "experiment-finalize.ts", "update.ts"]) {
+    // FN-9331 (74ffa19ef) removed the `fn research` CLI, so research.ts no longer exists and must
+    // not be audited here. Listing it made this test die with ENOENT on a removed source file.
+    for (const file of ["task.ts", "org-import.ts", "workflow.ts", "experiment-finalize.ts", "update.ts"]) {
       const source = readFileSync(join(cliRoot, "commands", file), "utf8");
       expect(source, file).toMatch(/import\s*\{[^}]*\bresult\b[^}]*\}\s*from\s*["']\.\.\/output\.js["']/);
       expect(source, file).toMatch(/(?:result|outputResult)\(/);
