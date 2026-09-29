@@ -63,10 +63,15 @@ describe("docs screenshot links", () => {
       }
     }
 
-    // FN-9295: artifacts-doc-edit.png and artifacts-gallery.png are not referenced by any
-    // markdown files; removed from expected list to match actual docs.
+    // FN-9295 removed artifacts-doc-edit.png and artifacts-gallery.png from this list because no
+    // markdown referenced them at the time. docs/dashboard-guide.md has since referenced both
+    // again (Artifacts gallery, Artifact document viewer with edit mode), so the references are
+    // real and the expected list must carry them again — otherwise this assertion fails on
+    // origin/main with "expected [ ...(18) ] to deeply equal [ ...(16) ]".
     expect(screenshotReferences.map(({ repoPath }) => repoPath).sort()).toEqual([
       "docs/screenshots/agents-view.png",
+      "docs/screenshots/artifacts-doc-edit.png",
+      "docs/screenshots/artifacts-gallery.png",
       "docs/screenshots/chat-view.png",
       "docs/screenshots/dashboard-overview.png",
       "docs/screenshots/dashboard-overview.png",

@@ -64,6 +64,11 @@ vi.mock("@fusion/core", () => ({
   formatRoleMismatchReason: vi.fn(() => ""),
   resolveAgentProvisioningPolicy: vi.fn(() => ({ approvalMode: "auto" })),
   TASK_PRIORITIES: ["low", "normal", "high", "urgent"],
+  // extension.ts reads MAX_TASK_MESSAGE_LENGTH while registering the refine tool's zod schema.
+  // A full-replacement mock that omits it fails at registration, before any assertion runs, so the
+  // mock has to carry the real constant or this whole file errors with
+  // 'No "MAX_TASK_MESSAGE_LENGTH" export is defined on the @fusion/core mock'.
+  MAX_TASK_MESSAGE_LENGTH: 100_000,
   getProjectRootFromWorktree: vi.fn(() => null),
   // FNXC:ToolPermissionGates 2026-07-26-14:55: fn_experiment_finalize is now withheld from agent
   // principals; the guard resolves the caller principal via the session-identity registry.
