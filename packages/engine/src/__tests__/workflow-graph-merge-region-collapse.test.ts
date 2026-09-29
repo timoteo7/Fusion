@@ -88,7 +88,26 @@ const SUCCESS_PATH = [
   "code-review::code-review-step",
   "review",
   "merge",
+  /*
+  FNXC:WorkflowGraphTests 2026-09-26-06:20:
+  FN-9369/FN-9370 turned post-merge verification into a required delivery-evidence gate, which
+  appended the gate's inner prompt child to the visited path. The id is DERIVED, not copied from a
+  failing log: `postMergeOptionalGroupNode` (packages/core/src/workflows/builtin-post-merge-group.ts:125)
+  names the inner node `${spec.id}-step`, and the executor records an optional-group child as
+  `<container>::<node.id>` (workflow-graph-executor.ts:147) — the same shape as the
+  `plan-review::plan-review-step` and `code-review::code-review-step` entries already listed above.
+
+  The collapse classification was confirmed CORRECT before this expectation was extended, because
+  extending it is only safe if the node is a child step and not a new merge-region boundary:
+  - `optional-group` is NOT in MERGE_REGION_KINDS (workflow-graph-executor.ts:490), so
+    `post-merge-verification` is a post-merge ENTRY node reached after the collapsed merge seam.
+  - its inner `prompt` child is likewise not a merge-region kind, so it is traversed as a child of
+    that entry and can never be mistaken for a region member.
+  This keeps the test's real subject intact: `expectNoRawMergeRegionVisits` still proves none of the
+  seven raw merge primitives is ever visited.
+  */
   "post-merge-verification",
+  "post-merge-verification::post-merge-verification-step",
 ];
 // Same path, stopped before the post-merge hop (merge itself failed).
 const MERGE_FAILURE_PATH = SUCCESS_PATH.slice(0, SUCCESS_PATH.indexOf("merge") + 1);

@@ -182,6 +182,68 @@ throwing before its renamed-lane assertion. The merge-queue-peek addition was
 See `dead-vi-mock-specifiers-fail-silently.md` for the related case where a mock
 factory is unwired rather than a store fake being incomplete.
 
+## FUSI-034: a prototype-only fake, and four more drifts that each looked like a product bug
+
+The `assertion-no-error-line` family (FUSI-020 Step 5, family 5 of 7) resolved six
+red engine suites, and five of them are this same catalogue: a hand-maintained test
+double drifted from a contract that moved, and the drift surfaced as an assertion
+failure attributed to production code.
+
+**The tell.** A `TypeError: Cannot read properties of undefined (reading 'has')`
+surfacing from deep inside `project-engine.ts` is a **test-double** defect, not a
+product crash. `internalEnqueueMerge` read `this.mergeRetryResetTaskIds.has(taskId)`
+on a receiver built by `Object.create(ProjectEngine.prototype)`, which runs **no
+class field initializers**, so every merge-lane field was `undefined`. A production
+`ProjectEngine` always has them. The two `Set` fields were added by FN-9317
+(`706c15560`); `_project-engine-merge-lane-fixture.ts` — whose own FNXC note exists
+precisely to prevent this drift — never learned them. This is the **second** time
+this fixture family has fallen behind production; the first was FUSI-030's missing
+`getTask` collaborator. The disappearance of the 5 unhandled rejections alongside the
+8 assertion failures is the tell that they were one defect surfacing on two paths.
+
+**The rule that generalises.** When a class field is added to a production class
+whose instances are faked via `Object.create(Prototype)` plus a hand-maintained state
+fixture, the fixture is now wrong — and `tsc` cannot see it. `packages/engine/tsconfig.json`
+is `{"include": ["src/**/*"], "exclude": ["src/__tests__/**/*"]}`, and these fakes are
+`as any`/`as never` cast anyway, so `pnpm verify:fast` is structurally blind to them and
+returns 0 whether the fixture is complete or not. **The only detector is running the
+suites.** A green typecheck is not evidence that a fake matches its class.
+
+Walking the full class-field diff (FN-5893) found a second latent gap the ratchet had
+not caught: `mergeBodySettleTimeoutMs` is declared at `project-engine.ts:1015` and read
+at `:1037`, *outside* the region the existing drift ratchet scans. Left undefined, the
+wait collapses to roughly 1 ms instead of the production 60 s, so any test that exercises
+the settle would have raced silently rather than failing loudly.
+
+**The post-merge evidence shape.** A completion guard that reads the workflow IR
+(`getRequiredPostMergeEvidenceBlocker`, FN-9370) turns *any* test store that exposes
+`getTaskWorkflowSelection` into a fixture that must also declare its post-merge gate
+evidence — the guard early-outs entirely when that method is absent, so exposing it for
+an unrelated reason silently opts the fake into a contract it never satisfied. Two
+suites drifted on the same change in the same way: one went from `expected 'blocked' to
+be 'done'`, the other from a merge-region node list that was one entry short. Note the
+direction: these are **completeness** defects, not the missing-method defects in the
+catalogue above. Exposing a method is not free.
+
+**The environment shape.** A `password authentication failed for user "<os-user>"`
+during `CREATE DATABASE` is a **provisioning gap, not a test defect**. The fixture's
+maintenance URL defaults to `postgresql://localhost:5432` with no user or password, so
+the client authenticates as the OS user (`mini` locally, `runner` in CI); CI is green
+only because the workflows pass `FUSION_PG_TEST_URL_BASE` with an explicit `postgres`
+user (`full-suite.yml:44-45`, `pr-checks.yml:206-207`). Route this to provisioning. Do
+**not** wrap `createPgLayer` in `try`/`catch` or teach the fixture to tolerate auth
+failure — that deletes the coverage the fixture exists to provide, and it converts a
+loud provisioning error into a silently skipped suite.
+
+**A fourth drift, from the same class, worth its own line:** a review gate's identity
+is its **optional group id**, not the inner template step id, because the executor
+resolves `effectiveWorkflowStepId = optionalGroupId ?? id.replace(/^graph:/, "")`. An
+audit assertion and a persisted-result fixture both encoded `"code-review-step"` /
+`"plan-review-step"` and went red together. When a test asserts an id that a
+constructed fixture *also* sets, derive it from the fixture's own field rather than
+retyping the literal — the drift is invisible precisely because the two copies agree
+with each other and disagree with production.
+
 ## Related
 
 - `docs/testing.md` — testing lanes and the taxonomy for trim-vs-keep.

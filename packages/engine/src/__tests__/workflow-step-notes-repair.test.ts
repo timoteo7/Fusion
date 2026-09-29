@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "./executor-test-helpers.js";
+import { PLAN_REVIEW_GROUP_ID } from "@fusion/core";
 import { TaskExecutor } from "../executor.js";
 import {
   createMockStore,
@@ -37,6 +38,24 @@ function baseTask() {
   };
 }
 
+/*
+FNXC:ReviewGateIdentity 2026-09-26-06:35:
+A review gate's identity is its optional GROUP id, not the inner template step id. The executor
+resolves `effectiveWorkflowStepId = optionalGroupId ?? workflowStep.id.replace(/^graph:/, "")`
+(execute-workflow-step.ts:262) and uses it for both the run-audit `workflowStepId` (:1275) and the
+prior-record reuse lookup `findReusableReviewResult` (:620, matching on `result.workflowStepId`).
+Because `optionalGroupId` is present, the group id wins. These fixtures and assertions were still
+keyed to the inner step id ("code-review-step" / "plan-review-step"), which is the pre-group shape.
+The group id is the shipped contract, so the ASSERTMENT and the persisted FIXTURE ROW are realigned
+to it — the product is not changed. `CODE_REVIEW_GROUP_ID` is deliberately not imported: unlike
+PLAN_REVIEW_GROUP_ID it is not re-exported from @fusion/core, and the code-review group id is
+already carried by this fixture's own `optionalGroupId`, which is the field the product reads.
+`CODE_REVIEW_GROUP_ID` is therefore mirrored here as a local constant rather than imported:
+@fusion/core does not re-export it from its barrel, and this keeps the fixture's gate id a single
+named value that the run-audit assertion below references instead of repeating a string literal.
+*/
+const CODE_REVIEW_GROUP_ID = "code-review";
+
 function reviewStep(overrides: Record<string, unknown> = {}) {
   const now = new Date().toISOString();
   return {
@@ -48,7 +67,7 @@ function reviewStep(overrides: Record<string, unknown> = {}) {
     gateMode: "gate" as const,
     prompt: "Review the implementation.",
     toolMode: "readonly" as const,
-    optionalGroupId: "code-review",
+    optionalGroupId: CODE_REVIEW_GROUP_ID,
     enabled: true,
     createdAt: now,
     updatedAt: now,
@@ -163,11 +182,24 @@ describe("workflow-step verdict note repair", () => {
     const { outcome } = await pending;
 
     expect(outcome).toMatchObject({ success: true, verdict: "APPROVE", notes: note, output: note });
+    /*
+    FNXC:ReviewGateIdentity 2026-09-26-06:35: matcher TIGHTENED, not weakened. It previously expected
+    a bare top-level `ObjectContaining` and asserted nothing about the agent/domain identity, so it
+    matched almost any call. It now pins the full event shape the emitter actually produces
+    (execute-workflow-step.ts:1266-1279) — agentId, runId, domain, mutationType, target, taskId — plus
+    every metadata field, and keys `workflowStepId` on the GATE id the product resolves. The
+    fail-soft subject is unchanged and still asserted first: these sinks must not alter the outcome.
+    */
     if (sink) expect(sink).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: "reviewer",
+      runId: "run-fn-241",
+      domain: "database",
       mutationType: "task:review-notes-repaired",
+      target: baseTask().id,
+      taskId: baseTask().id,
       metadata: expect.objectContaining({
         taskId: baseTask().id,
-        workflowStepId: "code-review-step",
+        workflowStepId: CODE_REVIEW_GROUP_ID,
         verdict: "APPROVE",
         outcome: "repaired",
       }),
@@ -247,13 +279,23 @@ describe("workflow-step verdict note repair", () => {
     const step = reviewStep({
       id: "graph:plan-review-step",
       name: "Plan Review",
-      optionalGroupId: "plan-review",
+      optionalGroupId: PLAN_REVIEW_GROUP_ID,
       reviewKind: "plan",
     });
 
     const first = await (executor as any).executeWorkflowStep(subject, step, subject.worktree, {});
+    /*
+    FNXC:ReviewGateIdentity 2026-09-26-06:35: the persisted prior record is keyed by the GATE id
+    (PLAN_REVIEW_GROUP_ID), because that is what `findReusableReviewResult` matches on
+    (execute-workflow-step.ts:134, called with sameGateStepId at :620). Keyed to the inner step id
+    ("plan-review-step") the record is not found at all, a SECOND review dispatch runs, and the
+    "reused-empty" notice this test exists to cover is never reached. With the gate id the record
+    matches, and because the fixture genuinely persists notes:"" and output:"",
+    `storedReusedNotes` is "" so the notice IS produced (execute-workflow-step.ts:640-641) — the
+    behaviour under test, reached through the product's real reuse path.
+    */
     subject.workflowStepResults = [{
-      workflowStepId: "plan-review-step",
+      workflowStepId: PLAN_REVIEW_GROUP_ID,
       workflowStepName: "Plan Review",
       phase: "pre-merge",
       status: "passed",

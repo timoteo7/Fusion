@@ -187,10 +187,33 @@ describe("pause-abort benign requeue-to-todo (FN-6782)", () => {
       expect.objectContaining({ graphResumeRetryCount: 1 }),
       expect.anything(),
     );
-    expect(store.updateTask).toHaveBeenCalledWith(
+    /*
+    FNXC:LifecycleContainment 2026-09-26-07:05:
+    The `status: "failed"` park this block used to assert NO LONGER HAPPENS, and asserting it would
+    now require a product change that AGENTS.md forbids ("A Behavior Change Owns Every Test That
+    Asserts the Old Behavior" cuts the other way here: containment owns this one). FN-207/FN-217
+    removed backward-move authority from automatic recovery. `route-graph-failure-to-execution-resume.ts:409`
+    now refuses to claim a WIP card it cannot move forward, and the live row is deliberately left
+    untouched: the probe for these exact inputs produced ZERO updateTask calls and the log line
+      "Workflow graph failed at node 'unknown' - automatic recovery cannot move 'in-progress'
+       backward; card remains in place"
+    This mirrors the established in-repo pattern (executor-prompt.test.ts:1680-1686): assert the row
+    was NOT parked and NOT moved, and assert the retention was narrated. No product source is edited.
+
+    The test's real subject is preserved and is still proven per variant: no transient in-place retry
+    (graphResumeRetryCount is not bumped, execute() is never re-dispatched). The durable inputs
+    (lastError, failureReason, exhausted graphResumeRetryCount) are what make this a terminal,
+    non-retryable failure, and the no-retry contract is what each variant still asserts.
+    */
+    expect(store.updateTask).not.toHaveBeenCalledWith(
       task.id,
       expect.objectContaining({ status: "failed" }),
-      undefined,
+      expect.anything(),
+    );
+    expect(store.moveTask).not.toHaveBeenCalled();
+    expect(task.column).toBe("in-progress");
+    expect(logText(store)).toContain(
+      "automatic recovery cannot move 'in-progress' backward; card remains in place",
     );
     expect(executeSpy).not.toHaveBeenCalled();
   });
