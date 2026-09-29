@@ -137,3 +137,87 @@ describe("every workflow node runs in the task worktree, never the shared checko
     expect(acquireSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+/*
+FNXC:AcquisitionPathInvariant 2026-09-25-00:00 (FUSI-032, class A):
+The 5-of-12 `missing-mock-call-other` seed failures were one defect with two
+leak shapes: a test's `existsSync` override returns TRUTHY for the task-pinned
+acquisition path, so acquisition routes into warm-reuse instead of fresh
+acquisition. `resetExecutorMocks()`'s documented default makes any path containing a
+`worktrees/` segment read absent, which keeps acquisition on the fresh branch.
+
+The invariant owned here is BEHAVIORAL, not textual: a fixture default must not
+be able to SILENTLY change which acquisition branch runs. Part 1 pins the fresh
+branch (it is reached and lands on the pinned path). Part 2 proves that making
+the pinned path truthy — in EITHER leak shape — observably changes that outcome,
+so a future silent default flip is caught. Part 2 is the ratchet: it only means
+something if the two branches actually differ, which is why it asserts a
+*difference* rather than re-asserting the happy path.
+*/
+describe("class A — a fixture existsSync default cannot silently divert task-worktree acquisition", () => {
+  const PINNED = `${ROOT}/.fusion/worktrees/fn-1403`;
+
+  beforeEach(() => {
+    resetExecutorMocks();
+    mockedExecSync.mockReturnValue("" as any);
+  });
+
+  it("resetExecutorMocks() makes the task-pinned acquisition path read absent", () => {
+    // The documented acquisition default is `! /[\\/]worktrees[\\/]/`, so any path containing a
+    // `worktrees/` SEGMENT reads absent. The FN-258 pinned path matches that segment. If this ever
+    // changes, the whole class-A reasoning below changes with it, so pin it explicitly.
+    expect(mockedExistsSync(PINNED)).toBe(false);
+    expect(mockedExistsSync(`${ROOT}/worktrees/fn-1403`)).toBe(false);
+  });
+
+  it.each([
+    ["coding prompt", PLAN_REVIEW_NODE],
+    ["custom read-only gate", CUSTOM_READONLY_GATE],
+  ])("fresh acquisition is reached and the %s lands on the pinned task path", async (_label, node) => {
+    const store = createMockStore();
+    const executor = new TaskExecutor(store, ROOT);
+    // Acquisition-path default: nothing on disk yet, so the node must acquire one.
+    const captured: { worktreePath?: string } = {};
+    vi.spyOn(executor as any, "executeWorkflowStep").mockImplementation(async (...args: any[]) => {
+      captured.worktreePath = args[2];
+      return { success: true, output: "APPROVE" };
+    });
+
+    const live = makeTask();
+    store.getTask.mockResolvedValue(live as any);
+    await (executor as any).runGraphCustomNode(node, live, { reviewerInlineFixes: false }, undefined);
+
+    expect(captured.worktreePath).toBe(PINNED);
+  });
+
+  it.each([
+    // Leak shape 1: a file-level absolute-truthy override.
+    ["absolute-truthy override", () => mockedExistsSync.mockReturnValue(true)],
+    // Leak shape 2: a bare `path !== "<x>"` predicate, which is truthy for the pinned path.
+    ["bare `path !== x` predicate", () => mockedExistsSync.mockImplementation((p: unknown) => p !== "/tmp/unrelated")],
+  ])("a truthy pinned path from a %s is a LOUD branch change, never a silent warm-reuse", async (_label, leak) => {
+    leak();
+    expect(mockedExistsSync(PINNED)).toBe(true); // the leak really landed
+
+    const store = createMockStore();
+    const executor = new TaskExecutor(store, ROOT);
+    const captured: { worktreePath?: string } = {};
+    vi.spyOn(executor as any, "executeWorkflowStep").mockImplementation(async (...args: any[]) => {
+      captured.worktreePath = args[2];
+      return { success: true, output: "APPROVE" };
+    });
+
+    const live = makeTask();
+    store.getTask.mockResolvedValue(live as any);
+
+    // With the pinned path reading present, warm-reuse cannot confirm a branch: the real
+    // `getRegisteredWorktreeBranches` probe returns [] on the non-git test rootDir, so
+    // `pinnedWorktreeBranchMatches` refuses. That refusal is the POINT: the mis-default is
+    // loud (the run fails) rather than silently landing the node somewhere else. A silent
+    // success on a NON-acquired path here would mean the default flip went unnoticed.
+    await expect(
+      (executor as any).runGraphCustomNode(PLAN_REVIEW_NODE, live, { reviewerInlineFixes: false }, undefined),
+    ).rejects.toThrow(/pinned branch probe returned no registered worktrees/);
+    expect(captured.worktreePath).toBeUndefined();
+  });
+});
