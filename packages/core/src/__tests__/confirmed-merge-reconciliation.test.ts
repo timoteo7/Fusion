@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getPostMergeFinalizeBlocker, getRequiredPostMergeEvidenceBlocker, planConfirmedMergeChecklistReconciliation } from "../merge/confirmed-merge-reconciliation.js";
+import { postMergeOptionalGroupNode } from "../workflows/builtin-post-merge-group.js";
 
 describe("confirmed merge reconciliation", () => {
   it("does not re-run stale review or checklist gates after a confirmed merge", () => {
@@ -37,10 +38,44 @@ describe("confirmed merge reconciliation", () => {
 });
 
 describe("required post-merge evidence", () => {
-  const store = {
+  /*
+  FNXC:PostMergeAdvisoryDemotion 2026-09-29-14:57:
+  FUSI-064 demoted the built-in post-merge verification from a hard completion gate to an advisory
+  observation. `getRequiredPostMergeEvidenceBlocker` still collects gate-mode post-merge groups —
+  that is its unchanged contract — but the built-in `builtin:coding` workflow no longer supplies
+  one, so a card with a confirmed merge and no successful Full Suite can now reach completion. The
+  two describes below pin BOTH halves: the new built-in truth (advisory => never blocks) and the
+  preserved function contract (a genuinely gate-mode post-merge group still blocks). The blocking
+  coverage uses a custom IR carrying a `gateMode: "gate"` post-merge group so it keeps exercising
+  the real function rather than deleting the contract.
+  */
+
+  // A workflow whose post-merge group is explicitly gate-mode, to preserve the function's blocking contract.
+  const gateModeStore = {
     getTaskWorkflowSelection: () => ({
-      workflowId: "builtin:coding",
+      workflowId: "WF-GATE",
       stepIds: ["post-merge-verification"],
+    }),
+    getWorkflowDefinition: async () => ({
+      ir: {
+        version: "v2",
+        name: "gate-post-merge",
+        columns: [
+          { id: "review", name: "Review", traits: [] },
+          { id: "done", name: "Done", traits: [] },
+        ],
+        nodes: [
+          postMergeOptionalGroupNode({
+            id: "post-merge-verification",
+            name: "Post-merge verification",
+            column: "done",
+            prompt: "gate-mode post-merge",
+            gateMode: "gate",
+            defaultOn: true,
+          }),
+        ],
+        edges: [],
+      },
     }),
   };
 
@@ -50,23 +85,54 @@ describe("required post-merge evidence", () => {
     [{ status: "skipped" }, "is not approved"],
     [{ status: "failed", verdict: "REVISE" }, "is not approved"],
   ])("blocks enabled gate evidence that %s", async (result, expected) => {
-    await expect(getRequiredPostMergeEvidenceBlocker(store as never, {
+    await expect(getRequiredPostMergeEvidenceBlocker(gateModeStore as never, {
       id: "FN-PM",
       enabledWorkflowSteps: ["post-merge-verification"],
       workflowStepResults: result ? [{ workflowStepId: "post-merge-verification", ...result }] : [],
     } as never)).resolves.toContain(expected);
   });
 
-  it("accepts durable approval and preserves explicit disablement", async () => {
-    await expect(getRequiredPostMergeEvidenceBlocker(store as never, {
+  it("accepts durable approval and preserves explicit disablement for a gate-mode group", async () => {
+    await expect(getRequiredPostMergeEvidenceBlocker(gateModeStore as never, {
       id: "FN-PM",
       enabledWorkflowSteps: ["post-merge-verification"],
       workflowStepResults: [{ workflowStepId: "post-merge-verification", status: "passed", verdict: "APPROVE_WITH_NOTES" }],
     } as never)).resolves.toBeUndefined();
-    await expect(getRequiredPostMergeEvidenceBlocker(store as never, {
+    await expect(getRequiredPostMergeEvidenceBlocker(gateModeStore as never, {
       id: "FN-PM-disabled",
       enabledWorkflowSteps: [],
       workflowStepResults: [],
+    } as never)).resolves.toBeUndefined();
+  });
+});
+
+describe("built-in coding post-merge verification is advisory (FUSI-064)", () => {
+  /*
+  FNXC:PostMergeAdvisoryDemotion 2026-09-29-14:57:
+  The Symptom Verification contract for FUSI-064: a card whose work merged cleanly, with a
+  post-merge result that is absent or REVISE (the shape a red/never-green Full Suite produces),
+  must still be able to reach completion because the built-in post-merge verification is an
+  advisory observation, not a hard gate. This pins the demotion against the REAL built-in
+  workflow so a future re-promotion to `gateMode: "gate"` (or a re-added "must refuse approval
+  until Full Suite evidence" prompt) fails here.
+  */
+  const store = {
+    getTaskWorkflowSelection: () => ({
+      workflowId: "builtin:coding",
+      stepIds: ["post-merge-verification"],
+    }),
+  };
+
+  it.each([
+    ["absent", []],
+    ["pending", [{ workflowStepId: "post-merge-verification", status: "pending" as const }]],
+    ["failed-REVISE", [{ workflowStepId: "post-merge-verification", status: "failed" as const, verdict: "REVISE" as const }]],
+    ["advisory_failure", [{ workflowStepId: "post-merge-verification", status: "advisory_failure" as const, verdict: "REVISE" as const }]],
+  ])("does not block completion on builtin:coding when the post-merge result is %s", async (_label, workflowStepResults) => {
+    await expect(getRequiredPostMergeEvidenceBlocker(store as never, {
+      id: "FN-PM",
+      enabledWorkflowSteps: ["post-merge-verification"],
+      workflowStepResults,
     } as never)).resolves.toBeUndefined();
   });
 });
