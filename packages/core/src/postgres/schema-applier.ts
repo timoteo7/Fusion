@@ -90,7 +90,9 @@ touches no data; it must advance in the same change that ships a new migration f
 /* FNXC:ChatSidebarPerf 2026-09-08-04:48: baseline marker includes the chat-message recency index required for index-backed sidebar previews. */
 /* FNXC:OverlapWaitSynchronization 2026-09-17-00:22: advance the ceiling so an upgraded project has the durable wait table before any overlap-marker transition tries to record into it. Renumbered 0074->0084 (2026-09-18): upstream's own migrations 0074 (FN-323 project notes) through 0083 (FN-514) are absent from this branch by design (it excludes their source commits), but the numeric slots are real and must not be reused, or a database that ran the real 0074..0083 would be misread as compatible with this branch's different 0074. */
 /* FNXC:SelfImproveLearningLedger 2026-09-29-02:38: SCHEMA_BASELINE_VERSION advances 0085 -> 0086 for the durable self-improvement proposal+evidence record. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the table, not a follow-up. */
-export const SCHEMA_BASELINE_VERSION = "0086";
+/* FNXC:SelfImproveLearningLedger 2026-09-29-15:15: SCHEMA_BASELINE_VERSION advances 0086 -> 0087 for the append-only learning-ledger event trail. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the table, not a follow-up. */
+/* FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45: SCHEMA_BASELINE_VERSION advances 0087 -> 0088 for the learning-revert reason enum on the event trail. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the column, not a follow-up. */
+export const SCHEMA_BASELINE_VERSION = "0088";
 /** FNXC:SymbolLock 2026-07-20-10:00: upgrades need durable task declarations before admission resolves symbols. */
 export const TASK_DECLARED_SYMBOLS_VERSION = "0028";
 const INITIAL_SCHEMA_VERSION = "0000";
@@ -285,6 +287,24 @@ is not wired here silently never runs and never errors, so this identity and the
 only thing making 0086 take effect on an existing database.
 */
 export const SELFIMPROVE_LEARNING_LEDGER_VERSION = "0086";
+
+/*
+FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+The append-only event trail needs the SAME explicit registration as 0086. A `.sql` file that is not
+wired into this applier silently never runs and never errors, so this identity and the guard below
+are the only things that make the trail exist on an already-migrated database. 0087 is claimed
+immediately after FUSI-009's 0086 because the two tables are created as one feature.
+*/
+export const LEARNING_LEDGER_EVENTS_VERSION = "0087";
+
+/*
+FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45:
+The revert-reason column needs the SAME explicit registration as 0086/0087. A `.sql` file that is not
+wired into this applier silently never runs and never errors, so this identity and the guard below
+are the only things that make the column exist on an already-migrated database. 0088 is claimed
+immediately after FUSI-010's 0087 because the reason enum is a property of the same event trail.
+*/
+export const LEARNING_LEDGER_REVERT_SEMANTICS_VERSION = "0088";
 
 /** FNXC:MemoryFocus 2026-08-13-15:57: explicit registration prevents the per-conversation memory-focus migration from being skipped. Renumbered to 0060 (FN-9037 took 0059), then 0061, then 0065 (2026-08-20) when the upstream FN-066..FN-094 batch claimed 0061-0064. */
 export const CHAT_SESSION_MEMORY_FOCUS_VERSION = "0066";
@@ -555,6 +575,8 @@ const CHAT_MESSAGES_SESSION_RECENCY_INDEX_MIGRATION_PATH = join(MIGRATIONS_DIR, 
 const OVERLAP_WAIT_SYNC_MIGRATION_PATH = join(MIGRATIONS_DIR, "0084_fn_332_overlap_sync.sql");
 const DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_MIGRATION_PATH = join(MIGRATIONS_DIR, "0085_drop_excluded_upstream_feature_schema.sql");
 const SELFIMPROVE_LEARNING_LEDGER_MIGRATION_PATH = join(MIGRATIONS_DIR, "0086_fn_selfimprove_learning_ledger.sql");
+const LEARNING_LEDGER_EVENTS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0087_fn_selfimprove_learning_events.sql");
+const LEARNING_LEDGER_REVERT_SEMANTICS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0088_fusi_011_learning_revert_semantics.sql");
 
 /**
  * Ensure the migration bookkeeping table exists. Lives in the public schema so
@@ -701,6 +723,8 @@ export async function applySchemaBaseline(
     const overlapWaitSyncAlreadyApplied = applied.includes(OVERLAP_WAIT_SYNC_VERSION);
     const dropExcludedUpstreamFeatureSchemaAlreadyApplied = applied.includes(DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION);
     const selfImproveLearningLedgerAlreadyApplied = applied.includes(SELFIMPROVE_LEARNING_LEDGER_VERSION);
+    const learningLedgerEventsAlreadyApplied = applied.includes(LEARNING_LEDGER_EVENTS_VERSION);
+    const learningLedgerRevertSemanticsAlreadyApplied = applied.includes(LEARNING_LEDGER_REVERT_SEMANTICS_VERSION);
     assertBinaryNotOlderThanDatabase(applied);
     let schemaChanged = false;
 
@@ -1651,6 +1675,35 @@ export async function applySchemaBaseline(
       const migrationSql = await readFile(SELFIMPROVE_LEARNING_LEDGER_MIGRATION_PATH, "utf8");
       await tx.execute(sql.raw(migrationSql));
       await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${SELFIMPROVE_LEARNING_LEDGER_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    const learningLedgerEventsMissing = ((await tx.execute(sql`
+      SELECT to_regclass('project.learning_ledger_events') IS NULL AS missing
+    `)) as unknown as Array<{ missing: boolean }>)[0]?.missing ?? true;
+    if (!learningLedgerEventsAlreadyApplied || learningLedgerEventsMissing) {
+      const migrationSql = await readFile(LEARNING_LEDGER_EVENTS_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${LEARNING_LEDGER_EVENTS_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    /*
+    FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45:
+    The bookkeeping check here is column presence, not `to_regclass` table presence, because 0088
+    alters an existing table rather than creating one. A database whose bookkeeping row says 0088 ran
+    but whose column is missing (a partially applied upgrade) must still be repaired, so the guard
+    re-runs the migration whenever `revert_reason` is absent from the trail — mirroring the
+    to_regclass guard's intent for the 0086/0087 table creates.
+    */
+    const learningLedgerRevertSemanticsMissing = ((await tx.execute(sql`
+      SELECT NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'project' AND table_name = 'learning_ledger_events' AND column_name = 'revert_reason'
+      ) AS missing
+    `)) as unknown as Array<{ missing: boolean }>)[0]?.missing ?? true;
+    if (!learningLedgerRevertSemanticsAlreadyApplied || learningLedgerRevertSemanticsMissing) {
+      const migrationSql = await readFile(LEARNING_LEDGER_REVERT_SEMANTICS_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${LEARNING_LEDGER_REVERT_SEMANTICS_VERSION}) ON CONFLICT (version) DO NOTHING`);
       schemaChanged = true;
     }
     return { applied: schemaChanged, pluginHooksRun: pluginHooks.length };

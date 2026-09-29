@@ -120,6 +120,18 @@ All `recordRunAuditEventWithinTransaction(tx, ...)` calls and the `recordRunAudi
 
 `task:reconcile-absent-branch-landed` records an ownership-trailer-proven review card finalized after its branch was cleaned up or when a still-present branch has no remaining task-owned unlanded commits. `task:reconcile-absent-branch-unproven` records a skipped absent-branch candidate. Metadata is IDs and fixed outcomes only: task id, source (`self-healing` or `manual`), branch/base branch identifiers, merge SHA/strategy or fixed reason, and ownership-proof classification; it never contains commit subjects, diffs, or reviewer text. Both emissions use the FN-9175 bounded best-effort engine seam, so hostile sinks cannot alter reconciliation. The unproven event is deduplicated per manager only after its audit write records successfully, allowing a failed audit write to be retried. `fn task reconcile <id>` and the automatic self-healing absent-branch sweep both call the same `SelfHealingManager.reconcileLandedReviewTask` fence, so a manual reconcile and an automatic one can never disagree about what "landed" means.
 
+### Self-improvement ledger events (FUSI-012)
+
+Three `selfimprove:*` events record the ledger's lifecycle transitions — proposal created, proposal applied, proposal reverted — through the core bounded run-audit seam (`packages/core/src/self-improve/self-improve-run-audit.ts`). They are the observability edge for the learning-proposal ledger added in FUSI-009/010/011.
+
+**Metadata rule** — ids/counts/fixed outcomes only. No proposal prose, evidence text, rationale, or diff content ever appears in metadata. Each façade builds metadata from an explicit closed field list and never spreads caller input, so adding an optional ledger field cannot silently widen the audit surface.
+
+**Sink independence** — all three façades delegate to `emitBoundedRunAudit` and are fully absorbent: absent, throwing, rejecting, never-settling, and late-settling sinks change nothing about the ledger transition. The sink is best-effort observability, not a lifecycle dependency.
+
+**Union registry** — the three literals are members of the engine `DatabaseMutationType` union, with a `date -u` FNXC comment stating the metadata rule.
+
+These events are intentionally outside the curated delivery-pipeline event catalogue (`DELIVERY_PIPELINE_RUN_AUDIT_EVENTS`). Adding or removing them requires updating this doc and the `DatabaseMutationType` union together — the run-audit catalogue parity test does not cover them.
+
 ### Merge-boundary evidence recovery (FN-9345)
 
 Missing implementation proof is normally repaired through the workflow's durable task log and graph remediation path before merge admission. On startup and periodic maintenance, `task:merge-boundary-evidence-recovered` records a historic proofless park only after durable unfinished work, lifecycle ownership, liveness, and auto-merge policy are re-verified. These repairs intentionally do not put boundary reason prose, foreach identities, paths, review output, or external capability diagnostics in run-audit metadata. If recovery cannot prove an executable owner, the existing terminal `task:merge-boundary-unproven-parked` event remains the fail-closed audit surface and retains its ids/counts/fixed-outcomes-only contract.

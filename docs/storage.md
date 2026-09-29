@@ -55,6 +55,21 @@ Both completion writers insert the entry inside the same transaction that persis
 
 Archive captures any missing legacy delivery inside its archive transaction before soft deletion. Archive cleanup consults the existing cold snapshot and captures before rewriting that snapshot or hard-deleting the task row; a capture failure leaves the archived row intact for retry. `reconcilePatchnodeLedger` is insert-only and re-arms every 15 minutes to backfill current completion rows, latest-only legacy revert markers, and archived rows whose cold snapshot preserves a completion `preArchiveColumn`. It is a backlog convenience, not the live guarantee. A delivery completed and superseded before Patchnode existed left no reliable lane, occurrence, or point-in-time summary evidence and is intentionally not fabricated.
 
+### Self-improvement learning ledger (FUSI-009 / FUSI-010)
+
+The self-improvement loop keeps two project-scoped, **append-only** tables that intentionally have no foreign key to `project.tasks` and survive task archive cleanup, for the same reason the Patchnode ledger does: a learning record is about a product surface (Memory/Evals/Skills), not a child of a task, and its evidence must stay readable after the task is hard-deleted.
+
+- `project.learning_proposals` (migration `0086`, FUSI-009) is the **current** assertion for a proposal — its `state`, `value`, `priorValue`, and confidence. It is the row the gate evaluates.
+- `project.learning_ledger_events` (migration `0087`, FUSI-010) is the immutable **event trail**: one row per transition, with `kind` in `proposed | applied | reverted`. Writes are insert-only — no `UPDATE` and no `DELETE` ever touch this table. A correction is a new event, never an edit.
+
+The split exists because an application and its reversal must be distinct, replayable events. If the proposal row were overwritten on each application, the value it held *before* an experiment — the one a revert must restore — would be gone exactly when it is needed. So a proposal's state is always **derived from its latest event**, never trusted from the proposal row's own `state` column (the listing exposes the derived value as `derivedState` and the row's value as `declaredState` so a divergence stays visible to the operator).
+
+Invariants enforced at the database boundary, not by accessor convention:
+- The `proposed` opening event is written in the **same transaction** as the proposal row (`appendLearningProposal`), so the trail alone is a self-sufficient record of a proposal's whole life and a replay never has to join back to the mutable row.
+- A `reverted` event **must** name the `applied` event it cancels (`reverts_event_id`), enforced by a `CHECK`; the accessor additionally rejects a blank pairing that the `IS NOT NULL` constraint alone would accept. This is what makes a re-application after a revert unambiguous: the trail reads `applied₁ → reverted(applied₁) → applied₂`.
+
+`listLearningProposals` filters by `target` (memory/evals/skills), by the **derived** `state`, and by a `from`/`to` window bounded on each proposal's latest-event instant. `limit` is clamped to 1..200 and `offset` floored at 0 by the accessor so a caller cannot request an unbounded page. Three named indexes — target+`occurred_at`, project+proposal+`occurred_at` (serves latest-event-per-proposal), and target+`kind`+`occurred_at` — back those reads without a full scan. Run-audit emission for these transitions is owned by FUSI-012; the store methods here emit none, so a stalled audit sink can never block a learning write.
+
 - User-initiated `TaskStore.deleteTask` is a **soft delete**: the task row stays in `tasks` and `deletedAt` is set.
 - Active task readers (`getTask`, `listTasks`, search, dependency scans, scheduler/watcher reads, mission task aggregations) must filter with `deletedAt IS NULL`.
 - Archived-task flows (`archiveTask`, archived cleanup/migration) hard-delete from the active `tasks` table after copying to PostgreSQL cold storage. Legacy `archive.db` files are import-only.

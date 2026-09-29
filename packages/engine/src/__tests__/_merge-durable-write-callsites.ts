@@ -324,6 +324,19 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   reconcilePatchnodeLedger: { kind: "writer", reason: "reconciles durable patchnode ledger entries" },
   recordPatchnodeCompletion: { kind: "writer", reason: "persists a patchnode completion ledger entry" },
   recordPatchnodeRevert: { kind: "writer", reason: "persists patchnode revert and pairing state" },
+  /*
+  FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+  The self-improvement ledger's four public store methods are classified by durable semantics, not by
+  current callers — none has a merge-path caller yet, and an unclassified method fails this guard
+  outright. The three writes append immutable ledger rows. `listLearningProposals` is a pure read
+  with no persistence of its own, but it is classified a writer CONSERVATIVELY so an orphaned merge
+  body that reaches the learning-ledger read frontier is still treated as having reached the durable
+  frontier; the classification errs toward fencing rather than toward missing a writer.
+  */
+  appendLearningProposal: { kind: "writer", reason: "persists a learning proposal row and its opening event" },
+  recordLearningApplication: { kind: "writer", reason: "appends a learning application event to the ledger" },
+  recordLearningReversal: { kind: "writer", reason: "appends a learning reversal event naming the application it cancels" },
+  listLearningProposals: { kind: "writer", reason: "on the learning-ledger read frontier; classified a writer conservatively so an orphaned body reaching it is still fenced" },
   appendAgentLog: { kind: "writer", reason: "persists task-scoped agent timeline state" },
   emit: { kind: "writer", reason: "announces task lifecycle events to durable subscribers" },
   logEntry: { kind: "writer", reason: "persists task-scoped log state and refreshes updatedAt" },

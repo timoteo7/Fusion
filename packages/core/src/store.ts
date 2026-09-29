@@ -180,8 +180,19 @@ import {
   reconcilePatchnodeFromLiveTasks,
   type PatchnodeReconcileResult,
 } from "./task-store/async/async-patchnode.js";
+import {
+  appendLearningProposal,
+  listLearningProposals,
+  recordLearningApplication,
+  recordLearningReversal,
+  type AppendLearningProposalInput,
+  type RecordLearningApplicationInput,
+  type RecordLearningReversalInput,
+} from "./task-store/async/async-learning-ledger.js";
 import { buildPatchnodeEntryId, buildPatchnodeEntryInput } from "./board/patchnode.js";
 import type { PatchnodeEntry, PatchnodeQuery } from "./types/task/patchnode.js";
+import type { LearningProposal } from "./types/self-improve/learning-proposal.js";
+import type { LearningLedgerEvent, LearningLedgerPage, LearningLedgerQuery } from "./self-improve/ledger-events.js";
 import { resolveWorkflowIrForTask } from "./workflows/workflow-ir-resolver.js";
 // FNXC:RuntimeBackendAsync 2026-06-24-10:15:
 // Async helper imports for backend-mode (AsyncDataLayer/PostgreSQL) delegation.
@@ -1228,6 +1239,35 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       });
     }
     return queryPatchnodeEntries(this.asyncLayer, query);
+  }
+
+  /*
+  FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+  The four self-improvement ledger methods are thin delegations through the async layer, matching
+  the patchnode pattern. They throw the same "requires an async data layer" guard when no layer is
+  bound, so a synchronous-only store never silently no-ops a learning transition. `appendLearningProposal`
+  writes the proposal row AND its opening event in one transaction; the two record methods append
+  only — none of them updates a previously written row, which is the append-only contract FUSI-011's
+  revert decision depends on. No method emits run-audit (FUSI-012 owns that).
+  */
+  async appendLearningProposal(input: AppendLearningProposalInput): Promise<LearningProposal> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    return appendLearningProposal(this.asyncLayer, input);
+  }
+
+  async recordLearningApplication(input: RecordLearningApplicationInput): Promise<LearningLedgerEvent> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    return recordLearningApplication(this.asyncLayer, input);
+  }
+
+  async recordLearningReversal(input: RecordLearningReversalInput): Promise<LearningLedgerEvent> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    return recordLearningReversal(this.asyncLayer, input);
+  }
+
+  async listLearningProposals(query: LearningLedgerQuery = {}): Promise<LearningLedgerPage> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    return listLearningProposals(this.asyncLayer, query);
   }
   public async atomicWriteTaskJsonWithAudit( dir: string, task: Task, auditInput?: RunAuditEventInput, planningInvalidation?: PlanningDependencyInvalidation, specPlanPrompt?: string, ): Promise<void> {
     return atomicWriteTaskJsonWithAuditImpl(this, dir, task, auditInput, planningInvalidation, specPlanPrompt);
