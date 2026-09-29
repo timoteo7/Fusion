@@ -24,9 +24,17 @@ workflow-graph NODE (Plan Review ran with stale task.worktree metadata pointing 
 worktree) fell through every graph-failure router into the terminal park, erasing the error
 signature and looping dispatch→park all day. The invariant: any graph-node failure carrying the
 assertValidWorktreeSession refusal routes into the bounded worktree-session recovery (clear
-stale metadata, requeue todo) and only an exhausted budget may terminal-park; additionally
-graphFailureValue must resolve optional-group materialized ids (`group::template`) so group
-routing values (e.g. FN-7977's provider-failure hold) are never invisible.
+stale metadata, retain the card in its own column) and only an exhausted budget escalates for
+human inspection; additionally graphFailureValue must resolve optional-group materialized ids
+(`group::template`) so group routing values (e.g. FN-7977's provider-failure hold) are never
+invisible.
+
+FNXC:LifecycleContainment 2026-09-25-00:00 (FUSI-032):
+FN-207/FN-217 changed the observable these tests own. Recovery used to requeue the card to `todo`;
+it is now IN-PLACE — stale worktree/branch/session metadata is cleared and the card is retained in
+its own current column — and the retry-budget seam escalates instead of terminal-parking here.
+The assertions below were re-anchored onto that contract (metadata cleared, retry count
+incremented, column retained); the negative guards that keep recovery safe are unchanged.
 */
 
 const MISSING_WT_ERROR = "Refusing to start coding agent in missing worktree: /tmp/stale-wt";
@@ -155,7 +163,13 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
     }));
 
     const live = getLive();
-    expect(live.column).toBe("todo");
+    /*
+    FNXC:LifecycleContainment 2026-09-25-00:00 (FUSI-032):
+    FN-207/FN-217 made worktree-session recovery IN-PLACE: the card is retained in its own current
+    column while stale metadata is cleared, instead of being requeued to `todo`. The recoverable
+    invariant is the metadata clear + retry-count increment + retention, not the old move target.
+    */
+    expect(live.column).toBe("in-progress");
     expect(live.status).toBeNull();
     expect(live.worktree).toBeNull();
     expect(live.branch).toBeNull();
@@ -165,10 +179,9 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
       expect.objectContaining({ status: "failed" }),
       expect.anything(),
     );
-    expect(store.moveTask).toHaveBeenCalledWith(
+    expect(store.logEntry).toHaveBeenCalledWith(
       initial.id,
-      "todo",
-      expect.objectContaining({ moveSource: "engine", recoveryRehome: true }),
+      expect.stringContaining("retained in in-progress"),
     );
   });
 
@@ -181,11 +194,11 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
       "node:plan-review::plan-review-step:error": MISSING_WT_ERROR,
     }));
 
-    expect(getLive().column).toBe("todo");
+    expect(getLive().column).toBe("in-progress");
     expect(getLive().worktree).toBeNull();
   });
 
-  it("terminal-parks visibly once the worktree-session retry budget is exhausted", async () => {
+  it("escalates for human inspection once the worktree-session retry budget is exhausted", async () => {
     const initial = makeTask({ worktreeSessionRetryCount: MAX_WORKTREE_SESSION_RETRIES });
     const { store, getLive } = trackingStore(initial);
     const executor = new TaskExecutor(store, "/tmp/test");
@@ -194,11 +207,20 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
       "node:plan-review-step:error": MISSING_WT_ERROR,
     }));
 
+    /*
+    FNXC:LifecycleContainment 2026-09-25-00:00 (FUSI-032):
+    The budget seam now returns `escalate-exhausted` and the router deliberately maps it to `false`
+    so the failure falls through to the visible terminal park (route-unusable-worktree-graph-failure-
+    to-recovery.ts:88-89) rather than looping recovery. What is observable HERE is the escalation
+    itself — the card is left untouched for the owning machinery and the exhaustion is recorded.
+    */
     const live = getLive();
     expect(live.column).toBe("in-progress");
-    expect(live.status).toBe("failed");
-    expect(String(live.error)).toContain("plan-review::plan-review-step");
-    expect(store.moveTask).not.toHaveBeenCalledWith(initial.id, "todo", expect.anything());
+    expect(live.worktreeSessionRetryCount).toBe(MAX_WORKTREE_SESSION_RETRIES);
+    expect(store.logEntry).toHaveBeenCalledWith(
+      initial.id,
+      expect.stringContaining("Auto-recovery exhausted"),
+    );
   });
 
   it("does not intercept graph failures without the worktree refusal signature", async () => {
@@ -257,7 +279,8 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
     );
 
     expect(handled).toBe(true);
-    expect(getLive().column).toBe("todo");
+    expect(getLive().column).toBe("in-progress");
+    expect(getLive().worktree).toBeNull();
   });
 
   it("leaves auto-merge-off in-review tasks terminal for human merge (FN-5147)", async () => {
@@ -293,8 +316,9 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
       planReviewGraphFailure({ "node:plan-review-step:error": MISSING_WT_ERROR }),
     );
 
+    // FN-207 recovery is in-place: an in-review card is recovered in `in-review`, not pushed to todo.
     expect(handled).toBe(true);
-    expect(getLive().column).toBe("todo");
+    expect(getLive().column).toBe("in-review");
   });
 
   it.each([
@@ -334,7 +358,14 @@ describe("Plan Review missing-worktree repo-root fallback (FN-7996)", () => {
   it("re-acquires a task worktree for Plan Review when the recorded worktree is gone (never the repo root)", async () => {
     const store = createMockStore();
     const executor = new TaskExecutor(store, "/tmp/test");
-    mockedExistsSync.mockImplementation((path: unknown) => path !== "/tmp/stale-wt");
+    // The recorded stale path must read absent (that is what makes the reacquire branch run), and
+    // the task-pinned path must ALSO read absent — the acquisition-path default
+    // `resetExecutorMocks()` installs. A truthy pinned path routes into warm-reuse, whose real
+    // `getRegisteredWorktreeBranches` probe returns [] on the non-git test rootDir and throws from
+    // `pinnedWorktreeBranchMatches` (worktree-acquisition.ts:315) — "refusing to prove mismatch".
+    mockedExistsSync.mockImplementation(
+      (path: unknown) => path !== "/tmp/stale-wt" && !/[\\/]\.fusion[\\/]worktrees[\\/]/.test(String(path)),
+    );
 
     const captured: { worktreePath?: string } = {};
     vi.spyOn(executor as any, "executeWorkflowStep").mockImplementation(async (...args: any[]) => {
@@ -355,10 +386,12 @@ describe("Plan Review missing-worktree repo-root fallback (FN-7996)", () => {
     // Not the stale path, and — the point of the change — not the shared repo root either.
     expect(captured.worktreePath).not.toBe("/tmp/stale-wt");
     expect(captured.worktreePath).not.toBe("/tmp/test");
-    expect(captured.worktreePath).toContain("/tmp/test/.worktrees/");
+    // FN-258 pins native worktrees to `.fusion/worktrees/<taskId>`; the older generated
+    // `.worktrees/<name>` shape no longer describes where the node runs.
+    expect(captured.worktreePath).toBe("/tmp/test/.fusion/worktrees/fn-7996-t");
     expect(store.logEntry).toHaveBeenCalledWith(
       live.id,
-      expect.stringContaining("re-acquiring a task worktree instead of running in the shared checkout"),
+      expect.stringContaining("requires a task worktree — acquiring worktree before node execution"),
       undefined,
       undefined,
     );
