@@ -1,4 +1,5 @@
 import {
+  ACTIVE_WORKFLOW_WORK_ITEM_STATES,
   getPostMergeFinalizeBlocker,
   getRequiredPostMergeEvidenceBlocker,
   planConfirmedMergeChecklistReconciliation,
@@ -223,6 +224,77 @@ function hasDurableMergeProof(task: Task, result?: MergeResult): boolean {
   return task.mergeDetails?.mergeConfirmed === true || result?.mergeConfirmed === true;
 }
 
+/*
+FNXC:PostMergeGateScheduling 2026-09-29:
+FN-9369 turned the `post-merge-verification` optional group into a REQUIRED gate, and
+upgradeLegacyCodingPostMergeVerificationStepIds() auto-migrates older built-in coding tasks onto
+it, so a task can acquire a gate it never enabled by hand. That gate is a GRAPH post-merge hop:
+workflow-graph-executor only walks it from inside runLegacyMergeSeam (postMergeEntryNodeIds ->
+walk(entryId)), i.e. while the `merge` node is still executing.
+
+Once the merge seam has returned, every later finalization attempt finds the gate unreported and
+returns `blocked`. Nothing re-entered the graph at the post-merge node, so on a repository that
+cannot produce the gate's post-landing CI evidence (a local checkout with no upstream pipeline)
+the card was provably unable to finalize: merged, proven, and permanently parked in review. This
+is the fence the code itself names in self-healing ("Do not strand graph re-entry waiting for
+evidence that can only be produced after merge") — the guard refuses completion but nobody owns
+RUNNING the gate.
+
+So finalization now owns the missing half: when it is about to defer a confirmed merge because a
+required post-merge gate has not reported, it makes that gate runnable again. The refusal to
+complete is preserved exactly (no evidence, no completion); only the terminal silence is removed.
+*/
+async function scheduleMissingPostMergeGate(
+  store: TaskStore,
+  task: Task,
+  blocker: string,
+  log?: (message: string) => Promise<void> | void,
+): Promise<boolean> {
+  const gateIds = [...blocker.matchAll(/gate '([^']+)'/g)].map((match) => match[1]).filter(Boolean);
+  if (gateIds.length === 0) return false;
+
+  // Never race the engine for the card: a live continuation already owns the slot, and the
+  // durable index permits only ONE active kind:"task" row per task. Writing while one exists is
+  // what previously deadlocked the board, so the pre-check stays advisory and the write itself
+  // goes through the atomic replace primitive.
+  let scheduled = false;
+  for (const nodeId of gateIds) {
+    try {
+      const active = await store.listWorkflowWorkItemsForTask(task.id);
+      if (active.some((item) => item.nodeId === nodeId && ACTIVE_WORKFLOW_WORK_ITEM_STATES.includes(item.state as never))) {
+        continue;
+      }
+      const input: Parameters<NonNullable<TaskStore["upsertWorkflowWorkItem"]>>[0] & { kind: "task" } = {
+        runId: `post-merge-gate:${task.id}:${nodeId}`,
+        taskId: task.id,
+        nodeId,
+        nodeInstanceId: nodeId,
+        kind: "task",
+        state: "runnable",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        blockedReason: null,
+        lastError: null,
+        sourceColumn: task.column,
+      };
+      if (typeof store.replaceActiveTaskWorkflowContinuation === "function") {
+        await store.replaceActiveTaskWorkflowContinuation(input);
+      } else if (typeof store.upsertWorkflowWorkItem === "function") {
+        await store.upsertWorkflowWorkItem(input);
+      } else {
+        continue;
+      }
+      scheduled = true;
+      await log?.(`Re-armed unreported post-merge gate '${nodeId}' for ${task.id} so it can run before finalization.`);
+    } catch (err) {
+      // Recording the re-arm is best effort. A failure here must never turn a refused
+      // finalization into a thrown error: the gate stays blocking either way.
+      await log?.(`Could not re-arm post-merge gate '${nodeId}' for ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return scheduled;
+}
+
 /**
  * FNXC:AutoMergeLifecycle 2026-06-22-19:28:
  * Proven auto-merge completion must refresh the authoritative row before moving to done because the merge CAS and queue retry paths can leave a landed task in todo with stale queued/overlap state. Use TaskStore recovery rehome for those column mismatches so completion remains idempotent without direct database surgery.
@@ -259,6 +331,9 @@ export async function finalizeProvenAutoMergeTask({
       auditAgentId,
       auditPhase,
     });
+    // The block stands (no evidence, no completion), but an unreported post-merge gate is a
+    // missing RUN, not a verdict. Re-arm it so the engine can actually produce the evidence.
+    await scheduleMissingPostMergeGate(store, latest, evidenceBlocker, log);
     await log?.(`Auto-merge finalization deferred for ${taskId}: ${evidenceBlocker}`);
     return { outcome: "blocked", task: latest, previousColumn: latest.column, reason: evidenceBlocker };
   }
