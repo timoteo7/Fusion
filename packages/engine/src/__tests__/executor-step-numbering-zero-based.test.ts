@@ -7,7 +7,6 @@ import {
   createWorkflowRoutingAgentStore,
   mockedCreateFnAgent,
   mockedExecSync,
-  mockedExistsSync,
   resetExecutorMocks,
 } from "./executor-test-helpers.js";
 
@@ -28,7 +27,15 @@ function createRoutingExecutor(store: any) {
 describe("executor tool step numbering is 0-based", () => {
   beforeEach(() => {
     resetExecutorMocks();
-    mockedExistsSync.mockReturnValue(true);
+    /*
+    FNXC:EngineTests 2026-09-25-00:00 (FUSI-032 class A):
+    A file-level absolute-truthy `existsSync` here made the task-pinned acquisition path
+    (`/tmp/test/.fusion/worktrees/<taskId>`) read PRESENT, routing acquisition into warm-reuse.
+    Its real `getRegisteredWorktreeBranches` probe returns [] on the non-git test rootDir, so
+    `pinnedWorktreeBranchMatches` throws ("refusing to prove mismatch") and the review-handoff
+    move is never reached. `resetExecutorMocks()` already installs the acquisition default
+    (any `/worktrees/` path reads absent), which is what these routing tests need.
+    */
   });
 
   async function captureTools(stepStates = [
