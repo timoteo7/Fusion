@@ -20,7 +20,8 @@ tags:
 
 # FUSI-020 — main Full Suite failure census and dispositions
 
-Observed 2026-09-25 (UTC) against `Runfusion/Fusion` `main`.
+Observed 2026-09-25 (UTC) against `Runfusion/Fusion` `main` at
+head_sha `b37d0fe26b4faab376b8a60f3d0c3866cf8b0b7f`.
 
 ## Authoritative run
 
@@ -109,12 +110,15 @@ misconfiguration.
 
 Checked **before** treating anything as a regression:
 
-- `scripts/lib/test-quarantine.json` on `main` holds exactly one entry —
+- `scripts/lib/test-quarantine.json` at census head_sha
+  `b37d0fe26b4faab376b8a60f3d0c3866cf8b0b7f` (i.e. `Runfusion/Fusion` `main`
+  as of 2026-09-25) holds exactly one entry —
   `packages/desktop/src/__tests__/native.test.ts` (quarantined 2026-09-24,
-  second-sighting rule). The ledger is **not** empty. That file is **not** among
-  the 117 census files, so no census case is already quarantined; the
-  conclusion rests on the file being absent from the inventory below, not on an
-  empty ledger.
+  second-sighting rule). The ledger is **not** empty. This fork's `main`
+  carries an empty ledger (last touch `bbbfae9be`, 2026-09-12), so the entry
+  count is frame-specific. That file is **not** among the 117 census files, so
+  no census case is already quarantined; the conclusion rests on the file
+  being absent from the inventory below, not on an empty ledger.
 - `docs/solutions/test-failures/suite-only-flakes-observed-register.md` -> the
   only census file it mentions is `src/__tests__/plugin-runner.test.ts`, and that
   record (**entry 3**) is **Closed 2026-08-17 by FN-9141 — rescued (fixture
