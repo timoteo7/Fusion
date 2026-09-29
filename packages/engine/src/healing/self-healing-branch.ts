@@ -49,10 +49,27 @@ export async function isBranchAheadOfBase(
     }
   }
 
+  // FNXC:WorktreeReclaimStrandedBase 2026-09-23-19:02:
+  // Root cause (operator board): `rev-list --count <base>..<branch>` counts the SHARED fork/main lineage as "ahead"
+  // when the branch tip is a descendant of the merge-base (194 forged "stranded commits since a830cde", FUSI-004/019/023,
+  // GDPR-075). Measure from the branch FORK-POINT (where it actually diverged) so shared history is never counted as
+  // unsaved work. A manual rebase/reclaim must never see shared lineage as stranded.
   try {
+    let countRange = `${resolvedBaseRef}..${branchName}`;
+    try {
+      const { stdout: fp } = await execFileAsync(
+        "git",
+        ["merge-base", "--fork-point", branchName, resolvedBaseRef],
+        { cwd: rootDir, timeout: 30_000 },
+      );
+      const forkPoint = fp.trim();
+      if (forkPoint) countRange = `${forkPoint}..${branchName}`;
+    } catch {
+      // fall back to the plain base range when fork-point is unavailable
+    }
     const { stdout } = await execFileAsync(
       "git",
-      ["rev-list", "--count", `${resolvedBaseRef}..${branchName}`],
+      ["rev-list", "--count", countRange],
       { cwd: rootDir, timeout: 30_000 },
     );
     const aheadCount = Number.parseInt(stdout.trim(), 10);
