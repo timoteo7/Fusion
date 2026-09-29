@@ -123,3 +123,7 @@ All `recordRunAuditEventWithinTransaction(tx, ...)` calls and the `recordRunAudi
 ### Merge-boundary evidence recovery (FN-9345)
 
 Missing implementation proof is normally repaired through the workflow's durable task log and graph remediation path before merge admission. On startup and periodic maintenance, `task:merge-boundary-evidence-recovered` records a historic proofless park only after durable unfinished work, lifecycle ownership, liveness, and auto-merge policy are re-verified. These repairs intentionally do not put boundary reason prose, foreach identities, paths, review output, or external capability diagnostics in run-audit metadata. If recovery cannot prove an executable owner, the existing terminal `task:merge-boundary-unproven-parked` event remains the fail-closed audit surface and retains its ids/counts/fixed-outcomes-only contract.
+
+## Self-improvement learning ledger
+
+The self-improvement loop's proposal/evidence ledger follows the same ids/counts/outcomes-only rule for its transition events (when they ship) and emits them through the bounded core seam. See the [Self-Improvement Learning Ledger contract](./self-improvement-ledger.md#run-audit) for the fields, state machine, and reversal contract those events describe.
