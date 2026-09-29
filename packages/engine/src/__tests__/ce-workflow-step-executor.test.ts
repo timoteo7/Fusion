@@ -43,7 +43,7 @@ vi.mock("../worktree/review-diff-fingerprint.js", async (importOriginal) => ({
 import { TaskExecutor } from "../executor.js";
 import type { PluginRunner } from "../plugins/plugin-runner.js";
 import { WorkflowGraphExecutor } from "../workflows/workflow-graph-executor.js";
-import { MERGE_BOUNDARY_UNPROVEN_VALUE } from "../workflows/workflow-merge-nodes.js";
+import { MERGE_BOUNDARY_RECOVERY_VALUE, MERGE_BOUNDARY_UNPROVEN_VALUE } from "../workflows/workflow-merge-nodes.js";
 import { WorktreeBaseRefreshError } from "../worktree/worktree-acquisition.js";
 import {
   createMockStore,
@@ -292,7 +292,6 @@ describe("CE workflow-step executor integration", () => {
 
   beforeEach(() => {
     resetExecutorMocks();
-    mockedExistsSync.mockReturnValue(true);
     quietGit();
   });
 
@@ -442,7 +441,11 @@ describe("CE workflow-step executor integration", () => {
 
     it("reacquires a task worktree when a CE graph node finds a stale missing checkout", async () => {
       const store = createMockStore();
-      mockedExistsSync.mockImplementation((path) => path !== "/tmp/test/.worktrees/missing-ce-checkout");
+      // Keep this test's named stale path absent (so the reacquire branch still runs) AND keep the
+      // task-pinned path absent, which is the acquisition default resetExecutorMocks() installs.
+      mockedExistsSync.mockImplementation(
+        (path) => path !== "/tmp/test/.worktrees/missing-ce-checkout" && !/[\\/]\.fusion[\\/]worktrees[\\/]/.test(String(path)),
+      );
       let live = baseStepTask({
         worktree: "/tmp/test/.worktrees/missing-ce-checkout",
         branch: "fusion/fn-ce-1",
@@ -517,7 +520,12 @@ describe("CE workflow-step executor integration", () => {
       ["reuses a live worktree", "/tmp/test/.worktrees/live-code-review", "/tmp/test/.worktrees/live-code-review", 0],
       ["reacquires a stale worktree", "/tmp/test/.worktrees/stale-code-review", "/tmp/test/.worktrees/acquired-code-review", 1],
     ])("prepares an inline-fix Code Review node when it %s", async (_scenario, existingWorktree, expectedWorktree, acquisitionCount) => {
-      mockedExistsSync.mockImplementation((path) => path !== "/tmp/test/.worktrees/stale-code-review");
+      // Same acquisition default as the case above: the named stale path stays absent, the
+      // task-pinned path stays absent. Row 2 ("reuses a live worktree") relies on its own
+      // non-pinned existingWorktree reading truthy, which this predicate preserves.
+      mockedExistsSync.mockImplementation(
+        (path) => path !== "/tmp/test/.worktrees/stale-code-review" && !/[\\/]\.fusion[\\/]worktrees[\\/]/.test(String(path)),
+      );
       const store = createMockStore();
       let live = baseStepTask({
         worktree: existingWorktree,
@@ -616,6 +624,14 @@ describe("CE workflow-step executor integration", () => {
         error: null,
         mergeDetails: { mergeConfirmed: true, commitSha: "abc123" },
         steps: [{ name: "Preflight", status: "done" }],
+        // FN-9370 fenced the terminal move on post-merge evidence. A reported, approved
+        // post-merge-verification gate result is that fence's PRECONDITION, not a weakened
+        // assertion: the fence still refuses when it is absent (see the sibling case below,
+        // which keeps the refusal green).
+        enabledWorkflowSteps: ["post-merge-verification"],
+        workflowStepResults: [
+          { workflowStepId: "post-merge-verification", status: "passed", verdict: "APPROVE" },
+        ],
       });
       store.getTask.mockImplementation(async () => live as any);
       store.updateTask.mockImplementation(async (_id: string, patch: Record<string, unknown>) => {
@@ -631,10 +647,20 @@ describe("CE workflow-step executor integration", () => {
       const handled = await (executor as any).finalizeMergeConfirmedWorkflowGraphTask("FN-CE-1", "test");
 
       expect(handled).toBe(true);
-      expect(store.moveTask).toHaveBeenCalledWith("FN-CE-1", "done", expect.objectContaining({
-        recoveryRehome: true,
-        preserveProgress: true,
-      }));
+      // FN-9370 replaced the unguarded moveTask with a predicate-fenced moveTaskIf. The seam the
+      // product now owns is moveTaskIf plus its provenance options; moveTask is what the fake
+      // delegates to once the predicate passes, so asserting moveTask would not prove the fence ran.
+      expect(store.moveTaskIf).toHaveBeenCalledWith(
+        "FN-CE-1",
+        "done",
+        expect.any(Function),
+        expect.objectContaining({
+          moveSource: "engine",
+          workflowMoveSource: "auto-merge-finalization",
+          recoveryRehome: true,
+          preserveProgress: true,
+        }),
+      );
       expect(live.column).toBe("done");
       expect(live.mergeDetails?.mergeConfirmed).toBe(true);
     });
@@ -718,7 +744,7 @@ describe("CE workflow-step executor integration", () => {
       */
       expect(result).toEqual(expect.objectContaining({
         outcome: "failure",
-        value: MERGE_BOUNDARY_UNPROVEN_VALUE,
+        value: MERGE_BOUNDARY_RECOVERY_VALUE,
       }));
       expect(mergeRequester).not.toHaveBeenCalled();
       /*
