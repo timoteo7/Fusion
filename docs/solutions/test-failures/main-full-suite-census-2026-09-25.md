@@ -34,37 +34,92 @@ Observed 2026-09-25 (UTC) against `Runfusion/Fusion` `main`.
 | previous run | #3157 (`36099164485`, `bade425e74...`, `2026-09-25T05:34:58Z`, `failure`) |
 | last green main push run | **#1396**, `2026-07-26T04:14:37Z` |
 
-The lane has been red on **every** main push since #1396 — **1762 consecutive
-red runs**, API-verified:
+The lane has been red on **every** main push since #1396 — **1770 consecutive
+red runs** as measured `2026-09-29T08:13Z`, API-verified:
 
 ```
 WF='repos/Runfusion/Fusion/actions/workflows/full-suite.yml/runs?branch=main&created=>2026-07-26T04:14:37Z&per_page=1'
-gh api "$WF" --jq .total_count                        # 1762
+gh api "$WF" --jq .total_count                        # 1771 (1770 completed + 1 in progress)
 gh api "$WF&status=success" --jq .total_count         # 0
-gh api "$WF&status=failure" --jq .total_count         # 1762
+gh api "$WF&status=failure" --jq .total_count         # 1770
 ```
 
-#1396 is the last green (`2026-07-26T04:14:37Z`), so the red streak is runs
-#1397-#3158 inclusive = 1762, with zero successes, cancellations or skips in
-between. The original intake window (2026-09-23 02:01Z-04:38Z, 6 runs) is a
-subset of this unbroken red period; the failing job set is unchanged:
-`Test shard 1/4`-`4/4` plus `Pipeline smoke tier`.
+**This number is a dated measurement, not a property of the lane.** Every main
+push extends the streak by one, so the figure above was already 1766 when first
+written and is 1770 now; a reader who copies it forward without re-running the
+command states a falsehood. Quote the streak only with its as-of run number and
+timestamp — `1770 completed red runs (#1397-#3166, as of #3167 in_progress
+2026-09-29T08:13Z)` — and re-measure rather than incrementing a remembered
+total. The *shape* of the claim is the stable fact here: zero successes since
+#1396, verified by `status=success` returning 0 over the whole window. That
+number does not drift.
 
-**Re-measuring the streak — two traps.** Count with `.total_count` (or the
-run-number arithmetic `last_run - 1396`), never with `gh api --paginate`: the
-paginated walk of this 1762-run window returns 1000 items and silently reads
-as a shorter streak. And the streak is **frozen at #3158** — as of
-2026-09-28T05:40Z upstream `main` has produced no Full Suite run after it
-(`per_page=100` ceiling = #3158, zero runs above), and the newest run of *any*
-workflow on `main` is an unrelated dependabot `github_actions` update at
-2026-09-27T02:12:31Z. A re-measurement that reports "still 1762" is therefore
-confirming a static number, not a lane that is still being exercised.
+#1396 is the last green (`2026-07-26T04:14:37Z`), so the completed red streak is
+runs #1397-#3166 inclusive = 1770, with zero successes in between. The original
+intake window (2026-09-23 02:01Z-04:38Z, 6 runs) is a subset of this unbroken
+red period; the failing job set is unchanged: `Test shard 1/4`-`4/4` plus
+`Pipeline smoke tier`.
+
+**Re-measuring the streak — three traps.** Count with `.total_count` (or the
+run-number arithmetic `last_completed_run - 1396`), never with
+`gh api --paginate`: the paginated walk of this >1700-run window returns 1000
+items and silently reads as a shorter streak. Read `.total_count` against
+`.status=failure` and expect them to differ by the in-flight run — on
+`2026-09-29T08:13Z` `total_count` was 1771 while `status=failure` was 1770,
+because #3167 was still `in_progress` (#3166, `a6e65a5af`, 2026-09-29T07:29:40Z,
+is the last *completed* red run at that measurement). Report the completed
+streak and name the in-flight run separately; a bare "1771" is not a streak
+length.
+
+The third trap is the one that produced a false "frozen" reading. An earlier
+revision of this doc asserted the streak was **frozen at #3158** because
+`per_page=100` returned #3158 as the newest run. That inference was wrong: the
+window is >1700 runs deep, and a 100-item page cannot show the head of a
+>100-item result set. Upstream `main` has in fact produced #3159-#3163 since
+(2026-09-29T03:06:53Z onward, every one a failure), so the lane is still being
+exercised and the streak is still growing. When a paginated call seems to prove
+a lane has stopped, re-query with a small `per_page` (which returns the newest
+runs) and cross-check the arithmetic before concluding anything stopped.
+
+A related pagination hazard: the list endpoint is not guaranteed to return a
+consistent snapshot across `per_page` values taken seconds apart. A
+`per_page=3` call returned runs #3150-#3152 — *older* than the five newest —
+while `per_page=5` and `per_page=1` returned #3159-#3163. Re-run a discrepant
+query before recording any number, and prefer `per_page=1` plus
+`.total_count`.
 
 ## Census — 233 named failing cases across 117 files
 
-Extracted from the #3158 job logs: every `FAIL <project> <file> > <suite > case>`
-line, paired with its following error line, then de-duplicated on
-`(shard, file, case, error)`.
+Extracted from the #3158 job logs: every `FAIL` line, paired with its following
+error line, then de-duplicated on `(shard, file, case, error)`.
+
+**The `FAIL` line has three different shapes across the four shards — a
+project-column-only parser silently loses a whole shard.** The `<project>`
+placeholder in `FAIL <project> <file> > <suite > case>` is real only in the two
+engine shards, and there it is a **vitest project name**, not a path. Verified
+verbatim against run #3162's job logs:
+
+| shard | verbatim shape | project column? |
+|---|---|---|
+| 1/4, 2/4 (`@fusion/engine`) | `FAIL   engine-reliability  src/__tests__/… > suite > case` | yes — a vitest project name (`engine-reliability`, `engine-default`) |
+| 3/4 (`@runfusion/fusion` CLI) | `packages/cli test:  FAIL  src/__tests__/… > suite > case` | no — the pnpm stream prefix sits *before* `FAIL` |
+| 4/4 (`@fusion/core`) | `FAIL  src/__tests__/… > suite > case` | no column at all |
+
+Because shards 1 and 2 are the only ones carrying that column, a parser written
+against them reads 110 + 107 = **217** of the 233 cases, drops shard 4/4
+entirely, and errors on nothing — the shard 3/4 lines simply fail to match. A
+parser that strips an optional leading token instead matches all four shards.
+Anchor on `FAIL` followed by whitespace and `src/`, and treat any leading
+segment as optional.
+
+Two further hazards in the same extraction: the bare substring `FAIL` is **not**
+a failure-line marker. In the CLI shard log it also matches `- \`ACTION_FAILED\``,
+`- \`SCREENSHOT_FAILED\`` and pnpm's own
+`ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL` summary line — 3 decoys against 2 real
+`FAIL` lines in shard 3/4 of run #3162, which would over-count that shard. And
+the logs are byte streams containing NUL/ANSI bytes, so `grep` reports them as
+binary and silently prints `binary file matches` instead of the lines; use
+`grep -a` (or `--text`) or the counts come back empty.
 
 | job | `FAIL` lines | named cases | distinct files |
 |---|---|---|---|
@@ -281,14 +336,16 @@ this task's File Scope and are carried by FUSI-030…037, so the Full Suite lane
 stays red on main until those land. The next main push run turning green is the
 operator-visible confirmation and cannot be produced by this branch alone.
 
-**That confirmation has two open links, not one.** (1) A human with upstream
-write access must port `3088670` to `Runfusion/Fusion`. (2) Upstream `main` must
-then *produce* a Full Suite run at all — as of 2026-09-28T05:40Z it has produced
-none after #3158, so there is no "next main push run" to cite and no operator can
-currently observe the lane at all. Neither link is an agent action, and even
-after both close the lane stays red until the 216 carried cases in FUSI-030…037
-land. Do not treat "the port is done" as completion: it is necessary, not
-sufficient.
+**That confirmation needed two links; both have since closed, and it still has
+not happened.** (1) A human with upstream write access had to port `3088670` to
+`Runfusion/Fusion` — done, `3088670` is an ancestor of `origin/main`. (2)
+Upstream `main` had to *produce* a Full Suite run to cite at all — also now
+satisfied, and this is what falsified the earlier "frozen at #3158" claim: runs
+#3159-#3163 have landed since, all failures. So the operator-visible surface
+exists again and is being exercised, yet the lane is still red: a run existing
+is not a run turning green. Treat the port as necessary, never sufficient; the
+confirmation remains outstanding until an actual green main push run exists,
+and even then the 216 carried cases in FUSI-030…037 must land first.
 
 ## Remaining follow-ups (out of this task's scope)
 
