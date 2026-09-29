@@ -152,7 +152,7 @@ describe("graph-node unusable-worktree failure recovery (FN-7996)", () => {
     mockedExecSync.mockReturnValue("" as any);
   });
 
-  it("requeues to todo with cleared worktree metadata instead of terminal-parking", async () => {
+  it("clears stale worktree metadata and retains the card in its own column instead of terminal-parking", async () => {
     const initial = makeTask();
     const { store, getLive } = trackingStore(initial);
     const executor = new TaskExecutor(store, "/tmp/test");

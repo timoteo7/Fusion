@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+/*
+FNXC:MergerMoveAttribution 2026-09-25-10:35:
+A successful merge lands the card via completeTask()'s store.moveTask(taskId, column, { workflowMoveSource:
+"merger-complete-task" }) (merger.ts, FNXC:MergerMoveAttribution 2026-08-29). The retired 2-arg assertion is
+re-anchored onto the current 3-arg completion seam; the "merge succeeded => moved to done" invariant is unchanged.
+*/
+
 // Mock external dependencies
 vi.mock("../pi.js", () => ({
   createFnAgent: vi.fn(),
@@ -628,7 +635,7 @@ describe("aiMergeTask — skill selection non-fatal diagnostics (FN-1510/FN-1511
     });
 
     expect(result.merged).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
   });
 
   it("records skill source in context result for debugging", async () => {

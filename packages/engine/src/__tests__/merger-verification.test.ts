@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+/*
+FNXC:MergerMoveAttribution 2026-09-25-10:35:
+Every assertion below that a successful merge lands the card in "done" pins the CURRENT 3-arg completion
+seam: completeTask() calls store.moveTask(taskId, column, { workflowMoveSource: "merger-complete-task" })
+(FNXC:MergerMoveAttribution 2026-08-29, merger.ts). The former 2-arg form is retired; the passing sibling
+suite merger-merge-lifecycle.test.ts already asserts the same objectContaining({ workflowMoveSource }) shape.
+These re-anchors keep the "merge succeeded => moved to done" invariant intact and are not loosened matches.
+*/
+
 // Mock external dependencies
 vi.mock("../pi.js", () => ({
   createFnAgent: vi.fn(),
@@ -420,7 +429,7 @@ describe("aiMergeTask — build verification", () => {
     const result = await aiMergeTask(store, "/tmp/root", "FN-050");
 
     expect(result.merged).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
   });
 
   it("merge aborts when build fails via fn_report_build_failure tool", async () => {
@@ -559,7 +568,7 @@ describe("aiMergeTask — build verification", () => {
     const result = await aiMergeTask(store, "/tmp/root", "FN-050");
 
     expect(result.merged).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
   });
 
   it("merge proceeds when buildCommand is empty string (treated as undefined)", async () => {
@@ -583,7 +592,7 @@ describe("aiMergeTask — build verification", () => {
     const result = await aiMergeTask(store, "/tmp/root", "FN-050");
 
     expect(result.merged).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
   });
 
   function setupDependencySyncVerificationScenario({
@@ -1108,7 +1117,7 @@ describe("aiMergeTask — deterministic merge verification", () => {
     const result = await aiMergeTask(store, "/tmp/root", "FN-050");
 
     expect(result.merged).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
     expect(store.logEntry).toHaveBeenCalledWith(
       "FN-050",
       expect.stringMatching(/^\[timing\] \[verification\] test command succeeded \(exit 0(?:, output exceeded buffer)?\) in \d+ms$/),
@@ -1909,7 +1918,7 @@ describe("aiMergeTask — inferred test command execution", () => {
     await aiMergeTask(store, "/tmp/root", "FN-050");
 
     expect(verificationCalls).toContain("pnpm test");
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
   });
 
   it("logs that test command was inferred from project files", async () => {
@@ -2086,7 +2095,7 @@ describe("aiMergeTask — inferred test command execution", () => {
     expect(verificationCalls).toHaveLength(0);
     // Merge should still succeed
     expect(result.merged).toBe(true);
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
   });
 });
 
@@ -2297,6 +2306,13 @@ describe("aiMergeTask — in-merge verification fix", () => {
   });
 
   it("logs fix-agent startup metadata, streams callbacks, and logs rerun lifecycle", async () => {
+    /*
+    FNXC:ToolLogDetail 2026-09-25-10:35:
+    The fix agent's onToolStart("Bash", { command: "vitest run" }) is logged by AgentLogger as
+    appendAgentLog(taskId, "Bash", "tool", summarizeToolArgs(...), "merger"); FN-253 made the tool detail
+    visible by default, so the 4th arg is "vitest run", not the retired undefined. The assertion pins the
+    current detail-bearing contract.
+    */
     let capturedFixOptions: any;
 
     mockedExecSync.mockImplementation((cmd: any) => {
@@ -2367,7 +2383,7 @@ describe("aiMergeTask — in-merge verification fix", () => {
     expect(capturedFixOptions.onToolStart).toBeTypeOf("function");
     expect(capturedFixOptions.onToolEnd).toBeTypeOf("function");
 
-    expect(store.appendAgentLog).toHaveBeenCalledWith("FN-050", "Bash", "tool", undefined, "merger");
+    expect(store.appendAgentLog).toHaveBeenCalledWith("FN-050", "Bash", "tool", "vitest run", "merger");
 
     const logMessages = (store.logEntry as ReturnType<typeof vi.fn>).mock.calls
       .map((call: any[]) => call[1])

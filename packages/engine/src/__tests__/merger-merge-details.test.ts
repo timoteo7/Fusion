@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+/*
+FNXC:MergerMoveAttribution 2026-09-25-10:35:
+A successful merge lands the card via completeTask()'s store.moveTask(taskId, column, { workflowMoveSource:
+"merger-complete-task" }) (merger.ts, FNXC:MergerMoveAttribution 2026-08-29). The retired 2-arg assertion is
+re-anchored onto the current 3-arg completion seam; "merge succeeded => moved to done" is unchanged even when
+the merge-details collection itself failed, which is the point of this case.
+*/
+
 // Mock external dependencies
 vi.mock("../pi.js", () => ({
   createFnAgent: vi.fn(),
@@ -505,6 +513,13 @@ describe("aiMergeTask — agent log persistence", () => {
   });
 
   it("logs tool invocations to store.appendAgentLog", async () => {
+    /*
+    FNXC:ToolLogDetail 2026-09-25-10:35:
+    AgentLogger's onToolStart writes appendAgentLog(taskId, name, "tool", summarizeToolArgs(name, args), lane).
+    FN-253 (FNXC:AgentLogging 2026-08-29) made complete tool arguments visible by default, so a Bash call with
+    { command: "git status" } records "git status" as the 4th arg — not the retired undefined. This assertion
+    pins the CURRENT detail-bearing contract; it is not a loosened match.
+    */
     let capturedOnToolStart: ((name: string, args: any) => void) | undefined;
 
     mockedCreateFnAgent.mockImplementation(async (opts: any) => {
@@ -527,7 +542,7 @@ describe("aiMergeTask — agent log persistence", () => {
 
     await aiMergeTask(store, "/tmp/root", "FN-050");
 
-    expect(store.appendAgentLog).toHaveBeenCalledWith("FN-050", "Bash", "tool", undefined, "merger");
+    expect(store.appendAgentLog).toHaveBeenCalledWith("FN-050", "Bash", "tool", "git status", "merger");
   });
 
   it("still fires onAgentText callback alongside logging", async () => {
@@ -1130,7 +1145,7 @@ describe("aiMergeTask — merge details collection", () => {
     expect(mergeDetailsCall).toBeUndefined();
 
     // Task should still be moved to done
-    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-050", "done", expect.objectContaining({ workflowMoveSource: "merger-complete-task" }));
   });
 
   it("handles missing shortstat gracefully when show --shortstat fails", async () => {
