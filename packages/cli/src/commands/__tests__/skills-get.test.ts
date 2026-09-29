@@ -55,12 +55,34 @@ describe("fn skills get", () => {
     expect(branch).not.toMatch(/\b(?:readFile|readFileSync|fetch|spawn|exec)\s*\(/);
   });
 
+  /*
+   * FNXC:ComputerUseSkill built-CLI budget (CI shard lane, b4cddcbd9):
+   * Every assertion below needs the BUILT binary, and each boot of `dist/bin.js` is a
+   * single ~19 MB ESM bundle: ~1.0 s per spawn on a warm developer box, 2-3 s on a
+   * shared GitHub runner. This test used to do three of those boots back to back inside
+   * one `it`, so it needed ~3.1 s locally against Vitest's 5000 ms default and blew that
+   * default on the shard runner (this lane's exact "Test timed out in 5000ms"). Nothing
+   * hung; three serial cold boots simply did not fit one test's budget.
+   *
+   * The cost is structural, so the seam changes rather than the budget: raising testTimeout
+   * is refused by scripts/check-no-test-timeout-appeasement.mjs and would hide a real
+   * regression, and no product seam is involved (the guide is rendered in-process by
+   * design). The two independent invocations are now awaited TOGETHER, so their boots
+   * overlap instead of summing, and the error-path boot moved to its own test. Wall clock
+   * is now one boot rather than three, and the assertions are unchanged: the guide must
+   * still come from the built entry point, and its embedded version must still be the
+   * version that same built binary reports for --version.
+   */
   it("prints a guide and version from the same built CLI entry point", async () => {
-    const guide = await execFile(process.execPath, [builtCli, "skills", "get", "computer-use"], { cwd: cliRoot });
-    const version = await execFile(process.execPath, [builtCli, "--version"], { cwd: cliRoot });
+    const [guide, version] = await Promise.all([
+      execFile(process.execPath, [builtCli, "skills", "get", "computer-use"], { cwd: cliRoot }),
+      execFile(process.execPath, [builtCli, "--version"], { cwd: cliRoot }),
+    ]);
     for (const heading of COMPUTER_USE_GUIDE_HEADINGS) expect(guide.stdout).toContain(heading);
     expect(guide.stdout).toContain(`# Fusion computer-use guide (v${version.stdout.trim()})`);
+  });
 
+  it("rejects an unknown skill from the built CLI entry point", async () => {
     await expect(execFile(process.execPath, [builtCli, "skills", "get", "definitely-not-a-skill"], { cwd: cliRoot }))
       .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("computer-use") });
   });
