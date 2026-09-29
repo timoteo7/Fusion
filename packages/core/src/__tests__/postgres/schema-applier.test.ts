@@ -117,6 +117,7 @@ import {
   CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION,
   OVERLAP_WAIT_SYNC_VERSION,
   DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
+  SELFIMPROVE_LEARNING_LEDGER_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
 import type { PluginSchemaInitHook } from "../../postgres/plugin-schema-hook.js";
@@ -173,7 +174,8 @@ describe("schema-applier: immutable migration identities", () => {
     expect(TASK_PLANNING_FAILURE_VERSION).toBe("0072");
     expect(CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION).toBe("0073");
     expect(Number(SCHEMA_BASELINE_VERSION)).toBeGreaterThanOrEqual(Number(CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION));
-    expect(SCHEMA_BASELINE_VERSION).toBe("0085");
+    expect(SELFIMPROVE_LEARNING_LEDGER_VERSION).toBe("0086");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0086");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -702,7 +704,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 113 project tables, 17 central tables, 1 archive table", async () => {
+  it("creates all 118 project tables, 17 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -724,10 +726,11 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     refusal marker (100 → 105); later baseline additions bring the count to 106; and 0048 adds
     GitHub check state (106 → 107); 0049 adds the agent-activity outbox and counter (→ 109);
     0050 adds immutable lock, evidence, and report history (109 → 112); 0052 adds recall records (→ 113);
-    0060 adds workspace coordination leases and land intents (→ 115); 0071 adds patchnode_entries and 0084 adds task_overlap_waits (→ 117). Plugin tables are added separately
+    0060 adds workspace coordination leases and land intents (→ 115); 0071 adds patchnode_entries and 0084 adds task_overlap_waits (→ 117);
+    0086 adds the self-improvement learning ledger's learning_proposals (117 → 118). Plugin tables are added separately
     by the schema-init hook and are excluded here.
     */
-    expect(bySchema.project).toBe(117);
+    expect(bySchema.project).toBe(118);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
@@ -1923,6 +1926,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       TASK_PLANNING_FAILURE_VERSION,
       OVERLAP_WAIT_SYNC_VERSION,
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
+      SELFIMPROVE_LEARNING_LEDGER_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
   });
@@ -2024,6 +2028,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION,
       OVERLAP_WAIT_SYNC_VERSION,
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
+      SELFIMPROVE_LEARNING_LEDGER_VERSION,
     ]);
   });
 
@@ -2258,6 +2263,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION,
       OVERLAP_WAIT_SYNC_VERSION,
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
+      SELFIMPROVE_LEARNING_LEDGER_VERSION,
     ]);
   });
 
@@ -2373,6 +2379,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION,
       OVERLAP_WAIT_SYNC_VERSION,
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
+      SELFIMPROVE_LEARNING_LEDGER_VERSION,
     ]);
   });
 
@@ -2488,6 +2495,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION,
       OVERLAP_WAIT_SYNC_VERSION,
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
+      SELFIMPROVE_LEARNING_LEDGER_VERSION,
     ]);
   });
 });

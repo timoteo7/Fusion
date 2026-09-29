@@ -100,6 +100,7 @@ import {
   PLANNING_ACTIVE_TIMING_VERSION,
   PROJECT_OWNERSHIP_SCHEMA_VERSION,
   QUEUED_EPISODE_SIGNATURE_VERSION,
+  SELFIMPROVE_LEARNING_LEDGER_VERSION,
   REMOVE_TASK_SUBTASK_SPLITTING_VERSION,
   RESEARCH_FEATURE_PROVENANCE_VERSION,
   REVIEW_CONVERGENCE_STAGE_VERSION,
@@ -366,6 +367,7 @@ export const RESTORED_SCHEMA_RELATION_SENTINELS: readonly RestoredSchemaRelation
   { version: TASK_REQUIRE_PLAN_APPROVAL_VERSION, columns: [tasksColumn("require_plan_approval")] },
   { version: PATCHNODE_ENTRIES_VERSION, relations: ["project.patchnode_entries"] },
   { version: OVERLAP_WAIT_SYNC_VERSION, relations: ["project.task_overlap_waits"] },
+  { version: SELFIMPROVE_LEARNING_LEDGER_VERSION, relations: ["project.learning_proposals"] },
 ];
 
 export async function detectRestoredSchemaRewindFloor(

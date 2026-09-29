@@ -740,6 +740,41 @@ export const patchnodeEntries = projectSchema.table("patchnode_entries", {
   index("idxPatchnodeEntriesTaskKind").on(t.projectId, t.taskId, t.kind, t.occurredAt),
 ]);
 
+/*
+FNXC:SelfImproveLearningLedger 2026-09-29-02:38:
+The self-improvement ledger follows the patchnode precedent rather than the schema's task
+foreign-key convention: a proposal is a learning record about a product surface, not a child of
+any task, and must stay readable after task archive cleanup hard-deletes task rows.
+Composite PK (project_id, proposal_id) keeps one live record per proposal per project, which is
+what makes re-application version that record in place instead of multiplying rows.
+CHECK constraints mirror the TS contract exactly (four states, confidence in 0..1) so a row that
+violates the domain model is rejected by the database rather than read back as truth.
+value/prior_value/evidence_refs are jsonb: evidence refs are a structured list, not prose, and
+prior_value is nullable precisely because no value is held before the first application.
+*/
+export const learningProposals = projectSchema.table("learning_proposals", {
+  projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`),
+  proposalId: text("proposal_id").notNull(),
+  target: text("target").notNull(),
+  origin: text("origin").notNull(),
+  confidence: real("confidence").notNull(),
+  value: real("value").notNull(),
+  priorValue: real("prior_value"),
+  expiresAt: text("expires_at"),
+  evidenceRefs: jsonb("evidence_refs").notNull().default(sql`'[]'::jsonb`),
+  state: text("state").notNull(),
+  version: integer("version").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.projectId, t.proposalId] }),
+  check("learning_proposals_state_check", sql`${t.state} IN ('proposed', 'applied', 'reverted', 'expired')`),
+  check("learning_proposals_target_check", sql`${t.target} IN ('memory', 'evals', 'skills')`),
+  check("learning_proposals_confidence_check", sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`),
+  check("learning_proposals_value_check", sql`${t.value} >= 0 AND ${t.value} <= 1`),
+  index("idxLearningProposalsTargetState").on(t.projectId, t.target, t.state),
+  index("idxLearningProposalsCreated").on(t.projectId, t.createdAt),
+]);
+
 export const agentActivityEventSeq = projectSchema.table("agent_activity_event_seq", {
   projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`), lastSeq: bigint("last_seq", { mode: "bigint" }).notNull().default(sql`0`),
 }, (t) => [primaryKey({ columns: [t.projectId] })]);
@@ -2713,4 +2748,5 @@ export const projectTableNames = [
   "task_lifecycle_consumer_receipts", "task_lifecycle_consumer_registrations",
   "task_lifecycle_event_seq", "task_lifecycle_events", "task_verification_requests",
   "unplanned_execution_blocks", "workflow_agent_capacity_leases", "task_overlap_waits",
+  "learning_proposals",
 ] as const;
