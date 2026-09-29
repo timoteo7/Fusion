@@ -34,18 +34,28 @@ Observed 2026-09-25 (UTC) against `Runfusion/Fusion` `main`.
 | previous run | #3157 (`36099164485`, `bade425e74...`, `2026-09-25T05:34:58Z`, `failure`) |
 | last green main push run | **#1396**, `2026-07-26T04:14:37Z` |
 
-The lane has been red on **every** main push since #1396 — **1766 consecutive
-red runs**, API-verified:
+The lane has been red on **every** main push since #1396 — **1770 consecutive
+red runs** as measured `2026-09-29T08:13Z`, API-verified:
 
 ```
 WF='repos/Runfusion/Fusion/actions/workflows/full-suite.yml/runs?branch=main&created=>2026-07-26T04:14:37Z&per_page=1'
-gh api "$WF" --jq .total_count                        # 1767 (1766 completed + 1 in progress)
+gh api "$WF" --jq .total_count                        # 1771 (1770 completed + 1 in progress)
 gh api "$WF&status=success" --jq .total_count         # 0
-gh api "$WF&status=failure" --jq .total_count         # 1766
+gh api "$WF&status=failure" --jq .total_count         # 1770
 ```
 
+**This number is a dated measurement, not a property of the lane.** Every main
+push extends the streak by one, so the figure above was already 1766 when first
+written and is 1770 now; a reader who copies it forward without re-running the
+command states a falsehood. Quote the streak only with its as-of run number and
+timestamp — `1770 completed red runs (#1397-#3166, as of #3167 in_progress
+2026-09-29T08:13Z)` — and re-measure rather than incrementing a remembered
+total. The *shape* of the claim is the stable fact here: zero successes since
+#1396, verified by `status=success` returning 0 over the whole window. That
+number does not drift.
+
 #1396 is the last green (`2026-07-26T04:14:37Z`), so the completed red streak is
-runs #1397-#3162 inclusive = 1766, with zero successes in between. The original
+runs #1397-#3166 inclusive = 1770, with zero successes in between. The original
 intake window (2026-09-23 02:01Z-04:38Z, 6 runs) is a subset of this unbroken
 red period; the failing job set is unchanged: `Test shard 1/4`-`4/4` plus
 `Pipeline smoke tier`.
@@ -55,10 +65,11 @@ run-number arithmetic `last_completed_run - 1396`), never with
 `gh api --paginate`: the paginated walk of this >1700-run window returns 1000
 items and silently reads as a shorter streak. Read `.total_count` against
 `.status=failure` and expect them to differ by the in-flight run — on
-2026-09-29 `total_count` is 1767 while `status=failure` is 1766, because #3163
-was still `in_progress` (#3162, `2848f5cad`, 2026-09-29T05:55:50Z, is the last
-*completed* red run). Report the completed streak and name the in-flight run
-separately; a bare "1767" is not a streak length.
+`2026-09-29T08:13Z` `total_count` was 1771 while `status=failure` was 1770,
+because #3167 was still `in_progress` (#3166, `a6e65a5af`, 2026-09-29T07:29:40Z,
+is the last *completed* red run at that measurement). Report the completed
+streak and name the in-flight run separately; a bare "1771" is not a streak
+length.
 
 The third trap is the one that produced a false "frozen" reading. An earlier
 revision of this doc asserted the streak was **frozen at #3158** because
