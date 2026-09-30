@@ -191,16 +191,27 @@ import {
   type RecordLearningReversalInput,
 } from "./task-store/async/async-learning-ledger.js";
 import {
+  emitSelfImproveGateVerdictRecorded,
   emitSelfImproveProposalApplied,
   emitSelfImproveProposalCreated,
   emitSelfImproveProposalReverted,
 } from "./self-improve/self-improve-run-audit.js";
 import { revertLearningApplication } from "./task-store/async/async-learning-revert.js";
+import {
+  listLearningGateVerdicts,
+  readLearningGateVerdictByBaseline,
+  readLearningGateVerdictByExperiment,
+  recordLearningGateVerdict,
+  type LearningGateVerdictPage,
+  type LearningGateVerdictQuery,
+  type RecordLearningGateVerdictResult,
+} from "./task-store/async/async-learning-gate-verdicts.js";
 import { buildPatchnodeEntryId, buildPatchnodeEntryInput } from "./board/patchnode.js";
 import type { PatchnodeEntry, PatchnodeQuery } from "./types/task/patchnode.js";
 import type { LearningProposal } from "./types/self-improve/learning-proposal.js";
 import type { LearningLedgerEvent, LearningLedgerPage, LearningLedgerQuery } from "./self-improve/ledger-events.js";
 import type { LearningRevertInput, LearningRevertResult } from "./self-improve/learning-revert-types.js";
+import type { LearningGateVerdictInput } from "./types/self-improve/learning-gate-verdict.js";
 import { resolveWorkflowIrForTask } from "./workflows/workflow-ir-resolver.js";
 // FNXC:RuntimeBackendAsync 2026-06-24-10:15:
 // Async helper imports for backend-mode (AsyncDataLayer/PostgreSQL) delegation.
@@ -1361,6 +1372,88 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
   async listLearningProposals(query: LearningLedgerQuery = {}): Promise<LearningLedgerPage> {
     if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
     return listLearningProposals(this.asyncLayer, query);
+  }
+
+  /*
+  FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+  The gate-verdict writer awaits the INSERT, then fires the audit façade UNAWAITED through `this`
+  as the audit host — exactly the shape the three proposal delegations use. The row is already
+  committed by the time emission starts, and the bounded seam never throws or rejects, so a sink
+  that is absent, throws, rejects, or hangs changes what is OBSERVED and nothing about what the
+  verdict DID. That is the invariant that lets a learning experiment be judged on its deterministic
+  gate verdict rather than on whether telemetry was healthy: telemetry must never sit on the
+  verdict's success path.
+
+  FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+  Both verdicts the façade records are the STORED ones from the committed row, never the caller's
+  raw input, so the audit row can never disagree with the durable verdict it mirrors. An
+  `already-recorded` re-attempt still emits, with the fixed `already-recorded` outcome, so a repeat
+  is visible as a repeat rather than being indistinguishable from a first record.
+
+  FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+  The three readers are EMISSION-FREE. A pure read is not a transition, and a run-audit row for a
+  lookup would make "how many times did someone LOOK at this experiment?" indistinguishable from
+  "how many times did the gate JUDGE it?", which is the one distinction this whole record exists to
+  preserve.
+  */
+  async recordLearningGateVerdict(
+    input: LearningGateVerdictInput & { occurredAt?: string },
+  ): Promise<RecordLearningGateVerdictResult> {
+    if (!this.asyncLayer) throw new Error("Learning gate verdicts require an async data layer");
+    const result = await recordLearningGateVerdict(this.asyncLayer, input);
+    const stored = result.record;
+    if (stored) {
+      void emitSelfImproveGateVerdictRecorded({
+        host: this,
+        experimentId: stored.experimentId,
+        baselineId: stored.baselineId,
+        projectId: this.asyncLayer.projectId ?? undefined,
+        timestamp: stored.occurredAt,
+        resolvedVerdict: stored.resolvedVerdict,
+        primaryVerdict: stored.primaryVerdict,
+        canaryVerdict: stored.canaryVerdict,
+        precedenceOutcome: stored.precedenceOutcome,
+        inputFingerprint: stored.inputFingerprint,
+        corpusVersion: stored.primarySignals.corpusVersion,
+        seed: stored.primarySignals.seed,
+        outcome: result.outcome,
+      });
+    } else {
+      // `already-recorded` appended nothing, so there is no committed row to mirror. The resolution
+      // is deterministic from the same inputs, so emitting it with the fixed already-recorded
+      // outcome keeps a repeat visible without inventing a row that does not exist.
+      void emitSelfImproveGateVerdictRecorded({
+        host: this,
+        experimentId: input.experimentId.trim(),
+        baselineId: input.baselineId.trim(),
+        projectId: this.asyncLayer.projectId ?? undefined,
+        timestamp: input.occurredAt,
+        resolvedVerdict: result.resolution.resolvedVerdict,
+        primaryVerdict: result.resolution.primaryVerdict,
+        canaryVerdict: result.resolution.canaryVerdict,
+        precedenceOutcome: result.resolution.precedenceOutcome,
+        inputFingerprint: result.inputFingerprint,
+        corpusVersion: input.primarySignals.corpusVersion,
+        seed: input.primarySignals.seed,
+        outcome: result.outcome,
+      });
+    }
+    return result;
+  }
+
+  async readLearningGateVerdictByExperiment(experimentId: string) {
+    if (!this.asyncLayer) throw new Error("Learning gate verdicts require an async data layer");
+    return readLearningGateVerdictByExperiment(this.asyncLayer, experimentId);
+  }
+
+  async readLearningGateVerdictByBaseline(baselineId: string) {
+    if (!this.asyncLayer) throw new Error("Learning gate verdicts require an async data layer");
+    return readLearningGateVerdictByBaseline(this.asyncLayer, baselineId);
+  }
+
+  async listLearningGateVerdicts(query: LearningGateVerdictQuery = {}): Promise<LearningGateVerdictPage> {
+    if (!this.asyncLayer) throw new Error("Learning gate verdicts require an async data layer");
+    return listLearningGateVerdicts(this.asyncLayer, query);
   }
   public async atomicWriteTaskJsonWithAudit( dir: string, task: Task, auditInput?: RunAuditEventInput, planningInvalidation?: PlanningDependencyInvalidation, specPlanPrompt?: string, ): Promise<void> {
     return atomicWriteTaskJsonWithAuditImpl(this, dir, task, auditInput, planningInvalidation, specPlanPrompt);

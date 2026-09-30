@@ -92,7 +92,8 @@ touches no data; it must advance in the same change that ships a new migration f
 /* FNXC:SelfImproveLearningLedger 2026-09-29-02:38: SCHEMA_BASELINE_VERSION advances 0085 -> 0086 for the durable self-improvement proposal+evidence record. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the table, not a follow-up. */
 /* FNXC:SelfImproveLearningLedger 2026-09-29-15:15: SCHEMA_BASELINE_VERSION advances 0086 -> 0087 for the append-only learning-ledger event trail. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the table, not a follow-up. */
 /* FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45: SCHEMA_BASELINE_VERSION advances 0087 -> 0088 for the learning-revert reason enum on the event trail. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the column, not a follow-up. */
-export const SCHEMA_BASELINE_VERSION = "0088";
+/* FNXC:SelfImproveGateVerdict 2026-09-30-15:26: SCHEMA_BASELINE_VERSION advances 0088 -> 0089 for the persisted deterministic gate verdict. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the table, not a follow-up. */
+export const SCHEMA_BASELINE_VERSION = "0089";
 /** FNXC:SymbolLock 2026-07-20-10:00: upgrades need durable task declarations before admission resolves symbols. */
 export const TASK_DECLARED_SYMBOLS_VERSION = "0028";
 const INITIAL_SCHEMA_VERSION = "0000";
@@ -305,6 +306,16 @@ are the only things that make the column exist on an already-migrated database. 
 immediately after FUSI-010's 0087 because the reason enum is a property of the same event trail.
 */
 export const LEARNING_LEDGER_REVERT_SEMANTICS_VERSION = "0088";
+
+/*
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+The persisted gate verdict needs the SAME explicit registration as 0086/0087/0088. A `.sql` file
+that is not wired into this applier silently never runs and never errors, so this identity and the
+guard below are the only things that make the verdict table exist on an already-migrated database.
+0089 is claimed immediately after FUSI-011's 0088 because the verdict record is a property of the
+same self-improvement trail.
+*/
+export const LEARNING_GATE_VERDICTS_VERSION = "0089";
 
 /** FNXC:MemoryFocus 2026-08-13-15:57: explicit registration prevents the per-conversation memory-focus migration from being skipped. Renumbered to 0060 (FN-9037 took 0059), then 0061, then 0065 (2026-08-20) when the upstream FN-066..FN-094 batch claimed 0061-0064. */
 export const CHAT_SESSION_MEMORY_FOCUS_VERSION = "0066";
@@ -577,6 +588,8 @@ const DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_MIGRATION_PATH = join(MIGRATIONS_DIR
 const SELFIMPROVE_LEARNING_LEDGER_MIGRATION_PATH = join(MIGRATIONS_DIR, "0086_fn_selfimprove_learning_ledger.sql");
 const LEARNING_LEDGER_EVENTS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0087_fn_selfimprove_learning_events.sql");
 const LEARNING_LEDGER_REVERT_SEMANTICS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0088_fusi_011_learning_revert_semantics.sql");
+/* FNXC:SelfImproveGateVerdict 2026-09-30-15:26: named by exact basename — the wiring-integrity guard proves every migration .sql is referenced here, so this constant is what makes 0089 actually run on an upgraded database. */
+const LEARNING_GATE_VERDICTS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0089_fn_selfimprove_learning_gate_verdicts.sql");
 
 /**
  * Ensure the migration bookkeeping table exists. Lives in the public schema so
@@ -725,6 +738,7 @@ export async function applySchemaBaseline(
     const selfImproveLearningLedgerAlreadyApplied = applied.includes(SELFIMPROVE_LEARNING_LEDGER_VERSION);
     const learningLedgerEventsAlreadyApplied = applied.includes(LEARNING_LEDGER_EVENTS_VERSION);
     const learningLedgerRevertSemanticsAlreadyApplied = applied.includes(LEARNING_LEDGER_REVERT_SEMANTICS_VERSION);
+    const learningGateVerdictsAlreadyApplied = applied.includes(LEARNING_GATE_VERDICTS_VERSION);
     assertBinaryNotOlderThanDatabase(applied);
     let schemaChanged = false;
 
@@ -1704,6 +1718,22 @@ export async function applySchemaBaseline(
       const migrationSql = await readFile(LEARNING_LEDGER_REVERT_SEMANTICS_MIGRATION_PATH, "utf8");
       await tx.execute(sql.raw(migrationSql));
       await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${LEARNING_LEDGER_REVERT_SEMANTICS_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    /*
+    FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+    Like 0086/0087, 0089 CREATES a table, so the guard is a `to_regclass` table-presence probe: a
+    database whose bookkeeping row says 0089 ran but whose table is missing (a partially applied
+    upgrade) must still be repaired, and re-running the `CREATE TABLE IF NOT EXISTS` plus the
+    idempotent index/RLS/policy/trigger statements is safe to repeat.
+    */
+    const learningGateVerdictsMissing = ((await tx.execute(sql`
+      SELECT to_regclass('project.learning_gate_verdicts') IS NULL AS missing
+    `)) as unknown as Array<{ missing: boolean }>)[0]?.missing ?? true;
+    if (!learningGateVerdictsAlreadyApplied || learningGateVerdictsMissing) {
+      const migrationSql = await readFile(LEARNING_GATE_VERDICTS_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${LEARNING_GATE_VERDICTS_VERSION}) ON CONFLICT (version) DO NOTHING`);
       schemaChanged = true;
     }
     return { applied: schemaChanged, pluginHooksRun: pluginHooks.length };

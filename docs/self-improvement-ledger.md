@@ -37,6 +37,18 @@ and never of a clock, so measuring twice yields the same answer. The gate's OTHE
 corpus, and the operator CLI remain unimplemented and stay marked — this page still describes no
 field, state, or event the code does not actually have.
 
+FNXC:AutoImprovement 2026-09-30-15:26:
+FUSI-020 lands a further M1 slice: the deterministic gate's VERDICT RECORD and its PRIMARY-GATE
+PRECEDENCE rule, so the persisted-verdict/precedence rule is no longer on the unshipped list. The
+"Deterministic gate verdict record" section below states the shipped shape (the closed verdict enum,
+the four-branch precedence rule in which the primary always prevails over the replay canary, the
+derived idempotent verdict id, the two required readers, and the bounded
+`selfimprove:gate-verdict-recorded` audit row). What remains unshipped is the gate RUNNER that computes
+the primary signals and drives the canary, the versioned replay corpus + manifest with its comparability
+guard, the structural denylist, and the `fn_selfimprove_*` operator surface — the verdict record is the
+durable destination the runner will write to, so recording the verdict contract now is accurate while
+leaving the runner, corpus, and comparability rules marked as not-yet-shipped.
+
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
 mission/M-MULZRJQ4-0001-IF11, NOT on main, and is pending merge. Every file path and migration
@@ -45,19 +57,26 @@ named below is therefore absent from the current checkout until that branch land
 document. The contract below is accurate to that committed code, but the symbols are not yet
 greppable in the reader's working tree, so this page must be re-read as a forward contract for the
 merge, not as a description of code already present.
--->
+*/
+
+/*
+FNXC:AutoImprovement 2026-09-30-15:26: FUSI-020 lands the deterministic gate's verdict record and
+primary-precedence rule; the block above states exactly which M1 surfaces remain unshipped.
+*/
 
 > **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
 > run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
-> FUSI-016, the test-count delta guard landed with FUSI-017, and the gate's cost-budget invariants
-> landed with FUSI-018 — all committed on the mission branch and **not yet merged into `main`**. The
+> FUSI-016, the test-count delta guard landed with FUSI-017, the gate's cost-budget invariants
+> landed with FUSI-018, and the gate's persisted verdict record and primary-precedence rule landed
+> with FUSI-020 — all committed on the mission branch and **not yet merged into `main`**. The
 > file paths and migrations named here are therefore not yet present in a `main` checkout — they
 > become real when that branch lands. The still-unimplemented M1 surfaces are the denylist, the gate
-> runner that consumes the delta verdict, the replay corpus, the persisted-verdict/precedence rule,
-> and the operator CLI.
+> runner that computes the primary signals and drives the canary, the replay corpus + manifest with
+> its comparability guard, and the operator CLI.
 > See [Not yet shipped](#not-yet-shipped),
-> [The deterministic primary gate](#the-deterministic-primary-gate), and
-> [Cost-budget invariants](#cost-budget-invariants-fusi-018).
+> [The deterministic primary gate](#the-deterministic-primary-gate),
+> [Cost-budget invariants](#cost-budget-invariants-fusi-018), and
+> [Deterministic gate verdict record](#deterministic-gate-verdict-record).
 
 ## Overview
 
@@ -481,6 +500,28 @@ fails closed with a named reason instead of wedging.
 recording the boolean verdict, the fingerprint, the per-step ids/booleans, and counts — ids,
 counts, and booleans only, never the diff, command lines, or log prose. The emission is
 best-effort: a hostile audit sink never alters the verdict the caller already holds.
+
+## Deterministic gate verdict record (FUSI-020)
+
+The gate's **verdict** is persisted as an append-only trail so an experiment's outcome is an operator-visible, reproducible record rather than a log line. The verdict contract is pure and lives in `packages/core/src/self-improve/learning-gate-verdict-types.ts`; the persistence and readers are in `packages/core/src/task-store/async/async-learning-gate-verdicts.ts`.
+
+**Closed verdict enum** — `keep | reverse | inconclusive | abstain`. A closed enum (not free text) is required so a verdict is countable and an operator can never read a novel label off the trail.
+
+**Primary-gate precedence.** The verdict is resolved by ONE pure function, `resolveLearningGateVerdict(primaryVerdict, canaryVerdict)`, from the primary gate's verdict and the replay canary's verdict. The rule, in order:
+
+1. **Canary absent** → the primary's verdict stands; `precedenceOutcome: "canary-absent"`.
+2. **Both agree** → that verdict stands; `precedenceOutcome: "agreed"`.
+3. **Primary abstained** (`inconclusive`) → the canary decides; `precedenceOutcome: "primary-abstained"`. If the canary is *also* inconclusive, the resolved verdict stays inconclusive — an abstention is never upgraded into a decision.
+4. **Both decisive and disagreeing** → **the PRIMARY gate prevails**; the canary never overturns it; `precedenceOutcome: "primary-prevailed"`.
+
+The primary gate is a boolean over its deterministic signals (build, lint, typecheck, gate, affected tests, the test-count delta, and the cost-budget invariant) and yields `keep` only when every lane is green and both invariants held; any failed lane, a moved test count, or a broken cost invariant is `reverse`; absent signals are the honest `inconclusive`. A failing lane is therefore never downgraded to "we don't know".
+
+**Idempotency by derivation.** `verdict_id` is `buildLearningGateVerdictId(experimentId, baselineId, fingerprint)` — never a fresh uuid — where the fingerprint is a canonical NUL-separated SHA-256 over the primary signals. Re-recording the *identical* judgment collides on the composite `(project_id, verdict_id)` primary key and is a no-op reported as `outcome: "already-recorded"`; a re-evaluation under a changed corpus version or seed yields a different fingerprint and therefore a genuinely new row, so the trail holds every judgment made rather than the last write. The resolution is computed by the accessor, never accepted from the caller, so the stored primary/canary/resolved triple is self-consistent by construction.
+
+**Readers** — `readLearningGateVerdictByExperiment` and `readLearningGateVerdictByBaseline` (both project-scoped and index-backed), plus a paginated `listLearningGateVerdicts`. The record is append-only: no accessor updates or deletes a verdict, because a status flip would make "the gate judged this and was overruled" indistinguishable from "the record moved". A gate verdict emits one bounded run-audit row (`selfimprove:gate-verdict-recorded`) from the committed row; the readers emit nothing.
+
+**Durable shape** — table `project.learning_gate_verdicts` (migration `0089`), with CHECKs mirroring the verdict/precedence enums, a canary-pairing invariant (a verdict that records a canary must record that canary's verdict), and a fingerprint-format check. The pure precedence rule and its fingerprint are pinned by `learning-gate-verdict-pure.test.ts`; the durable shape by `self-improve-gate-verdicts.pg.test.ts`; the store's audit mirroring and emission-freedom by `self-improve-gate-verdict-store.test.ts`.
+
 
 ## Related documentation
 

@@ -31,6 +31,7 @@ import {
   integer,
   bigint,
   real,
+  boolean,
   jsonb,
   primaryKey,
   foreignKey,
@@ -828,6 +829,107 @@ export const learningLedgerEvents = projectSchema.table("learning_ledger_events"
   index("idxLearningLedgerEventsTargetOccurred").on(t.projectId, t.target, t.occurredAt),
   index("idxLearningLedgerEventsProposalOccurred").on(t.projectId, t.proposalId, t.occurredAt),
   index("idxLearningLedgerEventsTargetKindOccurred").on(t.projectId, t.target, t.kind, t.occurredAt),
+]);
+
+/*
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+The PERSISTED gate verdict is its own table rather than a column or a status on the ledger trail,
+because a verdict is a JUDGMENT about one experiment against one baseline, and two such judgments
+can coexist: the same experiment re-evaluated against a new corpus version or a new seed is a
+DIFFERENT judgment with a DIFFERENT input fingerprint, and the loop must be able to hold both and
+answer "what did the gate say the first time, and what did it say after the corpus changed?". A
+single mutable verdict column would silently overwrite the earlier judgment and destroy exactly the
+evidence an audit needs.
+
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+Composite PK (project_id, verdict_id) with an APPEND-ONLY contract — there is no code path that
+updates or deletes a verdict. `verdict_id` is DERIVED from experiment_id + baseline_id +
+input_fingerprint, so re-recording the SAME judgment collides on the primary key and is absorbed as a
+no-op, while a genuinely different judgment gets its own row. That is the idempotency boundary, and
+it is why the verdict trail can be trusted to hold "the set of judgments made", not "the last write
+wins".
+
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+BOTH inputs' verdicts are stored, not just the resolved one. `primary_verdict` and `canary_verdict`
+sit beside `resolved_verdict` so a reader can see the conflict that produced the decision without
+re-running the gate — "the canary said keep, the primary said reverse, the primary won" is the
+audit trail, and a table holding only the resolved verdict would make the precedence rule
+unauditable. `canary_verdict` is NULL exactly when no canary ran, which is a real state (not an
+empty string) because `precedence_outcome='canary-absent'` names it.
+
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+CHECK constraints mirror the TS contract EXACTLY — the three resolved verdicts and the four
+precedence outcomes — so a drifted row is rejected by the DATABASE rather than read back as truth by
+the gate that is supposed to be deterministic. This is the same reason every other learning table
+carries its enums as CHECKs: the type system cannot produce an invalid value, but a migration, a
+restore, or a future writer might.
+
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+The primary signals are stored denormalized alongside `input_fingerprint` rather than being
+re-derivable from it. A sha256 is one-way: without the signals a reader could confirm two records
+were produced by the SAME inputs, but not WHAT those inputs were. Storing them makes the persisted
+verdict self-describing — an operator can see the booleans, the test-count delta, the corpus version
+and the seed that produced the decision without a re-run, and the fingerprint still proves identity.
+
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+`canary_present` is NOT a column. Deriving it from `canary_verdict IS NOT NULL` is deliberate: two
+columns that can disagree (a canary verdict set while `canary_present` says false) are a
+contradiction the database cannot catch. The one pairing invariant that IS enforced is that a canary
+verdict is present exactly when the precedence outcome says a canary was consulted — so
+`canary-absent` can never arrive with a canary verdict attached, and `primary-prevailed` can never
+arrive without one. That is the cross-column invariant the per-enum CHECKs alone cannot express.
+
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+Two indexes, each matching one of the two required readers exactly: (a)
+(project_id, experiment_id, occurred_at) serves "what did the gate say about this experiment?" and
+(b) (project_id, baseline_id, occurred_at) serves "what did the gate say about this baseline?".
+Both are project-scoped with project_id FIRST, matching the table's isolation model — a lookup is
+always bounded by the caller's project, never by experiment or baseline id alone. Both take
+occurred_at DESC because each reader's terminal ordering is newest-first, so the newest verdict is
+served straight from the index without a backward scan (mirroring 0087's proposal index).
+
+FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+Like the other learning tables, this one intentionally has NO REFERENCES clause: a gate verdict is a
+learning record about a product surface, not a child of a task or a proposal row, and must survive
+task archive cleanup that hard-deletes task rows. The experiment/baseline ids are recorded as text
+identity, not foreign keys, because the loop may judge an experiment whose proposal has been rolled
+back or whose baseline predates the current ledger.
+*/
+export const learningGateVerdicts = projectSchema.table("learning_gate_verdicts", {
+  projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`),
+  verdictId: text("verdict_id").notNull(),
+  experimentId: text("experiment_id").notNull(),
+  baselineId: text("baseline_id").notNull(),
+  resolvedVerdict: text("resolved_verdict").notNull(),
+  primaryVerdict: text("primary_verdict").notNull(),
+  canaryVerdict: text("canary_verdict"),
+  precedenceOutcome: text("precedence_outcome").notNull(),
+  inputFingerprint: text("input_fingerprint").notNull(),
+  buildOk: boolean("build_ok").notNull(),
+  lintOk: boolean("lint_ok").notNull(),
+  typecheckOk: boolean("typecheck_ok").notNull(),
+  gateOk: boolean("gate_ok").notNull(),
+  affectedTestsOk: boolean("affected_tests_ok").notNull(),
+  testCountDelta: integer("test_count_delta").notNull(),
+  costBudgetInvariantOk: boolean("cost_budget_invariant_ok").notNull(),
+  corpusVersion: text("corpus_version").notNull(),
+  seed: integer("seed").notNull(),
+  occurredAt: text("occurred_at").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.projectId, t.verdictId] }),
+  check("learning_gate_verdicts_resolved_verdict_check", sql`${t.resolvedVerdict} IN ('keep', 'reverse', 'inconclusive')`),
+  check("learning_gate_verdicts_primary_verdict_check", sql`${t.primaryVerdict} IN ('keep', 'reverse', 'inconclusive')`),
+  check("learning_gate_verdicts_canary_verdict_check", sql`${t.canaryVerdict} IS NULL OR ${t.canaryVerdict} IN ('keep', 'reverse', 'inconclusive')`),
+  check("learning_gate_verdicts_precedence_outcome_check", sql`${t.precedenceOutcome} IN ('canary-absent', 'agreed', 'primary-prevailed', 'primary-abstained')`),
+  // A canary verdict is present exactly when the precedence outcome says a canary was consulted.
+  check("learning_gate_verdicts_canary_pairing_check", sql`(${t.canaryVerdict} IS NOT NULL AND ${t.precedenceOutcome} <> 'canary-absent') OR (${t.canaryVerdict} IS NULL AND ${t.precedenceOutcome} = 'canary-absent')`),
+  // The fingerprint is a sha256 hex digest by construction; anything else is a drifted row.
+  check("learning_gate_verdicts_fingerprint_check", sql`${t.inputFingerprint} ~ '^[0-9a-f]{64}$'`),
+  // Serves "what did the gate say about this experiment?" — reader (a).
+  index("idxLearningGateVerdictsExperimentOccurred").on(t.projectId, t.experimentId, t.occurredAt),
+  // Serves "what did the gate say about this baseline?" — reader (b).
+  index("idxLearningGateVerdictsBaselineOccurred").on(t.projectId, t.baselineId, t.occurredAt),
 ]);
 
 export const agentActivityEventSeq = projectSchema.table("agent_activity_event_seq", {
@@ -2803,5 +2905,5 @@ export const projectTableNames = [
   "task_lifecycle_consumer_receipts", "task_lifecycle_consumer_registrations",
   "task_lifecycle_event_seq", "task_lifecycle_events", "task_verification_requests",
   "unplanned_execution_blocks", "workflow_agent_capacity_leases", "task_overlap_waits",
-  "learning_proposals", "learning_ledger_events",
+  "learning_proposals", "learning_ledger_events", "learning_gate_verdicts",
 ] as const;
