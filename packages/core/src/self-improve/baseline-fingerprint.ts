@@ -164,7 +164,7 @@ export function resolveBaselineCache(input: {
 }
 
 /**
- * Project a resolution into the operator read model `fn_selfimprove_status` renders.
+ * Project a resolution into the operator read model `fn_selfimprove_status` renders (shipped in FUSI-034).
  *
  * Pure, so the read model's shape is provable without a database; the accessor composes it with the
  * real read. `present` is DERIVED from the cached fingerprint, so a status can never claim a baseline

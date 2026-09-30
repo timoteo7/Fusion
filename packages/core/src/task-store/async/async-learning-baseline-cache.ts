@@ -185,7 +185,8 @@ export async function writeBaselineCache(
  *
  * Reads the cache, computes the fingerprint the CURRENT inputs request, and projects both through
  * the one pure resolver — so status can never report a reuse rule different from the one the cache is
- * governed by. This is the object `fn_selfimprove_status` renders.
+ * governed by. This is the object `fn_selfimprove_status` renders (shipped in FUSI-034), which calls
+ * this accessor rather than re-deriving the decision.
  *
  * A cached entry whose stored fingerprint is malformed is reported as ABSENT rather than thrown on:
  * the read model's job is to answer "can I reuse this?", and an unusable entry means "no", which is

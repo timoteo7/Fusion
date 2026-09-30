@@ -68,19 +68,36 @@ primary-precedence rule; the block above states exactly which M1 surfaces remain
 FNXC:AutoImprovement 2026-09-30-19:22: FUSI-031 lands the baseline cache with its content-addressed
 fingerprint, the reuse/rebuild resolver, the durable cache table, and the operator status read model.
 The cached-baseline arm of the replay-corpus bullet in the code-status block is therefore no longer
-entirely unshipped: the cache and its invalidation contract are real, while the corpus manifest that
-SUPPLIES `manifestVersion`/`seed` (FUSI-030) and the CLI that RENDERS the status (a later M1 slice)
-are not.
+entirely unshipped: the cache and its invalidation contract are real.
+
+FNXC:SelfImproveBaselineCacheStatus 2026-09-30-20:35: FUSI-034 lands `fn_selfimprove_status`, the
+operator tool that RENDERS the `BaselineCacheStatus` read model. Before it, the read model was built
+and unit-tested but nothing displayed it — every occurrence of the tool name in the repository was a
+comment describing a future render target — so an operator could not answer "may I reuse this
+baseline, and why" without a bespoke SQL query, and a silent incomparability had no first-class read
+path. The tool renders the read model VERBATIM through the one accessor (`readBaselineCacheStatus`),
+so it cannot report a reuse rule the cache is not governed by. It NEVER renders the cached payload:
+what must be observable is WHICH fingerprint is in play, never WHAT was measured. Each call records
+one `selfimprove:baseline-cache-resolved` row through the bounded FN-9177 seam, and telemetry is not
+load-bearing — a hostile sink leaves the returned read model unchanged.
+
+FNXC:SelfImproveBaselineCacheStatus 2026-09-30-20:35: The tool takes the fingerprint INPUTS as
+parameters and deliberately does NOT read them from the FUSI-030 manifest. That manifest carries a
+NUMBER `version` and a different digest (`fingerprintReplayCorpusManifest`), which are not this
+feature's `manifestVersion`/`configHash`; binding them together belongs to the measurement runner,
+which is still unshipped. Until then the operator supplies the exact inputs a measurement would use
+and the tool answers reuse-vs-rebuild for exactly those inputs.
 */
 
 > **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
 > run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
 > FUSI-016, the test-count delta guard landed with FUSI-017, the gate's cost-budget invariants
 > landed with FUSI-018, the structural denylist and its pre-gate guard landed with FUSI-019, the
-gate's persisted verdict record and primary-precedence rule landed with FUSI-020, the versioned
+> gate's persisted verdict record and primary-precedence rule landed with FUSI-020, the versioned
 > replay corpus manifest landed with FUSI-030, the cached replay baseline with its fingerprint-based
-> invalidation landed with FUSI-031, and the secondary ruler's four corpus metrics landed with
-> FUSI-033 — all
+> invalidation landed with FUSI-031, the secondary ruler's four corpus metrics landed with FUSI-033,
+> and the `fn_selfimprove_status` operator tool that renders the baseline-cache status read model
+> landed with FUSI-034 — all
 > committed on the mission branch and **not yet merged into `main`**. The file paths and
 > migrations named here are therefore not yet present in a `main` checkout — they become real
 > when that branch lands. The still-unimplemented M1 surfaces are the gate runner that computes
@@ -105,8 +122,9 @@ machinery can key on. It is PURE types + a PURE validator: it declares a corpus,
 The provider is typed as the single mock literal (unrepresentable at the type level, not merely
 rejected at runtime) so no corpus run can ever reach a real model, and version is data rather than a
 boolean flag so a v1 document is refused by a v2 loader instead of silently half-interpreted. The
-baseline CACHE and the comparability GUARD that consume it are later slices (FUSI-031/032) and stay
-on the not-yet-shipped list.
+baseline CACHE that consumes it landed with FUSI-031 and the comparability GUARD is the later slice
+FUSI-032; both stay on the not-yet-shipped list together with the measurement runner that would
+actually EXECUTE a corpus and skip re-execution on a reuse.
 
 <!--
 FNXC:AutoImprovement 2026-09-30-20:31:
@@ -493,8 +511,10 @@ the two mistakes that would destroy the feature's value: sampling `Date.now()` (
 runs of one corpus disagree) and reaching a provider (which would make a "reproducible" measurement
 depend on a real model's availability and pricing).
 
-The **baseline cache** (reuse/invalidation) and the `fn_selfimprove_status` display that consume this
-manifest are later slices (FUSI-031/032) and are not yet shipped.
+The **baseline cache** (reuse/invalidation) landed with FUSI-031 and the operator tool that RENDERS its
+status, `fn_selfimprove_status`, landed with FUSI-034; the comparability GUARD (FUSI-032) and the
+measurement runner that would consume this manifest by supplying `manifestVersion`/`seed` are later
+slices and are not yet shipped.
 
 ## Corpus metrics (FUSI-033)
 

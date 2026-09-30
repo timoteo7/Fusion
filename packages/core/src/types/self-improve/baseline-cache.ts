@@ -17,8 +17,8 @@ CHECKs on the persisted row.
 FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
 The `BaselineCacheStatus` shape is deliberately the WHOLE operator answer to "can I trust this
 comparison?". It carries the fingerprint that was requested, the fingerprint the cache actually held,
-the action, the reason, and whether a cached entry existed at all. `fn_selfimprove_status` (a later M1
-slice) renders exactly this object; nothing here is a CLI concern, so the read model stays pure data.
+the action, the reason, and whether a cached entry existed at all. `fn_selfimprove_status` (shipped in
+FUSI-034) renders exactly this object; nothing here is a CLI concern, so the read model stays pure data.
 */
 
 /**

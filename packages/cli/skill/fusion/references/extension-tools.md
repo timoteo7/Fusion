@@ -911,6 +911,18 @@ This tool is withheld from agent sessions and must be invoked by a human operato
 | `planOverride` | unknown | — | Optional plan override payload |
 | `summary` | string | — | Optional finalize summary |
 
+### fn_selfimprove_status
+
+Report whether a cached replay baseline may be reused for given measurement inputs, showing both fingerprints, the reuse/rebuild decision, and its reason.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `baselineKey` | string | ✓ | Baseline key whose cached entry is being resolved (e.g. replay-corpus baseline name) |
+| `manifestVersion` | string | ✓ | Version of the replay-corpus manifest this measurement would use |
+| `engineSha` | string | ✓ | Git sha of the engine build that produced (or would produce) the measurement |
+| `configHash` | string | ✓ | Hash of the measurement configuration (ordering, corpus contents, provider) |
+| `seed` | union | ✓ | Random seed pinning the measurement's non-determinism (number or numeric string) |
+
 <!-- END: extension-tools -->
 
 ## Goal retrieval contract notes

@@ -1,0 +1,7 @@
+---
+"@runfusion/fusion": minor
+---
+
+summary: Add an operator status tool that reports whether a cached self-improvement baseline is still reusable.
+category: feature
+dev: Adds `fn_selfimprove_status` (CLI/pi extension tool), returning `baselineKey`, `present`, the requested and cached fingerprints, the `reuse`/`rebuild` action, and the fixed reason (`no-cached-baseline`, `fingerprint-matched`, `fingerprint-diverged`). It renders the existing `BaselineCacheStatus` read model verbatim through the existing `readBaselineCacheStatus` accessor, so it cannot report a reuse rule the cache is not governed by, and it never renders the cached baseline payload. Each call records one `selfimprove:baseline-cache-resolved` run-audit row through the bounded core seam (ids/fingerprints/fixed outcomes only); telemetry is best-effort and a hostile sink leaves the returned read model unchanged. The fingerprint inputs (`manifestVersion`, `engineSha`, `configHash`, `seed`) are tool parameters and are deliberately not read from the replay-corpus manifest, whose `version` is a number and whose `fingerprintReplayCorpusManifest` is a different digest; that wiring belongs to the not-yet-built measurement runner.
