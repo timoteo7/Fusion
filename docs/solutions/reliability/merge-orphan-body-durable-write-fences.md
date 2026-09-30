@@ -22,9 +22,9 @@ This FN-8923 inventory is complete **only over the pinned closure and pinned wri
 
 ## Derived writer surface and closure
 
-The shared TypeScript-AST helper reads `packages/core/src/store.ts` and extracts the public `TaskStore` surface. Its durable surface includes every classified state-mutating method — including attachment, archive, atomic-update, task/workflow creation, deletion, recovery, lifecycle, and upsert operations — rather than only the methods currently seen in merge code. The complete method-by-method writer/non-writer classification (with reasons) is pinned as `writerSurfaceClassification` in `merge-orphan-durable-write-inventory.json` and compared to the AST result by the drift guard; an unclassified public method fails the guard. `markTaskWedgeNotificationPending` and `clearTaskWedgeNotificationPending` are writers because they respectively persist and remove deferred `wedgeNotification.pending` evidence through `updateTaskAtomic`. Module-level writers `finalizeProvenAutoMergeTask` and `syncGroupPrOnLanding` are explicit extras.
+The shared TypeScript-AST helper reads `packages/core/src/store.ts` and extracts the public `TaskStore` surface. Its durable surface includes every classified state-mutating method — including attachment, archive, atomic-update, task/workflow creation, deletion, recovery, lifecycle, and upsert operations — rather than only the methods currently seen in merge code. The complete method-by-method writer/non-writer classification (with reasons) is pinned as `writerSurfaceClassification` in `merge-orphan-durable-write-inventory.json` and compared to the AST result by the drift guard; an unclassified public method fails the guard. `markTaskWedgeNotificationPending` and `clearTaskWedgeNotificationPending` are writers because they respectively persist and remove deferred `wedgeNotification.pending` evidence through `updateTaskAtomic`. Module-level writers `finalizeProvenAutoMergeTask` and `syncGroupPrOnLanding` are explicit extras. The pinned classification currently covers 559 public methods and yields 274 writers.
 
-The walked closure is the sorted `scannedModules` list in the checked-in manifest. It is derived by following first-party emitted `.js` imports back to their TypeScript source, and currently includes 228 modules, including `packages/engine/src/merge/auto-merge-finalization.ts`, `packages/engine/src/merge/push-after-merge-policy.ts`, `packages/engine/src/worktree/workspace-base-refresh.ts`, and the run-audit/branch-group helpers. There are no declared closure boundaries: the walk runs to fixpoint. The alias rule normalizes single-assignment `store`/`options.store` aliases; computed or destructured access becomes a fail-closed suspect.
+The walked closure is the sorted `scannedModules` list in the checked-in manifest. It is derived by following first-party emitted `.js` imports back to their TypeScript source, and currently includes 323 modules, including `packages/engine/src/merge/auto-merge-finalization.ts`, `packages/engine/src/merge/push-after-merge-policy.ts`, `packages/engine/src/worktree/workspace-base-refresh.ts`, and the run-audit/branch-group helpers. There are no declared closure boundaries: the walk runs to fixpoint. The alias rule normalizes single-assignment `store`/`options.store` aliases; computed or destructured access becomes a fail-closed suspect.
 
 ## Reconciled frontier
 
@@ -32,9 +32,35 @@ The walked closure is the sorted `scannedModules` list in the checked-in manifes
 FNXC:MergeReliability 2026-09-01-04:31:
 FN-9221 re-synchronizes this inventory after the import closure gained new modules and durable writes.
 Fence-wrapped workspace-finalization logs are backed by their local MergeWriteFence call, while the explicit no-fence branches remain unresolved under FN-8958; newly reached base-refresh writes have no call edge from the merge entry points and remain out of frontier.
+
+FNXC:MergeReliability 2026-09-30-12:56:
+FUSI-021 classifies the four public TaskStore methods the 0084 overlap-wait work added, which is
+what had been keeping this guard red for five tests: the guard refuses at
+`assertInventoryRegenerationInputs` on unclassified methods BEFORE it compares anything, so all eight
+assertions were silently dead and no other entry was being policed.
+`claimTaskOverlapWait`, `completeTaskOverlapWait`, and `publishTaskOverlapDeliveries` are writers:
+all three run `layer.transactionImmediate` against `schema.project.taskOverlapWaits`. Claim and
+complete additionally take `acquireTaskAdvisoryXactLock`; publish does not, and instead relies on an
+optimistic-concurrency `revision` compare-and-set, which is why it is called out separately in the
+classification comment. Complete is the only one of the three that touches a second durable table
+(it appends a dedupe-keyed `schema.project.tasks.log` release entry).
+`listTaskOverlapWaits` is the one genuine non-writer: a single `layer.db.select()` with no
+transaction and no persistence, the same shape as the `getProjectId` precedent. It is deliberately
+NOT made a writer conservatively the way `listLearningProposals` is, because unlike the learning
+read it has no merge-frontier caller, so fencing it would protect nothing.
+This regeneration also re-synchronized the structural fields the 0084 drift had left stale:
+scannedModules 228->323, entries 343->393 (52 added, 2 removed), writerSurface 271->274, and
+writerSurfaceClassification 555->559. The two removed rows are the pre-hardening
+`auto-merge-finalization` `store.updateTask`/`store.moveTask` call sites, superseded by the
+`updateTaskAtomic`/`moveTaskIf` rows recorded as checkpoint-covered/already-fenced. The genuinely
+new frontier rows are those two hardened calls plus the three reroute
+`store.seedWorkspaceCodeReviewContinuationIfIdle` sites in `pre-merge-gate-reseed.ts` and
+`stale-content-review-reroute.ts`, which are indeterminate/unresolved under FN-8958 because they seed
+a durable workflow continuation with no local MergeWriteFence. All 48 other new rows are genuinely
+off-path and take the out-of-frontier tuple; no pre-existing human verdict was rewritten.
 -->
 
-The manifest is final and keyed by AST-derived call-site id and argument-shape fingerprint. It contains 343 derived call sites across the pinned closure: 288 scanned-but-off-path rows are explicitly `out-of-frontier`, and the directly exercised transient-status leaf plus the locally fence-wrapped workspace-finalization logs are `already-fenced`. The remaining direct-body surfaces are `unresolved` rather than falsely declared fenced because the real exported body cannot yet isolate every call site without test-only production exports. Each `must-be-fenced` or unresolved surface needs the follow-up below.
+The manifest is final and keyed by AST-derived call-site id and argument-shape fingerprint. It contains 393 derived call sites across the pinned closure: 336 scanned-but-off-path rows are explicitly `out-of-frontier`, and the directly exercised transient-status leaf plus the locally fence-wrapped workspace-finalization logs are `already-fenced`. The remaining direct-body surfaces are `unresolved` rather than falsely declared fenced because the real exported body cannot yet isolate every call site without test-only production exports. Each `must-be-fenced` or unresolved surface needs the follow-up below.
 
 | call site | writer | Axis 1 | final | Layer B evidence | proof | follow-up |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -82,7 +108,9 @@ The complete machine-readable table is `packages/engine/src/__tests__/fixtures/m
 
 ## Out-of-frontier rows
 
-The import closure intentionally includes modules pulled in by the legacy `aiMergeTask` pipeline and other independently owned engine subsystems. Their durable calls are retained in the manifest ratchet, but they have no call edge from `runAiMerge`, `landWorkspaceTask`, or `landOneRepo`; they are classified with the required `out-of-frontier` five-tuple rather than invented as unresolved orphan writes. This currently accounts for 288 entries, including all `packages/engine/src/merger.ts` legacy-pipeline writes, the `refreshReusedWorktreeBase>persistBaseSha` update, and the workspace base-refresh persistence and skipped-refresh log. The remaining 55 entries are the direct merger-body modules (`merger-ai.ts`, `auto-merge-finalization.ts`, and the `createRunAuditor` surface); each remains in the frontier and is separately classified in the manifest.
+The import closure intentionally includes modules pulled in by the legacy `aiMergeTask` pipeline and other independently owned engine subsystems. Their durable calls are retained in the manifest ratchet, but they have no call edge from `runAiMerge`, `landWorkspaceTask`, or `landOneRepo`; they are classified with the required `out-of-frontier` five-tuple rather than invented as unresolved orphan writes. This currently accounts for 336 entries, including all `packages/engine/src/merger.ts` legacy-pipeline writes, the `refreshReusedWorktreeBase>persistBaseSha` update, the workspace base-refresh persistence and skipped-refresh log, and the three overlap-wait writes. The remaining 57 entries are the direct merger-body modules (`merger-ai.ts`, `auto-merge-finalization.ts`, `pre-merge-gate-reseed.ts`, `stale-content-review-reroute.ts`, `workspace-land-failure.ts`, `lifecycle-move.ts`, and the `createRunAuditor` surface); each remains in the frontier and is separately classified in the manifest.
+
+The overlap-wait rows are a deliberate case. `packages/engine/src/workflows/overlap-plan-revalidation.ts` enters the closure transitively, but its only importers are `agent-heartbeat.ts` and `executor/execute-workflow-graph.ts`, and the same holds for the `merger.ts::aiMergeTask::store.publishTaskOverlapDeliveries` site in the soft-deprecated legacy pipeline. None of the three has a call edge from `runAiMerge`, `landWorkspaceTask`, or `landOneRepo`, so all three take the `out-of-frontier` five-tuple. A fourth reroute module, `packages/engine/src/merge/workspace-review-reroute.ts`, calls the same `store.seedWorkspaceCodeReviewContinuationIfIdle` seam but is imported only by `project-engine.ts`, which the merge entry walk never reaches; it is therefore absent from `scannedModules` and produces no call site at all. Its siblings `pre-merge-gate-reseed.ts` and `stale-content-review-reroute.ts` are also imported by `self-healing.ts`, which *is* in the closure, so those two do produce frontier rows. Whether a scan row exists is decided by reachability from the pinned entry, never by the presence of a durable write in the file.
 
 ## Characterization and competing generations
 
