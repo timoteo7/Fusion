@@ -2570,7 +2570,7 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     const ids: string[] = [];
     for (const feature of features) {
       if (repairIds.has(feature.id) || !feature.generatedFromFeatureId || !(passed(feature) || hasPassedAncestor(feature))) continue;
-      if (feature.status !== "done" || feature.loopState !== "passed" || feature.taskId) ids.push(feature.id);
+      if (feature.status !== "done" || feature.loopState !== "passed" || feature.taskId || feature.lastValidatorStatus !== "passed") ids.push(feature.id);
     }
     const repairedFeatureIds: string[] = [];
     if (repairIds.size > 0) {
@@ -2656,18 +2656,40 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
           .for("update");
         const lockedIds = locked.map((row) => row.id);
         const preImages = lockedIds.length > 0 ? await listFeaturesByIds(tx, lockedIds) : [];
-        const changed = preImages.filter((feature) => feature.status !== "done" || feature.loopState !== "passed" || feature.taskId);
+        /*
+        FNXC:Missions 2026-09-30-13:05:
+        The in-transaction pre-image filter must test the SAME field set the bulk write below
+        sets, under the same write fence. Discovering a candidate on the old fields and then
+        filtering it out on `lastValidatorStatus` alone would leave the already-terminal reported
+        row (done/passed with a null validator status) permanently unreconciled.
+        */
+        const changed = preImages.filter((feature) => feature.status !== "done" || feature.loopState !== "passed" || feature.taskId || feature.lastValidatorStatus !== "passed");
         if (changed.length === 0) return { events: [] as MissionEvent[], updatedFeatures: [] as MissionFeature[] };
 
         /*
         FNXC:Missions 2026-09-05-22:07:
         Superseding a generated fix means it is no longer needed; it is not validator evidence.
         Do not stamp an unearned passed marker because it re-arms this reconciliation trigger (issue #3574).
+
+        FNXC:Missions 2026-09-30-13:05:
+        `loopState` and `lastValidatorStatus` must move together. `computeSliceStatusWithHandle`
+        counts an assertion-linked feature as done ONLY on `lastValidatorStatus === "passed"`
+        (or an idle/undefined `loopState`), so writing `loopState: "passed"` alone left the slice
+        rollup reading the field this reconciler never set and pinning a finished slice at
+        `active` with every feature `done` — and, because slice progression is serial, blocking
+        every later slice with no visible error.
+
+        This is FEATURE-level evidence, never assertion-level: the fix was superseded by a
+        feature that did pass, so the feature itself needs no further validation. It is
+        deliberately NOT run evidence: `lastValidatorRunId` stays unset, and the fabrication
+        guard above is not weakened because such a feature always has a passed ancestor, which
+        is precisely the `!hasPassedAncestor` clause that protects genuine fabrications (#3574).
         */
         await tx.update(schema.project.missionFeatures).set({
           status: "done",
           taskId: null,
           loopState: "passed",
+          lastValidatorStatus: "passed",
           updatedAt: now,
         }).where(inArray(schema.project.missionFeatures.id, changed.map((feature) => feature.id)));
         // One sequence read preserves contiguous ordering for the bulk statement without
@@ -2684,7 +2706,13 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       });
       for (const event of events) this.emit("mission:event", event);
       for (const feature of updatedFeatures) {
-        const updated = { ...feature, status: "done" as const, taskId: undefined, loopState: "passed" as const, updatedAt: now };
+        /*
+        FNXC:Missions 2026-09-30-13:05:
+        The emitted snapshot must carry every field the bulk write persisted. Dropping
+        `lastValidatorStatus` here published an observable `feature:updated` that contradicted
+        the row, so any consumer reconciling from the event re-derived the pinned slice.
+        */
+        const updated = { ...feature, status: "done" as const, taskId: undefined, loopState: "passed" as const, lastValidatorStatus: "passed" as const, updatedAt: now };
         this.emit("feature:updated", updated);
         if (feature.taskId) await clearTaskMissionLinkage(this.db, feature.taskId);
       }

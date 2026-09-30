@@ -95,6 +95,52 @@ describe("MissionStore synchronous loop transitions", () => {
     expect(store.completeValidatorRun(run.id, "failed")).toEqual(completed);
     expect(updateFeature).not.toHaveBeenCalled();
   });
+
+  /*
+  FNXC:MissionStore 2026-09-30-13:10:
+  The synchronous twin must write the same paired marker as AsyncMissionStore. The slice rollup
+  reads lastValidatorStatus for an assertion-linked feature, so a twin that stamps only
+  loopState reproduces the pinned-slice bug on the sync surface.
+  */
+  it("stamps validator status alongside loop state when superseding a generated fix", () => {
+    const db = {
+      transaction: (callback: () => void) => callback(),
+      transactionImmediate: (callback: () => void) => callback(),
+      prepare: vi.fn().mockReturnValue({ get: vi.fn().mockReturnValue(undefined), run: vi.fn().mockReturnValue({ changes: 1 }) }),
+      bumpLastModified: vi.fn(),
+    } as unknown as Database;
+    const store = new MissionStore("/tmp/fusion-mission-store-test", db);
+    // Root already passed, so the generated fix is genuinely superseded and NOT fabricated
+    // (it has a passed ancestor): the reconciler takes the supersede branch, not the repair branch.
+    const root = {
+      id: "F-ROOT", sliceId: "SL-SUP", title: "Root", status: "done",
+      loopState: "passed", lastValidatorStatus: "passed", lastValidatorRunId: "VR-ROOT",
+      createdAt: "2026-09-30T00:00:00.000Z", updatedAt: "2026-09-30T00:00:00.000Z",
+    } as MissionFeature;
+    const fix = {
+      id: "F-FIX", sliceId: "SL-SUP", title: "Generated fix", status: "in-progress",
+      generatedFromFeatureId: root.id, generatedFromRunId: "VR-FAIL",
+      loopState: "implementing", lastValidatorStatus: undefined,
+      createdAt: "2026-09-30T00:00:00.000Z", updatedAt: "2026-09-30T00:00:00.000Z",
+    } as MissionFeature;
+    const byId = new Map<string, MissionFeature>([[root.id, root], [fix.id, fix]]);
+    vi.spyOn(store, "listFeatures").mockReturnValue([root, fix]);
+    vi.spyOn(store, "getFeature").mockImplementation((id: string) => byId.get(id));
+    const updateFeature = vi.spyOn(store, "updateFeature").mockImplementation((id, updates) => ({
+      ...byId.get(id)!, ...updates,
+    } as MissionFeature));
+    vi.spyOn(store, "getSlice").mockReturnValue(undefined);
+    vi.spyOn(store, "getMilestone").mockReturnValue(undefined);
+
+    expect(store.reconcileSupersededGeneratedFixFeatures("SL-SUP")).toMatchObject({
+      supersededCount: 1, featureIds: ["F-FIX"], repairedCount: 0, repairedFeatureIds: [],
+    });
+    expect(updateFeature).toHaveBeenCalledWith("F-FIX", {
+      status: "done", taskId: undefined, loopState: "passed", lastValidatorStatus: "passed",
+    });
+    // Deliberately no lastValidatorRunId: this is feature-level evidence, not run evidence.
+    expect(updateFeature.mock.calls[0][1]).not.toHaveProperty("lastValidatorRunId");
+  });
 });
 
 describe("MissionStore serial slice admission", () => {
