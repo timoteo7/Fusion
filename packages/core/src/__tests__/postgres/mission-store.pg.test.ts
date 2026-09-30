@@ -1466,13 +1466,21 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
       status: "done",
       loopState: "passed",
       taskId: undefined,
-      lastValidatorStatus: undefined,
+      /*
+      FNXC:MissionStore 2026-09-30-13:10:
+      The supersede write stamps `lastValidatorStatus: "passed"` together with
+      `loopState: "passed"`. These two assertions previously read `undefined`; they encoded the
+      half-written marker that pinned assertion-linked slices at `active`.
+      */
+      lastValidatorStatus: "passed",
+      lastValidatorRunId: undefined,
     });
     await expect(m.getFeature(secondFix.id)).resolves.toMatchObject({
       status: "done",
       loopState: "passed",
       taskId: undefined,
-      lastValidatorStatus: undefined,
+      lastValidatorStatus: "passed",
+      lastValidatorRunId: undefined,
     });
 
     await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toMatchObject({ supersededCount: 0, featureIds: [] });
@@ -1496,6 +1504,142 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     await expect(m.getFeature(fix.id)).resolves.toMatchObject({ status: "defined", loopState: "idle", lastValidatorStatus: undefined, taskId: undefined });
     await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toMatchObject({ repairedCount: 0, repairedFeatureIds: [] });
     await expect(m.triageFeature(fix.id)).resolves.toMatchObject({ taskId: expect.any(String) });
+  });
+
+  /*
+  FNXC:MissionStore 2026-09-30-13:10:
+  Regression for the observed pin: feature F-MUN6HH49-0007-3UMV (a generated fix superseded by a
+  feature that passed) sat at status=done, loop_state=passed, last_validator_status=null with a
+  linked contract assertion still `pending`. `computeSliceStatusWithHandle` counts an
+  assertion-linked feature as done ONLY on lastValidatorStatus==="passed" (or an idle/undefined
+  loopState), so the slice stayed `active` with every feature done — and because slice progression
+  is serial, every later slice stayed `pending` for over 12h with no visible error.
+  */
+  it("promotes a slice whose superseded generated fix carries a linked pending assertion", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Superseded fix slice promotion" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const root = await m.addFeature(slice.id, { title: "Root" });
+    const failedRun = await m.startValidatorRun(root.id, "scheduled");
+    await m.completeValidatorRun(failedRun.id, "failed", "needs fix");
+    const fix = await m.createGeneratedFixFeature(root.id, failedRun.id, [], "repair");
+    // The linked, still-pending contract assertion is what makes the slice rollup read
+    // lastValidatorStatus instead of the idle-loopState escape hatch.
+    const assertion = await m.addContractAssertion(milestone.id, {
+      title: "Fix holds", assertion: "The repaired feature stays green", status: "pending",
+    });
+    await m.linkFeatureToAssertion(fix.id, assertion.id);
+    // The root passes, which is what supersedes the generated fix. A real passed validator
+    // run moves the root to status "done" alongside loopState/lastValidatorStatus, so the
+    // rollup sees a fully-done root and the only remaining feature is the superseded fix.
+    await m.updateFeature(root.id, { status: "done", lastValidatorStatus: "passed", loopState: "passed" });
+
+    // Precondition: the reported row is already done/passed and differs ONLY in the
+    // validator status, so a fix that writes the field without widening the selection
+    // filters would return supersededCount 0 and leave the slice pinned.
+    expect(await m.getFeature(fix.id)).toMatchObject({ status: "defined" });
+
+    await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toMatchObject({
+      supersededCount: 1,
+      featureIds: [fix.id],
+      repairedCount: 0,
+      repairedFeatureIds: [],
+    });
+    await expect(m.getFeature(fix.id)).resolves.toMatchObject({
+      status: "done",
+      loopState: "passed",
+      lastValidatorStatus: "passed",
+      taskId: undefined,
+    });
+    /*
+    FNXC:MissionStore 2026-09-30-13:10:
+    Deliberately NOT run evidence. A run id here would make the marker indistinguishable from
+    genuine validation evidence and would re-arm the fabrication trigger (issue #3574).
+    */
+    const promoted = await m.getFeature(fix.id);
+    expect(promoted?.lastValidatorRunId ?? undefined).toBeUndefined();
+    // The slice now reaches complete instead of being pinned at active.
+    expect((await m.getSlice(slice.id))?.status).toBe("complete");
+    // The assertion is left untouched: this is feature-level evidence, not assertion-level.
+    expect((await m.listAssertionsForFeature(fix.id)).map((a) => a.status)).toEqual(["pending"]);
+
+    // No flap: a second reconcile is a no-op across all four counts.
+    await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toEqual({
+      supersededCount: 0, featureIds: [], repairedCount: 0, repairedFeatureIds: [],
+    });
+    await expect(m.getFeature(fix.id)).resolves.toMatchObject({ status: "done", loopState: "passed", lastValidatorStatus: "passed" });
+    expect((await m.getSlice(slice.id))?.status).toBe("complete");
+  });
+
+  /*
+  FNXC:MissionStore 2026-09-30-13:15:
+  The exact row shape observed in production (F-MUN6HH49-0007-3UMV): the generated fix is ALREADY
+  status=done / loopState=passed and differs from a fully reconciled row only in
+  lastValidatorStatus=null. The bulk write alone therefore proves nothing here — only the widened
+  selection filters can select this row, so this test is what makes dropping
+  `|| feature.lastValidatorStatus !== "passed"` from the discovery and in-transaction filters
+  detectable.
+  */
+  it("reconciles an already-terminal superseded fix that is missing only the validator status", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Terminal superseded fix repair" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const root = await m.addFeature(slice.id, { title: "Root" });
+    const failedRun = await m.startValidatorRun(root.id, "scheduled");
+    await m.completeValidatorRun(failedRun.id, "failed", "needs fix");
+    const fix = await m.createGeneratedFixFeature(root.id, failedRun.id, [], "repair");
+    const assertion = await m.addContractAssertion(milestone.id, {
+      title: "Fix holds", assertion: "The repaired feature stays green", status: "pending",
+    });
+    await m.linkFeatureToAssertion(fix.id, assertion.id);
+    await m.updateFeature(root.id, { status: "done", lastValidatorStatus: "passed", loopState: "passed" });
+    // The reported production state: the supersede write already ran under the old contract.
+    await m.updateFeature(fix.id, { status: "done", loopState: "passed" });
+    expect(await m.getFeature(fix.id)).toMatchObject({ status: "done", loopState: "passed", lastValidatorStatus: undefined });
+
+    await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toMatchObject({
+      supersededCount: 1,
+      featureIds: [fix.id],
+      repairedCount: 0,
+      repairedFeatureIds: [],
+    });
+    await expect(m.getFeature(fix.id)).resolves.toMatchObject({
+      status: "done",
+      loopState: "passed",
+      lastValidatorStatus: "passed",
+      lastValidatorRunId: undefined,
+    });
+    expect((await m.getSlice(slice.id))?.status).toBe("complete");
+  });
+
+  /*
+  FNXC:MissionStore 2026-09-30-13:10:
+  The marker the supersede write now stamps must not be mistaken for the fabricated one.
+  This feature has lastValidatorStatus="passed" with NO passed ancestor, so the guard still
+  reverts it to triage — issue #3574 protection survives the new write.
+  */
+  it("still repairs a superseded-written marker that has no passed ancestor", async () => {
+    const m = missions();
+    const mission = await m.createMission({ title: "Marker without a passed ancestor" });
+    const milestone = await m.addMilestone(mission.id, { title: "MS" });
+    const slice = await m.addSlice(milestone.id, { title: "SL" });
+    const root = await m.addFeature(slice.id, { title: "Root" });
+    const failedRun = await m.startValidatorRun(root.id, "scheduled");
+    await m.completeValidatorRun(failedRun.id, "failed", "needs fix");
+    const fix = await m.createGeneratedFixFeature(root.id, failedRun.id, [], "repair");
+    // Shape the row exactly as the supersede write would, then remove the passed ancestor
+    // so nothing legitimate justifies the marker.
+    await m.updateFeature(fix.id, { status: "done", loopState: "passed", lastValidatorStatus: "passed", lastValidatorRunId: undefined, taskId: undefined });
+    await m.updateFeature(root.id, { lastValidatorStatus: "failed", loopState: "needs_fix" });
+
+    await expect(m.reconcileSupersededGeneratedFixFeatures(slice.id)).resolves.toMatchObject({
+      repairedCount: 1, repairedFeatureIds: [fix.id], supersededCount: 0, featureIds: [],
+    });
+    await expect(m.getFeature(fix.id)).resolves.toMatchObject({
+      status: "defined", loopState: "idle", lastValidatorStatus: undefined, taskId: undefined,
+    });
   });
 
   it("runs the validator/fix lifecycle and reaps stale runs in PostgreSQL", async () => {
@@ -1906,7 +2050,17 @@ pgTest("MissionStore (PostgreSQL backend mode)", () => {
     await m.completeValidatorRun(childRun.id, "failed", "child failure");
     const passedRun = await m.startValidatorRun(root.id, "scheduled");
     await m.completeValidatorRun(passedRun.id, "passed", "root is correct now");
-    expect(await m.getFeature(child.id)).toMatchObject({ status: "done", loopState: "passed", lastValidatorRunId: childRun.id, lastValidatorStatus: "failed" });
+    /*
+    FNXC:MissionStore 2026-09-30-13:10:
+    The child's own validator run really did fail, and `lastValidatorRunId` still records that run.
+    But the root has now passed, so the reconciler supersedes the child and stamps
+    lastValidatorStatus: "passed" together with loopState: "passed". This assertion previously read
+    "failed" — it encoded the half-written marker where the two fields disagreed. The child's
+    claim is "superseded and no longer needed", and the slice rollup reads lastValidatorStatus,
+    so "passed" is the coherent value. The run id is deliberately left pointing at the failed run:
+    the marker is feature-level evidence, never run evidence.
+    */
+    expect(await m.getFeature(child.id)).toMatchObject({ status: "done", loopState: "passed", lastValidatorRunId: childRun.id, lastValidatorStatus: "passed" });
     const rootBefore = await m.getFeature(root.id);
     const featuresBefore = await m.listFeatures(slice.id);
     await expect(m.createGeneratedFixFeature(child.id, childRun.id, [], "late repair", undefined, undefined, { requireCurrentRun: true }))
