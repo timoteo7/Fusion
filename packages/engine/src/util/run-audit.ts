@@ -1070,7 +1070,17 @@ export type DatabaseMutationType =
    */
   | "selfimprove:proposal-created"
   | "selfimprove:proposal-applied"
-  | "selfimprove:proposal-reverted";
+  | "selfimprove:proposal-reverted"
+  /*
+   * FNXC:SelfImproveGateRunAudit 2026-09-30-09:50: FUSI-016 primary-gate event. Records that a
+   * candidate was JUDGED by the deterministic primary gate. Metadata is ids/counts/booleans only:
+   * candidate sha, boolean verdict, content-addressed fingerprint, per-step [id, boolean] pairs,
+   * failed-step count, affected-test count, scope kind, and duration. The diff, the step command
+   * lines, and any compiler/test log output are structurally excluded — the gate result is a yes/no.
+   * Emitted through the bounded core seam, so an absent/throwing/rejecting/hanging sink changes
+   * nothing about the verdict the caller already holds.
+   */
+  | "selfimprove:gate-run";
 
 // ── Filesystem mutation types ─────────────────────────────────────────────────
 

@@ -20,10 +20,15 @@ FNXC:AutoImprovement 2026-09-29-23:32:
 Three of those slices have since landed on the mission branch, so their "not yet shipped" marks are
 removed and each section now states the shipped shape: the append-only store methods (FUSI-010), the
 revert/re-apply write transitions (FUSI-011), and run-audit emission of ledger transitions (the
-`selfimprove:*` façades declared in FUSI-012, wired to their call sites in FUSI-015). The remaining
-unshipped list is the structural denylist, the deterministic primary gate, the versioned replay
-corpus, and the `fn_selfimprove_*` operator surface — those stay marked, because inventing a shipped
-contract for them is the failure mode the block above forbids.
+`selfimprove:*` façades declared in FUSI-012, wired to their call sites in FUSI-015).
+
+FNXC:AutoImprovement 2026-09-30-09:55:
+The deterministic primary gate has now landed too (FUSI-016), so it is documented below in
+[The deterministic primary gate](#the-deterministic-primary-gate) with its real verdict contract
+rather than left as mission-brief prose. The remaining unshipped list is the structural denylist,
+the versioned replay corpus, the persisted-verdict/precedence rule, and the `fn_selfimprove_*`
+operator surface — those stay marked, because inventing a shipped contract for them is the failure
+mode the block above forbids.
 
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
@@ -39,8 +44,10 @@ merge, not as a description of code already present.
 > run-audit layers landed with FUSI-010/011/012/015, all committed on the mission branch and **not yet
 > merged into `main`**. The file paths and migrations named here are therefore not yet present in a
 > `main` checkout — they become real when that branch lands. The still-unimplemented M1 surfaces are
-> the denylist, the deterministic gate, the replay corpus, and the operator CLI.
-> See [Not yet shipped](#not-yet-shipped).
+> the denylist, the replay corpus, the persisted-verdict/precedence rule, and the operator CLI; the
+> deterministic primary gate has landed with FUSI-016.
+> See [Not yet shipped](#not-yet-shipped) and
+> [The deterministic primary gate](#the-deterministic-primary-gate).
 
 ## Overview
 
@@ -239,13 +246,54 @@ that landed with FUSI-010/011/012/015 — all committed on the mission branch an
 `main`**, so none of the code above is greppable in a `main` checkout. The following are later M1
 slices and are **not** in the code at all:
 
-- Structural denylist enforcement, the deterministic **primary gate**, the versioned **replay
-  corpus** + manifest with cached baseline and comparability guard, and the CLI/pi
-  `fn_selfimprove_*` operator surface (status, proposals, experiments, veto, pause, force-revert).
+- Structural denylist enforcement, the versioned **replay corpus** + manifest with cached baseline
+  and comparability guard, and the CLI/pi `fn_selfimprove_*` operator surface (status, proposals,
+  experiments, veto, pause, force-revert). The **test-count delta**, **cost-budget invariants**,
+  and the **persisted verdict / precedence** rule are likewise later slices.
 
-The deterministic primary gate and the replay canary are described in the mission brief, not
-implemented yet; when they land, this page is extended with the gate's verdict contract and the
-replay manifest's comparability rules.
+The deterministic primary gate landed with FUSI-016 and is described in
+[The deterministic primary gate](#the-deterministic-primary-gate) below. The replay canary is
+still described only in the mission brief; when it lands, this page is extended with the replay
+manifest's comparability rules.
+
+## The deterministic primary gate (FUSI-016)
+
+The gate is the boolean ruler that decides whether a self-improvement candidate is **kept** or
+**reverted**. It answers a plain yes/no the way every other change here is judged: build, lint,
+typecheck, the merge gate, and only the tests the diff actually touches. Two runs over the same
+candidate and corpus return the same verdict and the same fingerprint.
+
+**The five steps** — `build`, `lint`, `typecheck`, `gate`, `affected-tests`. Each yields a boolean;
+the verdict `passed` is true only when all five pass. A single failing, timed-out, or unreadable
+step rejects the candidate.
+
+**Fail-closed** — a step that timed out, could not be spawned, or whose result could not be read is
+recorded as NOT-passing (never as a skip). Missing evidence must not approve a candidate.
+
+**Reproducibility** — the verdict's `fingerprint` content-addresses (sha256) exactly the inputs that
+can change a decision: the candidate sha, the sorted per-step booleans, and the sorted affected-test
+file list. It excludes wall-clock, duration, and log text, so it identifies *what was decided*, not
+how. Two identical runs share a fingerprint; flipping any step boolean, the candidate sha, or the
+affected-test list changes it.
+
+**Affected-file scoping, never full-suite** — the `affected-tests` step runs a per-file
+`vitest run <resolved files>` derived from the diff. There is no full-suite parameter anywhere in
+the executor: a whole-workspace run is structurally unreachable, mirroring the repo rule that
+verification is scoped to changed files. An empty diff is an explicit `empty` state (not a silent
+pass), a deleted test path yields no live entry, and a changed vitest config fans out to its
+package.
+
+**Sandbox isolation** — the executor spawns every step under the `superviseSpawn` supervisor with
+`cwd` bound to a caller-supplied sandbox worktree and the mock/test-mode env
+(`FUSION_TEST_MODE=1`). The live engine's cwd is never handed to a child, the live engine is never
+restarted or reloaded, and git capture is bounded (max buffer + timeout) so a huge or hung diff
+fails closed with a named reason instead of wedging.
+
+**Run-audit** — each gate run emits `selfimprove:gate-run` (see
+[Self-improvement primary-gate run](./run-audit.md#self-improvement-primary-gate-run-fusi-016))
+recording the boolean verdict, the fingerprint, the per-step ids/booleans, and counts — ids,
+counts, and booleans only, never the diff, command lines, or log prose. The emission is
+best-effort: a hostile audit sink never alters the verdict the caller already holds.
 
 ## Related documentation
 
