@@ -6,3 +6,4 @@ export * from "./learning-proposal.js";
 export * from "./primary-gate.js";
 export * from "./learning-gate-verdict.js";
 export * from "./baseline-cache.js";
+export * from "./replay-corpus-manifest.js";

@@ -44,10 +44,12 @@ PRECEDENCE rule, so the persisted-verdict/precedence rule is no longer on the un
 the four-branch precedence rule in which the primary always prevails over the replay canary, the
 derived idempotent verdict id, the two required readers, and the bounded
 `selfimprove:gate-verdict-recorded` audit row). What remains unshipped is the gate RUNNER that computes
-the primary signals and drives the canary, the versioned replay corpus + manifest with its comparability
-guard, the structural denylist, and the `fn_selfimprove_*` operator surface — the verdict record is the
-durable destination the runner will write to, so recording the verdict contract now is accurate while
-leaving the runner, corpus, and comparability rules marked as not-yet-shipped.
+the primary signals and drives the canary, the replay corpus's cached baseline and comparability guard
+(the versioned manifest contract itself landed later, in FUSI-030 — see
+[Replay corpus manifest](#replay-corpus-manifest-fusi-030)), the structural denylist, and the
+`fn_selfimprove_*` operator surface — the verdict record is the durable destination the runner will
+write to, so recording the verdict contract now is accurate while leaving the runner, baseline cache,
+and comparability guard marked as not-yet-shipped.
 
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
@@ -80,13 +82,27 @@ are not.
 > committed on the mission branch and **not yet merged into `main`**. The file paths and
 > migrations named here are therefore not yet present in a `main` checkout — they become real
 > when that branch lands. The still-unimplemented M1 surfaces are the gate runner that computes
-> the primary signals and drives the canary, the versioned replay corpus + manifest that supplies
-> the fingerprint's inputs, and the operator CLI.
+> the primary signals and drives the canary, the replay corpus's comparability guard, and the
+> operator CLI.
 > See [Not yet shipped](#not-yet-shipped),
 > [The deterministic primary gate](#the-deterministic-primary-gate),
 > [Cost-budget invariants](#cost-budget-invariants-fusi-018),
+> [Replay corpus manifest](#replay-corpus-manifest-fusi-030),
 > [Deterministic gate verdict record](#deterministic-gate-verdict-record), and
 > [Cached replay baseline](#cached-replay-baseline).
+
+FNXC:AutoImprovement 2026-09-30-19:35:
+FUSI-030 lands the REPLAY CORPUS MANIFEST — the versioned, validated document that declares which task
+ids a corpus covers, in which order, under which seed, with which provider. The cost-budget arm above
+already refuses to compare two runs that disagree on corpusId/seed/order, but until now those facts
+lived only as arguments a caller happened to pass, so "the same corpus" was an unverifiable claim.
+This manifest is the single on-disk declaration of them, plus a stable fingerprint the comparability
+machinery can key on. It is PURE types + a PURE validator: it declares a corpus, it does not run one.
+The provider is typed as the single mock literal (unrepresentable at the type level, not merely
+rejected at runtime) so no corpus run can ever reach a real model, and version is data rather than a
+boolean flag so a v1 document is refused by a v2 loader instead of silently half-interpreted. The
+baseline CACHE and the comparability GUARD that consume it are later slices (FUSI-031/032) and stay
+on the not-yet-shipped list.
 
 ## Overview
 
@@ -370,6 +386,90 @@ a cached baseline against a candidate possibly measured days later under a diffe
 durable is *which* corpus, *which* seed, *how many* tasks, and *which* axes moved. See the
 [Run-Audit Catalogue](./run-audit.md) for the full metadata contract.
 
+## Replay corpus manifest (FUSI-030)
+
+The versioned declaration of *what a corpus is*. The cost-budget arm above refuses to compare two
+runs that disagree on `corpusId`, `seed`, or the canonical task order — but until FUSI-030 those
+facts lived only as arguments a caller happened to pass, so "the same corpus" was an unverifiable
+claim. This manifest is the single on-disk declaration of them, and its fingerprint is the identity
+the comparability machinery can key on.
+
+Shipped in FUSI-030 as **pure types plus a pure validator**: it declares a corpus, it does not run
+one. There is no store, no engine path, and no provider client.
+
+### Fields
+
+| Field | Meaning |
+|---|---|
+| `version` | Schema version; must be in `REPLAY_CORPUS_MANIFEST_VERSIONS` (currently `[1]`, exposed as `REPLAY_CORPUS_MANIFEST_VERSION`). |
+| `corpusId` | Identity of the task set; travels with every measurement so a run cannot be silently relabelled. |
+| `taskIds` | The tasks the corpus covers, in **declared** order. |
+| `seed` | The run's seed; a re-seeded corpus is a different corpus. |
+| `provider` | Always the **mock** provider. |
+| `order` | How `taskIds` becomes the canonical order: `lexicographic` or `manifest`. |
+| `reproducibility` | Three booleans — `deterministicSeed`, `stableOrder`, `mockProviderOnly` — the rules the corpus commits to. |
+
+The **provider is a single literal, not a union with a restriction**. `provider` is typed as
+`typeof MOCK_PROVIDER_ID`, so there is no union arm through which a real provider id can be written
+at all: a non-mock provider is *unrepresentable at the type level*, not merely rejected at runtime.
+That is stronger than a union plus a validator, which is a convention a future edit can quietly
+relax. A corpus run must never reach a real model, because a real call would make both the cost
+measurement and the gate verdict irreproducible.
+
+**Version is data, not a flag.** `version` is a `number` compared against the accepted-versions
+array, not a `legacy?: boolean`. A boolean admits exactly two histories; a version admits N and says
+which one a document was written against, so a v1 document is *refused* by a v2 loader rather than
+silently half-interpreted.
+
+### Load-time validation
+
+`loadReplayCorpusManifest(raw)` returns a result — it never throws — so the caller (a gate deciding
+whether to measure) learns *which* defect it hit without a try/catch. It copies `taskIds` and
+`reproducibility`, so the loaded manifest is a **snapshot** a later caller mutation cannot reach.
+
+Refusal reasons are a **closed enum**, and each refusal names the offending **field** but never the
+offending **value** (the value may be a task id; echoing caller text into an operator surface is how
+injection and secret-leak bugs start):
+
+| Reason | Refused because |
+|---|---|
+| `unsupported-version` | `version` is absent or outside the accepted set. |
+| `missing-field` | A required field is absent or the wrong type (including a non-object document). |
+| `empty-corpus` | `taskIds` is empty — a corpus with no tasks has nothing to replay. |
+| `duplicate-task-id` | The same task id appears twice. |
+| `empty-task-id` | A task id is empty or non-string. |
+| `provider-not-mock` | `provider` is not the mock provider. |
+| `unsupported-order` | `order` is not `lexicographic` or `manifest`. |
+| `unknown-field` | The document (or its `reproducibility` block) carries a field this version does not define. |
+
+`unknown-field` is **refused, not ignored**: a permissive reader would happily accept a document
+written for a future version and then measure the corpus as something it is not. Refusing the unknown
+key is what makes `version` load-bearing rather than decorative.
+
+### Ordering and the fingerprint
+
+`resolveReplayCorpusOrder(manifest)` returns a **fresh** array and never mutates the manifest.
+
+- **`lexicographic`** sorts by task id, so the order is a function of the *set*: a shuffled document
+  resolves to the same corpus.
+- **`manifest`** keeps the declared order, so a reordered document is a *different* corpus.
+
+`fingerprintReplayCorpusManifest(manifest)` is a `sha256:` digest over a **fixed-key canonical
+object** of exactly the comparability facts — `version`, `corpusId`, `seed`, `provider`, `order`, and
+the **resolved** ordered task ids. It mirrors `fingerprintCostRun` and deliberately **excludes** any
+timestamp, duration, or wall clock. Because the fingerprint hashes the *resolved* order, the two
+modes are distinguishable by construction: a lexicographic shuffle leaves the fingerprint unchanged,
+while a `manifest`-order shuffle changes it.
+
+The loaded manifest imports nothing but `node:crypto`, the shared mock-provider literal, and its own
+type module — no clock, no store, no provider client. That import list is the cheapest guard against
+the two mistakes that would destroy the feature's value: sampling `Date.now()` (which would make two
+runs of one corpus disagree) and reaching a provider (which would make a "reproducible" measurement
+depend on a real model's availability and pricing).
+
+The **baseline cache** (reuse/invalidation) and the `fn_selfimprove_status` display that consume this
+manifest are later slices (FUSI-031/032) and are not yet shipped.
+
 ## Structural denylist
 
 The floor under the primary gate: an experiment may change product behavior, but it may not rewrite
@@ -539,19 +639,22 @@ gate library (FUSI-016), the test-count delta guard (FUSI-017), and the cost-bud
 following are later M1 slices and are **not** in the code at all:
 
 - The deterministic primary gate *runner* (FUSI-016's gate library above is landed, but the
-  runner that consumes the delta guard's verdict is not), the versioned **replay corpus** +
-  manifest that supplies the baseline cache's fingerprint inputs, and the CLI/pi `fn_selfimprove_*`
-  operator surface (status, proposals, experiments, veto, pause, force-revert). The structural
-  denylist shipped in FUSI-019, the **persisted verdict / precedence** rule in FUSI-020, and the
-  **cached baseline with its fingerprint and invalidation rule** in FUSI-031, so none of those three
+  runner that consumes the delta guard's verdict is not), the replay corpus's **comparability
+  guard**, and the CLI/pi `fn_selfimprove_*` operator surface (status, proposals, experiments, veto,
+  pause, force-revert). The structural denylist shipped in FUSI-019, the **persisted verdict /
+  precedence** rule in FUSI-020, the **versioned replay corpus manifest** in FUSI-030, and the
+  **cached baseline with its fingerprint and invalidation rule** in FUSI-031, so none of those four
   is on this list.
 
 The cached baseline itself shipped in FUSI-031 — see
-[Cached replay baseline](#cached-replay-baseline) — but the corpus manifest that ORIGINATES its
-`manifestVersion` and `seed` inputs did not, and neither did the CLI that renders the status read
-model. The gate runner and the replay canary are described in the mission brief, not implemented
-yet; when they land, this page is extended with the replay manifest's comparability rules. The
-cost-budget arm of the primary gate shipped in FUSI-018 and is described under
+[Cached replay baseline](#cached-replay-baseline) — and the versioned manifest that ORIGINATES its
+`manifestVersion` and `seed` inputs shipped in FUSI-030 — see
+[Replay corpus manifest](#replay-corpus-manifest-fusi-030). What did not ship is the comparability
+guard that CONSUMES the manifest's fingerprint to decide whether two runs describe the same corpus,
+and neither did the CLI that renders the status read model. The gate runner and the replay canary
+are described in the mission brief, not implemented yet; when they land, this page is extended with
+the replay manifest's comparability rules. The cost-budget arm of the primary gate shipped in
+FUSI-018 and is described under
 [Cost-budget invariants](#cost-budget-invariants-fusi-018).
 
 ## The deterministic primary gate (FUSI-016)

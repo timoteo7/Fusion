@@ -23,6 +23,18 @@ export { measureCostRun } from "./self-improve/cost-budget-measure.js";
 export { evaluateCostBudget } from "./self-improve/cost-budget-guard.js";
 export type { CostBudgetInput, CostRunInput } from "./self-improve/cost-budget-guard.js";
 /*
+FNXC:SelfImproveReplayCorpusManifest 2026-09-30-19:35:
+The corpus contract is exported from the package root so the baseline cache (FUSI-031), the
+comparability guard (FUSI-032), and the corpus metrics (FUSI-033) all import ONE declaration of
+"which tasks, in which order, under which seed" instead of each restating the facts or accepting
+them as loose arguments. The provider stays a single literal in the exported type, so a consumer
+cannot widen it to reach a real model through the barrel.
+*/
+export type { ReplayCorpusManifest, ReplayCorpusManifestVersion, ReplayCorpusOrder, ReplayCorpusReproducibility, ReplayCorpusManifestRejectionReason } from "./types/self-improve/replay-corpus-manifest.js";
+export { REPLAY_CORPUS_MANIFEST_VERSION, REPLAY_CORPUS_MANIFEST_VERSIONS, REPLAY_CORPUS_ORDERS, REPLAY_CORPUS_MANIFEST_REJECTION_REASONS, isReplayCorpusOrder, isReplayCorpusManifestRejectionReason } from "./types/self-improve/replay-corpus-manifest.js";
+export type { ReplayCorpusManifestLoadResult } from "./self-improve/replay-corpus-manifest.js";
+export { loadReplayCorpusManifest, resolveReplayCorpusOrder, fingerprintReplayCorpusManifest } from "./self-improve/replay-corpus-manifest.js";
+/*
 FNXC:SelfImproveGateVerdict 2026-09-30-12:40:
 The verdict contract is exported from the package root so the deterministic gate, the store
 accessor, and the operator surface all import ONE definition of a verdict rather than each
