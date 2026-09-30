@@ -140,6 +140,7 @@ async function loadCommandHandlers() {
   const { runGoalsList, runGoalsCreate, runGoalsArchive, runGoalsCitations } = await import("./commands/goals.js");
   const { runProjectList, runProjectAdd, runProjectRemove, runProjectShow, runProjectInfo, runProjectSetDefault, runProjectDetect } = await import("./commands/project.js");
   const { runNodeList, runNodeConnect, runNodeDisconnect, runNodeShow, runNodeHealth, runMeshStatus } = await import("./commands/node.js");
+  const { runModelsList, runModelsProviders, createModelCatalogDeps } = await import("./commands/models.js");
   const {
     runCloudPairStart,
     runCloudPairComplete,
@@ -265,6 +266,9 @@ async function loadCommandHandlers() {
     runNodeShow,
     runNodeHealth,
     runMeshStatus,
+    runModelsList,
+    runModelsProviders,
+    createModelCatalogDeps,
     runCloudPairStart,
     runCloudPairComplete,
     runCloudHeartbeat,
@@ -409,6 +413,10 @@ PR:
   fn node show | info [name] [--json] Show node details
   fn node health <name>               Health check a node
   fn mesh status [--json]              Show full mesh state
+  fn models list | ls [--json]         List usable models by provider, with per-model price
+  fn models list [--provider <id>] [--all]
+                                      Filter to one provider, or --all to include unconnected ones
+  fn models providers [--json]         List configured providers and their model counts
   fn cloud pair-start [--http <url>] [--name <name>]
                                       Start cloud-link pairing (prints code)
   fn cloud pair-complete [--http <url>] [--code <code>]
@@ -793,6 +801,9 @@ async function main() {
     runNodeShow,
     runNodeHealth,
     runMeshStatus,
+    runModelsList,
+    runModelsProviders,
+    createModelCatalogDeps,
     runCloudPairStart,
     runCloudPairComplete,
     runCloudHeartbeat,
@@ -1139,6 +1150,52 @@ async function main() {
             console.log("Try: fn node list | connect | disconnect | show | health");
             process.exit(1);
         }
+        break;
+      }
+
+      /*
+      FNXC:ModelCatalogCli 2026-09-30-19:35:
+      FUSI-024: the headless read surface for the model catalog. Bare `fn models` is `list`, and
+      both subcommands work with no dashboard running and no bearer token — the whole point of the
+      command. The dependency seam is built once per invocation and shared by the subcommands, so
+      `list` never pays for a second registry refresh.
+      */
+      case "models": {
+        // The subcommand is the first argument that is neither a flag nor a flag's VALUE. Both
+        // `fn models --json` (a `list` with a flag) and `fn models --provider openai` (a `list`
+        // with a valued flag) are legitimate invocations, so neither the flag nor the value that
+        // follows `--provider` may be mistaken for a bad subcommand and rejected. A boolean flag
+        // like `--all`/`--json` carries no value and must not swallow the next argument.
+        const VALUED_FLAGS = new Set(["--provider"]);
+        let subcommand: string | undefined;
+        for (let i = 1; i < args.length; i++) {
+          const arg = args[i]!;
+          if (VALUED_FLAGS.has(arg)) {
+            i++; // skip the flag's value
+            continue;
+          }
+          if (arg.startsWith("-")) continue; // a boolean flag
+          subcommand = arg;
+          break;
+        }
+        if (subcommand !== undefined && !["list", "ls", "providers"].includes(subcommand)) {
+          console.error(`Unknown subcommand: models ${subcommand}`);
+          console.log("Try: fn models list | providers");
+          process.exit(1);
+        }
+        const catalogDeps = await createModelCatalogDeps();
+        if (subcommand === "providers") {
+          await runModelsProviders({ json: args.includes("--json") }, catalogDeps);
+          break;
+        }
+        await runModelsList(
+          {
+            json: args.includes("--json"),
+            provider: getFlagValue(args, "--provider"),
+            all: args.includes("--all"),
+          },
+          catalogDeps,
+        );
         break;
       }
 

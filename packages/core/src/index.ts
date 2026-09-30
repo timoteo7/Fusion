@@ -123,6 +123,18 @@ export type {
   TaskBranchOrigin,
 } from "./branch/branch-assignment.js";
 export { customProviderRegistryKey } from "./ai/custom-provider-key.js";
+/*
+FNXC:ConfiguredProviderDiscovery 2026-09-30-19:10:
+FUSI-024: the configured-provider gate is exported from core so the dashboard `/api/models` route and the headless `fn models` CLI derive the same connected-provider set from ONE implementation. A catalog that advertises an unconnected provider is worse than no catalog, so this must never be re-implemented per surface.
+*/
+export {
+  addToggleConfiguredProviders,
+  discoverConfiguredProviders,
+} from "./ai/configured-provider-discovery.js";
+export type {
+  ConfiguredProviderAuthStorageLike,
+  ConfiguredProviderToggleFlags,
+} from "./ai/configured-provider-discovery.js";
 export {
   ANTHROPIC_PROVIDER_ID,
   ANTHROPIC_API_KEY_PROVIDER_ID,
