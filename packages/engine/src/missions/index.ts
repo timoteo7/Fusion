@@ -9,3 +9,4 @@ export {
   type MissionReconcilePassResult,
   type ReconcileMissionStateDeps,
 } from "./mission-state-reconcile.js";
+export { advanceMissionToNextSlice, type MissionStoreLike } from "./slice-advance.js";

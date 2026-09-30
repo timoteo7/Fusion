@@ -102,6 +102,7 @@ import {
   withWorkspaceMergeDispatchLease,
   MissionAutopilot,
   MissionExecutionLoop,
+  advanceMissionToNextSlice,
   HeartbeatMonitor,
   HeartbeatTriggerScheduler,
   type WakeContext,
@@ -1838,12 +1839,34 @@ export async function runDashboard(port: number, opts: { paused?: boolean; dev?:
             _status: "passed" | "failed" | "blocked" | "error",
           ) => {
             if (missionAutopilotImpl) {
-              const feature = missionStore?.getFeature(featureId);
+              /*
+              FNXC:MissionSliceAdvanceOnValidation 2026-09-30-13:48:
+              `missionStore` here is narrowed to the SYNC `MissionStore` (see the
+              `instanceof MissionStore` guard above), whose `getFeature` returns the
+              feature directly, so `await` here is identity-preserving and simply
+              keeps the call shape uniform with `AsyncMissionStore.getFeature`. The
+              feature with NO linked task falls through this branch untouched and
+              reaches the `onSliceValidated` seam below.
+              */
+              const feature = await missionStore.getFeature(featureId);
               if (feature?.taskId) {
                 await missionAutopilotImpl.handleTaskCompletion(feature.taskId);
               }
             }
           },
+        },
+        /*
+        FNXC:MissionSliceAdvanceOnValidation 2026-09-30-13:49:
+        UI-only mode (`fn dashboard --no-engine`) never constructs or wires a
+        Scheduler, and the local MissionAutopilot's `advanceToNextSlice` delegates
+        to `Scheduler.activateNextPendingSlice` — which does not exist here, so it
+        is a permanent silent no-op in this mode. Wiring the store-backed seam
+        directly is what makes a validation-closed slice advance the roadmap in
+        UI-only mode too, with no engine bootstrap. Do NOT construct a Scheduler
+        in this file.
+        */
+        onSliceValidated: async (missionId: string) => {
+          await advanceMissionToNextSlice(missionStore, missionId);
         },
         rootDir: cwd,
       })
