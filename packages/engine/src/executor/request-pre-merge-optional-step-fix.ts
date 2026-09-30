@@ -49,7 +49,7 @@ import {
 } from "@fusion/core";
 import { mergeEffectiveSettings } from "../project/effective-settings.js";
 import { moveTaskToReplanColumn, resolveReplanTargetColumn } from "../execution/replan-target.js";
-import { isNonPlanDefectPlanReviewFailure } from "../errors/transient-error-detector.js";
+import { isNonPlanDefectPlanReviewFailure, isPlanLockUnavailableDiagnostic } from "../errors/transient-error-detector.js";
 import { parseRequiredArtifactMissingValue } from "../execution/required-workflow-artifacts.js";
 import {
   countOptionalStepRevisionAttempts,
@@ -352,6 +352,23 @@ async function requestPreMergeOptionalStepFixInner(
   }
   const isPlanReview = info.nodeId === "plan-review" || info.stepName === "Plan Review";
   if (isPlanReview) {
+    /*
+    FNXC:PlanReviewReplan 2026-09-30-15:33 (FUSI-029):
+    A spec-lock rejection is a deterministic parser verdict about PROMPT.md, and no replan can change
+    it: the diagnostic arrives with no `verdict`, so the revision budget never increments and this
+    seam used to schedule a fresh fix on every cycle (FUSI-025: 20 cycles in ~67 min). Refuse here,
+    at the TOP of the plan-review branch, so the explicit `plan-review --failure--> plan-replan` node
+    path and any future caller are covered, not just graph traversal.
+    */
+    if (isPlanLockUnavailableDiagnostic(info.feedback) || isPlanLockUnavailableDiagnostic(info.failureValue)) {
+      await deps.store.logEntry(
+        taskId,
+        "Plan Review replan refused — the plan cannot be locked (structural PROMPT.md defect)",
+        `${info.feedback ?? info.failureValue ?? "the plan could not be locked"}\n\nA new plan cannot fix a structural lock failure. Correct PROMPT.md, then retry the task; no automatic replan was scheduled.`,
+        deps.getRunContextFor(taskId),
+      );
+      return false;
+    }
     /*
      * FNXC:PlanReviewReplan 2026-07-05-17:32:
      * FN-7561: a malformed reviewer response arrives as `advisory_failure` with NO parsed verdict. That is an infra/formatting failure (e.g. the reviewer could not locate the spec, or fumbled its trailing JSON), not a plan defect — it must NEVER bounce the task to a triage replan. The graph already excludes malformed advisories from the fix handoff (shouldRequestPreMergeFix); this guard defends the explicit remediation-node path and any future caller so a malformed advisory can never drive the replan loop. A genuine REVISE (verdict === "REVISE", also carried as advisory_failure) still replans below.
