@@ -84,14 +84,15 @@ gate's persisted verdict record and primary-precedence rule landed with FUSI-020
 > committed on the mission branch and **not yet merged into `main`**. The file paths and
 > migrations named here are therefore not yet present in a `main` checkout — they become real
 > when that branch lands. The still-unimplemented M1 surfaces are the gate runner that computes
-> the primary signals and drives the canary, the replay corpus's comparability guard, and the
+> the primary signals and drives the canary, and the
 > operator CLI.
 > See [Not yet shipped](#not-yet-shipped),
 > [The deterministic primary gate](#the-deterministic-primary-gate),
 > [Cost-budget invariants](#cost-budget-invariants-fusi-018),
 > [Replay corpus manifest](#replay-corpus-manifest-fusi-030),
 > [Cached replay baseline](#cached-replay-baseline),
-> [Corpus metrics](#corpus-metrics-fusi-033), and
+> [Corpus metrics](#corpus-metrics-fusi-033),
+> [Replay comparability guard](#replay-comparability-guard-fusi-032), and
 > [Deterministic gate verdict record](#deterministic-gate-verdict-record).
 
 FNXC:AutoImprovement 2026-09-30-19:35:
@@ -113,7 +114,20 @@ Conflict resolution: FUSI-030 (manifest), FUSI-031 (cached baseline), and FUSI-0
 all extend this same status block. The merged text names all three, and the "See" list links all three
 sections, so the merged page claims exactly the surfaces the merged code actually ships. The list of
 not-yet-shipped surfaces is reconciled in the same way: the canary that CONSUMES the FUSI-033 metrics
-is still unshipped, and so are the comparability guard and the operator CLI.
+is still unshipped, and so is the operator CLI.
+
+FNXC:AutoImprovement 2026-09-30-20:49:
+FUSI-032 lands the replay corpus's COMPARABILITY GUARD, so the surfaces listed as unshipped in the
+block above and in FUSI-030's own dated note are now real. The guard is PURE — four fixed dimensions
+(`manifest`, `seed`, `engine`, `config`), a closed refusal vocabulary (`divergent-identity` |
+`not-a-run`), and a refusal that fires BEFORE any delta is computed — and it consumes exactly the
+manifest fingerprint FUSI-030 ORIGINATES and the cached baseline FUSI-031 stores. Its contract is
+documented under [Replay comparability guard](#replay-comparability-guard-fusi-032); its bounded
+`selfimprove:comparability-refused` row is catalogued in the Run-Audit Catalogue.
+
+This block records the transition rather than rewriting the dated blocks above it: those describe
+their own moment, and a contract page that simultaneously documents a surface and denies it exists
+is the exact failure this page's header warns against.
 -->
 
 ## Overview
@@ -724,24 +738,25 @@ following are later M1 slices and are **not** in the code at all:
 
 - The deterministic primary gate *runner* (FUSI-016's gate library above is landed, but the
 runner that consumes the delta guard's verdict is not), the **canary that consumes** the four
-  corpus metrics, the replay corpus's **comparability guard**, and the CLI/pi `fn_selfimprove_*`
+  corpus metrics, and the CLI/pi `fn_selfimprove_*`
   operator surface (status, proposals, experiments, veto, pause, force-revert). The structural
   denylist shipped in FUSI-019, the **persisted verdict / precedence** rule in FUSI-020, the
   **versioned replay corpus manifest** in FUSI-030, the **cached baseline with its fingerprint and
-  invalidation rule** in FUSI-031, and the four **corpus metrics** in FUSI-033, so none of those five
-  is on this list.
+  invalidation rule** in FUSI-031, the four **corpus metrics** in FUSI-033, and the **comparability
+  guard** in FUSI-032, so none of those six is on this list.
 
 The cached baseline itself shipped in FUSI-031 — see
 [Cached replay baseline](#cached-replay-baseline) — and the versioned manifest that ORIGINATES its
 `manifestVersion` and `seed` inputs shipped in FUSI-030 — see
-[Replay corpus manifest](#replay-corpus-manifest-fusi-030). What did not ship is the comparability
-guard that CONSUMES the manifest's fingerprint to decide whether two runs describe the same corpus,
-and neither did the CLI that renders the status read model. The four corpus metrics — the secondary
+[Replay corpus manifest](#replay-corpus-manifest-fusi-030). The comparability guard that CONSUMES
+the manifest's fingerprint to decide whether two runs describe the same corpus shipped in FUSI-032 —
+see [Replay comparability guard](#replay-comparability-guard-fusi-032) — and what did not ship with
+it is the CLI that renders the status read model. The four corpus metrics — the secondary
 ruler's measurement seam — shipped in FUSI-033 and are described under
 [Corpus metrics](#corpus-metrics-fusi-033); what did NOT ship there is the **canary** that consumes
 them and turns their comparison into a keep/revert decision. The gate runner and the replay canary
 are described in the mission brief, not implemented yet; when they land, this page is extended with
-the replay manifest's comparability rules. The cost-budget arm of the primary gate shipped in
+the rules for driving a comparison from a guarded verdict. The cost-budget arm of the primary gate shipped in
 FUSI-018 and is described under
 [Cost-budget invariants](#cost-budget-invariants-fusi-018).
 
@@ -855,6 +870,54 @@ FNXC banner at the head of this file still lists the denylist among the remainin
 surfaces in one historical block; those blocks are dated and describe their own moment, so they
 are left intact rather than retroactively rewritten.
 */
+
+## Replay comparability guard (FUSI-032)
+
+A replay experiment keeps a **cached baseline** from a prior pass and measures a **fresh candidate**
+now. The entire value of the delta between them rests on both sides having been produced the same
+way, so the loop refuses to compare two runs whose measurement inputs differ. The contract is pure
+and lives in `packages/core/src/self-improve/comparability-types.ts`; the guard is
+`evaluateComparability` in `packages/core/src/self-improve/comparability-guard.ts`.
+
+**Four fixed dimensions.** A replay result is invalid because the corpus `manifest` was edited, the
+`seed` was re-rolled, the `engine` build changed, or the resolved `config` changed — and those are
+the only four ways, because they are the only inputs that determine *what* a replay pass measures.
+The set is a closed enum (`COMPARABILITY_DIMENSIONS`, evaluated in exactly the order
+`manifest, seed, engine, config`) so a crafted or misspelled name cannot widen what is compared or
+recorded. The order is fixed so the reported cause is a deterministic, reproducible list.
+
+**Refuse before running — never compute a metric.** There is deliberately no "how far apart" field.
+The guard walks the four dimensions, collects **every** dimension whose value differs, and the moment
+at least one does it returns `not-comparable` carrying that ordered list, computing no delta, score,
+or comparison value at all. A delta between two differently-produced runs is a number with no
+meaning, and a meaningless number that renders as a plausible delta is worse than none — it survives
+a glance and enters a keep-or-revert decision. Only a `comparable` verdict (all four dimensions equal)
+authorizes a metric downstream.
+
+**A half-populated identity is not a run.** An identity with an empty `manifest`, `seed`, `engine`, or
+`config` is a placeholder, not a measurement, and its own reported values are not evidence that a pass
+happened. It is refused as `not-a-run` (checked on both sides, before any dimension comparison) rather
+than trusted — this mirrors the cost-budget guard's `inconsistent-run` refusal. So the refusal
+vocabulary is exactly two fixed values: `divergent-identity` (a dimension diverged; `diverged` names
+which) and `not-a-run` (a placeholder side).
+
+**Determinism by content, never by clock.** An identity's `fingerprint` is a `sha256:` digest over the
+canonical serialization of its four dimension values, computed from the identity's own content — not
+from a clock, a store, an engine import, or the caller's property insertion order. The same four
+values always yield the same fingerprint on any host, which is exactly what makes a baseline cached on
+one pass comparable to a candidate measured later or elsewhere. Judging the same pair twice is
+deep-equal, including the recomputed fingerprints and both echoed identities, so a caller can record
+exactly what was judged without re-deriving it.
+
+**Fixed-outcome recording.** A refusal emits `selfimprove:comparability-refused` through the core
+bounded run-audit seam (see
+[Self-improvement learning ledger](./run-audit.md)). Metadata is ids/counts/fixed outcomes only: a
+fixed `outcome` (`divergent-identity` | `not-a-run`), the ordered `diverged` dimension list, its
+`divergedCount`, the eight opaque identity values (four per side), and `proposalId`/`projectId` only
+when present. The `diverged` enum list **is** the named cause — a reason sentence would be a second,
+uncountable vocabulary — and a crafted unknown dimension name is dropped rather than recorded. A
+hostile audit sink cannot soften, delay, or reverse a stop: the refusal was already decided by the
+pure guard before the emit was attempted.
 
 ## Related documentation
 

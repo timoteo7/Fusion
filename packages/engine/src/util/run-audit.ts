@@ -1106,7 +1106,27 @@ export type DatabaseMutationType =
    * seam, so an absent/throwing/rejecting/hanging sink changes nothing about the resolution the caller
    * already holds.
    */
-  | "selfimprove:baseline-cache-resolved";
+  | "selfimprove:baseline-cache-resolved"
+  /*
+   * FNXC:SelfImproveComparability 2026-09-30-19:55:
+   * A replay comparison that was REFUSED before anything was measured, because the cached baseline
+   * and the fresh candidate were not produced the same way. It is its own mutation type rather than a
+   * reuse of `selfimprove:cost-budget-evaluated` because those record opposite operator facts at
+   * different pipeline points: that row is a verdict the gate REACHED after a measurement, this one
+   * records that the measurement never legitimately happened.
+   *
+   * The metadata rule — ids/counts/fixed outcomes ONLY. The row carries a fixed `outcome`
+   * (`divergent-identity` | `not-a-run`), the ordered `diverged` list of fixed dimension names
+   * (`manifest` | `seed` | `engine` | `config`) and its `divergedCount`, and the eight opaque
+   * identity values (four per side). That `diverged` enum list IS the named cause: it is what makes
+   * the refusal actionable and countable by cause. NEVER a manifest body, config blob, diff, or reason
+   * sentence reaches this row.
+   *
+   * Deliberately OUTSIDE `DELIVERY_PIPELINE_RUN_AUDIT_EVENTS`: like the other `selfimprove:*` events
+   * it is not part of the curated delivery-pipeline catalogue, so `run-audit-catalogue.test.ts`
+   * lock-step parity is not triggered by adding it.
+   */
+  | "selfimprove:comparability-refused";
 
 // ── Filesystem mutation types ─────────────────────────────────────────────────
 

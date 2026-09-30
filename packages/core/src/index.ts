@@ -9,8 +9,8 @@ export type { LearningLedgerEventKind, LearningLedgerEvent, LearningProposalWith
 export { deriveLearningStateFromEvents, normalizeLedgerLimit, normalizeLedgerOffset } from "./task-store/async/async-learning-ledger.js";
 export type { LearningRevertReason, LearningRevertOutcome, LearningRevertResult, LearningRevertInput } from "./self-improve/learning-revert-types.js";
 export { LEARNING_REVERT_REASONS, isLearningRevertReason, buildLearningRevertEventId } from "./self-improve/learning-revert-types.js";
-export { SELF_IMPROVE_RUN_AUDIT_EVENTS, SELF_IMPROVE_AUDIT_AGENT_ID, emitSelfImproveProposalCreated, emitSelfImproveProposalApplied, emitSelfImproveProposalReverted, emitSelfImproveCostBudgetEvaluated, emitSelfImproveGateVerdictRecorded, emitSelfImproveDenylistRejected } from "./self-improve/self-improve-run-audit.js";
-export type { SelfImproveRunAuditEventType, SelfImproveProposalCreatedOutcome, SelfImproveProposalAppliedOutcome, SelfImproveProposalRevertedOutcome, SelfImproveRunAuditInput, SelfImproveCostBudgetOutcome, SelfImproveCostBudgetAuditInput, SelfImproveGateVerdictAuditInput, SelfImproveDenylistRejectedOutcome, SelfImproveDenylistRejectedInput } from "./self-improve/self-improve-run-audit.js";
+export { SELF_IMPROVE_RUN_AUDIT_EVENTS, SELF_IMPROVE_AUDIT_AGENT_ID, emitSelfImproveProposalCreated, emitSelfImproveProposalApplied, emitSelfImproveProposalReverted, emitSelfImproveCostBudgetEvaluated, emitSelfImproveGateVerdictRecorded, emitSelfImproveDenylistRejected, emitSelfImproveComparabilityRefused } from "./self-improve/self-improve-run-audit.js";
+export type { SelfImproveRunAuditEventType, SelfImproveProposalCreatedOutcome, SelfImproveProposalAppliedOutcome, SelfImproveProposalRevertedOutcome, SelfImproveRunAuditInput, SelfImproveCostBudgetOutcome, SelfImproveCostBudgetAuditInput, SelfImproveGateVerdictAuditInput, SelfImproveDenylistRejectedOutcome, SelfImproveDenylistRejectedInput, SelfImproveComparabilityRefusedOutcome, SelfImproveComparabilityRefusedInput } from "./self-improve/self-improve-run-audit.js";
 export { SELF_IMPROVE_GATE_RUN_EVENT, SELF_IMPROVE_GATE_RUN_AGENT_ID, emitSelfImproveGateRun } from "./self-improve/self-improve-gate-run-audit.js";
 export type { SelfImproveGateRunInput } from "./self-improve/self-improve-gate-run-audit.js";
 export { PRIMARY_GATE_STEP_IDS } from "./types/self-improve/primary-gate.js";
@@ -46,6 +46,19 @@ consumer uses.
 export type { CorpusMetricObservation, CorpusMetricName, CorpusMetricTaskEntry, CorpusMetrics } from "./self-improve/corpus-metrics-types.js";
 export { CORPUS_METRIC_NAMES, isCorpusMetricName, toCostObservations } from "./self-improve/corpus-metrics-types.js";
 export { measureCorpusMetrics } from "./self-improve/corpus-metrics.js";
+/*
+FNXC:SelfImproveComparability 2026-09-30-20:49:
+The comparability contract reaches the package root beside the baseline cache (FUSI-031) and the
+corpus manifest (FUSI-030) it consumes, so a caller that has a baseline fingerprint and a candidate
+fingerprint resolves ONE refusal vocabulary instead of restating which dimension drifted. The guard
+is pure and is exported from `index.ts` only — unlike the corpus metrics, nothing under the
+`engine-core` merge-gate bundle consumes it, and widening the reduced barrel for an unused symbol is
+the drift the reduced surface exists to prevent.
+*/
+export type { ComparabilityDimension, ComparabilityIdentity, ComparabilityRefusalReason, ComparabilityVerdict, ComparabilityVerdictValue } from "./self-improve/comparability-types.js";
+export { COMPARABILITY_DIMENSIONS, COMPARABILITY_REFUSAL_REASONS, COMPARABILITY_VERDICT_VALUES, isComparabilityDimension, isComparabilityRefusalReason, isComparabilityVerdictValue } from "./self-improve/comparability-types.js";
+export { evaluateComparability } from "./self-improve/comparability-guard.js";
+export type { ComparabilityInput } from "./self-improve/comparability-guard.js";
 /*
 FNXC:SelfImproveGateVerdict 2026-09-30-12:40:
 The verdict contract is exported from the package root so the deterministic gate, the store
