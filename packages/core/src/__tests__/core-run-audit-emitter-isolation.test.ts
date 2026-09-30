@@ -19,7 +19,15 @@ const awaitedClassifications = {
 
 /*
  * FN-295 (2026-09-04): removing task archiving deleted the transactional audit writer in
- * task-store/async/async-comments-attachments.ts, so it is no longer a transactional boundary.
+ * task-store/async/async-comments-attachments.ts, so it was no longer a transactional boundary.
+ *
+ * FNXC:RunAudit 2026-09-29-18:48:
+ * That removal was later reversed for this file: FN-9000's project scoping added an archived-document
+ * publication audit (`task-document:archived-addition-published`) that is written with the SAME `tx`
+ * as the `taskDocumentRevisions` insert and `taskDocuments` update it describes, so the file IS a
+ * transactional atomicity boundary again. The ratchet was left stale by that change and failed closed
+ * on `main` until this entry recorded the true decision; the audit row and the mutation it describes
+ * must commit or roll back together, which is precisely why bounding is forbidden here.
  */
 const transactionalSourceBoundaries = [
   "task-store/moves.ts", "task-store/symbol-locks.ts", "task-store/async/async-merge-coordination.ts",
@@ -27,6 +35,7 @@ const transactionalSourceBoundaries = [
   "task-store/task-artifacts-ops.ts", "task-store/task-lifecycle-consumer-registry.ts",
   "task-store/async/async-workflow-workitems.ts",
   "task-store/archive-lifecycle-2.ts",
+  "task-store/async/async-comments-attachments.ts",
 ] as const;
 
 const files = [

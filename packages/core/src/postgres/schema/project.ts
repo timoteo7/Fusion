@@ -740,6 +740,96 @@ export const patchnodeEntries = projectSchema.table("patchnode_entries", {
   index("idxPatchnodeEntriesTaskKind").on(t.projectId, t.taskId, t.kind, t.occurredAt),
 ]);
 
+/*
+FNXC:SelfImproveLearningLedger 2026-09-29-02:38:
+The self-improvement ledger follows the patchnode precedent rather than the schema's task
+foreign-key convention: a proposal is a learning record about a product surface, not a child of
+any task, and must stay readable after task archive cleanup hard-deletes task rows.
+Composite PK (project_id, proposal_id) keeps one live record per proposal per project, which is
+what makes re-application version that record in place instead of multiplying rows.
+CHECK constraints mirror the TS contract exactly (four states, confidence in 0..1) so a row that
+violates the domain model is rejected by the database rather than read back as truth.
+value/prior_value/evidence_refs are jsonb: evidence refs are a structured list, not prose, and
+prior_value is nullable precisely because no value is held before the first application.
+*/
+export const learningProposals = projectSchema.table("learning_proposals", {
+  projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`),
+  proposalId: text("proposal_id").notNull(),
+  target: text("target").notNull(),
+  origin: text("origin").notNull(),
+  confidence: real("confidence").notNull(),
+  value: real("value").notNull(),
+  priorValue: real("prior_value"),
+  expiresAt: text("expires_at"),
+  evidenceRefs: jsonb("evidence_refs").notNull().default(sql`'[]'::jsonb`),
+  state: text("state").notNull(),
+  version: integer("version").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.projectId, t.proposalId] }),
+  check("learning_proposals_state_check", sql`${t.state} IN ('proposed', 'applied', 'reverted', 'expired')`),
+  check("learning_proposals_target_check", sql`${t.target} IN ('memory', 'evals', 'skills')`),
+  check("learning_proposals_confidence_check", sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`),
+  check("learning_proposals_value_check", sql`${t.value} >= 0 AND ${t.value} <= 1`),
+  index("idxLearningProposalsTargetState").on(t.projectId, t.target, t.state),
+  index("idxLearningProposalsCreated").on(t.projectId, t.createdAt),
+]);
+
+/*
+FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+The append-only event trail (FUSI-010) is a SECOND table rather than extra columns on
+learning_proposals, because that row holds the CURRENT assertion and the trail holds the whole
+history. Collapsing them would mean overwriting the row on every application, destroying the
+prior value the loop's revert decision reads. An application and its reversal are therefore
+distinct immutable events, and a proposal's state is derived from its latest event — never stored
+as a mutable field on the event trail itself.
+
+FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+The `proposed` kind duplicates the proposal row's own existence on purpose. The row and its opening
+event are written in ONE transaction, so the trail is a self-sufficient record of a proposal's
+entire life and a replay needs no join back to the mutable row.
+
+FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+`reverts_event_id` is required by CHECK exactly when kind='reverted'. A reversal that does not name
+the application it cancels is unreplayable, so the invariant belongs at the database boundary
+rather than in an accessor convention; a re-application legitimately carries no target and stays
+permitted. evidence_refs is jsonb because a ref is a structured locator, not prose.
+
+FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45:
+`revert_reason` records WHY an application was backed out, as a FIXED ENUM rather than free prose.
+An operator asking "why was this experiment undone?" needs a classifiable answer (the deterministic
+gate rejected it, the operator vetoed it, the value was superseded) without the ledger becoming a
+free-text channel. Run-audit records the same reason code, so the ledger row and its telemetry can
+never disagree about why. The CHECK restricts it to the enum and additionally requires it present
+exactly when kind='reverted', mirroring the reverts_event_id invariant: a reversal without a reason
+is unauditable, and a non-reversal has no reason to give.
+*/
+export const learningLedgerEvents = projectSchema.table("learning_ledger_events", {
+  projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`),
+  eventId: text("event_id").notNull(),
+  proposalId: text("proposal_id").notNull(),
+  target: text("target").notNull(),
+  kind: text("kind").notNull(),
+  revertsEventId: text("reverts_event_id"),
+  revertReason: text("revert_reason"),
+  evidenceRefs: jsonb("evidence_refs").notNull().default(sql`'[]'::jsonb`),
+  occurredAt: text("occurred_at").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.projectId, t.eventId] }),
+  check("learning_ledger_events_kind_check", sql`${t.kind} IN ('proposed', 'applied', 'reverted')`),
+  check("learning_ledger_events_target_check", sql`${t.target} IN ('memory', 'evals', 'skills')`),
+  check("learning_ledger_events_reverts_check", sql`(${t.kind} = 'reverted' AND ${t.revertsEventId} IS NOT NULL) OR (${t.kind} <> 'reverted')`),
+  check("learning_ledger_events_revert_reason_check", sql`${t.revertReason} IS NULL OR ${t.revertReason} IN ('gate-rejected', 'operator-veto', 'superseded', 'expired', 'manual')`),
+  check("learning_ledger_events_revert_reason_required_check", sql`(${t.kind} = 'reverted' AND ${t.revertReason} IS NOT NULL) OR (${t.kind} <> 'reverted' AND ${t.revertReason} IS NULL)`),
+  // Serves "has this application already been reverted?" — the read the idempotency check performs
+  // before appending — as an index-backed lookup on the reversal's target application.
+  index("idxLearningLedgerEventsReverts").on(t.projectId, t.revertsEventId, t.occurredAt),
+  index("idxLearningLedgerEventsTargetOccurred").on(t.projectId, t.target, t.occurredAt),
+  index("idxLearningLedgerEventsProposalOccurred").on(t.projectId, t.proposalId, t.occurredAt),
+  index("idxLearningLedgerEventsTargetKindOccurred").on(t.projectId, t.target, t.kind, t.occurredAt),
+]);
+
 export const agentActivityEventSeq = projectSchema.table("agent_activity_event_seq", {
   projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`), lastSeq: bigint("last_seq", { mode: "bigint" }).notNull().default(sql`0`),
 }, (t) => [primaryKey({ columns: [t.projectId] })]);
@@ -2713,4 +2803,5 @@ export const projectTableNames = [
   "task_lifecycle_consumer_receipts", "task_lifecycle_consumer_registrations",
   "task_lifecycle_event_seq", "task_lifecycle_events", "task_verification_requests",
   "unplanned_execution_blocks", "workflow_agent_capacity_leases", "task_overlap_waits",
+  "learning_proposals", "learning_ledger_events",
 ] as const;

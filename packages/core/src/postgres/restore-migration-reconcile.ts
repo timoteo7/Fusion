@@ -95,11 +95,13 @@ import {
   MULTI_PROJECT_CUTOVER_SCHEMA_VERSION,
   MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
   OVERLAP_WAIT_SYNC_VERSION,
+  LEARNING_LEDGER_EVENTS_VERSION,
   OWNER_PROJECT_ID_SPLIT_VERSION,
   PATCHNODE_ENTRIES_VERSION,
   PLANNING_ACTIVE_TIMING_VERSION,
   PROJECT_OWNERSHIP_SCHEMA_VERSION,
   QUEUED_EPISODE_SIGNATURE_VERSION,
+  SELFIMPROVE_LEARNING_LEDGER_VERSION,
   REMOVE_TASK_SUBTASK_SPLITTING_VERSION,
   RESEARCH_FEATURE_PROVENANCE_VERSION,
   REVIEW_CONVERGENCE_STAGE_VERSION,
@@ -366,6 +368,15 @@ export const RESTORED_SCHEMA_RELATION_SENTINELS: readonly RestoredSchemaRelation
   { version: TASK_REQUIRE_PLAN_APPROVAL_VERSION, columns: [tasksColumn("require_plan_approval")] },
   { version: PATCHNODE_ENTRIES_VERSION, relations: ["project.patchnode_entries"] },
   { version: OVERLAP_WAIT_SYNC_VERSION, relations: ["project.task_overlap_waits"] },
+  { version: SELFIMPROVE_LEARNING_LEDGER_VERSION, relations: ["project.learning_proposals"] },
+  /*
+  FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+  The event trail carries its own sentinel, separate from 0086's, because the two are independently
+  rewind-detectable. A database restored from a point between 0086 and 0087 has the proposal row
+  but no trail; reporting the floor as 0086 lets the caller replay 0087 alone rather than treating
+  the proposal record as suspect and replaying the whole ledger.
+  */
+  { version: LEARNING_LEDGER_EVENTS_VERSION, relations: ["project.learning_ledger_events"] },
 ];
 
 export async function detectRestoredSchemaRewindFloor(
