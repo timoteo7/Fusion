@@ -1,6 +1,25 @@
 import type { RunAuditEventInput } from "../types/audit/run-audit.js";
 import { emitBoundedRunAudit, type RunAuditSinkHost } from "../run-audit/emit-bounded-run-audit.js";
 import type { LearningProposalTarget } from "../types/self-improve/learning-proposal.js";
+import {
+  LEARNING_REVERT_REASONS,
+  isLearningRevertReason,
+  type LearningRevertReason,
+} from "./learning-revert-types.js";
+
+/*
+FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:20:
+The revert-reason enum is RE-EXPORTED from `learning-revert-types.js` rather than declared here.
+FUSI-012 (this module) and FUSI-011 (that module) each arrived at the same fixed enum from opposite
+directions — the audit edge needed it to mirror the ledger's CHECK, the revert semantics needed it to
+classify a reversal — and two declarations of one enum is exactly the drift this contract exists to
+prevent: the audit row and the ledger row could then disagree about why a reversal happened, which is
+the single question this layer exists to answer. One declaration, re-exported, keeps both import
+paths working for existing callers while leaving a single source of truth.
+*/
+
+export { LEARNING_REVERT_REASONS, isLearningRevertReason };
+export type { LearningRevertReason };
 
 /*
 FNXC:SelfImproveRunAudit 2026-09-29-18:51:
@@ -68,30 +87,6 @@ export const SELF_IMPROVE_RUN_AUDIT_EVENTS = {
 /** One of the three `selfimprove:*` mutation types. */
 export type SelfImproveRunAuditEventType =
   (typeof SELF_IMPROVE_RUN_AUDIT_EVENTS)[keyof typeof SELF_IMPROVE_RUN_AUDIT_EVENTS];
-
-/**
- * Why an application was rolled back. Mirrors the `learning_ledger_events_revert_reason_check` CHECK
- * exactly, so the run-audit row and the ledger row can never disagree about why a reversal happened.
- *
- * Fixed enum rather than prose: the whole point is that "why was this undone?" is answerable by
- * counting reasons, not by reading sentences. A free-text column here would be an unbounded narrative
- * surface no later gate could filter, and run-audit could not honestly mirror it.
- */
-export const LEARNING_REVERT_REASONS = [
-  "gate-rejected",
-  "operator-veto",
-  "superseded",
-  "expired",
-  "manual",
-] as const;
-
-/** Fixed-enum member of {@link LEARNING_REVERT_REASONS}. */
-export type LearningRevertReason = (typeof LEARNING_REVERT_REASONS)[number];
-
-/** True when `value` is a member of the fixed revert-reason enum. Guards callers building a row by hand. */
-export function isLearningRevertReason(value: unknown): value is LearningRevertReason {
-  return typeof value === "string" && (LEARNING_REVERT_REASONS as readonly string[]).includes(value);
-}
 
 /**
  * Outcome recorded for a created proposal. A closed enum so "how do proposals enter the ledger?" is

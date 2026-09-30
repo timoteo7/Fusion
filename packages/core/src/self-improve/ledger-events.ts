@@ -4,7 +4,7 @@ import type {
   LearningProposalState,
   LearningProposalTarget,
 } from "../types/self-improve/learning-proposal.js";
-import type { LearningRevertReason } from "./self-improve-run-audit.js";
+import type { LearningRevertReason } from "./learning-revert-types.js";
 
 /*
 FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
@@ -38,6 +38,10 @@ export interface LearningLedgerEvent {
   /**
    * For `kind: "reverted"`, WHY the application was backed out, as a member of the fixed
    * revert-reason enum. Required by the database for a reversal and always absent otherwise.
+   *
+   * FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:08: added by FUSI-011. It is a CLOSED enum,
+   * not prose: an append-only ledger that accepted free text here would become a narrative surface
+   * no later gate could filter or count, and the bounded run-audit row could not mirror it.
    */
   revertReason?: LearningRevertReason | null;
   evidenceRefs: LearningProposalEvidenceRef[];

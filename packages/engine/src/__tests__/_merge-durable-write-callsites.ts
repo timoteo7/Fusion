@@ -337,6 +337,15 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   recordLearningApplication: { kind: "writer", reason: "appends a learning application event to the ledger" },
   recordLearningReversal: { kind: "writer", reason: "appends a learning reversal event naming the application it cancels" },
   listLearningProposals: { kind: "writer", reason: "on the learning-ledger read frontier; classified a writer conservatively so an orphaned body reaching it is still fenced" },
+  /*
+  FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45:
+  The revert is a durable APPEND like the other three ledger writers: it inserts a `reverted` event
+  naming the application it cancels inside an immediate transaction, and additionally emits a
+  bounded run-audit row. It is classified a writer for the same reason as the others — an orphaned
+  merge body that reached the learning-revert frontier has reached the durable frontier, and the
+  classification errs toward fencing.
+  */
+  revertLearningApplication: { kind: "writer", reason: "appends a learning revert event naming the cancelled application and restores the proposal's prior value" },
   appendAgentLog: { kind: "writer", reason: "persists task-scoped agent timeline state" },
   emit: { kind: "writer", reason: "announces task lifecycle events to durable subscribers" },
   logEntry: { kind: "writer", reason: "persists task-scoped log state and refreshes updatedAt" },

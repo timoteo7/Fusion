@@ -878,6 +878,18 @@ export type DatabaseMutationType =
   | "memory:semantics-skipped"
   | "memory:capture-recorded"
   | "memory:capture-failed"
+  /*
+   * FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:08:
+   * The learning revert is the self-improvement loop's authoritative undo, so its audit row is what
+   * answers "was this experiment backed out, and how many times" after the fact. Emitted through the
+   * CORE bounded seam (`emitBoundedRunAudit`) because `@fusion/core` cannot import the engine seam;
+   * the union lives here so the name is a real declared member and `docs/run-audit.md` can name it.
+   * One row per ATTEMPT, including the two no-op outcomes, so a retry is visible rather than silent.
+   * Metadata is ids/counts/fixed-outcomes only — proposal id, target, applied event id, revert event
+   * id, the `reverted`|`already-reverted`|`not-applied` outcome, and the fixed reason enum. It never
+   * carries a verdict, free prose, the restored value's diff, or reasoning.
+   */
+  | "learning:reverted"
   | "task:in-review-stall-deadlock-disposed"
   | "task:in-review-stall-terminal-provider-error"
   | "task:finalize-unproven-blocked"

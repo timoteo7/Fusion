@@ -143,3 +143,24 @@ Missing implementation proof is normally repaired through the workflow's durable
 ## Self-improvement learning ledger
 
 The self-improvement loop's proposal/evidence ledger follows the same ids/counts/outcomes-only rule for its transition events and emits them through the bounded core seam. See the [Self-Improvement Learning Ledger contract](./self-improvement-ledger.md#run-audit) for the fields, state machine, and reversal contract those events describe.
+
+## Self-improvement learning revert
+
+`learning:reverted` records one **revert attempt** against the self-improvement learning ledger, emitted through the core bounded seam (`packages/core/src/run-audit/emit-bounded-run-audit.ts`) because `@fusion/core` cannot import the engine seam. A revert is the loop's authoritative undo, so this row is what answers "was this experiment backed out, and how many times" after the fact.
+
+**One row is emitted per attempt, including the no-op outcomes.** The outcome is a fixed enum: `reverted` (a reversal event was appended), `already-reverted` (this exact application was cancelled before — the retry was absorbed and wrote nothing), and `not-applied` (there was no un-reverted application to cancel, so nothing was written). Recording the no-ops is what makes a retry visible rather than silent; only `reverted` mutates the ledger.
+
+**Metadata is ids/counts/fixed-outcomes only** and never carries a verdict, free prose, a diff, or the restored value itself:
+
+| Field | Content |
+| --- | --- |
+| `proposalId` | The learning proposal the reversal belongs to. |
+| `target` | The product surface the proposal acts on (`memory`, `evals`, or `skills`); absent when the proposal was not found. |
+| `appliedEventId` | The `applied` event the revert cancelled or would cancel; `null` when none was located. |
+| `revertEventId` | The derived id of the appended reversal; `null` for a no-op. |
+| `outcome` | Fixed enum `reverted` \| `already-reverted` \| `not-applied`. |
+| `reason` | Fixed enum `gate-rejected` \| `operator-veto` \| `superseded` \| `expired` \| `manual`. |
+
+**Readers counting ledger events must filter out `store:open`.** Every `TaskStore.init()` emits a `store:open` row, so a query that counts or orders the whole table sees a phantom row that has nothing to do with the learning trail. Filter to `mutation_type LIKE 'learning:%'` (or the specific type) before counting or asserting an ordered sequence. The same rule is why a caller cannot treat "one init, one learning row" as an exact-count invariant.
+
+**Idempotency is visible through the pair of rows, not through a status flag.** Because the reversal is an append naming the application it cancels, a repeated revert produces a second `learning:reverted` row with `outcome: already-reverted` and no new ledger event. The ledger row and its telemetry always agree: the audit `outcome` mirrors the ledger state exactly.

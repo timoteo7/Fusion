@@ -431,6 +431,7 @@
     "resolveWorkspaceLandIntent",
     "restoreFromArchive",
     "resumeWorkflowStep",
+    "revertLearningApplication",
     "revokeCliAutonomy",
     "rewriteBlockedByResidueDependentsForRemoval",
     "rewriteDependentsForRemoval",
@@ -2739,6 +2740,11 @@
       "method": "resumeWorkflowStep",
       "kind": "writer",
       "reason": "persists or mutates TaskStore state"
+    },
+    {
+      "method": "revertLearningApplication",
+      "kind": "writer",
+      "reason": "appends a learning revert event naming the cancelled application and restores the proposal's prior value"
     },
     {
       "method": "revokeCliAutonomy",

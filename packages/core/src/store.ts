@@ -195,10 +195,12 @@ import {
   emitSelfImproveProposalCreated,
   emitSelfImproveProposalReverted,
 } from "./self-improve/self-improve-run-audit.js";
+import { revertLearningApplication } from "./task-store/async/async-learning-revert.js";
 import { buildPatchnodeEntryId, buildPatchnodeEntryInput } from "./board/patchnode.js";
 import type { PatchnodeEntry, PatchnodeQuery } from "./types/task/patchnode.js";
 import type { LearningProposal } from "./types/self-improve/learning-proposal.js";
 import type { LearningLedgerEvent, LearningLedgerPage, LearningLedgerQuery } from "./self-improve/ledger-events.js";
+import type { LearningRevertInput, LearningRevertResult } from "./self-improve/learning-revert-types.js";
 import { resolveWorkflowIrForTask } from "./workflows/workflow-ir-resolver.js";
 // FNXC:RuntimeBackendAsync 2026-06-24-10:15:
 // Async helper imports for backend-mode (AsyncDataLayer/PostgreSQL) delegation.
@@ -1340,6 +1342,20 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       revertReason: stored.revertReason ?? input.revertReason,
     });
     return stored;
+  }
+
+  /*
+  FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45:
+  The revert is the loop's authoritative undo. It APPENDS a `reverted` event naming the application
+  it cancels and returns the proposal's `priorValue` verbatim; it never updates the application or
+  proposal row. The store passes `this` as the run-audit host so the bounded emission has a real
+  `recordRunAuditEvent` sink (the AsyncDataLayer alone would always read as `absent`). Emission is
+  best-effort and happens after the transition commits, so a hostile audit sink can never alter the
+  outcome or the ledger.
+  */
+  async revertLearningApplication(input: LearningRevertInput): Promise<LearningRevertResult> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    return revertLearningApplication(this.asyncLayer, input, { auditHost: this });
   }
 
   async listLearningProposals(query: LearningLedgerQuery = {}): Promise<LearningLedgerPage> {

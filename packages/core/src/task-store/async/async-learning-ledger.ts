@@ -8,7 +8,7 @@ import type {
   LearningLedgerPage,
   LearningLedgerQuery,
 } from "../../self-improve/ledger-events.js";
-import { isLearningRevertReason, type LearningRevertReason } from "../../self-improve/self-improve-run-audit.js";
+import { isLearningRevertReason, type LearningRevertReason } from "../../self-improve/learning-revert-types.js";
 
 /*
 FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
@@ -47,6 +47,9 @@ const mapEventRow = (row: EventRow): LearningLedgerEvent => ({
   target: row.target as LearningProposalTarget,
   kind: row.kind as LearningLedgerEventKind,
   revertsEventId: row.revertsEventId,
+  // FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:08: the reason a reversal was appended is
+  // part of the event's own contract (FUSI-011), so it is mapped onto the returned event rather than
+  // left for a caller to re-read from the row.
   revertReason: (row.revertReason ?? null) as LearningRevertReason | null,
   evidenceRefs: (row.evidenceRefs ?? []) as LearningProposalEvidenceRef[],
   occurredAt: row.occurredAt,
@@ -232,6 +235,8 @@ export async function recordLearningReversal(
     target: input.target,
     kind: "reverted",
     revertsEventId,
+    // A reversal always carries a reason: the database CHECK requires it, and an unauditable
+    // "undone, but nobody can say why" row is exactly what the enum exists to prevent.
     revertReason: input.revertReason,
     evidenceRefs: input.evidenceRefs ?? [],
     occurredAt: input.occurredAt,
