@@ -1064,9 +1064,12 @@ export type DatabaseMutationType =
   | "overseer:no-op-finalize-vetoed-failed-executor"
   /*
    * FNXC:SelfImproveRunAudit 2026-09-29-18:51: FUSI-012 selfimprove audit events.
+   * FNXC:SelfImproveCostBudget 2026-09-30-13:45: FUSI-018 adds the gate-verdict event. It is NOT a
+   * ledger transition and has no `kind` in the learning_ledger_events CHECK — it records that the
+   * deterministic primary gate reached a cost-budget verdict (within / over / not-comparable).
    * Metadata is ids/counts/fixed outcomes only — never proposal prose, evidence text, or diff.
    * The bounded core seam absorbs absent/throwing/rejecting/hanging sinks so the sink
-   * never alters the ledger transition.
+   * never alters the ledger transition or the gate verdict.
    */
   | "selfimprove:proposal-created"
   | "selfimprove:proposal-applied"
@@ -1080,7 +1083,8 @@ export type DatabaseMutationType =
    * Emitted through the bounded core seam, so an absent/throwing/rejecting/hanging sink changes
    * nothing about the verdict the caller already holds.
    */
-  | "selfimprove:gate-run";
+  | "selfimprove:gate-run"
+  | "selfimprove:cost-budget-evaluated";
 
 // ── Filesystem mutation types ─────────────────────────────────────────────────
 

@@ -6,6 +6,13 @@ import {
   isLearningRevertReason,
   type LearningRevertReason,
 } from "./learning-revert-types.js";
+import {
+  COST_AXES,
+  type CostAxis,
+  type CostBudgetReason,
+  type CostBudgetVerdictValue,
+  type CostTotals,
+} from "./cost-budget-types.js";
 
 /*
 FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:20:
@@ -47,11 +54,23 @@ telemetry" failure this contract exists to prevent. The narrative stays in the a
 trail (`learning_ledger_events`), which is the durable record; run-audit is the queryable edge.
 
 FNXC:SelfImproveRunAudit 2026-09-29-18:51:
-Single-writer contract. These three façades are the ONLY writer of `selfimprove:*` mutation types.
+Single-writer contract. These façades are the ONLY writer of `selfimprove:*` mutation types.
 Do NOT call `recordRunAuditEvent` directly from ledger code, and do NOT introduce a second
 `selfimprove:*` mutation type: the ledger row and its audit row must never be produced by divergent
 code paths, because "the ledger says reverted but run-audit has no reversion" is exactly the
 divergence an operator cannot debug.
+
+FNXC:SelfImproveCostBudget 2026-09-30-13:45:
+FUSI-018 adds a FOURTH event to that union, and the single-writer rule applies to it exactly as it
+does to the three ledger transitions — but it is a different KIND of row, and conflating the two would
+corrupt the ledger trail's meaning. `selfimprove:cost-budget-evaluated` records a decision the
+deterministic primary gate REACHED; it mutates no proposal state, so it has no `kind` in the
+`learning_ledger_events_kind_check` CHECK and must never be appended to that trail. It lives in
+run-audit only. The single-writer rule exists so that any `selfimprove:*` row — transition or verdict —
+is produced by exactly one façade in this file, never by a caller reaching past it; the reason a
+verdict still needs that protection is that an `over-budget` gate decision is the input to a later
+revert, so "the gate says over budget but no audit row names it" is just as un-debuggable as the
+revert case.
 
 FNXC:SelfImproveRunAudit 2026-09-29-18:51:
 Telemetry is NOT load-bearing. Every façade routes through the FN-9177 bounded core seam (the
@@ -77,14 +96,23 @@ a cross-run query. The stable default keeps every transition of one proposal und
 id while a caller that genuinely owns a run can still pass its own.
 */
 
-/** The three mutation types this module is the sole writer of. Mirrors the ledger trail's `kind`. */
+/** The mutation types this module is the sole writer of. The first three mirror the ledger trail's `kind`. */
 export const SELF_IMPROVE_RUN_AUDIT_EVENTS = {
   created: "selfimprove:proposal-created",
   applied: "selfimprove:proposal-applied",
   reverted: "selfimprove:proposal-reverted",
+  costBudgetEvaluated: "selfimprove:cost-budget-evaluated",
 } as const;
 
-/** One of the three `selfimprove:*` mutation types. */
+/**
+ * One of the `selfimprove:*` event types.
+ *
+ * The first three are LEDGER TRANSITIONS and mirror the append-only trail's `kind` CHECK. The fourth,
+ * `selfimprove:cost-budget-evaluated`, is a GATE VERDICT: it records a decision the deterministic
+ * primary gate reached, mutates no proposal state, and therefore has no `kind` in that CHECK. It lives
+ * in this union — not in the ledger trail — because run-audit is the observability edge, and the
+ * ledger trail is the durable record of what was DONE to a proposal.
+ */
 export type SelfImproveRunAuditEventType =
   (typeof SELF_IMPROVE_RUN_AUDIT_EVENTS)[keyof typeof SELF_IMPROVE_RUN_AUDIT_EVENTS];
 
@@ -112,6 +140,49 @@ export type SelfImproveProposalRevertedOutcome = "reverted" | "already-reverted"
 
 /** The fixed agent id recorded when a caller does not name one. */
 export const SELF_IMPROVE_AUDIT_AGENT_ID = "selfimprove";
+
+/**
+ * Outcome recorded for a cost-budget evaluation. The guard's own verdict, widened by exactly one
+ * value: a refusal is a fixed reason rather than a `reason` string on the verdict, so an operator
+ * counting evaluations groups "not comparable" outcomes by class instead of reading sentences.
+ *
+ * The refusal is recorded as its OWN outcome rather than being folded into the two budget verdicts
+ * because "these runs cannot be compared" is a harness fact the operator must act on, while
+ * "within budget" and "over budget" are the budget question itself. Collapsing them would make the
+ * most actionable result the rarest number in the table.
+ */
+export type SelfImproveCostBudgetOutcome = CostBudgetVerdictValue | "not-comparable";
+
+/** Input for one cost-budget evaluation's audit row. */
+export interface SelfImproveCostBudgetAuditInput {
+  /** The structural audit sink (`TaskStore` satisfies it). */
+  host: RunAuditSinkHost;
+  /** Learning proposal whose experiment the candidate run belongs to. Also the audit `target`. */
+  proposalId: string;
+  /** Product surface the proposal acts on. Mirrors the ledger's `target` CHECK. */
+  target: LearningProposalTarget;
+  /** Baseline totals the candidate was measured against. */
+  baseline: CostTotals;
+  /** Candidate totals that were measured. */
+  candidate: CostTotals;
+  /** Deterministic verdict, recorded verbatim. */
+  outcome: SelfImproveCostBudgetOutcome;
+  /** Comparability refusal reason. Recorded ONLY when `outcome` is `not-comparable`. */
+  reason?: CostBudgetReason;
+  /** Axes that exceeded their allowance. Recorded only when `outcome` is `over-budget`. */
+  exceededAxes?: readonly CostAxis[];
+  /** Project-scoped audit correlation id, when the caller tracks one. */
+  projectId?: string;
+  /** Actor recorded as the evaluating agent. Defaults to the fixed system principal. */
+  agentId?: string;
+  /**
+   * Run that performed the evaluation. Defaults to a stable synthetic id derived from the proposal,
+   * matching the three ledger façades so one proposal's gate decision correlates with its lifecycle.
+   */
+  runId?: string;
+  /** ISO-8601 instant override. Defaults to now. */
+  timestamp?: string;
+}
 
 /**
  * Shared input for every `selfimprove:*` façade.
@@ -255,5 +326,95 @@ export function emitSelfImproveProposalReverted(
       revertReason: input.revertReason,
       outcome: input.outcome ?? "reverted",
     }),
+  );
+}
+
+/*
+FNXC:SelfImproveCostBudget 2026-09-30-13:45:
+`emitSelfImproveCostBudgetEvaluated` records that the deterministic gate ASKED its cost question and
+what it answered. It is deliberately NOT a fourth ledger transition: a cost evaluation changes no
+proposal state, so it does not belong in the append-only `learning_ledger_events` trail and does not
+take a `kind` from its CHECK constraint. It is a gate verdict, and its home is run-audit — where an
+operator can count how often candidates were over budget, refused comparison, or clean.
+
+FNXC:SelfImproveCostBudget 2026-09-30-13:45:
+THE COST NUMBERS THEMSELVES ARE NOT AUDITED — only the AXES and the identities. The run-audit rule is
+ids/counts/fixed outcomes, and the measured token/step/millisecond totals are corpus-specific numbers
+that mean nothing outside the run that produced them: recording `baseline.tokens` next to a candidate's
+would invite an operator to compare a cached baseline against a candidate that may have been measured
+days later under a different corpus. What is durable and meaningful is WHICH corpus, WHICH seed, HOW
+MANY tasks, and WHICH axes moved. Those are the facts that let a later reader locate and re-derive
+the comparison; the arithmetic is re-derivable from the recorded identities, and the `sha256:`
+fingerprints are included so a reader can prove they are holding the same pair of runs.
+
+FNXC:SelfImproveCostBudget 2026-09-30-13:45:
+`reason` and `exceededAxes` are CONDITIONAL, and their absence is meaningful rather than an
+inconvenience: a `not-comparable` row has no axes (nothing was measured against anything), and a
+`within-budget` row has no exceeded axes (nothing exceeded). Both fields are omitted rather than
+defaulted to an empty list or a null, because "no axis exceeded" and "we never evaluated an axis" are
+different claims and a default would erase the difference.
+
+FNXC:SelfImproveCostBudget 2026-09-30-13:45:
+Metadata is assembled from an EXPLICIT field list built from a CLOSED axis set, never by spreading the
+input or the totals. `{ ...input.baseline }` would dump every field a future producer added to
+`CostTotals` straight into the audit trail — and since `CostTotals` is exactly the shape most likely to
+grow a new measured axis, a spreading implementation would widen the audit surface silently and
+precisely when someone added a measurement. `exceededAxes` is likewise filtered through the fixed
+`COST_AXES` membership so a caller passing an unrecognized axis name cannot write it into telemetry.
+*/
+
+/** Run identity fields shared by the cost-budget row, mirroring the ledger façades' correlation. */
+interface SelfImproveCostBudgetCorrelation {
+  proposalId: string;
+  target: LearningProposalTarget;
+  projectId?: string;
+  agentId?: string;
+  runId?: string;
+  timestamp?: string;
+}
+
+/**
+ * Record the deterministic gate's cost-budget verdict for one candidate run.
+ *
+ * Emits `selfimprove:cost-budget-evaluated` through the same bounded core seam as the three ledger
+ * façades, so an absent, throwing, rejecting, never-settling, or late-settling sink changes what is
+ * OBSERVED and nothing about what the gate DID. The verdict is the caller's; this function never
+ * computes, re-judges, or softens it.
+ */
+export function emitSelfImproveCostBudgetEvaluated(input: SelfImproveCostBudgetAuditInput): Promise<void> {
+  const correlation: SelfImproveCostBudgetCorrelation = {
+    proposalId: input.proposalId,
+    target: input.target,
+    projectId: input.projectId,
+    agentId: input.agentId,
+    runId: input.runId ?? `selfimprove-${input.proposalId}`,
+    timestamp: input.timestamp,
+  };
+
+  // Only axes that are BOTH named by the caller and members of the fixed set are recorded, so this
+  // list cannot become an open-ended free-text channel through a crafted caller.
+  const exceededAxes = (input.exceededAxes ?? []).filter((axis): axis is CostAxis => COST_AXES.includes(axis));
+
+  return emitBoundedRunAudit(
+    input.host,
+    selfImproveEvent(
+      { host: input.host, ...correlation },
+      SELF_IMPROVE_RUN_AUDIT_EVENTS.costBudgetEvaluated,
+      {
+      proposalId: input.proposalId,
+      target: input.target,
+      outcome: input.outcome,
+      baselineCorpusId: input.baseline.corpusId,
+      baselineSeed: input.baseline.seed,
+      baselineTaskCount: input.baseline.taskCount,
+      baselineFingerprint: input.baseline.fingerprint,
+      candidateCorpusId: input.candidate.corpusId,
+      candidateSeed: input.candidate.seed,
+      candidateTaskCount: input.candidate.taskCount,
+      candidateFingerprint: input.candidate.fingerprint,
+      ...(input.reason ? { reason: input.reason } : {}),
+      ...(exceededAxes.length > 0 ? { exceededAxes } : {}),
+      },
+    ),
   );
 }

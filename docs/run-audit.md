@@ -148,6 +148,22 @@ These events are intentionally outside the curated delivery-pipeline event catal
 
 Like the three ledger events, `selfimprove:gate-run` is a member of the engine `DatabaseMutationType` union and is intentionally outside the curated delivery-pipeline event catalogue.
 
+### Self-improvement cost-budget verdicts (FUSI-018)
+
+`selfimprove:cost-budget-evaluated` records that the deterministic primary gate asked its cost question — did the candidate spend more than the configured slack over the same corpus, seed, and order? — and what it answered. It is a **gate verdict, not a ledger transition**: it mutates no proposal state, has no `kind` in the `learning_ledger_events_kind_check` CHECK, and is never appended to that trail. It lives in run-audit only, through the same bounded core seam as the three ledger façades (`emitSelfImproveCostBudgetEvaluated` in `packages/core/src/self-improve/self-improve-run-audit.ts`).
+
+**Outcome** — the deterministic verdict, widened by exactly one value: `within-budget` or `over-budget` from the guard, plus `not-comparable` for a refusal. The refusal is recorded as its own outcome rather than folded into the two budget verdicts because "these runs cannot be compared" is a harness fact the operator must act on, while the other two are the budget question itself.
+
+**Emission point** — the deterministic primary gate, calling the façade once per candidate evaluation. It is deliberately best-effort and never re-judges the verdict: the row records what the gate decided, and nothing about that decision depends on whether the row landed.
+
+**Metadata rule** — identities, counts, and fixed outcomes only. Recorded keys are exactly `proposalId`, `target`, `outcome`, `projectId`, `baselineCorpusId`, `baselineSeed`, `baselineTaskCount`, `baselineFingerprint`, `candidateCorpusId`, `candidateSeed`, `candidateTaskCount`, `candidateFingerprint`, plus the conditional `reason` (on `not-comparable`) and `exceededAxes` (on `over-budget`).
+
+**The measured cost numbers are deliberately NOT audited.** The baseline and candidate token/step/millisecond totals are corpus-specific figures that mean nothing outside the run that produced them — recording `baseline.tokens` beside a candidate's would invite an operator to compare a cached baseline against a candidate possibly measured days later under a different corpus. What is durable is *which* corpus, *which* seed, *how many* tasks, and *which* axes moved; the arithmetic is re-derivable from the recorded identities, and the `sha256:` fingerprints let a later reader prove they hold the same pair of runs. `exceededAxes` is filtered through the fixed `tokens|steps|wallClockMs` membership, so an unrecognized axis can never be written into telemetry.
+
+**Sink independence** — the façade delegates to `emitBoundedRunAudit` and is fully absorbent: absent, throwing, rejecting, never-settling, and late-settling sinks leave the caller's verdict unchanged. Proven behaviorally in `packages/core/src/__tests__/self-improve-cost-budget.test.ts`, which drives the façade through all six sink modes with fake timers.
+
+**Union registry** — the literal is a member of the engine `DatabaseMutationType` union, with a `date -u` FNXC comment stating the metadata rule. Like the other `selfimprove:*` events it is outside `DELIVERY_PIPELINE_RUN_AUDIT_EVENTS`, so the delivery-pipeline catalogue parity test does not cover it; this doc and the union must be updated together.
+
 ### Merge-boundary evidence recovery (FN-9345)
 
 Missing implementation proof is normally repaired through the workflow's durable task log and graph remediation path before merge admission. On startup and periodic maintenance, `task:merge-boundary-evidence-recovered` records a historic proofless park only after durable unfinished work, lifecycle ownership, liveness, and auto-merge policy are re-verified. These repairs intentionally do not put boundary reason prose, foreach identities, paths, review output, or external capability diagnostics in run-audit metadata. If recovery cannot prove an executable owner, the existing terminal `task:merge-boundary-unproven-parked` event remains the fail-closed audit surface and retains its ids/counts/fixed-outcomes-only contract.

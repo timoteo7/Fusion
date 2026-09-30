@@ -27,6 +27,16 @@ consumes the delta verdict, the versioned replay corpus, the persisted-verdict/p
 the `fn_selfimprove_*` operator surface — those stay marked, because inventing a shipped contract for
 them is the failure mode the block above forbids.
 
+FNXC:AutoImprovement 2026-09-30-13:45:
+FUSI-018 adds the COST-BUDGET arm of the deterministic primary gate (pure measurement over recorded
+per-task cost observations, a comparability refusal that fires before any delta is computed, and a
+per-axis slack verdict). It is now documented under "Cost-budget invariants" rather than listed as
+unimplemented. Its determinism is the whole point: the verdict is a function of recorded observations
+and never of a clock, so measuring twice yields the same answer. The gate's OTHER boolean arms
+(build/lint/typecheck, the test-count delta arm's gate runner), the structural denylist, the replay
+corpus, and the operator CLI remain unimplemented and stay marked — this page still describes no
+field, state, or event the code does not actually have.
+
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
 mission/M-MULZRJQ4-0001-IF11, NOT on main, and is pending merge. Every file path and migration
@@ -39,13 +49,15 @@ merge, not as a description of code already present.
 
 > **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
 > run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
-> FUSI-016, and the test-count delta guard landed with FUSI-017 — all committed on the mission branch
-> and **not yet merged into `main`**. The file paths and migrations named here are therefore not yet
-> present in a `main` checkout — they become real when that branch lands. The still-unimplemented M1
-> surfaces are the denylist, the gate runner that consumes the delta verdict, the replay corpus, the
-> persisted-verdict/precedence rule, and the operator CLI.
-> See [Not yet shipped](#not-yet-shipped) and
-> [The deterministic primary gate](#the-deterministic-primary-gate).
+> FUSI-016, the test-count delta guard landed with FUSI-017, and the gate's cost-budget invariants
+> landed with FUSI-018 — all committed on the mission branch and **not yet merged into `main`**. The
+> file paths and migrations named here are therefore not yet present in a `main` checkout — they
+> become real when that branch lands. The still-unimplemented M1 surfaces are the denylist, the gate
+> runner that consumes the delta verdict, the replay corpus, the persisted-verdict/precedence rule,
+> and the operator CLI.
+> See [Not yet shipped](#not-yet-shipped),
+> [The deterministic primary gate](#the-deterministic-primary-gate), and
+> [Cost-budget invariants](#cost-budget-invariants-fusi-018).
 
 ## Overview
 
@@ -229,6 +241,106 @@ every transition against throwing, rejecting, and never-settling sinks.
   SKIPS the emit and still returns the committed event — an audit row that invents a confidence the
   ledger never asserted is worse than a missing row.
 
+## Cost-budget invariants (FUSI-018)
+
+The deterministic primary gate must answer, before it can keep a candidate change: **did the change make
+the same work more expensive?** FUSI-018 ships the answer to that one question. This section is the
+shipped contract for the comparison. It lives beside the ledger because the verdict it produces is the
+input to the later apply/revert decision, and it mutates no proposal state.
+
+<!--
+FNXC:SelfImproveCostBudget 2026-09-30-13:45:
+FUSI-018 ships the cost arm of the primary gate: three pure modules under
+`packages/core/src/self-improve/` (`cost-budget-types.ts`, `cost-budget-measure.ts`,
+`cost-budget-guard.ts`) plus one bounded-emit façade. The gate's other arms — build/lint/typecheck,
+test-count delta, structural denylist — are separate slices and are NOT described here.
+-->
+
+### Measurement is by recorded observation, never by clock
+
+A run is measured by `measureCostRun(observations)`, a **pure** function: it reads no clock, opens no
+store, imports no engine, and starts no process. It sorts the observations by `taskId`, sums the three
+axes, and returns totals carrying a `sha256:` fingerprint over the canonical content (corpus id, seed,
+task count, ordered task ids, all three totals, and the two consistency flags).
+
+This is what makes a verdict reproducible. Wall-clock belongs in the RECORD — an observation's
+`wallClockMs`, captured once by whatever ran the task — and never in the MEASUREMENT. A measurement
+that sampled `Date.now()` at read time could differ between two runs of the same corpus, which would
+make "the candidate is over budget" an unreproducible claim and the whole gate worthless.
+
+Because ordering is canonicalized by sort rather than by arrival, a shuffled input produces
+byte-identical totals and an identical fingerprint. Two runs that merely arrived in different orders
+are still the same run.
+
+### Three axes, judged independently
+
+`tokens`, `steps`, and `wallClockMs` are evaluated separately, in that fixed order. Any single axis
+exceeding its slack fails the run, and the verdict names **every** exceeded axis rather than the
+first — so an operator is not handed one problem at a time. There is no aggregate score and no
+offsetting between axes: a candidate that is faster and far more expensive is still over budget.
+
+The token convention mirrors `getTokenBudgetUsage` in
+`packages/engine/src/concurrency/token-budget-enforcer.ts` exactly — **input + output + cacheWrite,
+cache reads excluded**. That is deliberate: the platform's token budget already excludes cache reads
+(a cache hit saves input tokens without the task getting cheaper to run), so a guard that counted them
+would report a change as more expensive precisely when it made caching more effective.
+
+Slack is **absolute per axis**, not a ratio. The operator-facing question is "how much more may this
+spend", and a percentage allowance would silently widen the budget every time the corpus grew.
+
+### Comparability is checked before any subtraction
+
+`evaluateCostBudget({ baseline, candidate, slack })` refuses with `not-comparable` and computes **no
+delta at all** when:
+
+| Reason | Meaning |
+| --- | --- |
+| `corpus-mismatch` | The two runs measured different task sets. |
+| `seed-mismatch` | The two runs used different seeds, so at least one input order could differ. |
+| `ordering-mismatch` | Same corpus and seed, but the canonical task orders differ. Task-set and seed identity do **not** imply order identity. |
+| `inconsistent-run` | One side's own observations disagree with each other — a mixed corpus id, a mixed seed, or the same task measured twice. |
+
+The refusal **outranks** the budget verdict: a delta between two differently measured runs is a number
+with no meaning, so reporting one would let an obviously invalid comparison pass a gate while still
+producing a plausible figure. Refusing is also distinguishable from failing, which matters to an
+operator: "these two runs cannot be compared — fix the harness" is a different instruction from "the
+candidate spent too much".
+
+`inconsistent-run` is reachable only because measurement **records** agreement rather than leaving it
+to be re-derived. Summing destroys the evidence — once a mixed set is collapsed into one total the
+second corpus id no longer exists anywhere — so `measureCostRun` carries `consistentCorpus` and
+`consistentSeed` as measured facts and folds both into the fingerprint. A contaminated run therefore
+cannot collide with (and be cached as) the clean run it impersonates.
+
+### Verdict shape
+
+A verdict is one of three values, discriminated by `verdict`:
+
+- **`within-budget`** — comparable, and no axis exceeded its allowance. `failures` is empty.
+- **`over-budget`** — comparable, and at least one axis exceeded. `failures` names each one with the
+  **axis, both measured totals, the signed delta, and the allowance that was exceeded**. Both numbers
+  travel with the refusal on purpose: the measurement is the expensive part of an evaluation, so
+  demanding a re-run just to explain a verdict would be the wrong trade.
+- **`not-comparable`** — the runs were not measured the same way. `reason` is present; `deltas` and
+  `failures` are **absent**.
+
+`baseline` and `candidate` totals are always echoed back, refusal included, so a verdict names the
+exact inputs it judged.
+
+### Where it is recorded
+
+Every evaluation emits `selfimprove:cost-budget-evaluated` through the same bounded core seam as the
+three ledger façades. It is a **gate verdict, not a ledger transition**: it has no `kind` in the
+`learning_ledger_events_kind_check` CHECK and is never appended to that trail. Metadata is identities,
+counts, and fixed outcomes only — `proposalId`, `target`, `outcome`, `projectId`, each side's
+`corpusId`/`seed`/`taskCount`/`fingerprint`, plus conditional `reason` and `exceededAxes`.
+
+The measured token/step/millisecond totals are **deliberately not audited**: they are corpus-specific
+figures that mean nothing outside the run that produced them, and recording them would invite comparing
+a cached baseline against a candidate possibly measured days later under a different corpus. What is
+durable is *which* corpus, *which* seed, *how many* tasks, and *which* axes moved. See the
+[Run-Audit Catalogue](./run-audit.md) for the full metadata contract.
+
 ## Safety rails
 
 Shipped in FUSI-017:
@@ -315,19 +427,21 @@ This module is standalone: it imports nothing from the gate runner (FUSI-016) or
 ## Not yet shipped
 
 This page covers the record contract that landed in FUSI-009, the store/revert/run-audit layers that
-landed with FUSI-010/011/012/015, and the test-count delta guard (FUSI-017) — all committed on the
-mission branch and **not yet merged into `main`**, so none of that code is greppable in a `main`
-checkout. The following are later M1 slices and are **not** in the code at all:
+landed with FUSI-010/011/012/015, the gate library (FUSI-016), the test-count delta guard
+(FUSI-017), and the cost-budget invariants (FUSI-018) — all committed on the mission branch and
+**not yet merged into `main`**, so none of that code is greppable in a `main` checkout. The
+following are later M1 slices and are **not** in the code at all:
 
 - Structural denylist enforcement, the deterministic primary gate *runner* (FUSI-016's gate library
   above is landed, but the runner that consumes the delta guard's verdict is not), the versioned
   **replay corpus** + manifest with cached baseline and comparability guard, and the CLI/pi
   `fn_selfimprove_*` operator surface (status, proposals, experiments, veto, pause, force-revert).
-  The **cost-budget invariants** and the **persisted verdict / precedence** rule are likewise later
-  slices.
+  The **persisted verdict / precedence** rule is likewise a later slice.
 
 The gate runner and the replay canary are described in the mission brief, not implemented yet; when
-they land, this page is extended with the replay manifest's comparability rules.
+they land, this page is extended with the replay manifest's comparability rules. The cost-budget arm
+of the primary gate shipped in FUSI-018 and is described under
+[Cost-budget invariants](#cost-budget-invariants-fusi-018).
 
 ## The deterministic primary gate (FUSI-016)
 
