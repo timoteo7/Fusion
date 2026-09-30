@@ -12,7 +12,7 @@ import type {
   WorkflowStepNotRunReason,
 } from "@fusion/core";
 import { BUILTIN_CODING_WORKFLOW_IR, FAST_LANE_SKIP_VALUE, FAST_MODE_BYPASS_ACTOR, PLAN_REVIEW_GROUP_ID, WORKFLOW_STEP_NOT_RUN_REASONS, WorkflowIrError, computeWorkflowIrPin, getWorkflowExtensionRegistry, instanceNodeId, resolveFastLaneRoute, resolveMaxReworkCycles, isExperimentalFeatureEnabled, GRAPH_NATIVE_POST_MERGE_FLAG, isCompletionSummaryNode, classifyReviewLease, isWorkflowOptionalGroupEnabled, isPlanReviewSatisfied, parseNoOpCompletionMarker, requiresContentReviewProof, resolveRequiredPreMergeStepIds } from "@fusion/core";
-import { isNonPlanDefectPlanReviewFailure } from "../errors/transient-error-detector.js";
+import { isNonPlanDefectPlanReviewFailure, isPlanLockUnavailableDiagnostic } from "../errors/transient-error-detector.js";
 import { isSessionContentionError } from "../errors/transient-error-patterns.js";
 import { isRequiredArtifactReadFailedValue, parseRequiredArtifactMissingValue } from "../execution/required-workflow-artifacts.js";
 
@@ -68,6 +68,15 @@ type WorkflowNodeSettings = Pick<Settings, "experimentalFeatures"> & {
 
 /** A classified Plan Review provider outage terminates the graph without replan traversal. */
 export const PLAN_REVIEW_PROVIDER_FAILURE_HOLD_VALUE = "plan-review-provider-failure-hold";
+/**
+ * FNXC:PlanReviewReplan 2026-09-30-15:33 (FUSI-029):
+ * A plan the spec parser cannot bind is TERMINAL, so it gets its own hold value instead of borrowing
+ * the provider-failure hold. The provider hold schedules bounded in-place retries and then leaves the
+ * card cycling with `error: null`; this value parks the card with a non-null, actionable error.
+ */
+export const PLAN_LOCK_UNAVAILABLE_HOLD_VALUE = "plan-lock-unavailable-hold";
+/** Carries the parser diagnostic from the graph node to the terminal park so the error names it. */
+export const PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC_CONTEXT_KEY = "node:plan-lock-unavailable-diagnostic";
 /** Deterministic task-row validation; it must never enter provider retry handling. */
 export const BRANCH_WRITE_PROVENANCE_FAILURE_VALUE = "branch-write-provenance-failure";
 /** Workspace Git/base-ref preparation failed before any provider session could start. */
@@ -1341,6 +1350,40 @@ export class WorkflowGraphExecutor {
           const authoritativeResult = terminalPersistence.persistedResult;
           const effectiveStepStatus = authoritativeResult?.status ?? stepStatus;
           const effectiveVerdict = authoritativeResult ? authoritativeResult.verdict : verdict;
+          /*
+          FNXC:PlanReviewReplan 2026-09-30-15:33 (FUSI-029):
+          The spec-lock seam rewrites an APPROVED Plan Review into `status: "failed"` with
+          `verdict: undefined` and the parser diagnostic as its output, because an approval it cannot
+          lock is not an approval. Nothing else marks that row, so every downstream reader treated it
+          as "the plan is bad": `shouldRequestPreMergeFix` fabricated `verdict: "REVISE"` and traversed
+          `plan-review --failure--> plan-replan` forever, one full AI session per cycle
+          (FUSI-025 measured 20 rejections in ~67 min with `error` and `planReviewReplanCount` both
+          unchanged). The replan cap cannot catch this: `countPlanReviewRevisionAttempts` counts only
+          `verdict === "REVISE"` rows, and this row has no verdict at all.
+
+          It is TERMINAL, not a retry hold. A structurally invalid prompt cannot be fixed by producing
+          a different plan, only by editing PROMPT.md, so the failure parks with a non-null error
+          instead of scheduling in-place retries that leave `error: null`.
+
+          Read the AUTHORITATIVE persisted result, not `stepOutput`/`stepNotes`: those still carry the
+          reviewer's own approval text, while the spec-lock seam writes the diagnostic only into the
+          persisted row. Classified here, ahead of the `requiredGate` block below, so this specific
+          deterministic cause is never reported as a generic "gate-result-not-approved" and can never
+          reach `shouldRequestPreMergeFix` to have a REVISE fabricated for it.
+          */
+          const specLockUnavailableDiagnostic = node.id === PLAN_REVIEW_GROUP_ID
+            && effectiveStepStatus === "failed"
+            && [authoritativeResult?.output, authoritativeResult?.notes]
+              .find((value): value is string => isPlanLockUnavailableDiagnostic(value));
+          if (specLockUnavailableDiagnostic) {
+            this.deps.logTaskEntry?.(
+              `${logPrefix} ${groupName} approved a plan the spec lock cannot bind — parking instead of replanning. ${specLockUnavailableDiagnostic}`,
+            );
+            context[`node:${node.id}:outcome`] = "failure";
+            context[`node:${node.id}:value`] = PLAN_LOCK_UNAVAILABLE_HOLD_VALUE;
+            context[PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC_CONTEXT_KEY] = specLockUnavailableDiagnostic;
+            return { outcome: "failure", value: PLAN_LOCK_UNAVAILABLE_HOLD_VALUE };
+          }
           const verdictRequired = false;
           /*
           FNXC:PostMergeEvidenceFence 2026-09-23-07:48:

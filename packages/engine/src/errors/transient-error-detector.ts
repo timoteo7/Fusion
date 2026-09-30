@@ -17,6 +17,7 @@
  */
 
 import { isUsageLimitError } from "./usage-limit-detector.js";
+import { PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC } from "@fusion/core";
 /*
 FNXC:Reliability-ErrorClassification 2026-07-15-18:40:
 The pure predicates (TRANSIENT_ERROR_PATTERNS / isTransientError / isTransientAuthCredentialError)
@@ -76,6 +77,25 @@ export function isNonPlanDefectPlanReviewFailure(input: {
       || MODEL_FALLBACK_EXHAUSTED_PATTERN.test(errorMessage)
     )
   );
+}
+
+/**
+ * FNXC:SpecLock 2026-09-30-15:33:
+ * Recognizes the durable diagnostic the spec-lock seam persists into a Plan Review result when
+ * `canonicalizePlan` cannot produce lockable evidence. It is a prefix match because the seam appends
+ * the reason and the unavailable sections: `...: mission-missing (mission).`
+ *
+ * The parser relaxation for provably non-mission tasks removes the common cause; this predicate is
+ * the safety net for a genuinely malformed mission prompt, which must stop with an actionable error
+ * instead of spending one AI session per retry cycle.
+ *
+ * It is deliberately NOT folded into `isNonPlanDefectPlanReviewFailure`: that classifier routes to
+ * the bounded in-place provider hold, which retries twice and then leaves `error: null` with the card
+ * still cycling. A structural spec-lock failure must instead take a distinct terminal hold that parks
+ * the card with a non-null error naming the missing section (FUSI-029 Acceptance #4).
+ */
+export function isPlanLockUnavailableDiagnostic(value: string | undefined | null): boolean {
+  return typeof value === "string" && value.includes(PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC);
 }
 
 
