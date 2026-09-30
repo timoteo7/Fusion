@@ -402,6 +402,26 @@ Automatic hierarchy rollup, including terminal-task delivery reconciliation, own
 - Active autopilot slices are continuously reconciled on startup recovery and periodic maintenance: stranded features (`taskId == null`) are re-triaged idempotently, title-matched tasks are linked first, and successful link/triage repairs emit `mission:stranded-feature-triaged` run-audit events.
 - `autopilotEnabled=false`, `autoAdvance=false` → manual slice activation only
 
+**Periodic health check:**
+
+The background consistency sweep runs on the `missionHealthCheckIntervalMs` cadence (5 minutes by
+default; `0` disables it). It is **reconcile-only** — it repairs feature/task status bookkeeping and
+never creates a board task, promotes or activates a slice, or re-enters the lifecycle.
+
+- **Eligibility is derived from the mission store, never from the in-memory watch registry.** A
+  mission is eligible when its own `autopilotEnabled` is on and its `status` is neither `complete`
+  nor `archived`, or when its `status` is `active` (reconciled even with autopilot off, so the
+  corrector does not depend on a single flag). Terminal missions are never reconciled.
+- **Unwatched autopilot missions are auto-adopted before being reconciled**, so the `watched` flag on
+  `GET /api/missions/:missionId/autopilot` converges on reality after a restart or a poll that
+  started before the mission existed. The sweep is not gated on the watch registry: that registry is
+  derived state written only by the poll and startup recovery, so gating on it let a stopped corrector
+  keep reporting health while repairing nothing.
+- **The log distinguishes the two outcomes.** `Mission health check complete: no eligible missions —
+  nothing reconciled` means nothing was eligible; `Mission health check complete: reconciled N
+  missions, fixed M inconsistencies` means a real sweep ran and found M repairs. A per-mission store
+  failure is logged and skipped without aborting the remaining missions.
+
 **Slice progression (on slice completion):**
 
 - `autopilotEnabled=true` → serial admission activates only the earliest eligible pending slice. Any active slice blocks admission; earlier milestones and slices must be complete before later milestones start.
