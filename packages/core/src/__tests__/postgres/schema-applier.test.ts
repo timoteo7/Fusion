@@ -121,6 +121,7 @@ import {
   LEARNING_LEDGER_EVENTS_VERSION,
   LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
   LEARNING_GATE_VERDICTS_VERSION,
+  BASELINE_CACHE_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
 import type { PluginSchemaInitHook } from "../../postgres/plugin-schema-hook.js";
@@ -189,7 +190,12 @@ describe("schema-applier: immutable migration identities", () => {
     // migration is pinned here so a renumbered or unregistered 0089 fails loudly here rather than
     // silently never running on an already-migrated database.
     expect(LEARNING_GATE_VERDICTS_VERSION).toBe("0089");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0089");
+    // FNXC:SelfImproveBaselineCache 2026-09-30-18:53: FUSI-031 advanced the baseline to 0090 for the
+    // cached replay baseline. The baseline pin below must move with it, and the new migration is
+    // pinned here so a renumbered or unregistered 0090 fails loudly here rather than silently never
+    // running on an already-migrated database.
+    expect(BASELINE_CACHE_VERSION).toBe("0090");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0090");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -718,7 +724,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 120 project tables, 17 central tables, 1 archive table", async () => {
+  it("creates all 121 project tables, 17 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -743,10 +749,11 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     0060 adds workspace coordination leases and land intents (→ 115); 0071 adds patchnode_entries and 0084 adds task_overlap_waits (→ 117);
     0086 adds the self-improvement learning ledger's learning_proposals (117 → 118). 0087 adds its
     append-only learning_ledger_events trail (118 → 119). 0089 adds FUSI-020's persisted
-    learning_gate_verdicts record (119 → 120). Plugin tables are added separately
+    learning_gate_verdicts record (119 → 120). 0090 adds FUSI-031's cached replay baseline,
+    learning_baseline_cache (120 → 121). Plugin tables are added separately
     by the schema-init hook and are excluded here.
     */
-    expect(bySchema.project).toBe(120);
+    expect(bySchema.project).toBe(121);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
@@ -1946,6 +1953,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
   });
@@ -2051,6 +2059,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 
@@ -2289,6 +2298,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 
@@ -2408,6 +2418,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 
@@ -2527,6 +2538,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 });

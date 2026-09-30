@@ -932,6 +932,45 @@ export const learningGateVerdicts = projectSchema.table("learning_gate_verdicts"
   index("idxLearningGateVerdictsBaselineOccurred").on(t.projectId, t.baselineId, t.occurredAt),
 ]);
 
+/*
+FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
+The cached replay baseline, keyed (project_id, baseline_key) — ONE row per baseline per project,
+because this is a CACHE and not a trail: a second measurement under the same key replaces the first
+and the newest entry is the only valid one. An append-only shape would leave N rows per key with no
+defined "current", and every reader would have to guess which one may be reused.
+
+FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
+`payload` is `jsonb` and deliberately OPAQUE. The measurement layer owns the baseline's shape; this
+table caches and invalidates, it does not interpret. Pinning metric columns here would couple the
+cache to one corpus schema and force a migration per new metric, while the fingerprint — not the
+payload — is what governs reuse, so the payload's internal shape can never affect whether a reuse is
+valid.
+
+FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
+The four measurement components are denormalized beside `inputFingerprint` for the same reason 0089
+stores its primary signals: a sha256 is one-way, so without them a reader could confirm two entries
+came from the same inputs but not WHICH inputs — and "which component moved?" is exactly the question
+an operator asks when a rebuild is forced.
+*/
+export const learningBaselineCache = projectSchema.table("learning_baseline_cache", {
+  projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`),
+  baselineKey: text("baseline_key").notNull(),
+  manifestVersion: text("manifest_version").notNull(),
+  engineSha: text("engine_sha").notNull(),
+  configHash: text("config_hash").notNull(),
+  seed: integer("seed").notNull(),
+  inputFingerprint: text("input_fingerprint").notNull(),
+  payload: jsonb("payload").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.projectId, t.baselineKey] }),
+  // Only the canonical `sha256:<64 hex>` shape is a valid measurement identity.
+  check("learning_baseline_cache_fingerprint_check", sql`${t.inputFingerprint} ~ '^sha256:[0-9a-f]{64}$'`),
+  // A blank key could never be addressed by a reader, so its row would be unreachable garbage.
+  check("learning_baseline_cache_key_check", sql`length(btrim(${t.baselineKey})) > 0`),
+]);
+
 export const agentActivityEventSeq = projectSchema.table("agent_activity_event_seq", {
   projectId: text("project_id").notNull().default(sql`current_setting('fusion.project_id', true)`), lastSeq: bigint("last_seq", { mode: "bigint" }).notNull().default(sql`0`),
 }, (t) => [primaryKey({ columns: [t.projectId] })]);
@@ -2906,4 +2945,12 @@ export const projectTableNames = [
   "task_lifecycle_event_seq", "task_lifecycle_events", "task_verification_requests",
   "unplanned_execution_blocks", "workflow_agent_capacity_leases", "task_overlap_waits",
   "learning_proposals", "learning_ledger_events", "learning_gate_verdicts",
+  /*
+  FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
+  This list is the pg test harness's per-test reset set, so an entry here is what makes the cached
+  baseline actually empty between tests. A missing entry is not a cosmetic gap: the table would keep
+  rows across tests and a "no cached baseline" assertion would silently read another test's row,
+  which is exactly how a cache-invalidation bug hides behind a green suite.
+  */
+  "learning_baseline_cache",
 ] as const;

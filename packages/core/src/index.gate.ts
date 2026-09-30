@@ -76,6 +76,11 @@ export { STRUCTURAL_DENYLIST_CATEGORIES, isStructuralDenylistCategory, classifyS
 export type { StructuralDenylistCategory, StructuralDenylistVerdict } from "./self-improve/structural-denylist.js";
 export { guardStructuralDenylist } from "./self-improve/structural-denylist-guard.js";
 export type { StructuralDenylistGuardResult, StructuralDenylistGuardOptions, GateCallback } from "./self-improve/structural-denylist-guard.js";
+export { BASELINE_CACHE_ACTIONS, BASELINE_CACHE_REASONS, isBaselineCacheAction, isBaselineCacheReason } from "./types/self-improve/baseline-cache.js";
+export type { BaselineFingerprintInput, BaselineCacheAction, BaselineCacheReason, BaselineCacheDecision, BaselineCacheStatus } from "./types/self-improve/baseline-cache.js";
+export { computeBaselineFingerprint, isBaselineFingerprint, resolveBaselineCache, buildBaselineCacheStatus } from "./self-improve/baseline-fingerprint.js";
+export { SELF_IMPROVE_BASELINE_CACHE_EVENT, SELF_IMPROVE_BASELINE_CACHE_AGENT_ID, emitSelfImproveBaselineCacheResolved } from "./self-improve/self-improve-baseline-cache-run-audit.js";
+export type { SelfImproveBaselineCacheInput } from "./self-improve/self-improve-baseline-cache-run-audit.js";
 export { AGENT_VALID_TRANSITIONS, DUPLICATE_OF_METADATA_KEY, REPORT_ATTACHMENT_SOURCE, assertNotWorkspaceTaskMerge, isWorkspaceTask, WorkspaceTaskMergeError, normalizeAgentRoles } from "./types.js";
 export { MAX_TASK_STEP_REPORTS, MAX_TASK_STEP_REPORT_SUMMARY_CHARS, appendTaskStepReport } from "./workflows/task-step-reports.js";
 export {

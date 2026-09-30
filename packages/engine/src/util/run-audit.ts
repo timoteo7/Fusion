@@ -1095,7 +1095,18 @@ export type DatabaseMutationType =
   | "selfimprove:gate-run"
   | "selfimprove:cost-budget-evaluated"
   | "selfimprove:gate-verdict-recorded"
-  | "selfimprove:denylist-rejected";
+  | "selfimprove:denylist-rejected"
+  /*
+   * FNXC:SelfImproveBaselineCacheRunAudit 2026-09-30-18:53: FUSI-031 baseline-cache event. Records
+   * that the loop resolved a cached replay baseline to reuse or rebuild. Metadata is ids/fixed
+   * outcomes only: baseline key, action, the closed reason, the requested and cached fingerprints
+   * (both content-addressed digests), and whether an entry was present. The measured baseline PAYLOAD
+   * is structurally excluded — it is an opaque blob that may carry corpus contents or command output,
+   * and the fingerprint, not the payload, is what governs reuse. Emitted through the bounded core
+   * seam, so an absent/throwing/rejecting/hanging sink changes nothing about the resolution the caller
+   * already holds.
+   */
+  | "selfimprove:baseline-cache-resolved";
 
 // ── Filesystem mutation types ─────────────────────────────────────────────────
 

@@ -62,22 +62,31 @@ merge, not as a description of code already present.
 /*
 FNXC:AutoImprovement 2026-09-30-15:26: FUSI-020 lands the deterministic gate's verdict record and
 primary-precedence rule; the block above states exactly which M1 surfaces remain unshipped.
+
+FNXC:AutoImprovement 2026-09-30-19:22: FUSI-031 lands the baseline cache with its content-addressed
+fingerprint, the reuse/rebuild resolver, the durable cache table, and the operator status read model.
+The cached-baseline arm of the replay-corpus bullet in the code-status block is therefore no longer
+entirely unshipped: the cache and its invalidation contract are real, while the corpus manifest that
+SUPPLIES `manifestVersion`/`seed` (FUSI-030) and the CLI that RENDERS the status (a later M1 slice)
+are not.
 */
 
 > **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
 > run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
 > FUSI-016, the test-count delta guard landed with FUSI-017, the gate's cost-budget invariants
-> landed with FUSI-018, the structural denylist and its pre-gate guard landed with FUSI-019, and
-> the gate's persisted verdict record and primary-precedence rule landed with FUSI-020 — all
+> landed with FUSI-018, the structural denylist and its pre-gate guard landed with FUSI-019, the
+> gate's persisted verdict record and primary-precedence rule landed with FUSI-020, and the cached
+> replay baseline with its fingerprint-based invalidation landed with FUSI-031 — all
 > committed on the mission branch and **not yet merged into `main`**. The file paths and
 > migrations named here are therefore not yet present in a `main` checkout — they become real
 > when that branch lands. The still-unimplemented M1 surfaces are the gate runner that computes
-> the primary signals and drives the canary, the replay corpus + manifest with its comparability
-> guard, and the operator CLI.
+> the primary signals and drives the canary, the versioned replay corpus + manifest that supplies
+> the fingerprint's inputs, and the operator CLI.
 > See [Not yet shipped](#not-yet-shipped),
 > [The deterministic primary gate](#the-deterministic-primary-gate),
-> [Cost-budget invariants](#cost-budget-invariants-fusi-018), and
-> [Deterministic gate verdict record](#deterministic-gate-verdict-record).
+> [Cost-budget invariants](#cost-budget-invariants-fusi-018),
+> [Deterministic gate verdict record](#deterministic-gate-verdict-record), and
+> [Cached replay baseline](#cached-replay-baseline).
 
 ## Overview
 
@@ -531,14 +540,18 @@ following are later M1 slices and are **not** in the code at all:
 
 - The deterministic primary gate *runner* (FUSI-016's gate library above is landed, but the
   runner that consumes the delta guard's verdict is not), the versioned **replay corpus** +
-  manifest with cached baseline and comparability guard, and the CLI/pi `fn_selfimprove_*`
+  manifest that supplies the baseline cache's fingerprint inputs, and the CLI/pi `fn_selfimprove_*`
   operator surface (status, proposals, experiments, veto, pause, force-revert). The structural
-  denylist shipped in FUSI-019 and the **persisted verdict / precedence** rule in FUSI-020, so
-  neither is on this list.
+  denylist shipped in FUSI-019, the **persisted verdict / precedence** rule in FUSI-020, and the
+  **cached baseline with its fingerprint and invalidation rule** in FUSI-031, so none of those three
+  is on this list.
 
-The gate runner and the replay canary are described in the mission brief, not implemented yet; when
-they land, this page is extended with the replay manifest's comparability rules. The cost-budget arm
-of the primary gate shipped in FUSI-018 and is described under
+The cached baseline itself shipped in FUSI-031 — see
+[Cached replay baseline](#cached-replay-baseline) — but the corpus manifest that ORIGINATES its
+`manifestVersion` and `seed` inputs did not, and neither did the CLI that renders the status read
+model. The gate runner and the replay canary are described in the mission brief, not implemented
+yet; when they land, this page is extended with the replay manifest's comparability rules. The
+cost-budget arm of the primary gate shipped in FUSI-018 and is described under
 [Cost-budget invariants](#cost-budget-invariants-fusi-018).
 
 ## The deterministic primary gate (FUSI-016)
@@ -600,6 +613,43 @@ The primary gate is a boolean over its deterministic signals (build, lint, typec
 **Readers** — `readLearningGateVerdictByExperiment` and `readLearningGateVerdictByBaseline` (both project-scoped and index-backed), plus a paginated `listLearningGateVerdicts`. The record is append-only: no accessor updates or deletes a verdict, because a status flip would make "the gate judged this and was overruled" indistinguishable from "the record moved". A gate verdict emits one bounded run-audit row (`selfimprove:gate-verdict-recorded`) from the committed row; the readers emit nothing.
 
 **Durable shape** — table `project.learning_gate_verdicts` (migration `0089`), with CHECKs mirroring the verdict/precedence enums, a canary-pairing invariant (a verdict that records a canary must record that canary's verdict), and a fingerprint-format check. The pure precedence rule and its fingerprint are pinned by `learning-gate-verdict-pure.test.ts`; the durable shape by `self-improve-gate-verdicts.pg.test.ts`; the store's audit mirroring and emission-freedom by `self-improve-gate-verdict-store.test.ts`.
+
+## Cached replay baseline
+
+A verdict names a baseline; this section is what makes that baseline's **measurement identity** checkable. Without a cache the loop re-measures the replay corpus for every candidate — slow, and worse, with no proof the candidate was compared against a baseline produced under the same corpus, engine build, configuration, and seed. A stale reuse would silently mix incomparable measurements, which is the failure this feature exists to prevent.
+
+The pure identity contract lives in `packages/core/src/self-improve/baseline-fingerprint.ts`; the durable cache and its accessors are in `packages/core/src/task-store/async/async-learning-baseline-cache.ts`.
+
+**Fingerprint** — `computeBaselineFingerprint` is a deterministic SHA-256 over a canonical, order-stable, NUL-separated `key=value` string of exactly four inputs: `manifestVersion`, `engineSha`, `configHash`, and `seed`. It is emitted as `sha256:<hex>`, matching the convention in `cost-budget-measure.ts` and `test-count-delta.ts`. Because it covers all four, a change to any one of them is provably a different measurement. Two normalization rules matter:
+
+- **The seed is normalized to an integer.** A manifest may carry `"42"` while a runtime passes `42`; hashing the raw string would mint two fingerprints for one seed and rebuild the baseline on every alternate call path — a cache that never hits.
+- **A non-numeric seed is refused, not coerced.** Unlike the verdict fingerprint, which falls back to `0`, silently hashing `NaN` as `0` here would attribute a measurement to a seed it was not run with — the same unattributability the blank-field refusal prevents. Blank `manifestVersion`, `engineSha`, and `configHash` are refused for the same reason.
+
+**Reuse/rebuild resolver** — `resolveBaselineCache({ cachedFingerprint, requestedFingerprint })` is pure and TOTAL, returning `{ action, reason }` over a closed vocabulary:
+
+| Condition | `action` | `reason` |
+| --- | --- | --- |
+| Nothing cached for the key | `rebuild` | `no-cached-baseline` |
+| Cached fingerprint identical | `reuse` | `fingerprint-matched` |
+| Cached fingerprint differs | `rebuild` | `fingerprint-diverged` |
+
+The reason is a closed enum rather than free text so an operator can **count** why comparisons were refused — "how many comparisons were refused as incomparable" must be answerable by query. The resolver takes two strings rather than a cache entry, so the accessor decides how to *fetch* while this function alone decides what the answer *means*; a cache that reuses on a different rule than the one status reports is the drift this separation prevents.
+
+**Status read model** — `buildBaselineCacheStatus` (pure) and `readBaselineCacheStatus` (accessor-backed) produce the object `fn_selfimprove_status` will render:
+
+```ts
+{ baselineKey, inputFingerprint, cachedFingerprint, present, action, reason }
+```
+
+It is the complete answer to "may I trust this comparison?". `present` is **derived** from the cached fingerprint rather than accepted as a separate input, so a status can never claim a baseline exists while simultaneously reporting `no-cached-baseline`. Both fingerprints are surfaced so an operator can see which component moved. The CLI that renders this is a later M1 slice; this feature delivers the substrate only.
+
+**Durable shape** — table `project.learning_baseline_cache` (migration `0090`), keyed `(project_id, baseline_key)`. Unlike the verdict trail this is a **cache, not an append-only log**: one row per baseline per project, because the newest entry is the only valid one. `writeBaselineCache` therefore uses `onConflictDoUpdate`, which gives three behaviors from one statement — an identical re-store is a no-op, a changed fingerprint replaces the entry in place, a first measurement inserts. The four measurement components are denormalized beside `input_fingerprint` (a SHA-256 is one-way; without them a reader could confirm two entries came from the same inputs but not *which*), while `payload` is deliberately **opaque jsonb** — the measurement layer owns its shape, and the fingerprint, never the payload, governs reuse. `created_at` survives a replacement so a forced rebuild stays distinguishable from the original measurement. A CHECK restricts `input_fingerprint` to the `sha256:<hex>` shape so a drifted writer fails loudly at the database instead of being read back as a plausible value.
+
+The accessor is an `AsyncDataLayer` function, deliberately **not** a `TaskStore` method: a measurement cache has no business widening the durable-write inventory the store's public surface is held to.
+
+**Observability** — every resolution emits one bounded `selfimprove:baseline-cache-resolved` run-audit row carrying ids and fixed outcomes only; the measured payload is structurally excluded. See [Run-Audit Catalogue](./run-audit.md#self-improvement-baseline-cache-resolution-fusi-031).
+
+**Verification** — the pure identity, normalization, refusals, and resolver truth table are pinned by `self-improve-baseline-fingerprint-pure.test.ts`; the durable round trip, row-count idempotence, in-place replacement, `created_at` preservation, project scoping, and CHECK rejections by `self-improve-baseline-cache.pg.test.ts`; the sink health and metadata containment by `self-improve-baseline-cache-run-audit-sink-health.test.ts`.
 
 
 /*
