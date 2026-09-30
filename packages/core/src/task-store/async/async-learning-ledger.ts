@@ -14,9 +14,17 @@ import { isLearningRevertReason, type LearningRevertReason } from "../../self-im
 FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
 Every write in this module is an INSERT. There is deliberately no update or delete path: the trial's
 revert decision (FUSI-011) reads the value a proposal HELD before the experiment, which is only
-answerable because the prior application row survived untouched. FUSI-012 owns run-audit emission
-and this module emits none — keeping telemetry out of the lifecycle write means a stalled audit sink
-can never block a learning transition.
+answerable because the prior application row survived untouched.
+
+FNXC:SelfImproveRunAudit 2026-09-29-23:04:
+This module still emits no run-audit of its own, but the REASON changed in FUSI-015. Emission used to
+be absent because FUSI-012 had only declared the contract; the `selfimprove:*` rows are now emitted,
+from the TaskStore WRITE delegations in `store.ts` that call these functions, after the write has
+committed and unawaited through the bounded core seam. Keeping the emission OUT OF this module is now
+a layering choice rather than an absence: the ledger layer stays a pure durability boundary (INSERTs
+only, no telemetry dependency), while the audit row is recorded by the owner of the store's sink. A
+stalled audit sink therefore still cannot block a learning transition, and a ledger write stays
+readable without any audit infrastructure present.
 
 FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
 The proposal row and its opening `proposed` event are written in ONE `transactionImmediate`. A
@@ -232,6 +240,37 @@ export async function recordLearningReversal(
   const stored = rows[0];
   if (!stored) throw new Error(`Learning reversal event ${input.eventId} was not stored`);
   return mapEventRow(stored);
+}
+
+/*
+FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+`recordLearningApplication` appends only an EVENT, which carries the proposal's identity and the
+target but NOT the weight the application asserted (`version`, `confidence`, `value`, evidence
+count). The `selfimprove:proposal-applied` audit row must record that weight as bounded counts —
+never a diff — so the store delegation needs a way to read the proposal row the event was appended
+against. `readLearningProposal` is that read, kept as a MODULE-LEVEL export (not a new TaskStore
+method) so the FN-8923 durable-write inventory surface is unchanged by this task: a store method
+added for telemetry would have to be classified as a writer, and a writer that exists only to feed
+audit rows would misstate the ledger's durability boundary.
+
+FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+A missing proposal row returns null rather than throwing. The application EVENT append and the
+proposal READ are two separate statements; if the row is absent the emission is SKIPPED (the store
+delegation treats null as "no audit row") and never FABRICATED with placeholder weights. An audit
+row that invents a confidence or version the ledger does not hold is worse than no audit row: it
+would let an operator read a weight off the trail that no learning assertion ever made.
+*/
+export async function readLearningProposal(
+  layer: AsyncDataLayer,
+  proposalId: string,
+): Promise<LearningProposal | null> {
+  const projectId = requireProjectId(layer);
+  const rows = await layer.db.select().from(schema.project.learningProposals).where(and(
+    eq(schema.project.learningProposals.projectId, projectId),
+    eq(schema.project.learningProposals.proposalId, proposalId),
+  ));
+  const stored = rows[0];
+  return stored ? mapProposalRow(stored) : null;
 }
 
 const DEFAULT_LIMIT = 100;

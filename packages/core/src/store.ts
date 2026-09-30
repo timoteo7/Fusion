@@ -183,12 +183,18 @@ import {
 import {
   appendLearningProposal,
   listLearningProposals,
+  readLearningProposal,
   recordLearningApplication,
   recordLearningReversal,
   type AppendLearningProposalInput,
   type RecordLearningApplicationInput,
   type RecordLearningReversalInput,
 } from "./task-store/async/async-learning-ledger.js";
+import {
+  emitSelfImproveProposalApplied,
+  emitSelfImproveProposalCreated,
+  emitSelfImproveProposalReverted,
+} from "./self-improve/self-improve-run-audit.js";
 import { buildPatchnodeEntryId, buildPatchnodeEntryInput } from "./board/patchnode.js";
 import type { PatchnodeEntry, PatchnodeQuery } from "./types/task/patchnode.js";
 import type { LearningProposal } from "./types/self-improve/learning-proposal.js";
@@ -1248,21 +1254,92 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
   bound, so a synchronous-only store never silently no-ops a learning transition. `appendLearningProposal`
   writes the proposal row AND its opening event in one transaction; the two record methods append
   only — none of them updates a previously written row, which is the append-only contract FUSI-011's
-  revert decision depends on. No method emits run-audit (FUSI-012 owns that).
+  revert decision depends on.
+
+  FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+  The three WRITE delegations now emit their `selfimprove:*` run-audit row (FUSI-015 wires the
+  façades FUSI-012 declared; `listLearningProposals` stays emission-free because a pure read is not
+  a transition). Each emit runs AFTER the awaited write has returned its committed row, and is
+  deliberately NOT awaited: the bounded seam never throws or rejects, so a sink that is absent,
+  throws, rejects, or hangs changes what is OBSERVED and nothing about what the ledger DID. A
+  learning experiment is judged on its deterministic gate verdict, not on telemetry health, so
+  telemetry must never sit on the transition's success path.
+
+  FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+  The `applied` row is the one transition whose audit metadata (version/confidence/value/evidence
+  count) is not present on the appended EVENT, so the delegation reads the committed proposal row
+  first. A null row (proposal absent or the read racing a rolled-back write) SKIPS the emit rather
+  than fabricating weights — see `readLearningProposal` for why an invented weight is worse than a
+  missing row. `timestamp` is the transition's own durable instant (`createdAt` / `occurredAt`), not
+  `Date.now()`, so the audit row is ordered against the ledger it observes.
   */
   async appendLearningProposal(input: AppendLearningProposalInput): Promise<LearningProposal> {
     if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
-    return appendLearningProposal(this.asyncLayer, input);
+    const stored = await appendLearningProposal(this.asyncLayer, input);
+    void emitSelfImproveProposalCreated({
+      host: this,
+      proposalId: stored.proposalId,
+      target: stored.target,
+      projectId: this.asyncLayer.projectId ?? undefined,
+      timestamp: stored.createdAt,
+      evidenceCount: stored.evidenceRefs.length,
+    });
+    return stored;
   }
 
   async recordLearningApplication(input: RecordLearningApplicationInput): Promise<LearningLedgerEvent> {
     if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
-    return recordLearningApplication(this.asyncLayer, input);
+    const stored = await recordLearningApplication(this.asyncLayer, input);
+    /*
+    FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+    The applied EVENT carries identity + target only; the asserted weight lives on the proposal row,
+    so the delegation reads that row to build the audit metadata. The read is wrapped because the
+    EVENT is ALREADY committed by the line above: a metadata read that failed must not reject a
+    method whose write succeeded. A read failure is treated exactly like an absent row — skip the
+    emit, return the committed event. The learning transition is never reported as failed because
+    its telemetry could not be enriched.
+    */
+    let proposal: LearningProposal | null = null;
+    try {
+      proposal = await readLearningProposal(this.asyncLayer, stored.proposalId);
+    } catch (error) {
+      storeLog.warn("Learning application committed but its proposal row could not be read for run-audit", {
+        proposalId: stored.proposalId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (proposal) {
+      void emitSelfImproveProposalApplied({
+        host: this,
+        proposalId: proposal.proposalId,
+        target: proposal.target,
+        projectId: this.asyncLayer.projectId ?? undefined,
+        timestamp: stored.occurredAt,
+        version: proposal.version,
+        confidence: proposal.confidence,
+        value: proposal.value,
+        evidenceCount: proposal.evidenceRefs.length,
+        hasPriorValue: proposal.priorValue !== null,
+      });
+    }
+    return stored;
   }
 
   async recordLearningReversal(input: RecordLearningReversalInput): Promise<LearningLedgerEvent> {
     if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
-    return recordLearningReversal(this.asyncLayer, input);
+    const stored = await recordLearningReversal(this.asyncLayer, input);
+    // The committed event carries the trimmed pairing and the enum reason; use the STORED values so
+    // the audit row can never disagree with the ledger row it mirrors.
+    void emitSelfImproveProposalReverted({
+      host: this,
+      proposalId: stored.proposalId,
+      target: stored.target,
+      projectId: this.asyncLayer.projectId ?? undefined,
+      timestamp: stored.occurredAt,
+      revertedEventId: stored.revertsEventId ?? input.revertsEventId,
+      revertReason: stored.revertReason ?? input.revertReason,
+    });
+    return stored;
   }
 
   async listLearningProposals(query: LearningLedgerQuery = {}): Promise<LearningLedgerPage> {

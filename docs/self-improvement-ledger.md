@@ -16,6 +16,15 @@ operator surface are LATER M1 slices and are marked "not yet shipped" below. Do 
 field, state, or event the code does not actually have — a contract doc that runs ahead of the code
 is worse than no doc, because the gate and the ledger then disagree about what is real.
 
+FNXC:AutoImprovement 2026-09-29-23:32:
+Three of those slices have since landed on the mission branch, so their "not yet shipped" marks are
+removed and each section now states the shipped shape: the append-only store methods (FUSI-010), the
+revert/re-apply write transitions (FUSI-011), and run-audit emission of ledger transitions (the
+`selfimprove:*` façades declared in FUSI-012, wired to their call sites in FUSI-015). The remaining
+unshipped list is the structural denylist, the deterministic primary gate, the versioned replay
+corpus, and the `fn_selfimprove_*` operator surface — those stay marked, because inventing a shipped
+contract for them is the failure mode the block above forbids.
+
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
 mission/M-MULZRJQ4-0001-IF11, NOT on main, and is pending merge. Every file path and migration
@@ -26,11 +35,12 @@ greppable in the reader's working tree, so this page must be re-read as a forwar
 merge, not as a description of code already present.
 -->
 
-> **Code status:** the record contract below landed in FUSI-009, which is committed on the mission
-> branch and **not yet merged into `main`**. The file paths and migration named here are therefore
-> not yet present in the current checkout — they become real when that branch lands. Later M1
-> surfaces (store, revert writes, run-audit emission, denylist, gate, replay corpus, operator CLI)
-> are not implemented at all. See [Not yet shipped](#not-yet-shipped).
+> **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
+> run-audit layers landed with FUSI-010/011/012/015, all committed on the mission branch and **not yet
+> merged into `main`**. The file paths and migrations named here are therefore not yet present in a
+> `main` checkout — they become real when that branch lands. The still-unimplemented M1 surfaces are
+> the denylist, the deterministic gate, the replay corpus, and the operator CLI.
+> See [Not yet shipped](#not-yet-shipped).
 
 ## Overview
 
@@ -143,9 +153,12 @@ These are the decision rules the loop is built on. They are pure functions in
   be re-evaluated into a new, non-reverted record.
 
 **Write-path status:** the record and its revert **substrate** (the `reverted` state, the
-`canApplyProposal` refusal, and the `priorValue` versioning) have shipped. The revert **write
-transitions** — the store calls that move a proposal between states — are **not yet shipped**
-(FUSI-011, still open). This page documents the contract those transitions must satisfy.
+`canApplyProposal` refusal, and the `priorValue` versioning) shipped in FUSI-009, and the revert
+**write transitions** shipped with FUSI-010/FUSI-011: `appendLearningProposal`,
+`recordLearningApplication`, `recordLearningReversal`, and `listLearningProposals` on `TaskStore`
+(thin delegations over `packages/core/src/task-store/async/async-learning-ledger.ts`). Each write is
+an INSERT only — no store method updates or deletes a proposal row or its events — which is the
+append-only contract the revert decision reads from.
 
 ## Persistence
 
@@ -169,16 +182,47 @@ describe the shipped migration, not a table a reader can inspect in the current 
 
 ## Run-audit
 
-- Ledger transitions are **intended** to be recorded in run-audit following the repo's
-  **ids/counts/outcomes-only** convention — never description prose, never a free-form verdict,
-  never a diff, never `origin` (which is free-form by design). See the
-  [Run-Audit Catalogue](./run-audit.md) and the "Run Audit" rules in [AGENTS.md](../AGENTS.md).
-- When those emissions land they must go through the **bounded** core seam
+Every ledger transition writes one row to the platform's existing audit trail, following the repo's
+**ids/counts/outcomes-only** convention — never description prose, never a free-form verdict, never a
+diff, never `origin` (which is free-form by design). See the
+[Run-Audit Catalogue](./run-audit.md) and the "Run Audit" rules in [AGENTS.md](../AGENTS.md).
+
+<!--
+FNXC:SelfImproveRunAudit 2026-09-29-23:32:
+This section used to describe an intended contract; FUSI-015 made it the description of shipped
+behavior. The three mutation types, their metadata fields, and the emission points below are the
+emitted reality, verified by `packages/core/src/__tests__/self-improve-run-audit-sink-health.test.ts`
+(façade × sink-mode matrix) and by the pg suite, which asserts the three rows in order and re-runs
+every transition against throwing, rejecting, and never-settling sinks.
+-->
+
+- **The three events** — `selfimprove:proposal-created`, `selfimprove:proposal-applied`,
+  `selfimprove:proposal-reverted` — mirror the ledger trail's `kind` CHECK one-for-one. They are the
+  sole writers of the `selfimprove:*` prefix; ledger code must never call `recordRunAuditEvent`
+  directly.
+- **Metadata** is built from a closed field list per façade (`selfImproveEvent` in
+  `packages/core/src/self-improve/self-improve-run-audit.ts`) and never spreads caller input:
+  created → `proposalId`, `target`, `evidenceCount`, `outcome`; applied → additionally `version`,
+  `confidence`, `value`, `hasPriorValue`; reverted → `revertedEventId` plus `revertReason`, a fixed
+  five-member enum mirrored from the `0088` CHECK, so "why was this undone?" is answered by counting
+  reasons. Evidence is a COUNT (`evidenceCount`), never the refs; `priorValue` is a boolean
+  `hasPriorValue`, never the number.
+- **Emission points** are the three `TaskStore` WRITE delegations in `packages/core/src/store.ts`
+  (`appendLearningProposal`, `recordLearningApplication`, `recordLearningReversal`), each AFTER the
+  awaited write has returned its committed row. `listLearningProposals` emits nothing — a read is not
+  a transition.
+- **Never on the success path:** the emit is deliberately **unawaited**, and the seam never throws or
+  rejects, so an absent, throwing, rejecting, never-settling, or late-settling sink changes what is
+  observed and nothing about what the ledger did. Emission goes through the **bounded** core seam
   (`emitBoundedRunAudit` in `packages/core/src/run-audit/emit-bounded-run-audit.ts`, timeout
-  `CORE_RUN_AUDIT_EMIT_TIMEOUT_MS`) so a hostile/stalled audit sink can never become a lifecycle
-  dependency for the loop. FN-9177 keeps this bounded seam in core because core cannot import engine.
-- **Status:** no ledger run-audit event has shipped yet (FUSI-012, still open). This section states
-  the contract those events must satisfy; it does not name event types that do not exist.
+  `CORE_RUN_AUDIT_EMIT_TIMEOUT_MS`); FN-9177 keeps that seam in core because core cannot import engine.
+- **`timestamp` is the transition's own durable instant** — the proposal's `createdAt` or the event's
+  `occurredAt` — not `Date.now()`, so the audit trail orders against the ledger it observes.
+- **Never fabricate a weight:** the `applied` row needs `version`/`confidence`/`value`, which the
+  appended EVENT does not carry, so the delegation reads the committed proposal row
+  (`readLearningProposal`). A null row, or a read that throws after the event already committed,
+  SKIPS the emit and still returns the committed event — an audit row that invents a confidence the
+  ledger never asserted is worse than a missing row.
 
 ## Safety rails (mission-level; enforced by later slices)
 
@@ -190,13 +234,11 @@ describe the shipped migration, not a table a reader can inspect in the current 
 
 ## Not yet shipped
 
-This page covers the record contract that landed in FUSI-009 — which itself is committed on the mission
-branch and **not yet merged into `main`**, so even the fields above are not greppable in the current
-checkout. The following are later M1 slices and are **not** in the code at all:
+This page covers the record contract that landed in FUSI-009 and the store/revert/run-audit layers
+that landed with FUSI-010/011/012/015 — all committed on the mission branch and **not yet merged into
+`main`**, so none of the code above is greppable in a `main` checkout. The following are later M1
+slices and are **not** in the code at all:
 
-- Append-only store write/list methods and window/target reads (FUSI-010).
-- Revert/re-apply **write** transitions (FUSI-011) — only the state and guard exist.
-- Run-audit emission of ledger transitions (FUSI-012) — see [Run-audit](#run-audit).
 - Structural denylist enforcement, the deterministic **primary gate**, the versioned **replay
   corpus** + manifest with cached baseline and comparability guard, and the CLI/pi
   `fn_selfimprove_*` operator surface (status, proposals, experiments, veto, pause, force-revert).
