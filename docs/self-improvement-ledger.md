@@ -16,19 +16,16 @@ operator surface are LATER M1 slices and are marked "not yet shipped" below. Do 
 field, state, or event the code does not actually have — a contract doc that runs ahead of the code
 is worse than no doc, because the gate and the ledger then disagree about what is real.
 
-FNXC:AutoImprovement 2026-09-29-23:32:
-Three of those slices have since landed on the mission branch, so their "not yet shipped" marks are
+FNXC:AutoImprovement 2026-09-30-12:59:
+Four of those slices have since landed on the mission branch, so their "not yet shipped" marks are
 removed and each section now states the shipped shape: the append-only store methods (FUSI-010), the
-revert/re-apply write transitions (FUSI-011), and run-audit emission of ledger transitions (the
-`selfimprove:*` façades declared in FUSI-012, wired to their call sites in FUSI-015).
-
-FNXC:AutoImprovement 2026-09-30-09:55:
-The deterministic primary gate has now landed too (FUSI-016), so it is documented below in
-[The deterministic primary gate](#the-deterministic-primary-gate) with its real verdict contract
-rather than left as mission-brief prose. The remaining unshipped list is the structural denylist,
-the versioned replay corpus, the persisted-verdict/precedence rule, and the `fn_selfimprove_*`
-operator surface — those stay marked, because inventing a shipped contract for them is the failure
-mode the block above forbids.
+revert/re-apply write transitions (FUSI-011), run-audit emission of ledger transitions (the
+`selfimprove:*` façades declared in FUSI-012, wired to their call sites in FUSI-015), the
+deterministic primary gate (FUSI-016, documented below), and the test-count delta guard (FUSI-017,
+documented above). The remaining unshipped list is the structural denylist, the gate runner that
+consumes the delta verdict, the versioned replay corpus, the persisted-verdict/precedence rule, and
+the `fn_selfimprove_*` operator surface — those stay marked, because inventing a shipped contract for
+them is the failure mode the block above forbids.
 
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
@@ -41,11 +38,12 @@ merge, not as a description of code already present.
 -->
 
 > **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
-> run-audit layers landed with FUSI-010/011/012/015, all committed on the mission branch and **not yet
-> merged into `main`**. The file paths and migrations named here are therefore not yet present in a
-> `main` checkout — they become real when that branch lands. The still-unimplemented M1 surfaces are
-> the denylist, the replay corpus, the persisted-verdict/precedence rule, and the operator CLI; the
-> deterministic primary gate has landed with FUSI-016.
+> run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
+> FUSI-016, and the test-count delta guard landed with FUSI-017 — all committed on the mission branch
+> and **not yet merged into `main`**. The file paths and migrations named here are therefore not yet
+> present in a `main` checkout — they become real when that branch lands. The still-unimplemented M1
+> surfaces are the denylist, the gate runner that consumes the delta verdict, the replay corpus, the
+> persisted-verdict/precedence rule, and the operator CLI.
 > See [Not yet shipped](#not-yet-shipped) and
 > [The deterministic primary gate](#the-deterministic-primary-gate).
 
@@ -231,7 +229,15 @@ every transition against throwing, rejecting, and never-settling sinks.
   SKIPS the emit and still returns the committed event — an audit row that invents a confidence the
   ledger never asserted is worse than a missing row.
 
-## Safety rails (mission-level; enforced by later slices)
+## Safety rails
+
+Shipped in FUSI-017:
+
+- **Test-count delta guard:** a candidate that deletes a test, disables one, or collects fewer tests
+  than the baseline is a regression *even when every remaining test is green* — see
+  [Test-count delta guard](#test-count-delta-guard-fusi-017-shipped).
+
+Mission-level, enforced by later slices:
 
 - **Structural denylist** (gate, ratchets, quarantine ledger, release, and the self-patching code
   itself) is immutable — a diff touching it is rejected **before** the gate runs.
@@ -239,22 +245,89 @@ every transition against throwing, rejecting, and never-settling sinks.
 - **Isolation:** experiments run in a branch/worktree and a standalone sandboxed engine (own
   worktree, directory, DB/project, port, mock provider); the live engine is never restarted.
 
+## Test-count delta guard (FUSI-017, shipped)
+
+The guard is the primary gate's **measuring rule for coverage**: it compares a candidate test run
+against a recorded baseline and returns a boolean verdict with a fixed-enum reason list. It is pure
+— it never runs vitest, reads the filesystem, persists a baseline, or emits run-audit. Those belong
+to the gate runner that *consumes* the verdict.
+
+It exists because a fully green run proves only that the tests which **ran** passed. A change that
+deletes a test, comments it out, or flips it to `.skip` is green in exactly the case that matters,
+so build/lint/typecheck/gate/affected-tests all pass over a coverage-destroying diff. The guard
+closes that hole independently of the remaining tests' outcome.
+
+`packages/core/src/self-improve/test-count-delta.ts` (exported from `@fusion/core`):
+
+- `buildTestCountSnapshot(report)` normalizes a vitest JSON-reporter payload into a
+  `TestCountSnapshot`. Non-executed tests are counted from the **per-assertion `status`**, never
+  from the aggregate `numPendingTests`/`numTodoTests` counters (those also count queued or still-
+  running tests). The inventory id is `testFile::fullName`, mirroring `check-test-inventory.mjs`.
+  `total` is the number of **collected** assertions, so a `passed → skipped` flip keeps it flat
+  (caught by the skip rule) while a deleted test lowers it (caught by the count rule).
+- `fingerprintSnapshot(snapshot)` / `createTestCountBaseline(snapshot)` produce a `sha256:` over a
+  canonical, **clock-free** serialization of the counts plus sorted ids. The reporter's
+  `startTime`/`endTime`/`duration` are deliberately excluded, so the same candidate always yields
+  an identical verdict and fingerprint.
+- `evaluateTestCountDelta({ baseline, candidate, quarantinedFiles, repoRoot })` returns
+  `{ ok, reasons, removedCount, addedCount, skippedDelta, totalDelta, fingerprint }`.
+
+**Fixed reason enum** (closed, never prose — so the verdict stays ids/counts/fixed-outcomes only for
+the audit and ledger rows the consumer writes):
+
+| Reason | Fires when |
+|---|---|
+| `test-count-regressed` | the candidate collected **fewer** assertions than the baseline, net of quarantine-listed files |
+| `test-removed` | a baseline inventory id is absent from the candidate, net of quarantine exemptions |
+| `test-skipped` | the candidate's **non-executed** count **exceeds** the baseline's |
+
+**Rules:**
+
+- Removal or skip is a regression **even when every remaining test passed** — the guard never
+  consults the failure count, precisely because a coverage-destroying change passes when what is
+  left is green. `ok` is true only when `reasons` is empty; pure additions pass.
+- The three rules are **disjoint**: a deleted test fires count + removed, a skip keeps the count flat
+  and fires only the skip delta, and a pure add moves nothing negative.
+- A removal is exempt from **both** `test-removed` and `test-count-regressed` only when its file is
+  **actually listed** in the quarantine ledger (`scripts/lib/test-quarantine.json`). This is the
+  escape hatch that keeps the guard from deadlocking with the quarantine deletion ratchet (a
+  quarantined file is deleted by design after 14 days; without the exemption the two mechanisms
+  would block each other). The exemption is **net, not merely excusing**: a quarantined file's
+  assertions are subtracted from the collected-count comparison as well, exactly as
+  `check-test-inventory.mjs` prescribes for its own `--diff` guard ("diff against *snapshot minus
+  quarantined entries*"). A ledger-sanctioned deletion therefore returns `ok: true` outright and
+  reports `totalDelta: 0` — the number always explains the verdict. Netting only the removal reason
+  would have traded `test-removed` for `test-count-regressed` and left the deadlock in place. The
+  exemption cannot be widened to an unlisted file on either rule.
+- The ledger stores **repo-relative** paths while vitest's JSON reporter records
+  `testResults[].name` as an **absolute** path, so the guard normalizes before lookup: callers may
+  pass `repoRoot` (the module never reads the filesystem), and with no root it matches a
+  repo-relative entry as a `/`-anchored path **suffix**. Without this normalization the exemption
+  would silently never apply in production, re-creating the deadlock behind a guard that appears to
+  have an escape hatch.
+- `test-skipped` is a **directional** count, not a per-id flip, so a pre-existing skip that stays
+  skipped is not a regression — only a *newly* disabled test is. `skippedDelta` is deliberately
+  **not** quarantine-netted: the ratchet deletes a whole file, which creates no new skips.
+
+This module is standalone: it imports nothing from the gate runner (FUSI-016) or the denylist
+(FUSI-019) and consumes no baseline from disk.
+
 ## Not yet shipped
 
-This page covers the record contract that landed in FUSI-009 and the store/revert/run-audit layers
-that landed with FUSI-010/011/012/015 — all committed on the mission branch and **not yet merged into
-`main`**, so none of the code above is greppable in a `main` checkout. The following are later M1
-slices and are **not** in the code at all:
+This page covers the record contract that landed in FUSI-009, the store/revert/run-audit layers that
+landed with FUSI-010/011/012/015, and the test-count delta guard (FUSI-017) — all committed on the
+mission branch and **not yet merged into `main`**, so none of that code is greppable in a `main`
+checkout. The following are later M1 slices and are **not** in the code at all:
 
-- Structural denylist enforcement, the versioned **replay corpus** + manifest with cached baseline
-  and comparability guard, and the CLI/pi `fn_selfimprove_*` operator surface (status, proposals,
-  experiments, veto, pause, force-revert). The **test-count delta**, **cost-budget invariants**,
-  and the **persisted verdict / precedence** rule are likewise later slices.
+- Structural denylist enforcement, the deterministic primary gate *runner* (FUSI-016's gate library
+  above is landed, but the runner that consumes the delta guard's verdict is not), the versioned
+  **replay corpus** + manifest with cached baseline and comparability guard, and the CLI/pi
+  `fn_selfimprove_*` operator surface (status, proposals, experiments, veto, pause, force-revert).
+  The **cost-budget invariants** and the **persisted verdict / precedence** rule are likewise later
+  slices.
 
-The deterministic primary gate landed with FUSI-016 and is described in
-[The deterministic primary gate](#the-deterministic-primary-gate) below. The replay canary is
-still described only in the mission brief; when it lands, this page is extended with the replay
-manifest's comparability rules.
+The gate runner and the replay canary are described in the mission brief, not implemented yet; when
+they land, this page is extended with the replay manifest's comparability rules.
 
 ## The deterministic primary gate (FUSI-016)
 
