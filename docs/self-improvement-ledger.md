@@ -77,8 +77,10 @@ are not.
 > run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
 > FUSI-016, the test-count delta guard landed with FUSI-017, the gate's cost-budget invariants
 > landed with FUSI-018, the structural denylist and its pre-gate guard landed with FUSI-019, the
-> gate's persisted verdict record and primary-precedence rule landed with FUSI-020, and the cached
-> replay baseline with its fingerprint-based invalidation landed with FUSI-031 — all
+gate's persisted verdict record and primary-precedence rule landed with FUSI-020, the versioned
+> replay corpus manifest landed with FUSI-030, the cached replay baseline with its fingerprint-based
+> invalidation landed with FUSI-031, and the secondary ruler's four corpus metrics landed with
+> FUSI-033 — all
 > committed on the mission branch and **not yet merged into `main`**. The file paths and
 > migrations named here are therefore not yet present in a `main` checkout — they become real
 > when that branch lands. The still-unimplemented M1 surfaces are the gate runner that computes
@@ -88,8 +90,9 @@ are not.
 > [The deterministic primary gate](#the-deterministic-primary-gate),
 > [Cost-budget invariants](#cost-budget-invariants-fusi-018),
 > [Replay corpus manifest](#replay-corpus-manifest-fusi-030),
-> [Deterministic gate verdict record](#deterministic-gate-verdict-record), and
-> [Cached replay baseline](#cached-replay-baseline).
+> [Cached replay baseline](#cached-replay-baseline),
+> [Corpus metrics](#corpus-metrics-fusi-033), and
+> [Deterministic gate verdict record](#deterministic-gate-verdict-record).
 
 FNXC:AutoImprovement 2026-09-30-19:35:
 FUSI-030 lands the REPLAY CORPUS MANIFEST — the versioned, validated document that declares which task
@@ -103,6 +106,15 @@ rejected at runtime) so no corpus run can ever reach a real model, and version i
 boolean flag so a v1 document is refused by a v2 loader instead of silently half-interpreted. The
 baseline CACHE and the comparability GUARD that consume it are later slices (FUSI-031/032) and stay
 on the not-yet-shipped list.
+
+<!--
+FNXC:AutoImprovement 2026-09-30-20:31:
+Conflict resolution: FUSI-030 (manifest), FUSI-031 (cached baseline), and FUSI-033 (corpus metrics)
+all extend this same status block. The merged text names all three, and the "See" list links all three
+sections, so the merged page claims exactly the surfaces the merged code actually ships. The list of
+not-yet-shipped surfaces is reconciled in the same way: the canary that CONSUMES the FUSI-033 metrics
+is still unshipped, and so are the comparability guard and the operator CLI.
+-->
 
 ## Overview
 
@@ -470,6 +482,78 @@ depend on a real model's availability and pricing).
 The **baseline cache** (reuse/invalidation) and the `fn_selfimprove_status` display that consume this
 manifest are later slices (FUSI-031/032) and are not yet shipped.
 
+## Corpus metrics (FUSI-033)
+
+The secondary ruler. Where the primary gate is a boolean over build/lint/typecheck/gate/affected-tests
+plus the cost-budget invariants, the **replay canary** asks the follow-up question: over the same
+corpus, did the candidate still succeed as often, need as much rework, cost as much, and run as
+slowly? FUSI-033 ships the **measurement** of those four metrics. It is the pure, deterministic seam
+the canary will consume; it drives no replay itself, mutates no proposal state, and adds no run-audit
+event.
+
+<!--
+FNXC:SelfImproveCorpusMetrics 2026-09-30-18:56:
+FUSI-033 ships two pure modules under `packages/core/src/self-improve/`
+(`corpus-metrics-types.ts`, `corpus-metrics.ts`) plus their test. Unlike the cost-budget arm it has no
+verdict and no guard yet — the canary that CONSUMES these metrics, and the second ruler's
+keep/revert-by-canary decision, are later slices. This section therefore documents the measurement
+contract only; it does not claim the canary exists.
+-->
+
+### The four fixed definitions
+
+Each metric is a count over recorded observations or a straight arithmetic combination of counts —
+never a ratio of opinions, never a model-assigned score. If a definition could vary between two
+evaluations of the same corpus, the ruler would disagree with itself and become unreproducible.
+
+| Metric | Definition |
+| --- | --- |
+| **Success** | The number of DISTINCT tasks whose recorded terminal `succeeded` boolean is true, and the `successRate` = `succeededTaskCount / taskCount`. The denominator is the distinct task count, matching the cost lane's counting basis so both rulers divide by the same number. |
+| **Rework** | The SUM of the engine's recorded rework counter — `workflow_run_step_instances.reworkCount`, which the foreach graph increments on each `kind: "rework"` edge and `AgentSelfImproveService` already sums per task and run. |
+| **Cost** | Delegated to `measureCostRun` (see [Cost-budget invariants](#cost-budget-invariants-fusi-018)). Reported as the summed `tokens`, `steps`, and `wallClockMs`. |
+| **Latency** | Delegated to `measureCostRun` — the summed `wallClockMs` over the corpus. |
+
+**Rework is a counted fact, not a subjective judgment.** That is the load-bearing definitional choice.
+The engine already persists a verifiable counter; reading that recorded number gives "redone more" a
+definition two readers of the same run always agree on. Deriving rework from log prose, or scoring
+it, would make one run measure differently for two readers and would turn the ruler subjective — the
+exact failure the primary gate's determinism rule exists to prevent.
+
+**Cost and latency are reused, never forked.** They are the shipped cost lane's job, including its
+token convention (input + output + cacheWrite, cache reads excluded), canonical ordering, and
+fingerprint. This module does not restate them; it projects the recorded cost fields onto cost-lane
+observations via `toCostObservations` and hands them to `measureCostRun`. A corpus therefore has exactly
+ONE notion of "a run": if the corpus re-derived cost with a different rule, the canary could report a
+replay as cheaper while the primary gate's cost-budget arm reported the same replay as over budget, and
+neither verdict would be explainable.
+
+### Determinism: measured by recorded observation, never by clock
+
+`measureCorpusMetrics(observations)` is a **pure** function: it reads no clock, opens no store, imports
+no engine, and starts no process. Success, rework, tokens, steps, and wall-clock all arrive already
+captured on each observation. Ordering is canonicalized by **sort** on `taskId`, so a shuffled input
+yields byte-identical metrics and an identical `sha256:` fingerprint — two evaluations that merely
+arrived in different orders are still the same evaluation. `seed` and `corpusId` travel **with** each
+observation (not as measurement parameters) so a corpus cannot be silently re-run under a different
+seed or task set between the baseline and candidate passes.
+
+### Grouping by task, and duplicates that stay visible
+
+Metrics are grouped by `taskId` into one entry per distinct task, in canonical order. When a task was
+measured more than once, its occurrences collapse into a single entry whose numeric fields **sum**, whose
+`succeeded` flag is true only when **every** occurrence succeeded (a partial success must not read as
+clean success), and whose `occurrences` and `duplicateTaskIds` stay in the record so a corpus that
+measured a task twice is auditable rather than silently collapsed into a clean-looking total.
+
+### Validity is recorded, not thrown
+
+A `reworkCount` that is negative, fractional, or non-finite means the producer wrote a bad record. The
+measurement sets `valid: false` and lists the offending task ids in `invalidReworkTaskIds` rather than
+throwing, so a completed replay still reports its other metrics and a caller can decide whether to
+refuse. Summing destroys *which* observation was bad, so the ids are captured here, at the only point
+the individual observations still exist. The empty corpus is legal: it reports zero for every metric and
+a success rate of zero rather than throwing or producing `NaN`.
+
 ## Structural denylist
 
 The floor under the primary gate: an experiment may change product behavior, but it may not rewrite
@@ -633,17 +717,18 @@ This module is standalone: it imports nothing from the gate runner (FUSI-016) or
 
 This page covers the record contract that landed in FUSI-009, the store/revert/run-audit layers that
 landed with FUSI-010/011/012/015, the structural denylist and its pre-gate guard (FUSI-019), the
-gate library (FUSI-016), the test-count delta guard (FUSI-017), and the cost-budget invariants
-(FUSI-018) — all committed on the mission branch and
+gate library (FUSI-016), the test-count delta guard (FUSI-017), the cost-budget invariants
+(FUSI-018), and the secondary ruler's four corpus metrics (FUSI-033) — all committed on the mission branch and
 **not yet merged into `main`**, so none of that code is greppable in a `main` checkout. The
 following are later M1 slices and are **not** in the code at all:
 
 - The deterministic primary gate *runner* (FUSI-016's gate library above is landed, but the
-  runner that consumes the delta guard's verdict is not), the replay corpus's **comparability
-  guard**, and the CLI/pi `fn_selfimprove_*` operator surface (status, proposals, experiments, veto,
-  pause, force-revert). The structural denylist shipped in FUSI-019, the **persisted verdict /
-  precedence** rule in FUSI-020, the **versioned replay corpus manifest** in FUSI-030, and the
-  **cached baseline with its fingerprint and invalidation rule** in FUSI-031, so none of those four
+runner that consumes the delta guard's verdict is not), the **canary that consumes** the four
+  corpus metrics, the replay corpus's **comparability guard**, and the CLI/pi `fn_selfimprove_*`
+  operator surface (status, proposals, experiments, veto, pause, force-revert). The structural
+  denylist shipped in FUSI-019, the **persisted verdict / precedence** rule in FUSI-020, the
+  **versioned replay corpus manifest** in FUSI-030, the **cached baseline with its fingerprint and
+  invalidation rule** in FUSI-031, and the four **corpus metrics** in FUSI-033, so none of those five
   is on this list.
 
 The cached baseline itself shipped in FUSI-031 — see
@@ -651,7 +736,10 @@ The cached baseline itself shipped in FUSI-031 — see
 `manifestVersion` and `seed` inputs shipped in FUSI-030 — see
 [Replay corpus manifest](#replay-corpus-manifest-fusi-030). What did not ship is the comparability
 guard that CONSUMES the manifest's fingerprint to decide whether two runs describe the same corpus,
-and neither did the CLI that renders the status read model. The gate runner and the replay canary
+and neither did the CLI that renders the status read model. The four corpus metrics — the secondary
+ruler's measurement seam — shipped in FUSI-033 and are described under
+[Corpus metrics](#corpus-metrics-fusi-033); what did NOT ship there is the **canary** that consumes
+them and turns their comparison into a keep/revert decision. The gate runner and the replay canary
 are described in the mission brief, not implemented yet; when they land, this page is extended with
 the replay manifest's comparability rules. The cost-budget arm of the primary gate shipped in
 FUSI-018 and is described under

@@ -35,6 +35,18 @@ export { REPLAY_CORPUS_MANIFEST_VERSION, REPLAY_CORPUS_MANIFEST_VERSIONS, REPLAY
 export type { ReplayCorpusManifestLoadResult } from "./self-improve/replay-corpus-manifest.js";
 export { loadReplayCorpusManifest, resolveReplayCorpusOrder, fingerprintReplayCorpusManifest } from "./self-improve/replay-corpus-manifest.js";
 /*
+FNXC:SelfImproveCorpusMetrics 2026-09-30-18:56:
+The corpus metrics reach the package root beside the cost lane they delegate to, so the replay canary
+resolves its four definitions through the SAME public seam the primary gate's cost-budget arm uses. The
+export exists in both `index.ts` and `index.gate.ts` by design: a bare `index.ts` addition would leave
+the bundled CLI — which resolves `index.gate.ts` — unable to reach the canary's measurement, and the
+"cost and latency live in exactly one place" guarantee would be unverifiable from the surface a real
+consumer uses.
+*/
+export type { CorpusMetricObservation, CorpusMetricName, CorpusMetricTaskEntry, CorpusMetrics } from "./self-improve/corpus-metrics-types.js";
+export { CORPUS_METRIC_NAMES, isCorpusMetricName, toCostObservations } from "./self-improve/corpus-metrics-types.js";
+export { measureCorpusMetrics } from "./self-improve/corpus-metrics.js";
+/*
 FNXC:SelfImproveGateVerdict 2026-09-30-12:40:
 The verdict contract is exported from the package root so the deterministic gate, the store
 accessor, and the operator surface all import ONE definition of a verdict rather than each

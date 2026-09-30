@@ -58,6 +58,16 @@ export { measureCostRun } from "./self-improve/cost-budget-measure.js";
 export { evaluateCostBudget } from "./self-improve/cost-budget-guard.js";
 export type { CostBudgetInput, CostRunInput } from "./self-improve/cost-budget-guard.js";
 /*
+FNXC:SelfImproveCorpusMetrics 2026-09-30-18:56:
+Mirrored into the gate-safe barrel alongside the cost lane. The deterministic gate resolves
+`index.gate.ts`, so the canary's four metric definitions and the cost-budget arm it delegates to must
+be reachable from the SAME entry point — a definition the gate cannot see is a definition the gate
+cannot verify.
+*/
+export type { CorpusMetricObservation, CorpusMetricName, CorpusMetricTaskEntry, CorpusMetrics } from "./self-improve/corpus-metrics-types.js";
+export { CORPUS_METRIC_NAMES, isCorpusMetricName, toCostObservations } from "./self-improve/corpus-metrics-types.js";
+export { measureCorpusMetrics } from "./self-improve/corpus-metrics.js";
+/*
 FNXC:SelfImproveStructuralDenylist 2026-09-30-18:03:
 The structural denylist guard must be reachable from the `engine-core` merge-gate project. That
 project aliases `@fusion/core` to a PRE-BUNDLED `index.gate.ts` closure (see
