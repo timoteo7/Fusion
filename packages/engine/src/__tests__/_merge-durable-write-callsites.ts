@@ -103,6 +103,27 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   captureCurrentPlanEvidenceWhilePlanningLocked: { kind: "writer", reason: "persists or mutates TaskStore state" },
   checkAndRecordUnplannedExecutionBlock: { kind: "writer", reason: "persists or mutates TaskStore state" },
   claimNextToolFailureRetry: { kind: "writer", reason: "persists or mutates TaskStore state" },
+  /*
+  FNXC:MergeReliability 2026-09-30-12:37:
+  The 0084 overlap-wait surface adds three public writers and one pure read to TaskStore. All three
+  writers mutate `schema.project.taskOverlapWaits` inside `layer.transactionImmediate`, so each is a
+  durable writer on its own semantics — not on who calls it — because an orphaned merge body that
+  reaches one of them would have reached the durable frontier.
+  `claimTaskOverlapWaitImpl` takes the per-task advisory transaction lock, then UPDATEs the row to
+  `phase: "analyzing"` with owner/checkoutEpoch/planFingerprint and a merged observation, bumping
+  `attempt + 1` and `revision + 1` under an `(episodeId, expectedRevision)` fence so a stale claim
+  returns null instead of overwriting a concurrent owner.
+  `completeTaskOverlapWaitImpl` also takes the advisory lock, sets `receipt` and the caller-supplied
+  `phase` (default `"ready"`) with `revision + 1`, and additionally UPDATEs `schema.project.tasks.log`
+  with a dedupe-keyed release entry when the phase is `"ready"` or `"delivered"` — so it touches two
+  durable tables, not one.
+  `publishTaskOverlapDeliveriesImpl` is deliberately different: it does NOT take the advisory lock
+  and does NOT change `phase`. It selects only rows not already `delivered`/`cancelled` and stamps
+  the merged delivery snapshot (`observation`, `blockerLineageId`, `revision + 1`, `updatedAt`)
+  under an optimistic-concurrency `revision` compare-and-set. It still persists, so it stays a
+  writer; the compare-and-set is what makes it safe without the advisory lock.
+  */
+  claimTaskOverlapWait: { kind: "writer", reason: "claims an overlap-wait episode under an (episodeId, expectedRevision) fence and persists the analyzing phase" },
   claimTaskVerificationRequest: { kind: "writer", reason: "persists or mutates TaskStore state" },
   claimTaskWedgeNotificationEpisode: { kind: "writer", reason: "persists or mutates TaskStore state" },
   cleanupArchivedTasks: { kind: "writer", reason: "persists or mutates TaskStore state" },
@@ -121,6 +142,7 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   clearWorkflowRunBranches: { kind: "writer", reason: "persists or mutates TaskStore state" },
   clearWorkflowRunStepInstances: { kind: "writer", reason: "persists or mutates TaskStore state" },
   clearWorkflowRunStepInstancesAsync: { kind: "writer", reason: "persists or mutates TaskStore state" },
+  completeTaskOverlapWait: { kind: "writer", reason: "completes an overlap-wait episode under the task advisory lock and appends a dedupe-keyed release log entry" },
   consumePluginGateVerdicts: { kind: "writer", reason: "persists or mutates TaskStore state" },
   createBranchGroup: { kind: "writer", reason: "persists or mutates TaskStore state" },
   createCompletionHandoffWorkflowWork: { kind: "writer", reason: "persists or mutates TaskStore state" },
@@ -190,6 +212,7 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   pruneOperationalLogs: { kind: "writer", reason: "persists or mutates TaskStore state" },
   pruneOperationalLogsAsync: { kind: "writer", reason: "persists or mutates TaskStore state" },
   publishArchivedTaskDocumentAddition: { kind: "writer", reason: "persists or mutates TaskStore state" },
+  publishTaskOverlapDeliveries: { kind: "writer", reason: "persists the merged overlap-wait delivery snapshot under an optimistic-concurrency revision compare-and-set" },
   purgeTaskWorkflowSelectionRows: { kind: "writer", reason: "persists or mutates TaskStore state" },
   reconcileActiveTimingForEngineDowntime: { kind: "writer", reason: "persists or mutates TaskStore state" },
   reconcileDistributedTaskIdStateOnOpen: { kind: "writer", reason: "persists or mutates TaskStore state" },
@@ -320,6 +343,24 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   */
   appendRemediationSteps: { kind: "writer", reason: "persists task remediation steps" },
   getProjectId: { kind: "non-writer", reason: "returns the bound project identity without persistence" },
+  /*
+  FNXC:MergeReliability 2026-09-30-12:37:
+  `listTaskOverlapWaitsImpl` is the one 0084 overlap-wait method that is genuinely NOT a durable
+  writer, and it is classified as such on evidence rather than on naming. It is a single
+  `layer.db.select()` from `schema.project.taskOverlapWaits` (optionally filtered to rows whose
+  phase is not already `delivered`/`cancelled`) with NO transaction and NO persistence — it only
+  maps rows through `mapRow`. That makes it the same shape as the `getProjectId` non-writer above.
+
+  Unlike `listLearningProposals`, this read is NOT classified conservatively as a writer. The
+  learning-ledger read was made a writer because it sits on a read frontier a future orphaned merge
+  body could plausibly reach, and erring toward fencing is the safe default when a subsystem is new.
+  The overlap-wait read has no merge-frontier caller at all — its callers are the overlap workflow
+  and the merger, none of which an orphaned merge body reaches. Keeping it a non-writer is therefore
+  both honest and not a coverage loss: classifying it a writer would add a fence around a
+  provably read-only method. If a future change gives it a merge-path caller, the correct move is to
+  revisit this row, and the guard's `unclassified`/drift assertions will surface the new call site.
+  */
+  listTaskOverlapWaits: { kind: "non-writer", reason: "single read from taskOverlapWaits with no transaction and no persistence; provably read-only" },
   listPatchnodeEntries: { kind: "writer", reason: "may reconcile and persist the patchnode ledger before reading" },
   reconcilePatchnodeLedger: { kind: "writer", reason: "reconciles durable patchnode ledger entries" },
   recordPatchnodeCompletion: { kind: "writer", reason: "persists a patchnode completion ledger entry" },
