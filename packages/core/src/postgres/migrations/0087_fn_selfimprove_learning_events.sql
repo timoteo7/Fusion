@@ -29,9 +29,11 @@ Three indexes, each matching one real read shape rather than being generic. (a) 
 serves the per-target window feed; (b) project_id+proposal_id+occurred_at serves
 latest-event-per-proposal, which is the `state` derivation the listing performs once per page
 instead of a per-row correlated subquery; (c) target+kind+occurred_at serves filtering one
-transition kind within a window. All three are ascending, matching this schema's index convention;
-PostgreSQL reads (b) backwards for the newest-first ordering, which is why the column is present at
-all rather than the direction.
+transition kind within a window. Index (b) is created `occurred_at DESC` so the latest-event-per-proposal
+lookup — `ORDER BY occurred_at DESC, event_id DESC LIMIT 1` — is served straight from the index without
+a backward scan; this mirrors the `DESC` trailing columns on patchnode_entries' feed/task-kind indexes
+(0071). Indexes (a) and (c) are ascending because their consumers range-scan a window in either
+direction.
 */
 CREATE TABLE IF NOT EXISTS project.learning_ledger_events (
   project_id text NOT NULL DEFAULT current_setting('fusion.project_id', true),
