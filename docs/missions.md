@@ -364,6 +364,58 @@ Slices represent staged execution windows.
 
 Manual activation is available through `fn mission activate-slice <slice-id>`.
 
+### Both slice-closure routes advance the roadmap
+
+A slice can close by two equally valid routes, and **both** must advance the next
+slice. Before, the advance hook was wired only to one of them.
+
+1. **Task completion.** A linked task lands in a terminal column. The scheduler's
+   `handleMissionTaskCompletion` reconciles the feature and, once the source slice
+   is complete, calls `Scheduler.onSliceComplete(slice)`.
+2. **Feature validation.** The last outstanding feature of a slice reaches `done`
+   through a `passed` validator verdict. This happens on features with **no linked
+   task at all**, so no task-completion event ever fires.
+
+Route 2 used to stall the mission silently: the slice became `complete`, no hook
+ran, and the next `pending` slice stayed `pending` forever — no error and no
+progress log. This was observed on mission `M-MULZRJQ4-0001-IF11`, where `S1.1`
+closed via feature `F-MUN6HH49-0007-3UMV` passing validator run
+`VR-MUO2D2O3-000L-3MGM` and `S1.2` (`SL-MULZRJXG-000H-ALLI`) had to be activated by
+hand.
+
+Both routes now converge on one shared seam,
+`advanceMissionToNextSlice(missionStore, missionId)` in
+`packages/engine/src/missions/slice-advance.ts`. `MissionExecutionLoop` fires it
+from `notifyValidationPass` — the single funnel every pass verdict already reaches
+(no-assertion early return, the `reuse-pass` branch, and the main
+`result.status === "pass"` branch) — after re-reading the feature's slice from the
+store and confirming it is `complete`. `Scheduler.onSliceComplete` delegates to the
+same function, so the two routes cannot drift.
+
+**Why the seam is store-backed rather than a `Scheduler` method.** The seam takes a
+mission store and a mission ID, never a `Scheduler`. In UI-only mode
+(`fn dashboard --no-engine`) no `Scheduler` is ever constructed, and
+`MissionAutopilot.advanceToNextSlice` delegates to `Scheduler.activateNextPendingSlice`,
+which does not exist there — a scheduler-shaped seam would be a permanent silent
+no-op in that mode. A store-backed seam reaches identical behavior in every mode
+with no engine bootstrap.
+
+**Guarantees preserved on both routes:**
+
+- Strict ordering. Admission is delegated to
+  `MissionStore.tryActivateNextPendingSlice`, which selects through
+  `selectNextSerialMissionSlice`: a later slice is never admitted while an earlier
+  one is still `pending`.
+- The guards are reproduced verbatim — the mission must exist, be `active`, and have
+  `autopilotEnabled === true || autoAdvance === true`. A non-autorunning mission,
+  or one with autopilot off, never advances.
+- No slice promotion. The seam only admits the next slice; it never moves the slice
+  that just closed.
+- Fail-soft. A throwing or absent store is logged and yields no advance, so a store
+  fault can never prevent a validator verdict from being recorded.
+- Duplicate-safe. A repeated pass signal re-enters the seam, but the store's atomic
+  admission admits at most once.
+
 ## Mission Autopilot
 
 Missions are always created stopped (`status: "planning"`, `autopilotEnabled: false`, `autoAdvance: false`).
@@ -383,6 +435,10 @@ Typical flow:
 2. Task completion updates feature status
 3. If no slice is active, autopilot activates only the earliest pending slice after every earlier milestone and slice is complete
 4. When milestones are all complete, mission transitions to complete
+
+A slice also closes when its last feature passes validation without any task
+completing. That route advances the roadmap through the same guarded seam — see
+[Both slice-closure routes advance the roadmap](#both-slice-closure-routes-advance-the-roadmap).
 
 If validation cannot run (unexpected loop state, duplicate trigger, blocked validation, or validator error), Fusion logs a mission `warning`/`error` event with structured metadata so the stuck state is visible in mission events.
 

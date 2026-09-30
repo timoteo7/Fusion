@@ -177,6 +177,18 @@ export interface MissionExecutionLoopOptions {
   verificationCapability?: import("./mission-verification.js").VerificationCapability;
   /** Injectable disposable-checkout seam for validator inspection tests. */
   checkoutMaterializer?: CheckoutMaterializer;
+  /**
+   * FNXC:MissionSliceAdvanceOnValidation 2026-09-30-13:36:
+   * Optional, store-backed callback invoked when a `passed` validator verdict
+   * leaves the feature's slice `complete`. Slice auto-advance used to fire only
+   * from a task-completion event, so a slice whose last feature closed by
+   * VALIDATION stalled the mission with the next slice stuck `pending`. The loop
+   * calls this instead of touching `Scheduler` directly (which would invert the
+   * dependency direction and would be unreachable in UI-only mode where no
+   * `Scheduler` exists). Absent callback = today's no-op, so existing construction
+   * sites keep working unchanged.
+   */
+  onSliceValidated?: (missionId: string) => void | Promise<void>;
 }
 
 export class MissionExecutionLoop extends EventEmitter {
@@ -190,6 +202,7 @@ export class MissionExecutionLoop extends EventEmitter {
   private agentStore?: MissionExecutionLoopOptions["agentStore"];
   private verificationCapability?: MissionExecutionLoopOptions["verificationCapability"];
   private checkoutMaterializer: CheckoutMaterializer;
+  private onSliceValidated?: MissionExecutionLoopOptions["onSliceValidated"];
   private activeValidations = new Set<string>(); // feature IDs currently being validated
 
   constructor(options: MissionExecutionLoopOptions) {
@@ -203,6 +216,7 @@ export class MissionExecutionLoop extends EventEmitter {
     this.agentStore = options.agentStore;
     this.verificationCapability = options.verificationCapability;
     this.checkoutMaterializer = options.checkoutMaterializer ?? new GitCheckoutMaterializer();
+    this.onSliceValidated = options.onSliceValidated;
     loopLog.log("MissionExecutionLoop created");
   }
 
@@ -1970,6 +1984,40 @@ ${taskContext ? `\n\nImplementation context:\n${taskContext}` : ""}`;
       // Notify autopilot if configured
       if (this.missionAutopilot?.notifyValidationComplete) {
         await this.missionAutopilot.notifyValidationComplete(featureId, "passed");
+      }
+
+      /*
+      FNXC:MissionSliceAdvanceOnValidation 2026-09-30-13:38:
+      Every pass verdict funnels through here (no-assertion early return, the
+      `reuse-pass` branch, and the main `result.status === "pass"` branch all call
+      handleValidationPass → notifyValidationPass). Firing the slice-advance seam
+      from this single funnel — rather than at each call site — is what keeps the
+      pass routes from drifting and guarantees a slice whose last feature closes by
+      VALIDATION (no task completing) advances the roadmap, which previously stalled
+      the mission forever because advance fired only from task completion.
+
+      We RE-READ the feature and its slice from the store rather than trusting the
+      in-memory snapshot: `completeValidatorRun` may have been a no-op (reaped run,
+      lost ownership), and the slice's `complete` status is decided by the store's
+      recompute at commit time, not by this loop's snapshot. The seam's own guards
+      (mission active + autopilot enabled) still apply, and the call is fail-soft so
+      a throwing seam can never prevent the verdict from being recorded.
+      */
+      if (this.onSliceValidated) {
+        try {
+          const feature = await this.missionStore.getFeature(featureId);
+          if (feature) {
+            const slice = await this.missionStore.getSlice(feature.sliceId);
+            if (slice?.status === "complete") {
+              const milestone = await this.resolveFeatureMilestone(feature);
+              if (milestone) {
+                await this.onSliceValidated(milestone.missionId);
+              }
+            }
+          }
+        } catch (advanceErr) {
+          loopLog.warn(`Slice advance after ${featureId} passed validation was skipped:`, advanceErr);
+        }
       }
 
       this.emit("validation:passed", { featureId, runId, summary });

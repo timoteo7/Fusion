@@ -35,6 +35,7 @@ import { emitBoundedRunAudit } from "./util/emit-bounded-run-audit.js";
 import { createRepeatSuppressedLog } from "./util/repeat-suppressed-log.js";
 import { type PrMonitor, type PrComment } from "./merge/pr-monitor.js";
 import { reconcileMissionState, type MissionReconcileSource } from "./missions/mission-state-reconcile.js";
+import { advanceMissionToNextSlice } from "./missions/slice-advance.js";
 import { resolveDedicatedPlannerColumnsForTask } from "./planner-lane-resolution.js";
 import { evaluateSpecStaleness, getPromptPath } from "./execution/spec-staleness.js";
 import { resolveEffectiveNode, type EffectiveNode } from "./project/effective-node.js";
@@ -3544,17 +3545,19 @@ export class Scheduler {
         return;
       }
 
-      const mission = await missionStore.getMission(milestone.missionId);
-      // Use autopilotEnabled as canonical, fall back to autoAdvance for backward compat
-      const shouldAutoAdvance =
-        mission?.autopilotEnabled === true || mission?.autoAdvance === true;
-      if (!mission || mission.status !== "active" || !shouldAutoAdvance) {
-        return;
-      }
-
-      const nextSlice = await this.activateNextPendingSlice(mission.id);
+      // FNXC:MissionSliceAdvanceOnValidation 2026-09-30-13:31:
+      // Delegate to the shared store-backed seam rather than inlining the guards +
+      // activation here. The same seam is fired by the feature-validation route
+      // (`MissionExecutionLoop` → `onSliceValidated`), so the task-completion and
+      // validation routes cannot drift apart. The seam re-applies the identical
+      // guards (mission exists / `active` / `autopilotEnabled || autoAdvance`) and
+      // returns `undefined` when any fails, so this method's observable behavior is
+      // unchanged. Note it calls the seam's store admission, not
+      // `this.activateNextPendingSlice` — that method stays the MissionAutopilot's
+      // structural dependency and is intentionally left untouched.
+      const nextSlice = await advanceMissionToNextSlice(missionStore, milestone.missionId);
       if (nextSlice) {
-        schedulerLog.log(`Auto-advanced: activated slice ${nextSlice.id} for mission ${mission.id}`);
+        schedulerLog.log(`Auto-advanced: activated slice ${nextSlice.id} for mission ${milestone.missionId}`);
       }
     } catch (err) {
       schedulerLog.error(`Error handling slice completion for ${slice.id}:`, err);
