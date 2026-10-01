@@ -29,6 +29,16 @@ function createStore(task: Task, settings: Record<string, unknown> = {}): TaskSt
   });
   (emitter as any).moveTask = vi.fn().mockResolvedValue(undefined);
   (emitter as any).enqueueMergeQueue = vi.fn().mockResolvedValue(undefined);
+  /*
+  FNXC:MockPeekMergeQueue 2026-10-01:
+  Self-healing asks `await store.peekMergeQueue()` and treats a null/empty result as
+  "not owned by the merge queue" — that is the answer the disposition cases below
+  assert. Without the method the call throws, the catch logs
+  "Unable to inspect merge queue ownership" and the disposition falls back to the
+  generic path, so the suite failed for a reason unrelated to what it tests. The
+  real store returns null when the queue is empty, hence null here rather than [].
+  */
+  (emitter as any).peekMergeQueue = vi.fn().mockResolvedValue(null);
 
   return emitter;
 }

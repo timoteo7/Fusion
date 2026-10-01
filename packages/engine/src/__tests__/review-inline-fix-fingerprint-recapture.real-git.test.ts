@@ -184,6 +184,19 @@ describe("inline review fingerprint recapture", () => {
       getTaskWorkflowSelectionAsync: vi.fn(async () => ({ stepIds: ["security-review", "code-review"] })),
       listWorkflowWorkItemsForTask: vi.fn(async () => []),
       seedWorkspaceCodeReviewContinuationIfIdle: vi.fn(async () => ({ seeded: true })),
+      /*
+      FNXC:MockTelemetryStore 2026-10-01:
+      Agent logging and workflow-gate bookkeeping call `store.emitUsageEvent` and
+      `store.recordAgentActivity` while the reviewer runs. This store predates both, so
+      each call threw and the surrounding try/catch logged
+      "Failed to emit agent session telemetry" / "failed to record workflow gate activity".
+      The suite then failed for reasons unrelated to what it asserts. Both are
+      fire-and-forget telemetry: resolving `undefined` is the honest no-op here, and
+      `emitUsageEvent` is typed as possibly-sync upstream, so a resolved promise is
+      accepted by every caller that awaits it.
+      */
+      emitUsageEvent: vi.fn(async () => undefined),
+      recordAgentActivity: vi.fn(async () => undefined),
     } as any;
     installInlineFixReviewer(repo.directory);
     const deps = {
