@@ -1049,7 +1049,16 @@ export type DatabaseMutationType =
    * Metadata (ids/outcomes-only): { reason; branch; integrationBranch; lane:
    * "ai-empty-merge"; executorSignal?; executorSignalObservedAt? }
    */
-  | "overseer:no-op-finalize-vetoed-failed-executor";
+  | "overseer:no-op-finalize-vetoed-failed-executor"
+  /*
+   * FNXC:SelfImproveRunAudit 2026-09-29-18:51: FUSI-012 selfimprove audit events.
+   * Metadata is ids/counts/fixed outcomes only — never proposal prose, evidence text, or diff.
+   * The bounded core seam absorbs absent/throwing/rejecting/hanging sinks so the sink
+   * never alters the ledger transition.
+   */
+  | "selfimprove:proposal-created"
+  | "selfimprove:proposal-applied"
+  | "selfimprove:proposal-reverted";
 
 // ── Filesystem mutation types ─────────────────────────────────────────────────
 

@@ -149,3 +149,7 @@ This contract does not define:
 
 - eval settings UX
 - eval dashboard/list rendering
+
+## See also
+
+Evals are one of the product surfaces the self-improvement loop may propose changes to. See the [Self-Improvement Learning Ledger contract](./self-improvement-ledger.md) for how an eval-scored learning proposal is recorded and versioned.
