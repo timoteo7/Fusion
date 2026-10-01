@@ -168,6 +168,25 @@ vi.mock("../merge/merger-ai.js", () => {
       this.name = "WorkspaceMergeTechnicalError";
     }
   }
+  /*
+  FNXC:ProjectEngineMock 2026-10-01:
+  merger-ai.ts grew `AiMergeBlockedError` (the merge-queue drain raises it when a
+  correctness concern is unresolved). A factory mock that omits an export makes the
+  drain throw "No <export> is defined on the mock" BEFORE the behaviour under test
+  runs, so four shards went red for a reason unrelated to what they assert. Mirror the
+  real shape (taskId + reasons) so `instanceof` guards and `err.reasons` behave as in
+  production — a bare `class extends Error {}` would pass the guard but break any read
+  of `reasons`. Keep this list in step with merger-ai's exported errors.
+  */
+  class AiMergeBlockedError extends Error {
+    constructor(
+      public readonly taskId: string,
+      public readonly reasons: string[],
+    ) {
+      super(`AI merge blocked ${taskId} (unresolved correctness concern): ${reasons.join("; ") || "no reason given"}`);
+      this.name = "AiMergeBlockedError";
+    }
+  }
   return {
     runAiMerge: mocks.runAiMerge,
     landWorkspaceTask: mocks.landWorkspaceTask,
@@ -177,6 +196,7 @@ vi.mock("../merge/merger-ai.js", () => {
     WorkspaceReviewRequiredError,
     WorkspaceMergeDispatchSupersededError,
     WorkspaceMergeTechnicalError,
+    AiMergeBlockedError,
   };
 });
 
@@ -320,6 +340,39 @@ function createMockStore(initialSettings: Record<string, unknown>) {
     })),
     updateTask: vi.fn(async () => undefined),
     moveTask: vi.fn(async () => undefined),
+    /*
+    FNXC:ProjectEngineMockAtomic 2026-10-01:
+    Confirmed-merge finalization is a two-step compare-and-set. `moveTaskIf` claims the
+    terminal column and returns `{ moved, task }` with the DESTINATION column folded in,
+    then `updateTaskAtomic` rewrites the row (paused/status/error cleared, mergeRetries
+    zeroed, mergeDetails rebuilt, checklist steps reconciled) inside one transaction.
+
+    The shared factory had neither method, so the drain threw
+    "store.moveTaskIf is not a function" and then "store.updateTaskAtomic is not a
+    function" as each gap was patched in turn — the second failure was the SAME defect
+    surfacing later, not a new one. Defining both here is what stops the whack-a-mole.
+
+    Both must honour the column contract. The runtime emits `finalization.task`, which is
+    whatever updateTaskAtomic returns, and the fast-path assertions check
+    `task.column === "done"`. The mock's getTask is a fixed mockResolvedValue, so the
+    destination column has to be carried explicitly on both hops.
+    */
+    moveTaskIf: vi.fn(async (id: string, column: string, predicate?: (live: unknown) => boolean | Promise<boolean>) => {
+      const task = await store.getTask(id);
+      const allowed = typeof predicate === "function" ? await predicate(task) : true;
+      return allowed
+        ? { moved: true, task: { ...task, column } }
+        : { moved: false, task };
+    }),
+    updateTaskAtomic: vi.fn(async (
+      id: string,
+      mutate?: (current: Record<string, unknown>) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null,
+    ) => {
+      const current = await store.getTask(id);
+      if (typeof mutate !== "function") return current;
+      const patch = await mutate(current);
+      return patch ? { ...current, ...patch } : current;
+    }),
     updateSettings: vi.fn(async (patch: Record<string, unknown>) => {
       settings = {
         ...settings,
