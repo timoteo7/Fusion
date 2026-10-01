@@ -70,13 +70,13 @@ const POST_MERGE_VERIFICATION_PROMPT = `You are a post-merge verification review
 3. If configured test/build commands are available in the task context, inspect their latest result or explain why no post-merge command was applicable.
 
 ## Required post-landing Full Suite evidence
-This enabled gate requires post-landing Full Suite evidence. Do NOT approve until its delivery record names all of the following:
-1. The landed SHA and the first Full Suite push-to-main run at or after that SHA, including the run ID and run SHA.
+This enabled gate requires post-landing Full Suite evidence for the INTEGRATION branch — the branch the task actually landed on, which is the configured \`integrationBranch\` when the task has merged to anything other than \`main\`. Do NOT approve until its delivery record names all of the following:
+1. The landed SHA and the first Full Suite run at or after that SHA **on the integration branch**, including the run ID and run SHA. A \`workflow_dispatch\` run on the integration branch satisfies this when \`main\` is not the integration branch; the point is that the run covers the landed SHA, not that it was triggered by a push to \`main\`.
 2. A successful conclusion for Pipeline smoke tier.
 3. A successful conclusion for every Test shard: 1/4, 2/4, 3/4, and 4/4.
 4. All four timing artifacts: test-timings-shard-1, test-timings-shard-2, test-timings-shard-3, and test-timings-shard-4.
 
-Pre-landing, unrelated-main, or partial evidence does not satisfy this contract. If the required run or any required evidence is unavailable, return REVISE and state that final completion remains blocked pending the post-landing evidence. Record verified evidence in the task delivery record before approving.
+Pre-landing, unrelated-branch, or partial evidence does not satisfy this contract. If the required run or any required evidence is unavailable, return REVISE and state that final completion remains blocked pending the post-landing evidence. Record verified evidence in the task delivery record before approving.
 
 ## Output Requirements
 - APPROVE: post-merge verification is acceptable.
