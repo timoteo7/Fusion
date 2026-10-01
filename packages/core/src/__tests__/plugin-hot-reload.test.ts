@@ -81,6 +81,14 @@ function createMockTaskStore() {
     off: vi.fn(),
     preflightPluginSchema: vi.fn().mockReturnValue(null),
     runPluginSchemaInits: vi.fn().mockResolvedValue(undefined),
+    /*
+    FNXC:PluginHotReloadStoreMock 2026-10-01:
+    Hot reload re-runs the plugin on-load path, which records the activation through
+    `recordPluginActivation` — a method this store predates, so every reload case threw
+    before reaching its assertion. Activation is a bookkeeping write, so echoing the
+    input back is the honest no-op here.
+    */
+    recordPluginActivation: vi.fn().mockResolvedValue(undefined),
   } as any;
 }
 
@@ -125,6 +133,20 @@ function createMockPluginStore(
       if (error) {
         installation.error = error;
       }
+      return { ...installation };
+    },
+    /*
+    FNXC:PluginHotReloadUpdatePluginMock 2026-10-01:
+    Reload writes the plugin record through `updatePlugin(id, patch)` and reads the
+    returned installation. This store only had `updatePluginState`, so the call threw.
+    Merge the patch into the same backing `installation` the other methods read, so
+    the reload assertions observe the write instead of a detached copy.
+    */
+    async updatePlugin(id: string, patch: Partial<PluginInstallation>) {
+      if (id !== installation.id) {
+        throw Object.assign(new Error(`Plugin "${id}" not found`), { code: "ENOENT" });
+      }
+      Object.assign(installation, patch);
       return { ...installation };
     },
     async listPlugins(filter?: { enabled?: boolean }) {
