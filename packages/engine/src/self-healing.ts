@@ -307,6 +307,16 @@ every done card each pass.
 */
 const DONE_METADATA_REPAIR_CAP = 25;
 const DONE_TASK_INTEGRITY_SWEEP_LIMIT = 50;
+
+/*
+FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+The `pausedReason` this module writes when it auto-parks a card as a review deadlock, and the one
+signal `recoverUndeliveredReviewReplaySteps` uses to tell that ENGINE-authored park apart from an
+operator hold (`userPaused`). One constant for both the write and the read: the dispose arm and its
+recovery must agree on the exact string, and a hand-copied literal between them is precisely how a
+"cleared" park stops being recognized.
+*/
+const IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON = "in-review-stall-deadlock";
 /**
  * FNXC:GitWorktreeChurnCadenceCoarsen 2026-08-13-04:05 (RUFU-076):
  * Batch-1 git-churn steps (prune-worktrees, cleanup-orphans, cleanup-stale-temp-merge-worktrees,
@@ -10432,11 +10442,25 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
         if (!hasUndeliveredReplayStep(task)) return false;
         if (!allowsAutoMergeProcessing(task, settings)) return false;
         /*
-        An operator pause is a human hold, full stop. Note `surfaceInReviewStalls` parks a card with
-        `paused: true` + `pausedReason: "in-review-stall-deadlock"`, so this gate is what stops this
-        sweep from fighting the very disposition it exists to prevent.
+        An OPERATOR hold is a human decision, full stop: `userPaused` (and a `paused` flag the engine
+        did not author itself) is never overridden.
+
+        FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+        A bare `task.paused` check would make this sweep unable to fix a SINGLE one of the cards that
+        motivated it. `surfaceInReviewStalls` parks a stranded card with `paused:true` +
+        `pausedReason:"in-review-stall-deadlock"` — an ENGINE-authored park, and the exact marker this
+        defect leaves behind. The engine already draws this line itself: the dispose is gated on
+        `task.userPaused !== true`, so it only ever auto-parks cards the operator is not holding.
+
+        So the honest gate is that same distinction: refuse a user pause and refuse any engine-authored
+        park this defect does not name, but DO clear the `in-review-stall-deadlock` park — that park
+        IS the stranded state, and it is not reversible by unpausing (measured: an operator unpause
+        returns the card to review, the gate is re-seeded, and the identical deadlock recurs the same
+        day). Clearing it is what lets the contained hand-off actually run.
         */
-        if (task.paused) return false;
+        if (task.userPaused === true) return false;
+        const enginePark = task.paused === true && task.pausedReason === IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON;
+        if (task.paused === true && !enginePark) return false;
         if (executingIds.has(task.id)) return false;
         /* A live executor session owns this card's delivery. */
         if (this.options.isTaskActive?.(task.id)) return false;
@@ -10458,6 +10482,9 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
       let revived = 0;
       for (const task of candidates) {
         const replayName = task.steps?.[task.steps.length - 1]?.name ?? "replay step";
+        /* Re-measured from the SAME candidate row the filter admitted (the filter's value was
+           closure-local). Both callers read it only after the card cleared its admission gates. */
+        const enginePark = task.paused === true && task.pausedReason === IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON;
         try {
           /*
           The contained review→WIP move is the SAME authority the real bounce uses; it lost a capacity
@@ -10477,6 +10504,21 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
               + `(${result.deferred ? `deferred:${result.deferred}` : result.reason})`,
             );
             continue;
+          }
+          /*
+          FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+          Clear ONLY the engine-authored deadlock park, and only on a hand-off that actually moved.
+          Doing this after a successful move is what keeps it honest: had the move been deferred on
+          capacity the card keeps its park and stays visible, rather than a sweep having silently
+          cleared a park it could not make progress on. The move itself does not clear the flag, so a
+          card cannot sit in WIP while still advertising itself as a review deadlock.
+          */
+          if (enginePark) {
+            await this.store.updateTask(task.id, {
+              paused: false,
+              pausedReason: null,
+              error: null,
+            }).catch(() => undefined);
           }
           await this.store.logEntry(
             task.id,
@@ -10688,7 +10730,7 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
           );
           await this.store.updateTask(task.id, {
             paused: true,
-            pausedReason: "in-review-stall-deadlock",
+            pausedReason: IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON,
             status: "failed",
             error: `In-review stall deadlock: ${signal.code} repeated ${nextCount}× without progress. ${signal.reason}`,
           });
