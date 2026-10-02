@@ -10499,9 +10499,18 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
             { preserveResumeState: true, preserveWorktree: true, workflowMoveSource: "workflow-remediation" },
           );
           if (!result.moved) {
+            /*
+            `moveTaskToContainedBackwardTarget` returns a discriminated union: a capacity deferral
+            carries `deferred`, every other refusal carries `reason`. Narrow on the discriminant
+            rather than testing it truthily — the log line must say which kind of refusal it was,
+            because "capacity" is a wait that resolves and "no-contained-target" is not.
+            */
+            const outcome = "deferred" in result
+              ? `deferred:${result.deferred}`
+              : result.reason;
             log.log(
               `Left ${task.id} in review — undelivered replay '${replayName}' could not be handed off `
-              + `(${result.deferred ? `deferred:${result.deferred}` : result.reason})`,
+              + `(${outcome})`,
             );
             continue;
           }
