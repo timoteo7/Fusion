@@ -106,6 +106,71 @@ describe("PrMonitor", () => {
       expect(tracked.bufferedComments[0].id).toBe(12);
     });
 
+    it("delivers out-of-order-id comments exactly once, deciding newness on a monotonic sequence", async () => {
+      /*
+      FNXC:ReviewItemIdentity 2026-09-29-10:40:
+      Node ids are opaque and sort lexicographically, NOT chronologically: `IC_aaa…` compares
+      BEFORE `IC_kwD…` even though it was created first. The historical monitor decided newness with
+      `comments.filter((c) => c.id > tracked.lastCommentId!)` and reduced the watermark with
+      `Math.max(...ids)`. Against string ids that pair produced two fresh defects:
+        (a) silent loss — a genuinely-new comment whose id sorts below the watermark is filtered out
+            and never delivered;
+        (b) unbounded re-delivery — `Math.max` over strings is NaN, which is falsy, so the guard
+            falls through to the all-comments branch on EVERY poll and the whole comment set is
+            re-fired each tick.
+      Criteria 1-7 all pass on a tree that merely widened the id type; this case is what separates
+      a real fix from that. Both comments must arrive exactly once, in creation order, and a second
+      poll over the same payload must deliver neither again.
+      */
+      const earlyCreatedLowSort = {
+        id: "IC_aaa0000000000",
+        body: "Please fix the retry backoff",
+        user: { login: "reviewer1" },
+        created_at: "2024-01-01T00:00:00.000Z",
+        updated_at: "2024-01-01T00:00:00.000Z",
+        html_url: "https://example.com/a",
+      };
+      const lateCreatedHighSort = {
+        id: "IC_kwDOT5Q-Ec8AAAABXrfTmw",
+        body: "You should update the docs",
+        user: { login: "reviewer2" },
+        created_at: "2024-01-02T00:00:00.000Z",
+        updated_at: "2024-01-02T00:00:00.000Z",
+        html_url: "https://example.com/b",
+      };
+      // Guard the premise: this pair MUST sort opposite to its creation order, or the test is vacuous.
+      expect(earlyCreatedLowSort.id < lateCreatedHighSort.id).toBe(true);
+      expect(new Date(earlyCreatedLowSort.created_at) < new Date(lateCreatedHighSort.created_at)).toBe(true);
+
+      const delivered: typeof earlyCreatedLowSort[] = [];
+      const callback = vi.fn(async (_taskId: string, _prInfo: unknown, comments: unknown[]) => {
+        delivered.push(...(comments as typeof earlyCreatedLowSort[]));
+      });
+
+      fetchComments.mockResolvedValue([earlyCreatedLowSort, lateCreatedHighSort]);
+      monitor.onNewComments(callback as never);
+
+      monitor.startMonitoring("FN-001", "owner", "repo", mockPrInfo);
+      await flushAsync(); // poll 1
+
+      // Both arrive on the FIRST poll, and each exactly once.
+      expect(delivered.map((c) => c.id).sort()).toEqual(
+        [earlyCreatedLowSort.id, lateCreatedHighSort.id].sort(),
+      );
+
+      const tracked = monitor.getTrackedPrs().get("FN-001")!;
+      const afterFirstPoll = delivered.length;
+      const callsAfterFirstPoll = callback.mock.calls.length;
+
+      vi.setSystemTime(new Date("2024-01-03T00:00:00.000Z"));
+      await vi.advanceTimersByTimeAsync(30_000); // poll 2 — same payload, nothing new
+
+      // Nothing is re-delivered and the callback is not re-fired (the NaN-watermark defect).
+      expect(delivered).toHaveLength(afterFirstPoll);
+      expect(callback.mock.calls.length).toBe(callsAfterFirstPoll);
+      expect(tracked.bufferedComments).toHaveLength(2);
+    });
+
     it("keeps buffered comments even when callback throws, and drainComments is single-consumption", async () => {
       const newComment: PrComment = {
         id: 101,

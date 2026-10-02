@@ -71,6 +71,62 @@ describe("PrCommentHandler", () => {
     });
   });
 
+  /*
+  FNXC:ReviewItemIdentity 2026-09-29-10:40:
+  Two distinct reviewer comments on ONE pull request must become TWO review items.
+  Under the historical `gh` transport both comments carried `id: NaN`, so
+  `upsertReviewItem` computed the same constant key `gh-comment-NaN`, found it already present via
+  `findIndex`, and overwrote the first reviewer's body with the second's. This is the invariant that
+  silently DESTROYS reviewer feedback, so it is asserted directly against the store write rather
+  than inferred from the id mapping.
+  */
+  describe("review item identity", () => {
+    it("writes two distinct review items for two distinct comments on one PR", async () => {
+      await handler.handleNewComments("FN-001", mockPrInfo, [
+        {
+          id: "IC_kwDOT5Q-Ec8AAAABXrfTmw",
+          body: "Please fix the race condition in the retry loop",
+          user: { login: "reviewer1" },
+          created_at: "2024-01-01T00:00:00.000Z",
+          updated_at: "2024-01-01T00:00:00.000Z",
+          html_url: "https://github.com/owner/repo/pull/42#issuecomment-1",
+        },
+        {
+          id: "IC_kwDOT5Q-Ec8AAAABXrfTmz",
+          body: "You should update the documentation for this flag",
+          user: { login: "reviewer2" },
+          created_at: "2024-01-02T00:00:00.000Z",
+          updated_at: "2024-01-02T00:00:00.000Z",
+          html_url: "https://github.com/owner/repo/pull/42#issuecomment-2",
+        },
+      ]);
+
+      const reviewUpdate = mockStore.updateTask.mock.calls
+        .map((call) => call[1].review)
+        .filter((review) => review?.items?.length);
+      expect(reviewUpdate.length).toBeGreaterThan(0);
+
+      const finalItems = reviewUpdate[reviewUpdate.length - 1].items!;
+      expect(finalItems).toHaveLength(2);
+      expect(finalItems[0].id).not.toBe(finalItems[1].id);
+      expect(finalItems.map((item) => item.body)).toEqual([
+        "Please fix the race condition in the retry loop",
+        "You should update the documentation for this flag",
+      ]);
+
+      // The reviewState mirror must stay in lockstep — writing one list and not the other
+      // leaves the card half-migrated.
+      const stateUpdate = mockStore.updateTask.mock.calls
+        .map((call) => call[1].reviewState)
+        .filter((state) => state?.items?.length);
+      expect(stateUpdate.length).toBeGreaterThan(0);
+      const finalStateItems = stateUpdate[stateUpdate.length - 1].items!;
+      expect(finalStateItems).toHaveLength(2);
+      expect(finalStateItems[0].id).not.toBe(finalStateItems[1].id);
+      expect(finalStateItems.map((item) => item.id)).toEqual(finalItems.map((item) => item.id));
+    });
+  });
+
   describe("isActionable", () => {
     it.each([
       { body: "Please fix the indentation", keyword: "fix" },
