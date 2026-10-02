@@ -255,6 +255,25 @@ export {
   type ResolvedAgentMemoryInclusionMode,
 } from "./agents/agent-memory-mode.js";
 export type { TaskReviewData, TaskReviewSummary, TaskReviewItem, TaskReviewVerdict, TaskReviewerType } from "./types.js";
+/*
+FNXC:ReviewItemIdentity 2026-10-02-04:00:
+The PR-comment identity resolver is a VALUE export, not a type, so it cannot ride the type-only line
+above. Exported here (and mirrored in index.gate.ts) because both `@fusion/dashboard` and
+`@fusion/engine` must resolve a comment's identity through ONE definition — each carrying a private
+copy of the `gh` payload mapping is exactly what let the twin `parseInt(c.id, 10)` defect survive
+unnoticed in two places.
+*/
+export {
+  resolvePrCommentIdentity,
+  buildPrCommentReviewItemId,
+  PrCommentIdentityError,
+} from "./types/task/task-review.js";
+export type {
+  PrCommentIdentity,
+  PrCommentIdentityInput,
+  PrCommentIdentityKey,
+  PrCommentIdentitySequence,
+} from "./types/task/task-review.js";
 /* FNXC:TaskVerificationRequest 2026-07-30-00:00: FN-8296 makes the persisted verification read model available to dashboard task and Command Center surfaces without exporting a subprocess runner. */
 export type { TaskVerificationRequest, TaskVerificationResultSummary, TaskVerificationStatus, TaskVerificationProfile, TaskRecommendation, TaskRecommendationCategory, TaskRecommendationListItem, TaskRecommendationListPage } from "./types.js";
 export type {

@@ -209,4 +209,41 @@ describe("applyChangesRequestedTransition rebounds to a lane the board actually 
 
     expect(moves).toEqual([{ id: "FN-2", to: "todo" }]);
   });
+
+  /*
+  FNXC:ReviewItemIdentity 2026-09-29-10:40:
+  Criterion 3 REGRESSION GUARD — this site is already CORRECT and must stay that way.
+
+  The `gh-comment-` filter at register-git-github.ts:2258 selects the real per-PR comment keys
+  because the REST-fed snapshot builders (github.ts `getPrReviewSnapshot` / `getPrReviewDetails`)
+  carry genuine numeric ids. Under the `gh` transport that upstream data was the constant
+  `gh-comment-NaN`, so this filter could only ever assemble its feedback body from ONE arbitrary
+  comment. The test's job is therefore not to repair this site but to stop a future transport change
+  from silently collapsing the set again: two distinct comment keys must both reach the document.
+  */
+  it("assembles the review-feedback body from BOTH distinct comments of the PR", async () => {
+    const { store } = storeForMove(V1_UPGRADED_IR, "wf-v1");
+    const task = { id: "FN-3", column: "in-review", prInfo: { number: 9 } } as never;
+
+    const snapshot = {
+      decision: "CHANGES_REQUESTED",
+      items: [
+        { id: "gh-review-1", state: "CHANGES_REQUESTED", author: { login: "reviewer" }, body: "please fix" },
+        { id: "gh-comment-5884072859", author: { login: "reviewer1" }, body: "Rename this local variable please" },
+        { id: "gh-comment-5884072860", author: { login: "reviewer2" }, body: "Add a regression test for this path" },
+      ],
+    } as never;
+
+    await applyChangesRequestedTransition(store as never, task, snapshot, { number: 9 } as never);
+
+    // `upsertTaskDocument(taskId, document)` — the document is the SECOND argument.
+    const [, written] = (store.upsertTaskDocument as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { key: string; content: string },
+    ];
+    expect(written.key).toBe("review-feedback");
+    // BOTH bodies, not just the last writer.
+    expect(written.content).toContain("Rename this local variable please");
+    expect(written.content).toContain("Add a regression test for this path");
+  });
 });
