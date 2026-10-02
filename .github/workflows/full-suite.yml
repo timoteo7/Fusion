@@ -11,6 +11,14 @@ name: Full Suite (non-blocking)
 on:
   push:
     branches: [main]
+  # FNXC:MissionBranchFullSuite 2026-10-01:
+  # The post-merge verification gate requires Full Suite evidence on the landed
+  # SHA, but this workflow historically fired only on push to main. Work landed
+  # on a mission/integration branch therefore could never produce the evidence
+  # its own gate demands, and the mission stalled with every card in REVISE.
+  # workflow_dispatch lets the operator run the same gates on demand for a
+  # branch that has not been merged, without weakening the main-push trigger.
+  workflow_dispatch:
 
 # Key the concurrency group by SHA, not ref: on push to main the ref is
 # always refs/heads/main, so a ref-keyed group with cancel-in-progress would

@@ -35,7 +35,31 @@ export const MERGE_REGION_ENTRY_NODE_KINDS: ReadonlySet<WorkflowIrNodeKind> = ne
  * every seam-workflow card as "not at a merge node" and freeze their auto-merge recovery.
  */
 export function isMergeRegionNode(node: Pick<WorkflowIrNode, "kind" | "config">): boolean {
-  return MERGE_REGION_ENTRY_NODE_KINDS.has(node.kind) || node.config?.seam === "merge";
+  if (MERGE_REGION_ENTRY_NODE_KINDS.has(node.kind) || node.config?.seam === "merge") return true;
+  /*
+  FNXC:PostMergeGateMergeRegion 2026-10-01:
+  A REQUIRED post-merge evidence gate is an `optional-group` whose `phase` is "post-merge" and whose
+  template carries a `gateMode: "gate"` inner node — the same shape
+  `getRequiredPostMergeEvidenceBlocker` reads to decide the gate is mandatory.
+
+  It is missing from the set above, and that omission closes a cycle: auto-merge finalization
+  re-arms the unreported gate as a `runnable` continuation so it can run before finalization, but
+  the merge sweep only admits continuations whose node classifies as merge-region. Classified
+  "outside-merge-region", the re-armed item is dropped, the gate never reports, the next
+  finalization re-arms it again, and the card is parked forever with
+  "required post-merge evidence gate 'post-merge-verification' has not reported".
+
+  Scope is deliberately narrow: only a post-merge optional-group in gate mode, and only when its
+  own config says so. A post-merge group in advisory mode stays outside the region — advisory
+  evidence is not merge authority, and admitting it would let an advisory note drive a merge.
+  */
+  if (node.kind === "optional-group" && node.config?.phase === "post-merge") {
+    const template = node.config.template as
+      | { nodes?: Array<{ config?: { gateMode?: unknown } }> }
+      | undefined;
+    return template?.nodes?.some((inner) => inner.config?.gateMode === "gate") === true;
+  }
+  return false;
 }
 
 /**

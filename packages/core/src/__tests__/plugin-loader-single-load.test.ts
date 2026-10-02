@@ -36,6 +36,14 @@ function createStore(root: string, entry: string) {
     getRootDir: () => root,
     preflightPluginSchema: vi.fn(() => null),
     runPluginSchemaInits: vi.fn(async () => undefined),
+    /*
+    FNXC:PluginLoaderStoreMock 2026-10-01:
+    The loader records each successful on-load through `recordPluginActivation`, a
+    method this store predates. The call threw and the whole lifecycle suite failed
+    before reaching what it asserts. Activation is a bookkeeping write, so echoing
+    the input back satisfies the caller without inventing state.
+    */
+    recordPluginActivation: vi.fn(async (input: unknown) => input),
   };
   return { pluginStore, taskStore };
 }

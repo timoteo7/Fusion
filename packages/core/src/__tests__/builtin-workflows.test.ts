@@ -300,7 +300,17 @@ describe("built-in workflows", () => {
       const template = postMerge?.config?.template as { nodes?: Array<{ config?: Record<string, unknown> }> } | undefined;
       const postMergeStep = template?.nodes?.[0]?.config;
       expect(postMergeStep?.gateMode, workflow.id).toBe("gate");
-      expect(postMergeStep?.prompt, workflow.id).toContain("first Full Suite push-to-main run at or after that SHA");
+      /*
+      FNXC:PostMergeIntegrationBranchEvidence 2026-10-01:
+      The gate used to name `main` literally, which made it unsatisfiable for any
+      deployment whose `integrationBranch` is not main: no push-to-main run can exist
+      at or after a SHA that never lands on main. The contract that actually matters is
+      that the run covers the landed SHA, so the assertion tracks the integration branch
+      and keeps every other evidence item (smoke, all four shards, all four timing
+      artifacts) mandatory.
+      */
+      expect(postMergeStep?.prompt, workflow.id).toContain("first Full Suite run at or after that SHA **on the integration branch**");
+      expect(postMergeStep?.prompt, workflow.id).toContain("workflow_dispatch");
       expect(postMergeStep?.prompt, workflow.id).toContain("successful conclusion for Pipeline smoke tier");
       expect(postMergeStep?.prompt, workflow.id).toContain("test-timings-shard-1");
       expect(postMergeStep?.prompt, workflow.id).toContain("test-timings-shard-4");
