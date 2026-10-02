@@ -19,9 +19,23 @@ FN-217 containment made the recovery NARRATE when it retains a card in place
 (`moveTaskToContainedBackwardTarget` -> `store.logEntry`), and a fake without `logEntry` threw a
 TypeError that read as a product fault. Five copies meant five places to forget; one factory means
 the next method the path adopts is added once.
+
+FNXC:LifecycleContainment 2026-09-25-17:20:
+The next method the path adopted arrived on the same seam, and this file hit it the same way: FN-9362
+re-reads the live row via `store.getTask` before choosing a backward target, and a factory without it
+threw `TypeError: store.getTask is not a function` from `lifecycle-move.ts` — identical signature to
+the `logEntry` defect above, same misleading "product fault" reading. Confirms the comment's argument
+for the factory: the same omission recurred the moment one was omitted elsewhere, in five-literal form
+it would have recurred five times. Answer from the same `baseTask` the assertions use so the reader and
+the lister cannot drift.
 */
 function makeTaskStore() {
-  return { moveTask: vi.fn(), updateTask: vi.fn(), logEntry: vi.fn(async () => undefined) } as any;
+  return {
+    moveTask: vi.fn(),
+    updateTask: vi.fn(),
+    logEntry: vi.fn(async () => undefined),
+    getTask: vi.fn(async (id: string) => (id === baseTask.id ? baseTask : undefined)),
+  } as any;
 }
 
 describe("ContaminationAutoRecoveryHandler", () => {

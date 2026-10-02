@@ -29,6 +29,7 @@ describe("reliability interactions: auto-revive + watchdog", () => {
       updateTask: vi.fn(async () => undefined),
       logEntry: vi.fn(async () => undefined),
       moveTask: vi.fn(async () => undefined),
+      getTask: vi.fn(async (id: string) => tasks.find((entry) => entry.id === id)),
     };
     const executor: any = { resumeOrphaned: vi.fn(async () => undefined) };
     const rc = new RestartRecoveryCoordinator(store, executor);
@@ -62,7 +63,8 @@ describe("reliability interactions: auto-revive + watchdog", () => {
   });
 
   it("Case 12: new commits are orthogonal to restart classification", async () => {
-    const store: any = { listTasks: vi.fn(async () => [task({ id: "FN-3", status: "failed", error: "Agent finished without calling fn_task_done", steps: [] as any[] })]), updateTask: vi.fn(async () => undefined), logEntry: vi.fn(async () => undefined), moveTask: vi.fn(async () => undefined) };
+    const rows = [task({ id: "FN-3", status: "failed", error: "Agent finished without calling fn_task_done", steps: [] as any[] })];
+    const store: any = { listTasks: vi.fn(async () => rows), getTask: vi.fn(async (id: string) => rows.find((entry) => entry.id === id)), updateTask: vi.fn(async () => undefined), logEntry: vi.fn(async () => undefined), moveTask: vi.fn(async () => undefined) };
     const executor: any = { resumeOrphaned: vi.fn(async () => undefined) };
     const rc = new RestartRecoveryCoordinator(store, executor);
     await rc.recoverInterruptedRuns();
