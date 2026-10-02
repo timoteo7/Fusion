@@ -125,6 +125,9 @@ export async function appendAgentLogImpl(store: TaskStore, taskId: string, text:
       durationMs: null,
       timeToFirstTokenMs: null,
     });
+    // FNXC:AgentLogTaskState 2026-09-23-16:06: carry card state so the event is not "stateless" to watchers.
+    const stateCard2 = store.taskCache.get(taskId) ?? undefined;
+    if (stateCard2) { entry.column = stateCard2.column; entry.status = stateCard2.status ?? null; entry.currentStep = stateCard2.currentStep ?? 0; }
     store.emit("agent:log", entry);
 
     if (store.agentLogBuffer.length >= TaskStore.AGENT_LOG_BUFFER_SIZE) {

@@ -181,6 +181,17 @@ export interface AgentLogEntry {
   durationMs?: number;
   /** Time to first visible model output in milliseconds. Absent after the first visible output and on legacy rows. */
   timeToFirstTokenMs?: number;
+  /**
+   * Live card state snapshot (column/status/currentStep) carried on `agent:log` events so SSE
+   * consumers and stall-watchers don't read real agent activity as "stateless" empty events.
+   * Absent on entries emitted without a cached task card. Mirrors Task's fields: `status` is
+   * null when the card has none, `currentStep` falls back to 0.
+   *
+   * FNXC:AgentLogTaskState 2026-09-23-16: FUSI-020/022/023, GDPR-075.
+   */
+  column?: ColumnId;
+  status?: string | null;
+  currentStep?: number;
 }
 
 /** How much of `.fusion/tasks/{ID}/agent.log` is copied into cold archive storage. */
