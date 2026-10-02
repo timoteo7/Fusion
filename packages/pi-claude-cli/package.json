@@ -35,6 +35,6 @@
   },
   "scripts": {
     "test": "vitest run --reporter=dot",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --build --noEmit"
   }
 }
