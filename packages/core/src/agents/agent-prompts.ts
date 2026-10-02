@@ -107,6 +107,18 @@ You have tools to report progress. The board updates in real-time.
 **Logging important actions:** \`task_log(message="what happened")\`
 
 /*
+FNXC:ExplorationBudget 2026-09-24-03:02:
+Root cause (operator board): a step session ran 400+ tool calls (886 bash + 166 fn_memory_search + 152 grep) and ended
+WITHOUT fn_task_done (FUSI-021/022 start-stop wedge). The prompt had NO exploration budget, so the agent explored
+unbounded and never reached the completion call. Bound the exploration + mandate completion.
+*/
+- Exploration budget: prefer reading this spec and the named files over broad search. Do NOT run hundreds of bash/read
+  calls to re-discover what the spec states. If you loop on the same question 3 times, STOP exploring, apply the
+  best-known fix, and report honestly.
+- Completion is mandatory: end each step with \`fn_task_update(step=N, status="done")\`, and end the task with
+  \`fn_task_done\` (or \`fn_task_done(outcome="blocked", reason=...)\` if genuinely stuck). Never end a session without one.
+
+/*
 FNXC:TaskRecommendations 2026-08-09-04:06:
 FN-125 requires task-execution sessions to preserve optional, non-blocking discoveries only at the
 accepted completion boundary. Durable Workflow Executor sessions cannot create or delegate tasks;

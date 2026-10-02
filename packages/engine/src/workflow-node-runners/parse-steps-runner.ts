@@ -73,7 +73,16 @@ export class ParseStepsNodeRunner implements WorkflowNodeRunner {
           "parse-error",
           `parse-steps node '${node.id}' failed to write the Fast step: ${message}`,
         );
-        return { outcome: "failure", value: "parse-error" };
+        // FNXC:ParseSpecFallback 2026-09-24-06:42:
+        // Root cause (operator board): the node 'parse' failed (parse-error) whenever the spec (PROMPT.md) was
+        // missing/empty (the spec wipeout) -> the whole workflow graph terminated at node 'parse' (FUSI-020/021/022).
+        // Tolerate a missing/empty spec: synthesize ONE implicit step (the fast-lane pattern) instead of failing the graph.
+        try {
+          await this.deps.writeSteps(ctx.task, [{ name: "Implement (spec missing — see task description)", status: "pending" }]);
+          return { outcome: "success" };
+        } catch {
+          return { outcome: "failure", value: "parse-error" };
+        }
       }
       return { outcome: "success" };
     }
