@@ -1,3 +1,4 @@
+import { resolveStrandedStartPoint } from "../execution/stranded-commits.js";
 import { exec } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
@@ -379,7 +380,8 @@ export class BranchWorktreeAutoRecoveryHandler {
         branchName,
         conflictingWorktreePath,
         requestingTaskId: ctx.task.id,
-        startPoint: ctx.task.baseCommitSha ?? integrationBranch,
+        startPoint: await resolveStrandedStartPoint(repoDir, branchName, ctx.task.baseCommitSha ?? integrationBranch),
+        // FNXC:StrandedCommits 2026-09-24-03:55: the fork-point (a fonte unica), not the raw baseCommitSha (a830cdeea)
         integrationRef: integrationBranch,
       });
       if (bare.kind === "foreign-unmerged") {
@@ -422,7 +424,8 @@ export class BranchWorktreeAutoRecoveryHandler {
       conflictingWorktreePath,
       requestingTaskId: ctx.task.id,
       ownerTaskId: ctx.task.id,
-      startPoint: ctx.task.baseCommitSha ?? integrationBranch,
+      startPoint: await resolveStrandedStartPoint(repoDir, branchName, ctx.task.baseCommitSha ?? integrationBranch),
+        // FNXC:StrandedCommits 2026-09-24-03:55: the fork-point (a fonte unica), not the raw baseCommitSha (a830cdeea)
       integrationRef: integrationBranch,
     });
 

@@ -1,3 +1,4 @@
+import { resolveStrandedStartPoint } from "./stranded-commits.js";
 import { exec } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
@@ -162,11 +163,16 @@ async function isAncestor(repoDir: string, sha: string, ref: string): Promise<bo
   }
 }
 
-async function listStrandedCommits(repoDir: string, startPoint: string, branchName: string): Promise<BranchConflictCommit[]> {
+  async function listStrandedCommits(repoDir: string, startPoint: string, branchName: string): Promise<BranchConflictCommit[]> {
+  // FNXC:WorktreeReclaimStrandedBase 2026-09-23-19:52:
+  // Root cause (operator board): `<startPoint>..<branch>` counts the SHARED fork/main lineage as "stranded commits"
+  // (the forged "194 stranded since a830cde", FUSI-019). List from the branch FORK-POINT so shared history is never stranded.
+  const strandedStartPoint = await resolveStrandedStartPoint(repoDir, branchName, startPoint);
+
   try {
     const output = await runGit(
       repoDir,
-      `git log --reverse --format=%H%x09%s ${quoteShellArg(`${startPoint}..${branchName}`)}`,
+      `git log --reverse --format=%H%x09%s ${quoteShellArg(`${strandedStartPoint}..${branchName}`)}`,
     );
     if (!output) return [];
     return output
@@ -688,7 +694,13 @@ export async function classifyForeignOnlyContamination(
   // merge-base when it is a descendant of the persisted baseSha.
   let effectiveBaseSha = baseSha;
   try {
-    const mergeBaseRaw = await runGit(repoDir, `git merge-base ${quoteShellArg(branchName)} ${quoteShellArg(mainRef)}`);
+    const mergeBaseRaw = await runGit(repoDir, `git merge-base --fork-point ${quoteShellArg(branchName)} ${quoteShellArg(mainRef)}`);
+    // FNXC:WorktreeReclaimStrandedBase 2026-09-23-17:38:
+    // Root cause (operator board): task branches cut from the fork/main lineage sat 183-194 commits "ahead" of the
+    // local-main/upstream merge-base (a830cde), so the reclaim counted the SHARED fork/main history as "stranded
+    // commits" and refused with "not safely reclaimable" (FUSI-004/019/023, GDPR-075). The stranded count must be
+    // against the branch's own fork-point, not the main merge-base, or shared lineage is misread as unsaved work.
+    // We therefore prefer the merge-base with the branch's creation base (fork-point) when it is ahead of mainRef.
     const liveMergeBase = mergeBaseRaw.trim();
     if (liveMergeBase && liveMergeBase !== baseSha) {
       // Use live merge-base if it is a descendant of baseSha (newer)
@@ -870,7 +882,17 @@ export async function autoRecoverCrossContamination(
   }
 
   const originalTip = await revParse(repoDir, branchName);
-  const commitListOutput = await runGit(repoDir, `git rev-list --reverse ${quoteShellArg(`${baseSha}..${branchName}`)}`)
+  // FNXC:WorktreeReclaimStrandedBase 2026-09-23-20:52:
+  // Root cause (operator board): `rev-list <baseSha>..<branch>` counts the SHARED fork/main lineage as stranded work
+  // (the forged "194 stranded since a830cde"). Use the branch FORK-POINT so shared history is never stranded.
+  let strandedListStart = baseSha;
+  try {
+    const fpList = (await runGit(repoDir, `git merge-base --fork-point ${quoteShellArg(branchName)} ${quoteShellArg(baseSha)}`)).trim();
+    if (fpList) strandedListStart = fpList;
+  } catch {
+    // fall back to the plain baseSha when fork-point is unavailable
+  }
+  const commitListOutput = await runGit(repoDir, `git rev-list --reverse ${quoteShellArg(`${strandedListStart}..${branchName}`)}`)
     .catch(() => "");
   const commits = commitListOutput.split("\n").map((line) => line.trim()).filter(Boolean);
 
