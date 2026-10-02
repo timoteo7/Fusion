@@ -277,6 +277,33 @@ describe("FUSI-068 the undelivered-replay shape is a named cause, not generic in
       .toBe("merge-blocker");
   });
 
+  it("Step 8.8 — the name does NOT depend on the merge door still refusing", () => {
+    /*
+    The ordering defect this card's own first cut shipped. `undelivered-replay-step` was gated behind
+    `if (mergeBlocker)`, so it only fired while the merge door happened to refuse. The door's rule for
+    a pending step is not fixed — it currently treats a pending step carrying `notes`/`result` as
+    complete (FNXC:ImplicitCompletion) — so a replay occurrence an executor began annotating read as
+    mergeable, the gate was skipped, and the card reported NO stall at all: the exact silent strand
+    this defect exists to eliminate.
+
+    Assert the INVARIANT, not the door's current opinion: whatever the door says, a card whose only
+    unfinished work is an undelivered engine replay must be NAMED. This stays green whether or not
+    that `notes` exemption exists.
+    */
+    const annotatedReplay = strandedReviewTask({
+      steps: [
+        { name: "Preflight", status: "done" },
+        { name: "Testing & Verification", status: "done" },
+        { name: "Documentation & Delivery", status: "done" },
+        // An executor started this occurrence and wrote a note, then the hand-off was still lost.
+        { name: "Documentation & Delivery", status: "pending", notes: "re-ran delivery" },
+      ],
+    });
+    expect(hasUndeliveredReplayStep(annotatedReplay)).toBe(true);
+    expect(getInReviewStallReason(annotatedReplay, { reviewColumns: new Set(["in-review"]) })?.code)
+      .toBe("undelivered-replay-step");
+  });
+
   it("an operator-held card with duplicate-name steps is not reported as undelivered", () => {
     /* GDPR-001 / FUSI-010 shape: duplicate names, all done, operator-held. */
     const held = strandedReviewTask({

@@ -336,26 +336,42 @@ export function getInReviewStallReason(
   The outer question was resolved and the inner one was not — the same half-conversion recorded at the
   helper itself for moves.ts, and fixed in #2963/#2964 for the merge paths.
   */
+  /*
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+  A Code Review REVISE appended its replay step to the durable ledger, then the review→WIP hand-off
+  lost the WIP capacity race. `task has incomplete steps` is what the operator used to see for that
+  card — indistinguishable from any ordinary unfinished checklist, so a dropped hand-off read as
+  "the reviewer asked for work and nothing happened". Name it: when the card's only unfinished work
+  is an undelivered engine replay occurrence, report that as its OWN actionable code instead of the
+  generic blocker. The merge door itself is unchanged (this is diagnostic-only, per this module's
+  header) — the point is the CAUSE, not a different refusal.
+
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20 (gate independence — the ordering defect this
+  card's own fix introduced):
+  This check MUST NOT live inside `if (mergeBlocker)`. Gating the name on the door's refusal made the
+  name conditional on an unrelated code path: the door treats a pending step as complete whenever the
+  step carries `notes`/`result` (see FNXC:ImplicitCompletion in getTaskMergeBlocker), so a replay
+  occurrence an executor had begun annotating reads as mergeable, `mergeBlocker` is undefined, this
+  whole block is skipped, and the card reports NO stall at all. That is precisely the silent strand
+  this defect exists to eliminate — the work was asked for, a partial note was written, and the
+  hand-off was still never delivered, yet the board reads healthy.
+
+  The undelivered hand-off is a fact about the DURABLE SHAPE (a trailing pending replay occurrence),
+  so it is decided BEFORE and independently of what the merge door thinks. `getTaskMergeBlocker` is
+  still consulted below and is still unchanged; only the ordering moved. Delivery itself never
+  depended on this gate — the revival sweep keys on `hasUndeliveredReplayStep` alone — so this is the
+  diagnostic half of the guarantee, made as unconditional as the delivery half.
+  */
+  if (hasUndeliveredReplayStep(task)) {
+    return {
+      code: "undelivered-replay-step",
+      reason: `Replay step '${task.steps?.[task.steps.length - 1]?.name}' was appended by a review revision but never delivered to the executor lane`,
+      observedAt,
+    };
+  }
+
   const mergeBlocker = getTaskMergeBlocker(task, { reviewColumns: context.reviewColumns });
   if (mergeBlocker) {
-    /*
-    FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
-    A Code Review REVISE appended its replay step to the durable ledger, then the review→WIP hand-off
-    lost the WIP capacity race. `task has incomplete steps` is what the operator used to see for that
-    card — indistinguishable from any ordinary unfinished checklist, so a dropped hand-off read as
-    "the reviewer asked for work and nothing happened". Name it: when the card's only unfinished work
-    is an undelivered engine replay occurrence, report that as its OWN actionable code instead of the
-    generic blocker. The merge door itself is unchanged (this is diagnostic-only, per this module's
-    header) — the point is the CAUSE, not a different refusal.
-    */
-    if (hasUndeliveredReplayStep(task)) {
-      return {
-        code: "undelivered-replay-step",
-        reason: `Replay step '${task.steps?.[task.steps.length - 1]?.name}' was appended by a review revision but never delivered to the executor lane`,
-        observedAt,
-      };
-    }
-
     if (mergeBlocker.startsWith(FAILED_TASK_MERGE_BLOCKER_PREFIX)) {
       const error = mergeBlocker.slice(FAILED_TASK_MERGE_BLOCKER_PREFIX.length).trim();
       if (classifyProviderError(error) === "non_retryable") {
