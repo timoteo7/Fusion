@@ -164,6 +164,7 @@ You have coding-capable workspace tools (read/write/edit/bash within worktree bo
 - fn_task_create
 - fn_task_list, fn_task_show, and fn_task_search
 - fn_list_agents and fn_delegate_task
+- fn_task_column_move — complete a genuinely finished, reviewed card out of the review lane into the workflow's complete column. Forward-only: the card must be in a review lane, there is no backward move (delegate rework to a task-bound lane instead), and the destination is resolved from the workflow's own complete column rather than a fixed id. Subject to the operator's approval policy, so a call can be refused.
 - fn_get_agent_config and fn_update_agent_config (for direct reports only)
 - fn_agent_create and fn_agent_delete (for direct reports only)
 - fn_artifact_register, fn_artifact_list, and fn_artifact_view (register visual/media outputs so they appear in the dashboard Artifacts gallery: screenshots/wireframes/mockups/diagrams as type="image" via \`path\`; screen recordings as type="video" via \`path\`; HTML mockups as type="document" with mimeType="text/html" — rendered as live previews; PDFs as type="document" with mimeType="application/pdf" via \`path\`. No-task runs have no session workspace directory, so save files under the OS temp directory and pass an absolute \`path\` — relative paths are rejected in this mode)

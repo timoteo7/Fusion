@@ -45,7 +45,7 @@ import {
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
-import { createTaskCreateTool, createTaskLogToolWithContext, createTaskLogsReadTool, createTaskDocumentWriteTool, createTaskDocumentReadTool, createTaskReadTools, createArtifactRegisterTool, createArtifactListTool, createArtifactViewTool, createListAgentsTool, createDelegateTaskTool, createTaskAssignTool, createGetAgentConfigTool, createUpdateAgentConfigTool, createAgentCreateTool, createAgentDeleteTool, createSendMessageTool, createReadMessagesTool, createPostRoomMessageTool, createMemoryTools, createGoalRetrievalTools, createMissionTools, createIdeationTools, createReadEvaluationsTool, createUpdateIdentityTool, createReflectOnPerformanceTool, createWebFetchTool, createWorkflowListTool, createWorkflowGetTool, createWorkflowValidateTool, createWorkflowSelectTool, createTaskPromoteTool, createWorkflowCreateTool, createWorkflowUpdateTool, createWorkflowDeleteTool, createWorkflowSettingsTool, createTraitListTool, createAskQuestionTool, createResearchTools, readAgentMemoryWorkspaceLongTerm, taskCreateParams } from "./agent-tools.js";
+import { createTaskCreateTool, createTaskLogToolWithContext, createTaskLogsReadTool, createTaskDocumentWriteTool, createTaskDocumentReadTool, createTaskReadTools, createArtifactRegisterTool, createArtifactListTool, createArtifactViewTool, createListAgentsTool, createDelegateTaskTool, createTaskAssignTool, createTaskColumnMoveTool, createGetAgentConfigTool, createUpdateAgentConfigTool, createAgentCreateTool, createAgentDeleteTool, createSendMessageTool, createReadMessagesTool, createPostRoomMessageTool, createMemoryTools, createGoalRetrievalTools, createMissionTools, createIdeationTools, createReadEvaluationsTool, createUpdateIdentityTool, createReflectOnPerformanceTool, createWebFetchTool, createWorkflowListTool, createWorkflowGetTool, createWorkflowValidateTool, createWorkflowSelectTool, createTaskPromoteTool, createWorkflowCreateTool, createWorkflowUpdateTool, createWorkflowDeleteTool, createWorkflowSettingsTool, createTraitListTool, createAskQuestionTool, createResearchTools, readAgentMemoryWorkspaceLongTerm, taskCreateParams } from "./agent-tools.js";
 import { AgentLogger } from "./agents/agent-logger.js";
 import { attachAgentUsageTelemetry, emitAgentSessionStart } from "./agents/agent-usage-telemetry.js";
 import { emitApprovalMail } from "./agents/approval-mail.js";
@@ -2744,6 +2744,17 @@ export class HeartbeatMonitor {
             sourceAgentId: agentId,
           }));
           heartbeatTools.push(createTaskAssignTool(this.store, taskStore));
+          /*
+          FNXC:AmbientColumnMove 2026-10-02-02:30:
+          FUSI-072. Ownership and column authority sit together deliberately here, not incidentally: an
+          ambient agent that can hand a card to an owner but never move one is what left a finished card
+          stranded in review with only a human as the escape. This is the one column move ambient runs
+          receive, it is forward-only inside the tool (review lane → the workflow's complete column),
+          and it is classified `task_agent_mutation` in gating-classifications.ts so the operator's existing
+          approval dial governs it. The task-bound builder is deliberately NOT given it — that lane already
+          has fn_task_promote, and two ways to move a card in one surface is how precedence disputes start.
+          */
+          heartbeatTools.push(createTaskColumnMoveTool(taskStore));
           heartbeatTools.push(createGetAgentConfigTool(this.store, agentId));
           heartbeatTools.push(createUpdateAgentConfigTool(this.store, agentId));
           // FNXC:AgentProvisioningGate 2026-07-26-13:15: real settings + approval store so the provisioning policy actually gates idle-heartbeat lanes.

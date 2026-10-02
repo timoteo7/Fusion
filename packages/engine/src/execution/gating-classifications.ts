@@ -22,6 +22,25 @@ const SHARED_TASK_AGENT_TOOLS = [
   "fn_workflow_delete",
   "fn_workflow_settings",
   "fn_task_promote",
+  /*
+  FNXC:AmbientColumnMove 2026-10-02-02:20:
+  FUSI-072. Column movement is LIFECYCLE AUTHORITY, not a coordination convenience, so this tool belongs in
+  the governed bucket rather than in a coordination exemption. Membership here is precisely what makes the
+  move audited and operator-dialable: this one list feeds four consumers — the action gate's
+  `task_agent_mutation` branch, the permanent-agent gate, the read-only workflow-step deny list, and the
+  classification parity test — so no gating path can drift from another.
+
+  It is forward-only by construction (review lane to the workflow's complete column, enforced inside the
+  tool), and the operator's existing `task_agent_mutation` dial is the whole governance story: allow under
+  `unrestricted`, ask under `approval-required`, refuse under `locked-down`. `task_id` is the field the
+  action gate reads as the approval `resourceId`, so each target card gets its own approval identity
+  instead of collapsing distinct cards onto one shared approval.
+
+  Keep it out of COORDINATION_EXEMPT_TOOLS and READONLY_FN_TOOLS: it is a mutation, and either list would
+  silently permit it. Leave it out of the pi extension registry — `fn_task_move` is reserved as
+  engine-internal by two CLI tests, and this tool is engine-side governance only.
+  */
+  "fn_task_column_move",
   "fn_task_refine",
 ] as const;
 const PROVISIONING_TOOLS = ["fn_agent_create", "fn_agent_delete"] as const;

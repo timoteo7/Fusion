@@ -65,6 +65,10 @@ const FN_7111_GOVERNED_TOOLS = [
   ["fn_task_update", "task_agent_mutation"],
   ["fn_task_assign", "task_agent_mutation"],
   ["fn_task_promote", "task_agent_mutation"],
+  // FNXC:AmbientColumnMove 2026-10-02-02:22 (FUSI-072): a column move is lifecycle authority, so it
+  // must block under `locked-down` and ask under `approval-required` in BOTH gate paths, exactly like
+  // the other column-moving tool above. This row is what proves the classification propagated.
+  ["fn_task_column_move", "task_agent_mutation"],
   ["fn_task_refine", "task_agent_mutation"],
   ["fn_run_verification", "command_execution"],
   ["fn_install_worktree_dependencies", "command_execution"],
