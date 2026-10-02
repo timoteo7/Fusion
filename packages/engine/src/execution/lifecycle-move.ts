@@ -73,6 +73,16 @@ export async function moveTaskWithLifecycleReason(
     }
     const task = await store.getTask(taskId);
     const summary = ENGINE_BACKWARD_MOVE_REASONS[reason]?.summary ?? reason;
+    /*
+    FNXC:LifecycleContainment 2026-10-02-00:20:
+    The "retrying later" promise below is now KEPT, but not here — this function only reports the
+    deferral. For the Code Review REVISE bounce (`performWorkflowRerunBounce`) the caller records a
+    DURABLE capacity wait on this exact rejection, and the existing due-drain resumes the card when a
+    slot frees. Before FUSI-068 the string was an unkept promise: the replay step was already durable,
+    nothing retried after the watchdog's single 15s attempt, and the card was auto-disposed as a
+    permanent deadlock. Callers other than the review bounce must not assume a retry exists — treat
+    `deferred: "capacity"` as "nobody is coming unless this caller arranged it".
+    */
     await store.logEntry(
       taskId,
       `Lifecycle move deferred: ${task.column} → ${toColumn} (backward) — ${summary} (destination at capacity; retrying later)`,

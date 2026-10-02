@@ -48,7 +48,14 @@ export function scheduleWorkflowRerun(
       } else if (outcome === "skipped-pending") {
         executorLog.warn(`${taskId}: rerun bounce skipped — another bounce already in flight`);
       } else if (outcome === "deferred-capacity") {
-        executorLog.log(`${taskId}: rerun bounce deferred while the WIP lane is at capacity`);
+        /*
+        FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+        This deferral is DURABLE, not dropped: `performWorkflowRerunBounce` recorded a capacity wait
+        (the same durable continuation shape the graph's own capacity-suspend uses), which the due-drain
+        resumes once a slot frees. Before FUSI-068 this line promised "retrying later" with nothing
+        behind it and the card stranded forever.
+        */
+        executorLog.log(`${taskId}: rerun bounce deferred while the WIP lane is at capacity — durable wait recorded`);
       } else {
         executorLog.log(`${taskId}: rerun bounce deferred while pause is active`);
       }
@@ -107,7 +114,17 @@ export function scheduleWorkflowRerun(
           `Workflow rerun watchdog retry skipped — original bounce still in flight after ${deps.workflowRerunWatchdogMs / 1000}s; task may be stuck`,
         ).catch(() => undefined);
       } else if (outcome === "deferred-capacity") {
-        executorLog.log(`${taskId}: workflow rerun watchdog retry deferred while the WIP lane is at capacity`);
+        /*
+        FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+        A second deferral is NOT terminal. The bounce re-recorded its durable capacity wait on this
+        attempt too (idempotent via the active-continuation guard), and the watchdog's own map entry
+        being deleted here no longer matters: delivery no longer depends on this process-local timer.
+        */
+        executorLog.log(`${taskId}: workflow rerun watchdog retry deferred while the WIP lane is at capacity — durable wait still armed`);
+        await deps.store.logEntry(
+          taskId,
+          "Workflow rerun watchdog retry deferred — WIP lane at capacity; durable wait remains armed and resumes when a slot frees",
+        ).catch(() => undefined);
       } else if (outcome === "refused-no-remediation") {
         executorLog.warn(`${taskId}: workflow rerun watchdog retry refused because no remediation work is pending`);
         await deps.store.logEntry(

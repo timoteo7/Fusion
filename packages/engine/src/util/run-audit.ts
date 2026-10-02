@@ -508,6 +508,15 @@ export type DatabaseMutationType =
   | "task:external-block-cleared"
   /** Metadata: { taskId, column, trigger, outcome, completedStepCount } */
   | "task:step-session-abort-contained"
+  /*
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+  A Code Review REVISE appended its replay step to the durable ledger, then lost the race for WIP
+  capacity. FUSI-068 makes that deferral durable instead of a log line: this event records the park
+  and its later recovery so a stranded replay step is never silent. Metadata is ids/columns/fixed
+  outcomes only — never the merge-blocker string, the replay step's name, or reviewer prose.
+  */
+  | "task:review-bounce-capacity-parked"
+  | "task:review-bounce-capacity-recovered"
   /** Metadata: { taskId, artifactKeys, owner, source, action, attempt, maxAttempts, nodeId? } */
   | "task:required-artifact-missing"
   /*
