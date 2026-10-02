@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Task, TaskStore, WorkflowWorkItem } from "@fusion/core";
 
 import { projectAdmissionCoordinator } from "../concurrency/concurrency.js";
+import { registerPlanningLivenessProbe } from "../agents/planning-liveness.js";
 import {
   admitPlanningContinuation,
   createPlanningContinuationDispatcher,
@@ -11,8 +12,21 @@ import {
 const PROJECT_ID = "/test/workflow-continuation-capacity";
 const CONTINUATION_ID = "FN-CONTINUATION";
 
+/*
+FNXC:CapacitySlotLeak 2026-09-19-04:07:
+Every `status:"planning"` fixture in this file means a planner that is ALREADY RUNNING, so the planner
+liveness proof must report those ids live. `isRunningAgentTask` now counts a planning status only with
+that proof: a durable planning row with no live planner held every project slot and froze planning
+itself (677 "Plan throttled by running-agent cap" lines; 258 with `claimed=2, processing=0`). Without
+this probe the fixtures below would assert admission into FREE capacity instead of admission AT the
+cap — the slot-accounting behavior they exist to pin — and the already-active resume fast path would
+stop being exercised at all.
+*/
+const LIVE_PLANNING_TASK_IDS = new Set<string>();
+registerPlanningLivenessProbe((taskId) => LIVE_PLANNING_TASK_IDS.has(taskId));
+
 function task(id: string, patch: Partial<Task> = {}): Task {
-  return {
+  const row = {
     id,
     title: id,
     description: id,
@@ -26,6 +40,8 @@ function task(id: string, patch: Partial<Task> = {}): Task {
     updatedAt: "2026-08-01T00:00:00.000Z",
     ...patch,
   } as Task;
+  if (row.status === "planning") LIVE_PLANNING_TASK_IDS.add(row.id);
+  return row;
 }
 
 function store(

@@ -22,6 +22,11 @@ export type RunningAgentTaskShape = Pick<Task, "column" | "status" | "paused" | 
   columnCountsTowardWip?: boolean;
   /** Trait-derived review/merge membership; active merge statuses are live only here. */
   columnIsReviewOrMerge?: boolean;
+  /**
+   * Process-liveness proof for `status:"planning"`. Supplied by store-backed capacity
+   * callers; absent means a flag-less legacy caller that cannot observe planners.
+   */
+  planningIsLive?: boolean;
 };
 
 /*
@@ -201,7 +206,34 @@ export function isRunningAgentTask(task: RunningAgentTaskShape): boolean {
   already exclude status:"failed" from active merge holders.
   */
   if (task.status === "failed") return false;
-  if (task.status === "planning") return true;
+  /*
+  FNXC:CapacitySlotLeak 2026-09-19-04:07:
+  Requisito (relato do operador): "um card sem sessão viva não pode segurar vaga de capacidade; caso
+  contrário o planejador se auto-bloqueia e o board inteiro congela".
+
+  `status:"planning"` is a DURABLE row field, so it outlives a planner that was stuck-killed, died, or
+  was never started. Counting it unconditionally as a live agent let orphaned planning rows pin every
+  project slot and starve planning itself. Measured in production on 2026-09-18: 677
+  "Plan throttled by running-agent cap" lines over ~2.8 h, 258 of them logging
+  `claimed=2, processing=0` — two durable planning claims and NO planner in the process, while one
+  eligible card waited (FUSI-018, idle 32 min). The slow repair path (`sweepStalePlanningStatuses`,
+  20-minute grace) cleared two rows in the whole log and never unblocked that stall.
+
+  Capacity now requires positive liveness proof for a planning claim, exactly as the review-status
+  branch below already requires review/merge lane membership for its statuses. Lane membership cannot be the
+  discriminator: a planning card is legitimately dispatched from either the intake or the hold lane, so
+  only liveness separates a real planner from a stale status. `undefined` keeps the historical count for
+  flag-less callers (dashboard footer, CLI, the synchronous semaphore leak valve) that cannot observe
+  planner sessions; every store-backed engine capacity path supplies the flag.
+
+  This cannot release a slot an EXECUTOR owns: `status:"planning"` means the scope is not finalized
+  (`HARD_BLOCKING_TASK_STATUSES`), so the card is not dispatchable for execution until the status is
+  cleared — the scheduler's planning-finished wake is guarded on `!task.status`. Known, accepted
+  tradeoff: a planner on ANOTHER node is invisible to this process's registry, so its claim stops
+  counting here and this node may admit one extra agent for the project; the durable status repair
+  still clears the row later. That is strictly better than the whole board freezing for hours.
+  */
+  if (task.status === "planning") return task.planningIsLive !== false;
   // Review statuses are not globally live: a stale status in intake/WIP must not consume capacity.
   if (ACTIVE_IN_REVIEW_AGENT_STATUSES.has(String(task.status ?? ""))) {
     return task.columnIsReviewOrMerge ?? task.column === "in-review";

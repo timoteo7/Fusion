@@ -13,9 +13,29 @@ function task(overrides: Partial<RunningAgentTaskShape> & Pick<RunningAgentTaskS
 }
 
 describe("live agent count predicates", () => {
-  it("counts live planners in every non-terminal workflow lane", () => {
+  /*
+  FNXC:CapacitySlotLeak 2026-09-19-04:07:
+  A planning claim is a live agent only while a planner session is live. The lane is NOT the
+  discriminator: planning is dispatched from the intake lane and from the hold lane alike, so lane
+  membership cannot separate a running planner from the durable remains of a dead one. The flag-less
+  case is the documented legacy fallback for callers that cannot observe planner sessions (dashboard
+  footer, CLI, the synchronous semaphore leak valve). The incident this pins: orphaned
+  `status:"planning"` rows held every project slot, so the planner throttled itself (677
+  "Plan throttled by running-agent cap" lines; 258 with `claimed=2, processing=0`).
+  */
+  it("counts a planner in every non-terminal lane only while a planner session is live", () => {
+    expect(isRunningAgentTask(task({ column: "todo", status: "planning", planningIsLive: true }))).toBe(true);
+    expect(isRunningAgentTask(task({ column: "ideas", status: "planning", planningIsLive: true }))).toBe(true);
+    // No planner session behind the status: the card must not hold a capacity slot in ANY lane.
+    expect(isRunningAgentTask(task({ column: "todo", status: "planning", planningIsLive: false }))).toBe(false);
+    expect(isRunningAgentTask(task({ column: "ideas", status: "planning", planningIsLive: false }))).toBe(false);
+    expect(isRunningAgentTask(task({ column: "in-progress", columnCountsTowardWip: true, status: "planning", planningIsLive: false }))).toBe(false);
+    expect(countRunningAgentTasks([
+      task({ column: "todo", status: "planning", planningIsLive: false }),
+      task({ column: "todo", status: "planning", planningIsLive: true }),
+    ])).toBe(1);
+    // Flag-less legacy callers keep the historical count; pause still excludes the card.
     expect(isRunningAgentTask(task({ column: "todo", status: "planning" }))).toBe(true);
-    expect(isRunningAgentTask(task({ column: "ideas", status: "planning" }))).toBe(true);
     expect(isRunningAgentTask(task({ column: "ideas", status: "planning", paused: true }))).toBe(false);
     expect(isRunningAgentTask(task({ column: "ideas", status: "planning", userPaused: true }))).toBe(false);
   });
