@@ -23,6 +23,7 @@ export type {
 export {
   compactTaskActivityLog,
   truncateTaskLogOutcome,
+  truncateTaskLogAction,
   __setTaskActivityLogLimitsForTesting,
   getTaskActivityLogEntryLimit,
 } from "./comments.js";

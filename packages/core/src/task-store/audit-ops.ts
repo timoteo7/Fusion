@@ -17,7 +17,7 @@ import {makeTransitionPending} from "../tasks/transition-types.js";
 import {writeTransitionPendingAsync} from "./async/async-transition-pending.js";
 import type {WorkflowIr} from "../workflows/workflow-ir-types.js";
 import "../builtin-traits.js";
-import {__setTaskActivityLogLimitsForTesting, truncateTaskLogOutcome, getTaskActivityLogEntryLimit} from "../task-store/comments.js";
+import { __setTaskActivityLogLimitsForTesting, truncateTaskLogAction, truncateTaskLogOutcome, getTaskActivityLogEntryLimit } from "../task-store/comments.js";
 import {readTaskRow, updateTaskColumns} from "../task-store/async/async-persistence.js";
 import { getLiveTaskColumn } from "./async/async-comments-attachments.js";
 import { acquireTaskAdvisoryXactLock } from "./task-advisory-lock.js";
@@ -132,6 +132,16 @@ suppression marker without the operator-visible task-log entry.
  * Environment repair is one operator episode even when concurrent merge doors observe it.
  * The project/task advisory lock makes the log check and append atomic across engine, CLI, and UI.
  */
+/*
+FNXC:TaskLogStructureAwareTruncation 2026-09-28-08:25:
+All three activity-log writers now bound `action` as well as `outcome`. `action`
+is the field an operator actually reads, and the merge-failure producers used to
+interpolate a whole `git rebase` stderr into it: one failed merge wrote the same
+5 KB of skip warnings into ten separate entries on one card, while the field
+meant for the diagnostic held the bare string "Error". Bounding it here is what
+stops that duplication; the leading sentence is preserved verbatim so prefix
+matchers (IN_REVIEW_STALL_LOG_REGEX) still match.
+*/
 export async function logEntryOnceImpl(
   store: TaskStore,
   id: string,
@@ -151,7 +161,7 @@ export async function logEntryOnceImpl(
     const duplicate = log.some((entry) => entry.dedupeKey === input.dedupeKey
       && now.getTime() - Date.parse(entry.timestamp) < input.windowMs);
     if (duplicate) return { appended: false, row: current };
-    log.push({ timestamp: now.toISOString(), action: input.action, outcome: truncateTaskLogOutcome(input.outcome), dedupeKey: input.dedupeKey });
+    log.push({ timestamp: now.toISOString(), action: truncateTaskLogAction(input.action), outcome: truncateTaskLogOutcome(input.outcome), dedupeKey: input.dedupeKey });
     const limit = getTaskActivityLogEntryLimit();
     if (log.length > limit) log.splice(0, log.length - limit);
     const updated = await tx.update(schema.project.tasks).set({ log, updatedAt: now.toISOString() }).where(and(
@@ -229,7 +239,7 @@ export async function transitionQueuedEpisodeImpl(
     if (appended) {
       log.push({
         timestamp: now,
-        action: transition.action,
+        action: truncateTaskLogAction(transition.action),
         outcome: truncateTaskLogOutcome(transition.outcome),
         ...(transition.runContext ? { runContext: transition.runContext } : {}),
       });
@@ -306,7 +316,7 @@ export async function logEntryImpl(store: TaskStore, id: string, action: string,
     return store.withTaskLock(id, async () => {
       const entry: TaskLogEntry = {
         timestamp: new Date().toISOString(),
-        action,
+        action: truncateTaskLogAction(action),
         outcome: truncateTaskLogOutcome(outcome),
       };
       if (runContext) {
