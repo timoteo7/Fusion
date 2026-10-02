@@ -278,6 +278,24 @@ export const taskPromoteParams = Type.Object({
   ),
 });
 
+/*
+FNXC:AmbientColumnMove 2026-10-02-02:05:
+FUSI-072. Ambient (no-task) heartbeat agents hold no current task, so `task_id` is REQUIRED here
+rather than defaulted to a closure value the way `taskPromoteParams` is: there is no closure task to
+default to. It is also the field the action gate reads as the approval `resourceId`
+(`agent-action-gate.ts:222-226`), so one required field gives every target its own approval identity
+instead of collapsing distinct cards onto one shared approval.
+*/
+export const taskColumnMoveParams = Type.Object({
+  task_id: Type.String({
+    description: "Card to move (e.g. FN-001). Must currently sit in the review lane and be genuinely finished.",
+  }),
+  reason: Type.String({
+    description:
+      "Short operator-readable sentence recorded in the task log, naming why the card is finished.",
+  }),
+});
+
 export const taskArchiveParams = Type.Object({
   id: Type.String({ description: "Task ID to archive from any live column (e.g. FN-001)." }),
   removeLineageReferences: Type.Optional(Type.Boolean({ description: "When true, clear incoming lineage-parent references (child sourceParentTaskId) before archiving, so a task still referenced as a lineage parent can be archived." })),
@@ -3400,6 +3418,163 @@ export function createTaskPromoteTool(store: TaskStore, currentTaskId: string): 
       } catch (err: any) {
         return {
           content: [{ type: "text" as const, text: `ERROR: Failed to promote task: ${err?.message ?? err}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  };
+}
+
+/*
+FNXC:AmbientColumnMove 2026-10-02-02:05:
+FUSI-072 grants ambient (no-task) heartbeat agents exactly one column move: a card that is genuinely
+finished leaves the review lane for the workflow's own complete column. Before this card, every card
+needing a review-lane decision was stranded for every no-task agent and the only escape was a human —
+a structural tool-surface gap, not a prompt bug.
+
+FORWARD-ONLY BY CONSTRUCTION, not by comment. The precondition admits one (fromRole, toRole) pair:
+review -> complete. LIFECYCLE_ROLE_RANK makes every other role unreachable from review in a forward
+direction, and intake (rank 0) is reachable only backward, so there is no parameter combination that
+targets intake. There is deliberately NO `reason`-parameter escape hatch accepting a backward move: an
+ambient agent holds no review verdict, so it is never the revision authority. Backward movement stays
+with the review and merge lanes that actually own a verdict.
+
+THE CONTAINMENT TRAP (the single most important line in this factory):
+`store.moveTask` is called with `moveSource: "engine"` AND `bypassGuards: false`. `moveSource: "engine"`
+is required because `workflow-transition-policy.ts:165` skips containment entirely for any source that
+is not engine/scheduler — an agent move gets NO containment at all without it. But
+`task-store-helpers.ts:156-158` derives `bypassGuards ?? (moveSource === "engine" || ...)`, so passing
+`moveSource: "engine"` alone resolves bypass to TRUE and skips the very policies we are asking for.
+The explicit `bypassGuards: false` short-circuits that derivation. Never drop it. Widening
+`MoveTaskOptions.moveSource` with an "agent" value would be the tidy-looking alternative and is a
+security-shape change to who may skip merge blockers — explicitly out of scope here.
+
+Destination resolution goes through workflow IR traits, never the literal "done": two FNXC notes in this
+repo record hardcoded column ids silently breaking on a renamed board (`agent-tools.ts` WorkflowResolvedColumns,
+`task-store-helpers.ts:266`).
+*/
+export function createTaskColumnMoveTool(store: TaskStore): ToolDefinition {
+  return {
+    name: "fn_task_column_move",
+    label: "Complete Reviewed Task",
+    description:
+      "Move a genuinely finished, reviewed card out of the review lane into the workflow's complete column. " +
+      "Forward-only: the card must currently sit in the review lane, and the destination is the workflow's " +
+      "own complete column. There is no backward move — if the work needs rework, delegate it to a task-bound lane. " +
+      "Subject to the operator's task_agent_mutation approval policy. Returns the destination column, or a " +
+      "refusal reason when the card is not in the review lane, the workflow declares no complete column, or the " +
+      "destination is at capacity.",
+    parameters: taskColumnMoveParams,
+    execute: async (_id: string, params: Static<typeof taskColumnMoveParams>) => {
+      const taskId = params.task_id?.trim();
+      if (!taskId) {
+        return {
+          content: [{ type: "text" as const, text: "ERROR: task_id is required." }],
+          details: {},
+          isError: true,
+        };
+      }
+      const reason = params.reason?.trim() || "ambient agent completed the card";
+
+      try {
+        const task = await store.getTask(taskId);
+        if (!task) {
+          return {
+            content: [{ type: "text" as const, text: `ERROR: No task '${taskId}'.` }],
+            details: { taskId },
+            isError: true,
+          };
+        }
+
+        // Resolve both endpoints from the workflow's own trait flags, never from literals.
+        const ir = await fusionCore.resolveWorkflowIrForTask(store, taskId);
+        if (!ir) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `ERROR: Could not resolve the workflow for '${taskId}', so no complete column can be identified.`,
+            }],
+            details: { taskId, rejection: "workflow-unresolved" },
+            isError: true,
+          };
+        }
+        // Review is genuinely a SET: a board may declare several review lanes and `humanReview`
+        // counts, so `resolveReviewColumns` (the set) is the canonical "is this card in review",
+        // not the single-id `resolveLifecycleColumns().review`.
+        const reviewColumns = new Set(fusionCore.resolveReviewColumns(ir));
+        const toColumn = fusionCore.resolveCompleteColumn(ir);
+        if (!toColumn) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                `ERROR: The workflow for '${taskId}' declares no column carrying the 'complete' trait, ` +
+                `so there is no complete destination. '${taskId}' stays in '${task.column}'.`,
+            }],
+            details: { taskId, column: task.column, rejection: "no-complete-column" },
+            isError: true,
+          };
+        }
+
+        // The one admitted pair. Everything else is refused with a self-describing reason.
+        if (!reviewColumns.has(task.column)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                `ERROR: '${taskId}' is in '${task.column}', which is not a review-lane column. ` +
+                `This tool only completes a reviewed card. '${taskId}' is unchanged.`,
+            }],
+            details: { taskId, column: task.column, rejection: "not-review-lane" },
+            isError: true,
+          };
+        }
+
+        try {
+          await store.moveTask(taskId, toColumn, { moveSource: "engine", bypassGuards: false });
+        } catch (error) {
+          // Mirrors the contained-defer pattern in execution/lifecycle-move.ts:70-81. Do not retry,
+          // do not pick a different column, do not swallow — capacity is the destination's truth.
+          if (
+            error instanceof fusionCore.TransitionRejectionError &&
+            error.rejection.code === "capacity-exhausted"
+          ) {
+            return {
+              content: [{
+                type: "text" as const,
+                text:
+                  `ERROR: '${toColumn}' is at capacity, so '${taskId}' stays in '${task.column}'. ` +
+                  `${error.rejection.detail ?? "Destination at capacity."}`,
+              }],
+              details: {
+                taskId,
+                column: task.column,
+                toColumn,
+                rejection: "capacity-exhausted",
+                detail: error.rejection.detail ?? null,
+              },
+              isError: true,
+            };
+          }
+          throw error;
+        }
+
+        await store.logEntry(
+          taskId,
+          `Lifecycle move: ${task.column} → ${toColumn} (forward) — ${reason} [source=fn_task_column_move]`,
+        ).catch(() => undefined);
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Completed ${taskId}: '${task.column}' → '${toColumn}'.`,
+          }],
+          details: { taskId, fromColumn: task.column, toColumn, reason },
+        };
+      } catch (err: unknown) {
+        return {
+          content: [{ type: "text" as const, text: `ERROR: Failed to complete task: ${toolErrorMessage(err)}` }],
           details: {},
           isError: true,
         };
