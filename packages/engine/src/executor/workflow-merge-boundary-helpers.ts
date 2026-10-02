@@ -5,6 +5,7 @@
  */
 import type { TaskDetail, TaskStore } from "@fusion/core";
 import { resolveWorkflowIrForTask } from "@fusion/core";
+import { isGraphNativePreMergeResult } from "./evaluate-workflow-merge-boundary.js";
 import { MERGE_REGION_KINDS } from "../workflows/workflow-graph-executor.js";
 
 export type ResolveMergeBoundaryColumnDeps = {
@@ -69,6 +70,18 @@ export function shouldCompleteChecklistAtWorkflowMerge(
   if (!Array.isArray(task.steps) || task.steps.length === 0) return false;
   if (task.steps.every((step) => step.status === "done" || step.status === "skipped")) return false;
   if (proof) return proof.complete;
-  const graphNodeResults = (task.workflowStepResults ?? []).filter((result) => result.source === "node" && (result.phase ?? "pre-merge") === "pre-merge");
+  /*
+  FNXC:WorkflowMerge 2026-09-19-03:58:
+  Resultados pre-merge podem vir de passos opcionais habilitados (source="optional-group"); a prova
+  de fronteira deve enxerga-los, senao tarefas com reviews aprovados ficam presas em
+  merge-boundary-unproven.
+
+  This branch computes the SAME merge decision as the boundary proof when no proof object is
+  supplied (the production caller at `workflow-merge-boundary.ts` always passes one), so it must not
+  answer that question with a narrower origin set: a caller that dropped the proof argument would
+  re-park an approved card in exactly the way measured on the live FUSI-014 card. Origin provenance
+  therefore shares `isGraphNativePreMergeResult` instead of repeating the literal.
+  */
+  const graphNodeResults = (task.workflowStepResults ?? []).filter(isGraphNativePreMergeResult);
   return graphNodeResults.length > 0 && graphNodeResults.every((result) => result.status === "passed" || result.status === "skipped");
 }
