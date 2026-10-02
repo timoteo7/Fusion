@@ -135,11 +135,56 @@ jobs:
         # our own iface step so it is not attacker-controlled, but "a workflow
         # expression interpolated into a shell body" is the shape of a template
         # injection and static analysis reads the shape, not the provenance.
+        # The same reasoning applies to the settings-sourced threshold below:
+        # it reaches the shell as an environment variable, never as shell text.
         env:
           NATIVE: ${{ steps.iface.outputs.native }}
+          # Optional, never load-bearing. Unset is the normal case and resolves
+          # to the default in the script body; see the FNXC block there.
+          FAIL_ON_OVERRIDE: ${{ vars.THREATCRUSH_FAIL_ON }}
         run: |
           set -o pipefail
-          FAIL_ON=""
+
+          # FNXC:ThreatCrushFailOn 2026-09-29-11:29:
+          # This job is a gate, so it must be able to fail on a real finding.
+          # It previously hardcoded FAIL_ON="" with no override, so --fail-on
+          # was never passed, the CLI never returned 1, and the `1)` findings
+          # arm below was unreachable — every other exit meant the scan itself
+          # broke, not that a problem was detected. A credential committed in a
+          # PR and a clean tree both concluded "success".
+          #
+          # Threshold `high` is measured, not taste: on the pinned
+          # @profullstack/threatcrush@0.11.0 a committed Postgres DSN (userinfo + host + db)
+          # is HIGH (secret-database-url, CWE-798, confidence: evidence) while
+          # a `/tmp/...` string quoted inside a markdown table is MEDIUM
+          # (insecure-temp-file, CWE-377, confidence: pattern). `high` therefore
+          # fails on the credential and passes on the known documentation noise.
+          # `medium` would redden open PRs on that noise; `critical` would keep
+          # reporting green on exactly the credential class we exist to catch.
+          #
+          # The threshold is a FLOOR, not a list. The CLI takes the minimum rank
+          # across the requested severities, so `high` also fails on CRITICAL,
+          # and `high,medium` behaves as `medium`. Read it as "this and worse".
+          #
+          # The default lives here, in the workflow, not only in the override.
+          # An unset repository variable expands to the empty string, so a bare
+          # vars.THREATCRUSH_FAIL_ON with no default would put us straight back
+          # to the defect that this line replaces, one settings-page click away
+          # and with a green check to hide it. The override is additive; the
+          # gate is fail-closed.
+          #
+          # `.github/` is outside ROOTS in scripts/check-fnxc-future-dates.mjs,
+          # so this stamp is convention-honored but not gate-checked.
+          #
+          # Trim before defaulting. ${VAR:-high} alone substitutes only for an
+          # unset or empty variable, not for a whitespace-only one, so a stray
+          # space pasted into the repo variable would reach the CLI as an
+          # unknown severity: exit 2, no SARIF, reported as a broken scan
+          # rather than as the threshold being unset. Trimming makes every
+          # blank value resolve to the documented default.
+          FAIL_ON="$(printf %s "${FAIL_ON_OVERRIDE}" | tr -d '[:space:]')"
+          FAIL_ON="${FAIL_ON:-high}"
+
           SCAN_PATH="."
           code=0
 
@@ -177,9 +222,18 @@ jobs:
           # failure this whole workflow is arranged to avoid.
           if [ ! -s threatcrush.sarif ]; then
             echo "status=error" >> "$GITHUB_OUTPUT"
-            echo "::error::ThreatCrush produced no SARIF (exit ${code}) — this diff was NOT scanned"
+            # The real scope, not "this diff": SCAN_PATH="." with a default
+            # actions/checkout on pull_request scans the full working tree at
+            # the merge ref. Naming it accurately is the difference between
+            # "your change was examined and is clean" and "the whole tree,
+            # change included, was examined".
+            echo "::error::ThreatCrush produced no SARIF (exit ${code}) — the full working tree at the merge ref was NOT scanned"
             exit 1
           fi
+
+          # The resolved threshold, so the report can name the severity boundary
+          # a red job means instead of leaving it only in the job log.
+          echo "threshold=$FAIL_ON" >> "$GITHUB_OUTPUT"
 
           case "$code" in
             0) echo "status=clean" >> "$GITHUB_OUTPUT" ;;
@@ -245,6 +299,7 @@ jobs:
               )
 
           status = os.environ.get("SCAN_STATUS", "")
+          threshold = os.environ.get("THRESHOLD", "")
           try:
               with open("threatcrush.sarif") as handle:
                   results = json.load(handle)["runs"][0]["results"]
@@ -252,7 +307,18 @@ jobs:
               results = None
               print(f"::warning::could not read SARIF: {err}")
 
-          lines = ["## ThreatCrush Security Scan", ""]
+          # Answer "what did you look at" in the header, where the reader
+          # arrives, instead of leaving it to be inferred. SCAN_PATH="." with a
+          # default actions/checkout scans the FULL WORKING TREE at the merge
+          # ref, not the diff — a secret that predates the pull request is
+          # reported here too, which is the correct posture for a secret scan.
+          lines = [
+              "## ThreatCrush Security Scan",
+              "",
+              "_Scanned: the full working tree at the merge ref (not just the changed files)._",
+          ]
+          if threshold:
+              lines.append(f"_The job fails when a finding at or above **{threshold}** severity is present._")
 
           # Fail closed: render findings only on positive evidence that a scan
           # completed. Testing for `status == "error"` was fail-open and got
@@ -263,10 +329,10 @@ jobs:
           # outcome is NOT RUN.
           if status not in ("clean", "findings") or results is None:
               # Never render "no issues found" for a scan that did not finish.
-              # An unexamined diff is not a clean one, and the two are
+              # An unexamined tree is not a clean one, and the two are
               # indistinguishable to whoever reads the comment.
               lines += [
-                  "**NOT RUN** — the scan did not complete, so this diff was not examined.",
+                  "**NOT RUN** — the scan did not complete, so the full working tree at the merge ref was not examined.",
                   "This is not a clean result. See the job log.",
               ]
           else:
@@ -321,6 +387,7 @@ jobs:
           PYEOF
         env:
           SCAN_STATUS: ${{ steps.scan.outputs.status }}
+          THRESHOLD: ${{ steps.scan.outputs.threshold }}
 
       - name: Write report to job summary
         if: always()
