@@ -58,11 +58,56 @@ describe("evaluateBashContainment — denies the escalation chain", () => {
     expect(evaluateBashContainment("cat ~/.config/gh/hosts.yml").allowed).toBe(false);
   });
 
+
   it("denies shell calls to the approvals API", () => {
     expect(
       evaluateBashContainment('curl -X POST http://localhost:4040/api/approvals/apr-123/decision -d \'{"decision":"approve"}\'').allowed,
     ).toBe(false);
     expect(evaluateBashContainment("curl 'http://127.0.0.1:9000/api/tasks?fn_token=abc'").allowed).toBe(false);
+  });
+
+  // PR-open rules are owner-scoped (FUSION_PR_OPEN_ALLOW_OWNERS).
+  // The default (env var unset) denies every gh pr create / PR API call,
+  // so the agent is forbidden from opening PRs against company/other
+  // repos. When the env var allows the explicit owner, the same command
+  // is permitted. Owner is detected from --repo, --head, or github.com URLs.
+  it("denies gh pr create when FUSION_PR_OPEN_ALLOW_OWNERS is unset (default deny)", () => {
+    expect(evaluateBashContainment("gh pr create --base homolog --head fusion/gdpr-072 --title x").allowed).toBe(false);
+    expect(evaluateBashContainment("gh pr create --draft --base develop --repo bradoctech/gdprev-v2").allowed).toBe(false);
+    expect(evaluateBashContainment("gh pr create-pr --base main --repo timoteo7/sandbox").allowed).toBe(false);
+    expect(evaluateBashContainment("hub pull-request -b homolog").allowed).toBe(false);
+  });
+
+  it("denies the GitHub PR REST API for non-allow-listed owners (default deny)", () => {
+    expect(
+      evaluateBashContainment("gh api repos/bradoctech/gdprev-v2/pulls -f title=x -f head=foo -f base=homolog").allowed,
+    ).toBe(false);
+    expect(
+      evaluateBashContainment("curl -X POST https://api.github.com/repos/bradoctech/gdprev-v2/pulls -d '{}'").allowed,
+    ).toBe(false);
+  });
+
+  it("permits gh pr create when the target owner is in FUSION_PR_OPEN_ALLOW_OWNERS", () => {
+    process.env.FUSION_PR_OPEN_ALLOW_OWNERS = "timoteo7";
+    try {
+      const allowed = evaluateBashContainment("gh pr create --base main --head feat/x --title y --repo timoteo7/sandbox");
+      expect(allowed.allowed).toBe(true);
+
+      // Owner appears in --head as `owner:branch`; also matched.
+      const headForm = evaluateBashContainment("gh pr create --base homolog --head timoteo7:fix/typo --title t");
+      expect(headForm.allowed).toBe(true);
+
+      // Same command, different owner — still denied (fail closed).
+      const otherOwner = evaluateBashContainment("gh pr create --base main --head bradoctech:feat --title t");
+      expect(otherOwner.allowed).toBe(false);
+      expect(otherOwner.rule).toBe("company-pr-open");
+
+      // GitHub API URL form is also allow-listed by owner.
+      const api = evaluateBashContainment("curl -X POST https://api.github.com/repos/timoteo7/sandbox/pulls -d {}");
+      expect(api.allowed).toBe(true);
+    } finally {
+      delete process.env.FUSION_PR_OPEN_ALLOW_OWNERS;
+    }
   });
 });
 
