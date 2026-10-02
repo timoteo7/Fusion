@@ -348,13 +348,19 @@ export function getInReviewStallReason(
 
   FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20 (gate independence — the ordering defect this
   card's own fix introduced):
-  This check MUST NOT live inside `if (mergeBlocker)`. Gating the name on the door's refusal made the
-  name conditional on an unrelated code path: the door treats a pending step as complete whenever the
-  step carries `notes`/`result` (see FNXC:ImplicitCompletion in getTaskMergeBlocker), so a replay
-  occurrence an executor had begun annotating reads as mergeable, `mergeBlocker` is undefined, this
-  whole block is skipped, and the card reports NO stall at all. That is precisely the silent strand
-  this defect exists to eliminate — the work was asked for, a partial note was written, and the
-  hand-off was still never delivered, yet the board reads healthy.
+  This check MUST NOT live inside `if (mergeBlocker)`. That made the name conditional on a refusal
+  this defect has no stake in. The door's ONLY rule for a pending step is the plain membership test
+  at task-merge.ts:532-534 — `steps.some((s) => NON_TERMINAL_STEP_STATUSES.has(s.status))` behind
+  `task has incomplete steps`. A trailing replay occurrence is `pending`, so it refuses, and while it
+  refuses this block runs. But nothing about the merge door is load-bearing for the guarantee, and
+  the moment the door's treatment of a step is widened, reordered, or short-circuited by an unrelated
+  refusal that fires first (`task is paused`, `task is in '<lane>'`, `task is marked 'failed': …`),
+  `mergeBlocker` goes undefined for a reason that has NOTHING to do with the replay, this block is
+  skipped, and the card reports NO stall at all — the silent strand this defect exists to eliminate,
+  restored through a different door. An earlier draft of this comment justified the ordering with a
+  `notes`/`result` completion exemption inside the merge door; that exemption is not in the shipped
+  rule, so the reasoning did not survive contact with the tree. The ordering stands on its own
+  footing: the name must never be conditioned on an unrelated refusal.
 
   The undelivered hand-off is a fact about the DURABLE SHAPE (a trailing pending replay occurrence),
   so it is decided BEFORE and independently of what the merge door thinks. `getTaskMergeBlocker` is

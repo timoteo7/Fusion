@@ -280,11 +280,15 @@ describe("FUSI-068 the undelivered-replay shape is a named cause, not generic in
   it("Step 8.8 — the name does NOT depend on the merge door still refusing", () => {
     /*
     The ordering defect this card's own first cut shipped. `undelivered-replay-step` was gated behind
-    `if (mergeBlocker)`, so it only fired while the merge door happened to refuse. The door's rule for
-    a pending step is not fixed — it currently treats a pending step carrying `notes`/`result` as
-    complete (FNXC:ImplicitCompletion) — so a replay occurrence an executor began annotating read as
-    mergeable, the gate was skipped, and the card reported NO stall at all: the exact silent strand
-    this defect exists to eliminate.
+    `if (mergeBlocker)`, so it only fired while the merge door happened to refuse. That couples the
+    name to a refusal this card has no stake in: today the door refuses a pending step through the
+    plain membership test at task-merge.ts:532-534, but any unrelated refusal that fires first
+    (`task is paused`, `task is marked 'failed': …`) or any widening of the door's step rule makes
+    `mergeBlocker` undefined for reasons unrelated to the replay, the gate is skipped, and the card
+    reports NO stall at all: the exact silent strand this defect exists to eliminate. An earlier draft
+    of this comment claimed the door treats a `notes`/`result` pending step as complete; that
+    exemption is not in the shipped rule, so this fixture (a pending replay carrying a note) pins the
+    INVARIANT rather than that implementation detail.
 
     Assert the INVARIANT, not the door's current opinion: whatever the door says, a card whose only
     unfinished work is an undelivered engine replay must be NAMED. This stays green whether or not
