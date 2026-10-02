@@ -71,7 +71,14 @@ export interface SpecLock {
 export interface SpecLockDiff { changedSections: SpecLockSection[]; }
 
 const sections: Array<{ key: SpecLockSection; headings: string[]; required: boolean }> = [
-  { key: "mission", headings: ["mission"], required: true },
+  // FNXC:SpecLockMissionOptional 2026-09-24-03:41:
+  // Root cause (operator board): the mission section was required: true UNCONDITIONALLY (the parse loop marks a
+  // missing required section as mission-missing without consulting bindings), while docs/missions.md:28 says
+  // mission lineage is OPTIONAL. Any regenerated spec without `## Mission` failed the deterministic validation
+  // -> needs-replan -> the self-healing sweep re-seeded planning -> an infinite loop (the 7 stuck cards).
+  // Align the lock to the policy: mission is optional (required: false). When a task DOES carry a missionId, the
+  // bindings (applyLivePlanBindings) still require real mission evidence.
+  { key: "mission", headings: ["mission"], required: false },
   { key: "file-scope", headings: ["file scope"], required: false },
   { key: "steps", headings: ["steps"], required: false },
   { key: "acceptance-criteria", headings: ["completion criteria", "acceptance criteria"], required: false },
