@@ -32,9 +32,17 @@ const BUILTIN_CODING_WORKFLOW_IDS = new Set([
 
 /**
  * FNXC:PostMergeFullSuiteEvidence 2026-09-23-05:41:
- * Upgrade the historical built-in coding default with the mandatory post-merge
- * delivery-evidence gate. Only the exact former default is changed; every other
+ * Upgrade the historical built-in coding default with the post-merge
+ * delivery-evidence group. Only the exact former default is changed; every other
  * optional-step configuration retains its recorded shape.
+ *
+ * FNXC:PostMergeAdvisoryDemotion 2026-09-29-14:57:
+ * FUSI-064 makes the enabled post-merge group an ADVISORY observation, not a hard completion
+ * gate. The group is still seeded here so every merge-capable built-in records a post-merge
+ * verdict for the audit trail, but its `gateMode` is `advisory`, so it can no longer refuse
+ * finalization (neither in the graph executor nor via `getRequiredPostMergeEvidenceBlocker`,
+ * both of which key on `gateMode === "gate"`). A landed card finalizes on merge confirmation
+ * alone; the Full Suite remains the advisory signal the repository documents it to be.
  */
 export function upgradeLegacyCodingPostMergeVerificationStepIds(
   workflowId: string,
@@ -48,19 +56,29 @@ export function upgradeLegacyCodingPostMergeVerificationStepIds(
 
   /*
   FNXC:PostMergeFullSuiteEvidence 2026-09-23-05:41:
-  The former two-review default predates the required post-landing Full Suite evidence gate.
+  The former two-review default predates the post-landing evidence group.
   Migrate only that exact inherited profile when it is next authoritatively resolved, preserving
-  intentional optional-step configurations while preventing existing default coding tasks from
-  completing without the five-lane CI evidence required by FN-9369.
+  intentional optional-step configurations.
+  FNXC:PostMergeAdvisoryDemotion 2026-09-29-14:57:
+  FUSI-064 demoted the group from gate to advisory, so this upgrade no longer withholds
+  completion; it only ensures the advisory post-merge observation runs and is recorded.
   */
   return [...LEGACY_CODING_DEFAULT_OPTIONAL_GROUP_IDS, POST_MERGE_VERIFICATION_GROUP_ID];
 }
 
 /*
-FNXC:PostMergeFullSuiteEvidence 2026-09-22-01:36:
-An enabled post-merge gate owns the task's required post-landing Full Suite evidence. CI remains
-non-blocking branch protection, but this gate must refuse final task completion until the first
-push-to-main run at or after the landed SHA has recorded every shard conclusion and timing artifact.
+FNXC:PostMergeAdvisoryDemotion 2026-09-29-14:57:
+FUSI-064 reconciled the post-merge completion contract with the project's own CI policy. The Full
+Suite tier is documented in three places as a non-blocking, advisory post-merge signal
+(docs/testing.md, the .github/workflows/full-suite.yml header, and the thin-trusted-merge-gate
+pattern), so it can no longer be the hard precondition the completion gate demands. This prompt
+therefore treats the landed Full Suite result as RECORDED ADVISORY CONTEXT, never as a reason to
+refuse approval: a red or absent Full Suite run must not hold a cleanly merged card open. The
+prompt still REVISEs for genuine integration problems (merge-proof absence, mismatched merged
+diff, integration-only regressions), which is the signal this check exists to provide. The
+demotion is implemented by the node's `gateMode: "advisory"` (see
+`postMergeVerificationOptionalGroupNode`), which is what actually makes the verdict non-blocking
+in the graph executor and in `getRequiredPostMergeEvidenceBlocker`.
 */
 const POST_MERGE_VERIFICATION_PROMPT = `You are a post-merge verification reviewer. Verify that the task's merged result is safe after integration.
 
@@ -69,19 +87,13 @@ const POST_MERGE_VERIFICATION_PROMPT = `You are a post-merge verification review
 2. Check the final merged diff and task summary for obvious mismatches, missing verification evidence, or integration-only regressions.
 3. If configured test/build commands are available in the task context, inspect their latest result or explain why no post-merge command was applicable.
 
-## Required post-landing Full Suite evidence
-This enabled gate requires post-landing Full Suite evidence. Do NOT approve until its delivery record names all of the following:
-1. The landed SHA and the first Full Suite push-to-main run at or after that SHA, including the run ID and run SHA.
-2. A successful conclusion for Pipeline smoke tier.
-3. A successful conclusion for every Test shard: 1/4, 2/4, 3/4, and 4/4.
-4. All four timing artifacts: test-timings-shard-1, test-timings-shard-2, test-timings-shard-3, and test-timings-shard-4.
-
-Pre-landing, unrelated-main, or partial evidence does not satisfy this contract. If the required run or any required evidence is unavailable, return REVISE and state that final completion remains blocked pending the post-landing evidence. Record verified evidence in the task delivery record before approving.
+## Post-landing Full Suite (advisory)
+The Full Suite and Pipeline smoke tiers are non-blocking post-merge signals, not a merge stopper. If a Full Suite push-to-main run at or after the landed SHA is available, record it as advisory context in your notes: the run ID and run SHA, the Pipeline smoke and Test shard 1/4, 2/4, 3/4, and 4/4 conclusions, and the timing artifacts test-timings-shard-1, test-timings-shard-2, test-timings-shard-3, and test-timings-shard-4. A red or absent Full Suite run is information only and MUST NOT by itself cause a REVISE or withhold approval: this task's completion does not depend on a green Full Suite. Judge the integrated result on its own merits.
 
 ## Output Requirements
 - APPROVE: post-merge verification is acceptable.
-- APPROVE_WITH_NOTES: completion may proceed with non-blocking notes only when every post-landing evidence item above is recorded.
-- REVISE: completion should be blocked; include the concrete post-merge issue and the needed follow-up.
+- APPROVE_WITH_NOTES: completion may proceed with non-blocking notes, including any recorded Full Suite observations.
+- REVISE: the merged result has a concrete post-merge problem; include it and the needed follow-up. Do NOT return REVISE solely because a Full Suite run is red, absent, or partial.
 - \`notes\` MUST contain one to three non-empty sentences naming what was checked and why the verdict was reached. An empty \`notes\` string is a protocol violation.
 - Final output: output exactly one trailing JSON object on the final line (no markdown fences, no surrounding prose):
 {"verdict":"APPROVE|APPROVE_WITH_NOTES|REVISE","notes":"..."}`;
@@ -146,12 +158,24 @@ export function postMergeVerificationOptionalGroupNode(column = "done"): Workflo
     column,
     prompt: POST_MERGE_VERIFICATION_PROMPT,
     description: "Verify the integrated result after merge proof before final completion",
-    gateMode: "gate",
+    /*
+    FNXC:PostMergeAdvisoryDemotion 2026-09-29-14:57:
+    FUSI-064 demoted the built-in post-merge verification from a hard completion gate to an
+    advisory observation. The repository documents the Full Suite tier as a non-blocking
+    post-merge signal, so requiring its lane-conclusion SUCCESS as the sole hard precondition
+    for completion contradicted the project's own stated policy and left a cleanly merged card
+    unable to finalize. `gateMode: "advisory"` is the single change that actually removes the
+    block: both the graph executor (which only treats an enabled `gateMode === "gate"` post-merge
+    group as a required follow-up) and `getRequiredPostMergeEvidenceBlocker` (which collects only
+    `gateMode === "gate"` groups) key on this value. The node still runs and records a
+    `phase: "post-merge"` verdict, so a landed card finalizes on merge confirmation alone while
+    keeping the post-merge audit record.
+    */
+    gateMode: "advisory",
     /*
     FNXC:PostMergeFullSuiteEvidence 2026-09-23-05:04:
-    Post-merge evidence is a delivery boundary, not an advisory observation. Seed this gate for
-    merge-capable built-ins so completion cannot claim GitHub-hosted Full Suite success before the
-    landed run has proved Pipeline smoke, every shard, and each timing artifact.
+    Keep the post-merge verification seeded for merge-capable built-ins so the integrated result
+    still receives an observed verdict after merge proof.
     */
     defaultOn: true,
   });

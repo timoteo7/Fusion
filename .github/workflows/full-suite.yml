@@ -7,6 +7,9 @@ name: Full Suite (non-blocking)
 # to branch-protection required checks. A red run here is information, not a
 # merge stopper; see docs/testing.md for the quarantine ratchet that keeps
 # this tier honest.
+# A red run here is also not a task-completion blocker: the built-in
+# post-merge verification is an advisory observation (FUSI-064), so a merged
+# card finalizes on merge proof regardless of this tier's result.
 
 on:
   push:

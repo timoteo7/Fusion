@@ -299,12 +299,25 @@ describe("built-in workflows", () => {
       });
       const template = postMerge?.config?.template as { nodes?: Array<{ config?: Record<string, unknown> }> } | undefined;
       const postMergeStep = template?.nodes?.[0]?.config;
-      expect(postMergeStep?.gateMode, workflow.id).toBe("gate");
-      expect(postMergeStep?.prompt, workflow.id).toContain("first Full Suite push-to-main run at or after that SHA");
-      expect(postMergeStep?.prompt, workflow.id).toContain("successful conclusion for Pipeline smoke tier");
+      /*
+      FNXC:PostMergeAdvisoryDemotion 2026-09-29-14:57:
+      FUSI-064 reconciled the post-merge completion contract with the project's own CI policy. The
+      built-in post-merge verification is now an ADVISORY observation, not a hard completion gate:
+      it runs and records a `phase: "post-merge"` verdict, but it must not refuse finalization. The
+      single `gateMode` value is what makes it non-blocking (both the graph executor and
+      `getRequiredPostMergeEvidenceBlocker` key on `gateMode === "gate"`). The prompt must
+      therefore treat a red/absent Full Suite run as advisory context and refuse to withhold
+      approval on it — pinning that here keeps the code, the tests, and the docs in one position.
+      */
+      expect(postMergeStep?.gateMode, workflow.id).toBe("advisory");
+      // The prompt still surfaces the landed Full Suite run as advisory context...
+      expect(postMergeStep?.prompt, workflow.id).toContain("Full Suite push-to-main run at or after the landed SHA");
       expect(postMergeStep?.prompt, workflow.id).toContain("test-timings-shard-1");
       expect(postMergeStep?.prompt, workflow.id).toContain("test-timings-shard-4");
-      expect(postMergeStep?.prompt, workflow.id).toContain("Do NOT approve until");
+      // ...but it must no longer hold completion hostage to a red or absent run.
+      expect(postMergeStep?.prompt, workflow.id).toContain("MUST NOT by itself cause a REVISE");
+      expect(postMergeStep?.prompt, workflow.id).toContain("Do NOT return REVISE solely because a Full Suite run is red");
+      expect(postMergeStep?.prompt, workflow.id).not.toContain("Do NOT approve until");
       expect(workflow.ir.edges, `${workflow.id}:post-merge-entry`).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ from: mergeNode.id, to: "post-merge-verification", condition: "success" }),
