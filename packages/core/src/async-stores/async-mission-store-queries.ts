@@ -1113,6 +1113,83 @@ export async function updateFeature(handle: QueryHandle, feature: MissionFeature
     .where(and(missionProjectScope(schema.project.missionFeatures.projectId), eq(schema.project.missionFeatures.id, feature.id)));
 }
 
+/**
+ * FNXC:MissionFeatureNoopWrite 2026-09-19-05:48:
+ * The column set of `updateFeature` above is the authoritative answer to "would this write change
+ * anything". Both sides are pushed through that writer's own `?? null` / `?? "idle"` / `?? 0`
+ * normalisation, so a caller supplying `undefined` for an optional column is never misread as a
+ * change; `updatedAt` is excluded by construction because the boundary stamps it on every call.
+ * `specAlignment` is deliberately absent: this writer does not persist it, so treating it as a
+ * persisted column would make its guard unsatisfiable and produce a write on every pass.
+ *
+ * The only fields outside the set are `id`, `sliceId`, `createdAt` (identity, never rewritten) and
+ * the module-level derived `specAlignment` (see above).
+ */
+function normalizeFeaturePersistedColumns(feature: MissionFeature) {
+  return {
+    taskId: feature.taskId ?? null,
+    title: feature.title,
+    description: feature.description ?? null,
+    acceptanceCriteria: feature.acceptanceCriteria ?? null,
+    status: feature.status,
+    loopState: feature.loopState ?? "idle",
+    implementationAttemptCount: feature.implementationAttemptCount ?? 0,
+    validatorAttemptCount: feature.validatorAttemptCount ?? 0,
+    implementationStopReason: feature.implementationStopReason ?? null,
+    implementationStoppedAt: feature.implementationStoppedAt ?? null,
+    implementationStopOrigin: feature.implementationStopOrigin ?? null,
+    validationBudgetFingerprint: feature.validationBudgetFingerprint ?? null,
+    validationBudgetRunId: feature.validationBudgetRunId ?? null,
+    validationBudgetBlockedAt: feature.validationBudgetBlockedAt ?? null,
+    lastValidatorRunId: feature.lastValidatorRunId ?? null,
+    lastValidatorStatus: feature.lastValidatorStatus ?? null,
+    generatedFromFeatureId: feature.generatedFromFeatureId ?? null,
+    generatedFromRunId: feature.generatedFromRunId ?? null,
+    researchRunId: feature.researchProvenance?.researchRunId ?? null,
+    researchFindingId: feature.researchProvenance?.findingId ?? null,
+    researchSourceUrls: feature.researchProvenance?.sourceUrls ?? null,
+  };
+}
+
+/** Ordered URL comparison: the writer persists the array by value, so equality must be structural. */
+function sameSourceUrls(left: readonly string[] | null, right: readonly string[] | null): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((url, index) => url === right[index]);
+}
+
+/**
+ * FNXC:MissionFeatureNoopWrite 2026-09-19-05:48:
+ * True when `updateFeature` above would persist at least one column change. Callers use this to
+ * refuse a semantically empty write instead of rewriting the whole row and stamping `updatedAt`.
+ * A false negative would drop a real change, so every persisted column is compared.
+ */
+export function featurePersistedColumnsChanged(before: MissionFeature, after: MissionFeature): boolean {
+  const pre = normalizeFeaturePersistedColumns(before);
+  const next = normalizeFeaturePersistedColumns(after);
+  return pre.taskId !== next.taskId
+    || pre.title !== next.title
+    || pre.description !== next.description
+    || pre.acceptanceCriteria !== next.acceptanceCriteria
+    || pre.status !== next.status
+    || pre.loopState !== next.loopState
+    || pre.implementationAttemptCount !== next.implementationAttemptCount
+    || pre.validatorAttemptCount !== next.validatorAttemptCount
+    || pre.implementationStopReason !== next.implementationStopReason
+    || pre.implementationStoppedAt !== next.implementationStoppedAt
+    || pre.implementationStopOrigin !== next.implementationStopOrigin
+    || pre.validationBudgetFingerprint !== next.validationBudgetFingerprint
+    || pre.validationBudgetRunId !== next.validationBudgetRunId
+    || pre.validationBudgetBlockedAt !== next.validationBudgetBlockedAt
+    || pre.lastValidatorRunId !== next.lastValidatorRunId
+    || pre.lastValidatorStatus !== next.lastValidatorStatus
+    || pre.generatedFromFeatureId !== next.generatedFromFeatureId
+    || pre.generatedFromRunId !== next.generatedFromRunId
+    || pre.researchRunId !== next.researchRunId
+    || pre.researchFindingId !== next.researchFindingId
+    || !sameSourceUrls(pre.researchSourceUrls, next.researchSourceUrls);
+}
+
 /** Delete a feature by id. Returns true if deleted. */
 export async function deleteFeature(handle: QueryHandle, id: string): Promise<boolean> {
   const result = await handle

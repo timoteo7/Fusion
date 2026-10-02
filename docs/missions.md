@@ -334,6 +334,28 @@ Fusion keeps a canonical per-feature assertion invariant in `MissionStore`:
 - `deleteFeature()` removes the store-managed assertion to avoid orphaned rows.
 - This applies to all creation paths (interview import, API, CLI, tools).
 
+#### Semantic no-op writes perform nothing
+
+`updateFeature()` (and therefore `updateFeatureStatus()` and `transitionLoopState()`, which funnel
+through it) writes no row when every column it persists already equals the locked pre-image. A
+suppressed call emits no `feature:updated`, records no status event, triggers no slice rollup, and
+leaves `updatedAt` untouched; it returns the existing feature unchanged. Optional columns supplied
+as `undefined` are compared through the writer's own `?? null` / `?? "idle"` / `?? 0` defaults, so
+they never register as a change on their own.
+
+Two consequences worth knowing:
+
+- `updatedAt` is meaningful again: it moves only when something actually changed, so a fleet of
+  features whose `updatedAt` keeps advancing is a real signal instead of reconcile-pass background.
+- A pass that keeps re-issuing the same projection converges instead of writing forever. The row
+  lock (`SELECT … FOR UPDATE`) is still taken on every call, including suppressed ones, and the
+  assertion sync above still runs whenever `title`, `description`, or `acceptanceCriteria` are
+  supplied even when their values are unchanged.
+
+Set `FUSION_DEBUG=core-async-mission-store` to log one diagnostic line per suppressed write, naming
+the feature, the slice, the fields the caller supplied, and the caller stack. It is the forensic
+seam for a future rewrite storm and has no durable sink.
+
 Assertion text source priority is: `acceptanceCriteria` → `feature.description` → fallback text (`"Verify implementation of: {feature.title}"`).
 
 **Operator repair note (FN-5696):** Some databases created before the feature-create-path fix could show feature `acceptanceCriteria`/`description` in the UI but still have zero `mission_feature_assertions` links, which caused validator auto-pass short-circuits. Use the built-in backfill operator surfaces instead of ad-hoc scripts:

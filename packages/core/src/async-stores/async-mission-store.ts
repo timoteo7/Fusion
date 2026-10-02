@@ -169,6 +169,7 @@ import {
   clearTaskMissionLinkage,
   listFailedTaskIds,
   recordGeneratedFixOperatorStop,
+  featurePersistedColumnsChanged,
 } from "./async-mission-store-queries.js";
 
 // ════════════════════════════════════════════════════════════════════
@@ -1239,11 +1240,58 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
     return locked.length > 0 ? getFeature(tx, id) : undefined;
   }
 
+  /**
+   * FNXC:MissionFeatureNoopWrite 2026-09-19-05:48:
+   * Permanent forensic seam for the periodic no-op write storm. It records which caller asked for a
+   * semantically empty write, never values, and is inert unless `FUSION_DEBUG` selects
+   * `core-async-mission-store`. A debug line is the whole telemetry story: no durable sink, no
+   * event, and never a failure in the write path.
+   */
+  private logNoopFeatureWrite(feature: MissionFeature, updates: Partial<MissionFeature>, callerStack?: string): void {
+    try {
+      const suppliedFields = Object.keys(updates).sort().join(",");
+      const stack = callerStack ?? new Error("mission-store no-op feature write").stack;
+      const frames = (stack ?? "").split("\n").slice(1, 7).map((frame) => frame.trim()).join(" <- ");
+      severityAuditLog.debug(`no-op feature write feature=${feature.id} slice=${feature.sliceId} suppliedFields=[${suppliedFields}] caller=${frames}`);
+    } catch {
+      /* Diagnostics must never break a mission write. */
+    }
+  }
+
   async updateFeature(id: string, updates: Partial<MissionFeature>, options: MissionUpdateOptions = {}): Promise<MissionFeature> {
-    const { updated, event, taskIdChanged, statusChanged } = await this.layer.transactionImmediate(async (tx) => {
+    /*
+    The caller stack has to be taken at entry, before the first await: once the transaction's
+    continuation is running, V8's stack no longer holds the calling frame and a stack built there
+    names only this method, never the writer. It is only built when a FUSION_DEBUG value is present
+    (the logger still decides whether the line is emitted), so the hot path pays nothing by default.
+    */
+    const callerStack = process.env.FUSION_DEBUG?.trim() ? new Error("mission-store feature write").stack : undefined;
+    const { updated, event, written, taskIdChanged, statusChanged } = await this.layer.transactionImmediate(async (tx) => {
       const feature = await this.getFeatureForStatusWrite(tx, id);
       if (!feature) throw new Error(`Feature ${id} not found`);
       const updated: MissionFeature = { ...feature, ...updates, id, sliceId: feature.sliceId, createdAt: feature.createdAt, updatedAt: new Date().toISOString() };
+      /*
+      FNXC:MissionFeatureNoopWrite 2026-09-19-05:48:
+      A write whose persisted columns are byte-identical to the locked pre-image is not a write. The
+      storm this replaces rewrote every taskId-bearing feature of a mission in a fixed order, twice
+      per ~296 s period (two independently-started 300 s reconcile timers, ~3-7 s apart, 7 rows per
+      sweep; >=2.8 writes/s at the 2026-09-16 07:00Z peak), stamping a fresh `updatedAt`, churning
+      `UPDATE`/`COMMIT` on the embedded Postgres, and pushing a `feature:updated` frame for every
+      row so dashboards re-rendered while `updatedAt` stopped meaning anything. Observed caller:
+      the spec-alignment projection at `mission-state-reconcile.ts:289`, whose guard compares
+      `feature.specAlignment` against the computed alignment but is unsatisfiable because this
+      writer does not persist `specAlignment`, so it re-issued the same empty write on every pass.
+      The precedent is FNXC:MissionFeatureUnlinkContract 2026-08-19-21:24, which rejected a silent
+      repair branch precisely because it still rewrote the row and recorded a status event.
+      Contract: a semantic no-op writes no row, stamps no `updatedAt`, emits no `feature:updated`,
+      records no status event, and triggers no slice rollup. The row lock above is still taken on
+      every call, and `updates` presence alone (title/description/acceptanceCriteria) still drives
+      assertion sync.
+      */
+      if (!featurePersistedColumnsChanged(feature, updated)) {
+        this.logNoopFeatureWrite(feature, updates, callerStack);
+        return { updated: feature, event: undefined, written: false, taskIdChanged: false, statusChanged: false };
+      }
       await updateFeature(tx, updated);
       const event = updates.status !== undefined ? await this.recordFeatureStatusChange(tx, feature, updates.status, options.actor, options.reason) : undefined;
       // FNXC:MissionStatusWrites 2026-08-10-13:32: Preserve no-op PATCH behavior:
@@ -1251,11 +1299,12 @@ export class AsyncMissionStore extends EventEmitter<MissionStoreEvents> {
       return {
         updated,
         event,
+        written: true,
         taskIdChanged: updates.taskId !== undefined && updates.taskId !== feature.taskId,
         statusChanged: updates.status !== undefined && updates.status !== feature.status,
       };
     });
-    this.emit("feature:updated", updated);
+    if (written) this.emit("feature:updated", updated);
     if (event) this.emit("mission:event", event);
     if (taskIdChanged || statusChanged) await this.recomputeSliceStatus(updated.sliceId);
     const shouldSyncAssertion = updates.title !== undefined || updates.description !== undefined || updates.acceptanceCriteria !== undefined;
