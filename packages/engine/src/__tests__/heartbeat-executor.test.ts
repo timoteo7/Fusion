@@ -1728,6 +1728,55 @@ describe("executeHeartbeat", () => {
       expect(toolNames).not.toContain("fn_task_document_read");
     });
 
+    /*
+    FNXC:AmbientColumnMove 2026-10-02-02:35:
+    FUSI-072. THE NO-TASK BRANCH HAD NO EXACT-COUNT ASSERTION AT ALL, and that absence is the only reason
+    an entire tool CATEGORY could go missing from one branch without a single test going red. The task-bound
+    branch pinned `toHaveLength(70)` plus an ordered name list precisely so new tools fail loudly; the
+    no-task branch pinned nothing, so `fn_task_promote`, `fn_task_update`, and every other task-scoped tool
+    could simply be absent and the suite stayed green. The wall survived because nothing counted.
+
+    Baseline measured by enumeration at runtime on 2026-10-02 (not by reading source): 64 tools for this
+    exact fixture. Count rose 64→65 with `fn_task_column_move`; keep exact so a future refactor cannot
+    quietly add OR drop a tool here.
+
+    The count is a property of THIS fixture, not of the branch alone. `fn_send_message` / `fn_read_messages`
+    (no messageStore), `fn_post_room_message` (no chatStore), and `fn_reflect_on_performance` (no
+    reflectionService) are absent because the fixture supplies none of those stores. Asserting against a
+    no-task run that DOES supply them would encode a different number, so the count is deliberately bound
+    to the bare monitor below.
+    */
+    it("no-task run exposes the governed ambient column move and pins its exact tool list", async () => {
+      const store = createStoreWithAgentForExec({ taskId: undefined, soul: "I am a coordinator" });
+      const mockSession = createMockAgentSession();
+      mockedCreateFnAgent.mockResolvedValue({ session: mockSession as any });
+
+      const monitor = new HeartbeatMonitor({ store, taskStore: mockTaskStore, rootDir: "/tmp" });
+
+      await monitor.executeHeartbeat({ agentId: "agent-001", source: "timer" });
+
+      expect(mockedCreateFnAgent).toHaveBeenCalledOnce();
+      const callArgs = mockedCreateFnAgent.mock.calls[0]![0]!;
+      const toolNames = callArgs.customTools!.map((tool: any) => tool.name);
+
+      // The ambient review-lane column move this card was opened to add. Without it every finished card
+      // is stranded in review for every no-task agent and only a human can close it.
+      expect(toolNames).toContain("fn_task_column_move");
+
+      // Exact, not a lower bound: the point is that a refactor cannot silently reshape this branch.
+      expect(toolNames).toHaveLength(65);
+
+      // The task-scoped near-misses stay absent. This tool is the ONLY column move ambient runs get;
+      // promoting a held card and updating the current task's steps remain task-bound capabilities.
+      expect(toolNames).not.toContain("fn_task_promote");
+      expect(toolNames).not.toContain("fn_task_update");
+      // No other lifecycle mutation leaked into the ambient surface.
+      expect(toolNames).not.toContain("fn_task_archive");
+      expect(toolNames).not.toContain("fn_task_delete");
+      expect(toolNames).not.toContain("fn_task_retry");
+      expect(toolNames).not.toContain("fn_task_unpause");
+    });
+
     it("no-task run receives HEARTBEAT_NO_TASK_SYSTEM_PROMPT as system prompt", async () => {
       const store = createStoreWithAgentForExec({ taskId: undefined, soul: "I am a coordinator" });
       const mockSession = createMockAgentSession();
