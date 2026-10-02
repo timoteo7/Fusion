@@ -20,13 +20,18 @@ import {
   resolvePrebuildMode,
 } from "./dev-with-memory-lib.mjs";
 import { existsSync as fsExistsSync, mkdirSync as fsMkdirSync } from "node:fs";
+import { totalmem as osTotalmem } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join as pathJoin, resolve as pathResolve } from "node:path";
 import { createDevSourceWatcher } from "./lib/dev-source-watch.mjs";
 import { resolveDevTunnelAuth, startDevTunnel } from "./lib/dev-tunnel.mjs";
 
-// Set increased heap size (8GB) to prevent OOM during initial build/start
-const MEMORY_MB = process.env.FUSION_DEV_MEMORY_MB || "8192";
+// Set increased heap size to prevent OOM during initial build/start.
+// FNXC:DevMemoryCap 2026-09-23-23:34: the old `|| "8192"` was sized after one workstation, so a 12GB
+// box handed every node child an 8GB heap ceiling and V8 would happily hold it. Derive the ceiling
+// from the machine (half of RAM, clamped to 1-8GB) and keep FUSION_DEV_MEMORY_MB as the override.
+const MEMORY_MB = process.env.FUSION_DEV_MEMORY_MB
+  || String(Math.min(8192, Math.max(1024, Math.floor(osTotalmem() / 1024 / 1024 / 2))));
 
 // Spawn the actual dev command with all arguments passed through
 const { spawn } = await import("child_process");
@@ -43,7 +48,12 @@ let { watchSource } = parsedArgs;
 
 // NODE_OPTIONS is shared with every spawned node process (build + run +
 // agents). Heap size belongs here. Inspector flags do NOT — see comment above.
-const nodeOptions = `--max-old-space-size=${MEMORY_MB} ${process.env.NODE_OPTIONS || ""}`.trim();
+// Never emit the flag twice: callers such as ~/.fusion/start-capped.sh already pin a tighter
+// `--max-old-space-size`, and precedence between repeated V8 flags is not worth relying on.
+const inheritedNodeOptions = process.env.NODE_OPTIONS || "";
+const nodeOptions = inheritedNodeOptions.includes("--max-old-space-size")
+  ? inheritedNodeOptions
+  : `--max-old-space-size=${MEMORY_MB} ${inheritedNodeOptions}`.trim();
 process.env.NODE_OPTIONS = nodeOptions;
 
 // In dev we bind the dashboard to 0.0.0.0 so the server is reachable from

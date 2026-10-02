@@ -29,7 +29,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --build --noEmit",
     "test": "vitest run --silent=passed-only --reporter=dot --project=engine-default --project=engine-reliability",
     "test:core": "vitest run --silent=passed-only --reporter=dot --project=engine-core",
     "test:slow": "vitest run --silent=passed-only --reporter=dot --project=engine-slow",

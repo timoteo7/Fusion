@@ -5,6 +5,22 @@ ignoredBuiltDependencies:
   - keytar
   - sharp
   - ssh2
+# FNXC:WorkspaceConcurrency 2026-09-23: Cap a single `pnpm -r` run at 2 packages so its tsc workers
+# (500MB-1.4GB each) cannot thrash a 12GB desktop. pnpm 10.33 ignores the ~/.npmrc workspace-concurrency
+# key entirely (it echoes the value but behavior stays at the 4-project default); this key is the live
+# channel, verified with a process-overlap bench (peak 4 -> 2).
+# Scope limit (measured 2026-09-23): this only bounds ONE `pnpm -r` invocation. verify:fast spawns one
+# `pnpm --filter <pkg> typecheck` process per changed package and bypasses it — that 4-wide fan-out is
+# what froze the desktop twice (PSI memory full 80%), and it is bounded by TYPECHECK_PARALLEL_LIMIT in
+# scripts/verify-fast.mjs. Do not treat this key as the fan-out guard.
+# Why it lives here as a constant: pnpm 10 has no live env channel for this knob (~/.npmrc,
+# npm_config_workspace_concurrency and pnpm_config_* are all silently ignored), and this manifest is
+# the only backstop for an ad-hoc `pnpm -r` that no script wraps. Treat it as a blunt guardrail for
+# small boxes, not a project requirement — override per command with --workspace-concurrency on a
+# larger machine. Callers this repo owns already do the better thing: scripts/test-changed.mjs derives
+# the value from FUSION_TEST_WORKSPACE_CONCURRENCY and passes the flag explicitly.
+workspaceConcurrency: 2
+
 onlyBuiltDependencies:
   - '@embedded-postgres/darwin-arm64'
   - '@embedded-postgres/darwin-x64'
