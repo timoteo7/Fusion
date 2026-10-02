@@ -10,7 +10,19 @@ export interface TrackedPr {
   repo: string;
   prInfo: PrInfo;
   lastCheckedAt: Date;
-  lastCommentId?: number;
+  /*
+  FNXC:ReviewItemIdentity 2026-10-02-04:00:
+  RENAMED from `lastCommentId` to `lastCommentSequence`, and this field's CONTRACT CHANGED with it.
+
+  It was never an identity field. Nothing here tests equality; `checkForComments` compares with `>`
+  and reduces with `Math.max`, so the contract is MONOTONIC INCREASE. When `id` became an opaque
+  node-id string that contract broke twice over: a new comment whose id sorts lexicographically below
+  the watermark was silently dropped, and `Math.max(...)` over strings is `NaN` — falsy — so the
+  newness guard fell through to the all-comments branch on EVERY poll and re-delivered the whole set
+  forever. The name change is load-bearing: `lastCommentId` invites the exact misuse this field now
+  forbids. The comment key belongs on the item identity, never here.
+  */
+  lastCommentSequence?: number;
   consecutiveErrors: number;
   isActive: boolean; // true if we've seen recent activity
   /** Buffered comments collected since last drain, used for follow-up task creation. */
@@ -18,11 +30,26 @@ export interface TrackedPr {
 }
 
 export interface PrComment {
-  id: number;
+  /*
+  FNXC:ReviewItemIdentity 2026-10-02-04:00:
+  `id` WAS `number`, WHICH THE TRANSPORT NEVER ACTUALLY SUPPLIED ON THE `gh` CLI PATH.
+
+  REST supplies a real numeric id (`5884072859`); `gh pr view --json comments` supplies a GraphQL
+  node id (`IC_kwDOT5Q-Ec8AAAABXrfTmw`). The declared type did not match reality on one of its two
+  transports, which is how `parseInt` came to be there and returned `NaN`.
+
+  `id` is now the IDENTITY role — opaque, compared only for equality when building the review-item
+  key — and `sequence` is the ORDER role, the numeric monotonic value `TrackedPr.lastCommentSequence`
+  compares. Keeping them on separate fields is the whole point: one opaque string cannot serve both.
+  */
+  id: string | number;
+  /** Monotonic ordering value. Compared with `>` and reduced with `Math.max` — never a string. */
+  sequence: number;
   body: string;
   user: { login: string };
   created_at: string;
-  updated_at: string;
+  /** Absent on the `gh` transport, which carries no `updatedAt` for a top-level PR comment. */
+  updated_at?: string;
   html_url: string;
 }
 
@@ -95,7 +122,7 @@ export class PrMonitor {
       repo,
       prInfo,
       lastCheckedAt: new Date(),
-      lastCommentId: undefined,
+      lastCommentSequence: undefined,
       consecutiveErrors: 0,
       isActive: true, // Start as active
       bufferedComments: [],
@@ -211,9 +238,20 @@ export class PrMonitor {
         since,
       });
 
-      // Filter to only new comments (by ID)
-      const newComments = tracked.lastCommentId
-        ? comments.filter((c) => c.id > tracked.lastCommentId!)
+      /*
+      FNXC:ReviewItemIdentity 2026-10-02-04:00:
+      NEWNESS IS DECIDED ON `sequence`, NEVER ON THE OPAQUE KEY.
+
+      The filter is a RELATIONAL compare, not an equality test, so its input must be a total order
+      that tracks creation time. `id` is an opaque node id on the `gh` transport: comparing it with
+      `>` orders lexicographically, which silently drops genuinely-new comments that happen to sort
+      below the watermark, and reducing it with `Math.max` yields `NaN`, which is falsy and sends this
+      same guard down the all-comments branch on every poll — re-buffering and re-firing the entire
+      comment set each tick. `sequence` is monotonic in real time by construction, so both failure
+      modes disappear together.
+      */
+      const newComments = tracked.lastCommentSequence !== undefined
+        ? comments.filter((c) => c.sequence > tracked.lastCommentSequence!)
         : comments;
 
       if (newComments.length > 0) {
@@ -221,9 +259,9 @@ export class PrMonitor {
           `Found ${newComments.length} new comment(s) on PR #${tracked.prInfo.number}`
         );
 
-        // Update lastCommentId
-        const maxId = Math.max(...newComments.map((c) => c.id));
-        tracked.lastCommentId = maxId;
+        // Advance the watermark on the ORDER value, so it only ever moves forward.
+        const maxSequence = Math.max(...newComments.map((c) => c.sequence));
+        tracked.lastCommentSequence = maxSequence;
 
         // Buffer comments for potential follow-up task creation on PR close/merge
         tracked.bufferedComments.push(...newComments);

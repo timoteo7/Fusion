@@ -772,6 +772,49 @@ describe("GitHubClient", () => {
       expect(result[0].id).toBe(200);
     });
 
+    /*
+    FNXC:ReviewItemIdentity 2026-09-29-10:40:
+    `gh pr view --json comments` returns a GraphQL NODE id (`IC_…`), not the REST numeric id. The
+    historical `parseInt(c.id, 10)` turned every CLI-sourced comment into `NaN`, so two distinct
+    comments collapsed onto the single constant review key `gh-comment-NaN` and `upsertReviewItem`
+    overwrote one reviewer with the other. The fixtures above use numeric strings ("100"/"200"),
+    which is why the green suite never exercised the defect — this case feeds real-shaped node ids
+    so it fails on the pre-fix tree.
+    */
+    it("gives two node-id comments distinct non-NaN ids through the gh transport", async () => {
+      mockRunGhJsonAsync.mockResolvedValue({
+        comments: [
+          {
+            id: "IC_kwDOT5Q-Ec8AAAABXrfTmw",
+            body: "Please rename this local variable.",
+            author: { login: "reviewer1" },
+            createdAt: "2024-01-01T00:00:00Z",
+            updatedAt: "2024-01-01T00:00:00Z",
+            url: "https://github.com/owner/repo/pull/42#issuecomment-1",
+          },
+          {
+            id: "IC_kwDOT5Q-Ec8AAAABXrfTmz",
+            body: "This branch also needs a regression test.",
+            author: { login: "reviewer2" },
+            createdAt: "2024-01-02T00:00:00Z",
+            updatedAt: "2024-01-02T00:00:00Z",
+            url: "https://github.com/owner/repo/pull/42#issuecomment-2",
+          },
+        ],
+      });
+
+      const result = await client.listPrComments("owner", "repo", 42);
+
+      expect(result).toHaveLength(2);
+      // Identity, not label: a NaN id (or any shared sentinel) makes these two equal.
+      expect(result[0].id).not.toBe(result[1].id);
+      expect(String(result[0].id)).not.toBe("NaN");
+      expect(String(result[1].id)).not.toBe("NaN");
+      // Stable: the same node id must map to the same value on every read.
+      const repeat = await client.listPrComments("owner", "repo", 42);
+      expect(repeat[0].id).toBe(result[0].id);
+    });
+
     it("returns empty array when no comments", async () => {
       mockRunGhJsonAsync.mockResolvedValue({ comments: [] });
 

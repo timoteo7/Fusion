@@ -16,6 +16,13 @@ import {
   mergeIngestedCheckStates,
   type IngestedCheckState,
 } from "@fusion/core";
+/*
+FNXC:ReviewItemIdentity 2026-10-02-04:00:
+Imported (not defined here) so the dashboard and engine resolve a PR comment's identity through ONE
+definition. Each package carrying a private copy of the `gh` payload mapping is exactly what let the
+twin `parseInt(c.id, 10)` defect exist unnoticed in two places.
+*/
+import { resolvePrCommentIdentity } from "@fusion/core";
 import { ALLOWED_IMAGE_MIMES, MAX_IMAGE_BYTES } from "./issue-image-attachments.js";
 
 const execAsync = promisify(exec);
@@ -348,11 +355,26 @@ export interface CreatedDiscussion {
 }
 
 export interface PrComment {
-  id: number;
+  /*
+  FNXC:ReviewItemIdentity 2026-10-02-04:00:
+  `id` WAS `number`, WHICH THIS TRANSPORT NEVER SUPPLIED. `gh pr view --json comments` returns a
+  GraphQL NODE id (`IC_kwDOT5Q-Ec8AAAABXrfTmw`), so the historical `parseInt(c.id, 10)` in
+  `listPrCommentsWithGh` produced `NaN` for every CLI-sourced comment and the downstream key
+  collapsed to the constant `gh-comment-NaN`.
+
+  Split into two roles exactly as the engine twin does, because the two transports genuinely disagree
+  on the TYPE of the same field: `listPrCommentsWithApi` (REST) supplies a real number,
+  `listPrCommentsWithGh` supplies an opaque node id. `id` is the identity key; `sequence` is the
+  monotonic order value. One opaque string cannot serve both roles.
+  */
+  id: string | number;
+  /** Monotonic ordering value; a number on both transports, never a string. */
+  sequence: number;
   body: string;
   user: { login: string };
   created_at: string;
-  updated_at: string;
+  /** Absent on the `gh` transport, which carries no `updatedAt` for a top-level PR comment. */
+  updated_at?: string;
   html_url: string;
 }
 
@@ -546,7 +568,14 @@ interface GhPrViewJson {
     body: string;
     author: { login: string };
     createdAt: string;
-    updatedAt: string;
+    /*
+    FNXC:ReviewItemIdentity 2026-10-02-04:00:
+    Declared optional because the live `gh pr view --json comments` payload does NOT carry `updatedAt`
+    for a top-level PR comment (measured keys: author, authorAssociation, body, createdAt, id,
+    includesCreatedEdit, isMinimized, minimizedReason, reactionGroups, url, viewerDidAuthor). It was
+    typed required, so code reading it looked sound while receiving `undefined` at runtime.
+    */
+    updatedAt?: string;
     url: string;
   }>;
   reviews?: GhReviewJson[];
@@ -2982,22 +3011,49 @@ export class GitHubClient {
       "--json", "comments",
     ]);
 
-    let comments = pr.comments.map((c: GhPrViewJson["comments"][number]) => ({
-      id: parseInt(c.id, 10),
-      body: c.body,
-      user: { login: c.author.login },
-      created_at: c.createdAt,
-      updated_at: c.updatedAt,
-      html_url: c.url,
-    }));
+    /*
+    FNXC:ReviewItemIdentity 2026-10-02-04:00:
+    THE DASHBOARD TWIN OF pr-monitor-gh.ts — THEY MOVE TOGETHER, ALWAYS.
+
+    `gh pr view --json comments` returns a GraphQL NODE id (`IC_kwDOT5Q-Ec8AAAABXrfTmw`), not the REST
+    numeric id, so `parseInt(c.id, 10)` produced `NaN` for every CLI-sourced comment and the review key
+    collapsed to the constant `gh-comment-NaN`.
+
+    This surface has no production caller today (its only references are the definition and tests), so
+    a fix confined to it would be green everywhere and change nothing on the board. It is fixed anyway
+    because it is a public method that WOULD reintroduce the collapse the moment it gained a caller,
+    and because the engine twin it duplicates is precisely what let this defect survive unnoticed in two
+    places. Identity (`id`, opaque) and order (`sequence`, numeric) are resolved separately here too.
+    */
+    const resolved: Array<{ comment: PrComment; sequence: number }> = [];
+    for (const c of pr.comments as GhPrViewJson["comments"][number][]) {
+      try {
+        const { key, sequence } = resolvePrCommentIdentity({ id: c.id, createdAt: c.createdAt });
+        resolved.push({
+          sequence,
+          comment: {
+            id: key,
+            sequence,
+            body: c.body,
+            user: { login: c.author.login },
+            created_at: c.createdAt,
+            html_url: c.url,
+          },
+        });
+      } catch {
+        // A comment we cannot identify is skipped, never filed under an invented shared key.
+      }
+    }
+
+    let comments = resolved;
 
     // Filter by timestamp if since is provided
     if (since) {
       const sinceDate = new Date(since);
-      comments = comments.filter((c: PrComment) => new Date(c.created_at) > sinceDate);
+      comments = comments.filter((entry) => new Date(entry.comment.created_at) > sinceDate);
     }
 
-    return comments;
+    return comments.map((entry) => entry.comment);
   }
 
   private async listPrCommentsWithApi(
@@ -3026,7 +3082,16 @@ export class GitHubClient {
       throw new Error(`GitHub API error: ${response.status} ${error.message || response.statusText}`);
     }
 
-    return response.json() as Promise<PrComment[]>;
+    /*
+      The REST twin. Its ids are REAL numeric ids (e.g. 5884072859) and are strictly monotonic, so
+      they resolve to themselves for BOTH roles — the key stays numeric and unchanged for the
+      already-correct snapshot builders, and the sequence needs no separate derivation.
+    */
+    const payload = (await response.json()) as Array<Omit<PrComment, "sequence"> & { id: string | number }>;
+    return payload.map((comment) => {
+      const { key, sequence } = resolvePrCommentIdentity({ id: comment.id, createdAt: comment.created_at });
+      return { ...comment, id: key, sequence };
+    });
   }
 
   /**

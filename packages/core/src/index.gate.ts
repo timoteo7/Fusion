@@ -207,6 +207,18 @@ export {
   type ResolvedAgentMemoryInclusionMode,
 } from "./agents/agent-memory-mode.js";
 export type { TaskReviewData, TaskReviewSummary, TaskReviewItem, TaskReviewVerdict, TaskReviewerType } from "./types.js";
+/* FNXC:ReviewItemIdentity 2026-10-02-04:00: mirrors the index.ts resolver export so the curated gate entry keeps the same public surface. */
+export {
+  resolvePrCommentIdentity,
+  buildPrCommentReviewItemId,
+  PrCommentIdentityError,
+} from "./types/task/task-review.js";
+export type {
+  PrCommentIdentity,
+  PrCommentIdentityInput,
+  PrCommentIdentityKey,
+  PrCommentIdentitySequence,
+} from "./types/task/task-review.js";
 export type {
   TaskCommitAssociation,
   TaskCommitAssociationConfidence,
