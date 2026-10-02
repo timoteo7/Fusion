@@ -289,6 +289,30 @@ function formatErrorDetails(error: unknown): { message: string; detail: string }
 }
 
 /*
+FNXC:MergeFailureLogFields 2026-09-28-08:30:
+A failed merge must say why it failed. The merge-failure producers used to
+interpolate the whole `git rebase` stderr into `action` — the field an operator
+reads — while the `outcome` field, the one meant to hold the diagnostic, held a
+bare classification code or `err.name` (the literal string "Error"). One card
+recorded the same 5 KB of skip warnings across ten entries and still could not
+say which commit conflicted.
+
+So: `action` keeps its leading sentence byte-identical (prefix matchers depend on
+it) plus the command output's first line, which names the failing command; the
+full payload goes to `outcome`, where the store's structure-aware compactor keeps
+the failure tail that carries the reason. An existing `code` is kept as the
+outcome's first line so the classification still reads off the entry. This
+changes field allocation only — no classification, retry, or column logic.
+*/
+function mergeFailureLogFields(sentence: string, detail: string, code?: string): { action: string; outcome: string } {
+  const firstLine = detail.split("\n", 1)[0]?.trim() ?? "";
+  return {
+    action: firstLine ? `${sentence}: ${firstLine}` : sentence,
+    outcome: code ? `${code}\n${detail}` : detail,
+  };
+}
+
+/*
 FNXC:Workspace 2026-06-22-05:10 (Phase C review B6 — unify partial-land retry seam):
 The workspace PARTIAL-land retry decision (some sub-repos landed, one failed) is the SAME
 arithmetic as the conflict-retry decision MINUS the `autoResolveConflicts` gate (a partial
@@ -5237,12 +5261,13 @@ export class ProjectEngine {
               runtimeLog.error(
                 `Auto-merge: ${taskId} workspace partial land but getTask failed (DB outage?) — failing closed, NOT scheduling a retry storm: ${errorMsg}`,
               );
+              const partialLandUnreadableFields = mergeFailureLogFields(
+                "Workspace partial land — task state unreadable (DB error); parking as failed instead of scheduling a retry storm",
+                errorMsg,
+                "WorkspacePartialLand",
+              );
               await store
-                .logEntry(
-                  taskId,
-                  `Workspace partial land — task state unreadable (DB error); parking as failed instead of scheduling a retry storm: ${errorMsg}`,
-                  "WorkspacePartialLand",
-                )
+                .logEntry(taskId, partialLandUnreadableFields.action, partialLandUnreadableFields.outcome)
                 .catch(() => undefined);
               await store
                 .updateTask(taskId, { status: "failed", error: errorMsg })
@@ -5255,8 +5280,13 @@ export class ProjectEngine {
               wsSettings as { autoResolveConflicts?: boolean; maxAutoMergeRetries?: unknown } | null,
               { skipAutoResolveCheck: true },
             );
+            const partialLandFields = mergeFailureLogFields(
+              "Workspace partial land",
+              errorMsg,
+              "WorkspacePartialLand",
+            );
             await store
-              .logEntry(taskId, `Workspace partial land: ${errorMsg}`, "WorkspacePartialLand")
+              .logEntry(taskId, partialLandFields.action, partialLandFields.outcome)
               .catch(() => undefined);
             if (decision.shouldRetry) {
               /*
@@ -5293,12 +5323,13 @@ export class ProjectEngine {
               await store
                 .updateTask(taskId, { status: "failed", mergeRetries: decision.maxAutoMergeRetries, error: errorMsg })
                 .catch(() => undefined);
+              const partialLandExhaustedFields = mergeFailureLogFields(
+                `Workspace partial land exhausted ${decision.maxAutoMergeRetries} retries — parking as failed for operator intervention (landed repos remain landed locally)`,
+                errorMsg,
+                "WorkspacePartialLand",
+              );
               await store
-                .logEntry(
-                  taskId,
-                  `Workspace partial land exhausted ${decision.maxAutoMergeRetries} retries — parking as failed for operator intervention (landed repos remain landed locally): ${errorMsg}`,
-                  "WorkspacePartialLand",
-                )
+                .logEntry(taskId, partialLandExhaustedFields.action, partialLandExhaustedFields.outcome)
                 .catch(() => undefined);
               runtimeLog.error(
                 `Auto-merge: ${taskId} workspace partial land exhausted ${decision.maxAutoMergeRetries} retries — parked as failed`,
@@ -5310,13 +5341,16 @@ export class ProjectEngine {
           runtimeLog.error(`${hasManualResolver ? "Manual" : "Auto"}-merge failed for ${taskId}: ${errorMsg}`);
 
           // Surface every merge failure on the task log so the dashboard shows
-          // *why* a merge didn't complete instead of silently looping.
+          // *why* a merge didn't complete instead of silently looping. The
+          // sentence names the failure, the command's first line names the
+          // failing command, and the outcome carries the diagnostic payload
+          // (previously `err.name`, i.e. the bare string "Error").
+          const mergeFailureFields = mergeFailureLogFields(
+            `${hasManualResolver ? "Manual" : "Auto"}-merge failed`,
+            errorMsg,
+          );
           await store
-            .logEntry(
-              taskId,
-              `${hasManualResolver ? "Manual" : "Auto"}-merge failed: ${errorMsg}`,
-              err instanceof Error ? err.name : undefined,
-            )
+            .logEntry(taskId, mergeFailureFields.action, mergeFailureFields.outcome)
             .catch((logErr: unknown) => {
               runtimeLog.warn(
                 `Auto-merge: failed to log merge-failure entry on ${taskId}: ${logErr instanceof Error ? logErr.message : String(logErr)}`,
@@ -5766,17 +5800,27 @@ export class ProjectEngine {
                         });
                       }
                     }
+                    const transientMrExhaustedFields = mergeFailureLogFields(
+                      `Auto-merge transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); marked merge request exhausted without column rebound`,
+                      errorMsg,
+                      "MergeTransientRetryExhausted",
+                    );
                     await store.logEntry(
                       taskId,
-                      `Auto-merge transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); marked merge request exhausted without column rebound: ${errorMsg}`,
-                      "MergeTransientRetryExhausted",
+                      transientMrExhaustedFields.action,
+                      transientMrExhaustedFields.outcome,
                     );
                     continue;
                   }
+                  const transientParkFields = mergeFailureLogFields(
+                    `Auto-merge transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); parking task as failed`,
+                    errorMsg,
+                    "MergeTransientRetryExhausted",
+                  );
                   await store.logEntry(
                     taskId,
-                    `Auto-merge transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); parking task as failed: ${errorMsg}`,
-                    "MergeTransientRetryExhausted",
+                    transientParkFields.action,
+                    transientParkFields.outcome,
                   );
                 }
                 await store.updateTask(taskId, {
@@ -5784,11 +5828,12 @@ export class ProjectEngine {
                   mergeRetries: maxAutoMergeRetriesOnErr,
                   error: errorMsg,
                 });
-                await store.logEntry(
-                  taskId,
-                  `Auto-merge failed with a non-conflict error and stopped retrying: ${errorMsg}`,
+                const nonConflictFields = mergeFailureLogFields(
+                  "Auto-merge failed with a non-conflict error and stopped retrying",
+                  errorMsg,
                   "MergeNonConflictFailure",
                 );
+                await store.logEntry(taskId, nonConflictFields.action, nonConflictFields.outcome);
               } catch (recoveryErr) {
                 runtimeLog.error(
                   `Auto-merge: failed to update ${taskId} after non-conflict error: ${recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)}`,
@@ -5861,14 +5906,24 @@ export class ProjectEngine {
                       });
                     }
                   }
-                  await store.logEntry(taskId, `Pull-request transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); marked merge request exhausted without consuming merge retries: ${errorMsg}`, "MergeTransientRetryExhausted");
+                  const prTransientMrFields = mergeFailureLogFields(
+                    `Pull-request transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); marked merge request exhausted without consuming merge retries`,
+                    errorMsg,
+                    "MergeTransientRetryExhausted",
+                  );
+                  await store.logEntry(taskId, prTransientMrFields.action, prTransientMrFields.outcome);
                   continue;
                 }
                 await store.updateTask(taskId, {
                   status: "failed",
                   error: errorMsg,
                 });
-                await store.logEntry(taskId, `Pull-request transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); task parked without consuming merge retries: ${errorMsg}`, "MergeTransientRetryExhausted");
+                const prTransientParkFields = mergeFailureLogFields(
+                  `Pull-request transient retries exhausted (${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}/${ProjectEngine.MAX_AUTO_MERGE_TRANSIENT_RETRIES}); task parked without consuming merge retries`,
+                  errorMsg,
+                  "MergeTransientRetryExhausted",
+                );
+                await store.logEntry(taskId, prTransientParkFields.action, prTransientParkFields.outcome);
                 continue;
               }
               if (!diagnosis.retryable) {
@@ -5877,7 +5932,12 @@ export class ProjectEngine {
                   status: "failed",
                   error: diagnosis.message,
                 });
-                await store.logEntry(taskId, `Pull-request merge failed without retry (${diagnosis.code}): ${diagnosis.message}`, "MergeNonRetryableFailure");
+                const nonRetryableFields = mergeFailureLogFields(
+                  `Pull-request merge failed without retry (${diagnosis.code})`,
+                  diagnosis.message,
+                  "MergeNonRetryableFailure",
+                );
+                await store.logEntry(taskId, nonRetryableFields.action, nonRetryableFields.outcome);
                 continue;
               }
               const currentRetries = taskOnErr?.mergeRetries ?? 0;
@@ -5889,7 +5949,12 @@ export class ProjectEngine {
                   mergeRetries: nextRetries,
                   error: errorMsg,
                 });
-                await store.logEntry(taskId, `Pull-request merge retries exhausted after ${nextRetries}/${maxAutoMergeRetriesOnErr} actual failures: ${errorMsg}`, "MergeRetriesExhausted");
+                const retriesExhaustedFields = mergeFailureLogFields(
+                  `Pull-request merge retries exhausted after ${nextRetries}/${maxAutoMergeRetriesOnErr} actual failures`,
+                  errorMsg,
+                  "MergeRetriesExhausted",
+                );
+                await store.logEntry(taskId, retriesExhaustedFields.action, retriesExhaustedFields.outcome);
                 continue;
               }
               const delayMs = PR_MERGE_RETRY_BACKOFF_BASE_MS * Math.pow(2, currentRetries);
@@ -5900,7 +5965,12 @@ export class ProjectEngine {
               advance it past the timer deadline and make the queue reject its own
               scheduled retry as still early.
               */
-              await store.logEntry(taskId, `Pull-request merge retry ${nextRetries}/${maxAutoMergeRetriesOnErr} scheduled in ${delayMs / 1000}s: ${errorMsg}`, "MergeRetry");
+              const prRetryScheduledFields = mergeFailureLogFields(
+                `Pull-request merge retry ${nextRetries}/${maxAutoMergeRetriesOnErr} scheduled in ${delayMs / 1000}s`,
+                errorMsg,
+                "MergeRetry",
+              );
+              await store.logEntry(taskId, prRetryScheduledFields.action, prRetryScheduledFields.outcome);
               await store.updateTask(taskId, {
                 mergeRetries: nextRetries,
                 status: null,

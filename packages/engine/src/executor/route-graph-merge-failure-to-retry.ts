@@ -137,7 +137,21 @@ export async function routeGraphMergeFailureToRetry(
     const failedNode = result.visitedNodeIds[result.visitedNodeIds.length - 1] ?? "unknown";
     const message = `Workflow graph merge failure at node '${failedNode}' routed to bounded auto-merge retry${abortProvenance === "merge-seam" ? " after merge-seam abort" : isGenericAbortProvenance(abortProvenance) || abortProvenance === undefined ? " after benign pause/resume abort" : ""}`;
     executorLog.warn(`${live.id}: ${message}`);
-    await deps.store.logEntry(live.id, message, undefined, deps.getRunContextFor(live.id));
+    /*
+    FNXC:MergeFailureLogFields 2026-09-28-08:35:
+    The graph's own failure value is the diagnostic a reader needs, so it belongs
+    in `outcome` — the field the store's structure-aware compactor keeps the
+    reason in. `action` keeps its sentence byte-identical because prefix matchers
+    depend on it. Previously this entry carried no outcome at all, so the routed
+    failure looked identical to a benign pause/resume abort in the log. Only the
+    field allocation changes; the routing decision below is untouched.
+    */
+    await deps.store.logEntry(
+      live.id,
+      message,
+      `GraphFailure:${graphFailureValue(result)}`,
+      deps.getRunContextFor(live.id),
+    );
 
     /*
     FNXC:MergeRetryReliability 2026-08-26-13:40 (Greptile P1): the boundary-try scope
