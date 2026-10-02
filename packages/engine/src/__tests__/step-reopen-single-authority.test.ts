@@ -83,7 +83,17 @@ describe("FN-180 step reopen single authority", () => {
 
     expect(reopenActions(live)).toHaveLength(1);
     expect(evaluateStepLedgerSeal(live.log).sealed).toBe(false);
-    expect(live.steps.at(-1)).toEqual({ name: "Testing & Verification", status: "pending" });
+    /*
+    FUSI-068: the appended occurrence carries additive `replay` provenance (wave + the completed
+    occurrence it replays) so it is distinguishable from its name-clone sibling. Assert the identity
+    rather than dropping it from the comparison — the FN-180 subject is that the COMPLETED occurrence
+    is untouched, not that the replay occurrence stays anonymous.
+    */
+    expect(live.steps.at(-1)).toMatchObject({
+      name: "Testing & Verification",
+      status: "pending",
+      replay: { wave: 1, replaysStepIndex: 1 },
+    });
   });
 
   it("does not stamp a live implementation session", async () => {
@@ -100,7 +110,11 @@ describe("FN-180 step reopen single authority", () => {
     await reopenLastStepForRevision(store as never, live.id, live);
 
     expect(reopenActions(live)).toEqual([]);
-    expect(live.steps.at(-1)).toEqual({ name: "Implementation", status: "pending" });
+    expect(live.steps.at(-1)).toMatchObject({
+      name: "Implementation",
+      status: "pending",
+      replay: { wave: 1, replaysStepIndex: 0 },
+    });
   });
 
   it("does not append or stamp a replay while pending work is already queued", async () => {

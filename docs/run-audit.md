@@ -41,6 +41,8 @@ Events that close a task's delivery: blocked/advanced completion parks, already-
 | `task:auto-recover-stale-merger-status` | Self-healing clears a stale merger status left on a finalize path. |
 | `task:merge-admission-deferred-live-execution` | Merge admission found a live executor session, execution lock, or active task signal and deferred without parking the task. Metadata contains task ID plus fixed source, signal, and outcome values only. |
 | `task:reconcile-confirmed-merge-checklist` | A confirmed merge reconciled stale non-terminal checklist steps or pending pre-merge results before terminal finalization. Metadata contains task ID, source, counts, prior column, and fixed outcome only. |
+| `task:review-bounce-capacity-parked` | A Code Review REVISE replay step is committed but the review→WIP bounce lost the WIP capacity race; a durable wait is recorded so the card resumes when a slot frees. Metadata contains task ID, source/target columns, and a fixed outcome only — never the merge-blocker string, the replay step's name, or reviewer prose. |
+| `task:review-bounce-capacity-recovered` | A previously capacity-parked Code Review REVISE replay step reaches the executor lane (durable continuation drained, or the undelivered-replay sweep revived it). Metadata contains task ID and a fixed recovery-source outcome only. |
 
 ## Self-healing reconciliation events
 

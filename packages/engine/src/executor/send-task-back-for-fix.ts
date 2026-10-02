@@ -102,6 +102,25 @@ export async function sendTaskBackForFix(
 
   // 4. Append one replay occurrence for the workflow-selected trailing step.
   // Completed occurrences remain immutable history, and existing pending work prevents duplicate growth.
+  /*
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+  ORDERING. The replay step (step 4) is written to the DURABLE ledger, and the hand-off (step 6) is a
+  best-effort async bounce that can lose the race for WIP capacity. Before FUSI-068 these two were
+  independently durable with nothing reconciling them: the step was committed unconditionally, the
+  hand-off was fire-and-forget, and a capacity loss (or a crash between them) stranded a real Code
+  Review REVISE forever — the pending step kept the merge door closed, no sweep was keyed on a
+  non-terminal step, and the card was auto-disposed as a permanent deadlock.
+
+  They are now COUPLED, not independently durable: `performWorkflowRerunBounce` records a DURABLE
+  capacity wait on the exact `capacity-exhausted` rejection (the same durable continuation shape the
+  graph's own capacity-suspend writes), so the moment the hand-off loses the race the delivery path
+  becomes durable alongside the already-committed step. A crash between step 4 and step 6 is still
+  theoretically possible for the fraction of a second before the bounce timer fires — that residual
+  window is what the Step-5 undelivered-replay SHAPE sweep is the backstop for, and why this comment
+  must not be "simplified" back into treating the two writes as independent. The bounce itself also
+  still refuses an empty hand-off (FN-267 `hasPendingReviewRemediationWork`), so reordering must never
+  make a pending-step-less bounce reachable.
+  */
   const updatedTask = await deps.store.getTask(taskId);
   if (stepReopenPolicy === "reopen-trailing") {
     await deps.reopenLastStepForRevision(taskId, updatedTask);

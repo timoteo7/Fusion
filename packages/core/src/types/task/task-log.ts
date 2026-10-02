@@ -46,6 +46,25 @@ export interface TaskStep {
     declaredFiles?: string[];
   };
   /**
+   * FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+   * Identity of an engine-appended trailing REPLAY occurrence (FUSI-068). Under the
+   * `reopen-trailing` policy a completed occurrence is immutable history and the replay step is
+   * appended with a name clone of its predecessor — indistinguishable by name, which is why a lost
+   * capacity hand-off read as "the reviewer asked for work and nothing happened". This additive JSONB
+   * field gives the occurrence a distinguishable wave identity for FUTURE cards without touching the
+   * `remediation` provenance (whose presence makes `parse-steps` preserve the full step list forever,
+   * permanently blocking a normal re-parse). It is FORWARD-ONLY: cards stranded before this field
+   * existed still carry name-clone twins, so the undelivered-replay predicate and stall diagnostic
+   * must work from the durable SHAPE (trailing pending step whose name equals its predecessor's) and
+   * never depend on this field alone.
+   */
+  replay?: {
+    /** 1-based replay wave: how many trailing replays this card has produced. */
+    wave: number;
+    /** The index of the completed step occurrence being replayed. */
+    replaysStepIndex: number;
+  };
+  /**
    * Step-inversion (KTD-11): 0-indexed indices of steps this step depends on.
    * Heading annotations name literal `### Step N` values and rebase only a
    * fully-1-based legacy prompt; structured parser output uses 0-based document indices.

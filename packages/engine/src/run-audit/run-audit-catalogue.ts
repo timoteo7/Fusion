@@ -49,6 +49,14 @@ export const DELIVERY_PIPELINE_RUN_AUDIT_EVENTS_LITERALS = [
   "task:reconcile-confirmed-merge-checklist",
   "task:finalize-lost-work-blocked",
   "task:auto-recover-stale-merger-status",
+  /*
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+  A Code Review REVISE appended its replay step to the durable ledger and lost the race for WIP
+  capacity. FUSI-068 records that deferral and its later recovery so a stranded replay step is
+  never silent. Ids/columns/fixed outcomes only; never the blocker string or the step name.
+  */
+  "task:review-bounce-capacity-parked",
+  "task:review-bounce-capacity-recovered",
 
   /* ── 2. Self-healing reconciliation events ─────────────────────────────── */
   "task:auto-recover-paused-abort-park",
@@ -133,6 +141,16 @@ export const DELIVERY_PIPELINE_RUN_AUDIT_EVENT_NOTES: Readonly<Record<DeliveryPi
     "Finalize is blocked because it would discard work (lost-work guard).",
   "task:auto-recover-stale-merger-status":
     "Self-healing clears a stale merger status left on a finalize path.",
+  /*
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+  A Code Review REVISE appended its replay step to the durable ledger and lost the race for WIP
+  capacity. FUSI-068 records that deferral and its later recovery so a stranded replay step is
+  never silent. Ids/columns/fixed outcomes only; never the blocker string or the step name.
+  */
+  "task:review-bounce-capacity-parked":
+    "A Code Review REVISE replay step is committed but the review→WIP bounce lost the WIP capacity race; a durable wait is recorded so the card resumes when a slot frees.",
+  "task:review-bounce-capacity-recovered":
+    "A previously capacity-parked Code Review REVISE replay step reaches the executor lane (durable continuation drained, or the undelivered-replay sweep revived it).",
 
   /* ── 2. Self-healing reconciliation events ─────────────────────────────── */
   "task:auto-recover-paused-abort-park":

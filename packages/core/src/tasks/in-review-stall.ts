@@ -1,4 +1,4 @@
-import { getTaskMergeBlocker } from "../merge/task-merge.js";
+import { getTaskMergeBlocker, hasUndeliveredReplayStep } from "../merge/task-merge.js";
 import type { Task, TaskLogEntry } from "../types.js";
 
 /*
@@ -25,6 +25,7 @@ const LEGACY_REVIEW_LANES: ReadonlySet<string> = new Set(["in-review"]);
  */
 export type InReviewStallCode =
   | "merge-blocker"
+  | "undelivered-replay-step"
   | "transient-merge-status-no-owner"
   | "merge-retries-exhausted"
   | "completed-review-status-none"
@@ -335,6 +336,46 @@ export function getInReviewStallReason(
   The outer question was resolved and the inner one was not — the same half-conversion recorded at the
   helper itself for moves.ts, and fixed in #2963/#2964 for the merge paths.
   */
+  /*
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+  A Code Review REVISE appended its replay step to the durable ledger, then the review→WIP hand-off
+  lost the WIP capacity race. `task has incomplete steps` is what the operator used to see for that
+  card — indistinguishable from any ordinary unfinished checklist, so a dropped hand-off read as
+  "the reviewer asked for work and nothing happened". Name it: when the card's only unfinished work
+  is an undelivered engine replay occurrence, report that as its OWN actionable code instead of the
+  generic blocker. The merge door itself is unchanged (this is diagnostic-only, per this module's
+  header) — the point is the CAUSE, not a different refusal.
+
+  FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20 (gate independence — the ordering defect this
+  card's own fix introduced):
+  This check MUST NOT live inside `if (mergeBlocker)`. That made the name conditional on a refusal
+  this defect has no stake in. The door's ONLY rule for a pending step is the plain membership test
+  at task-merge.ts:532-534 — `steps.some((s) => NON_TERMINAL_STEP_STATUSES.has(s.status))` behind
+  `task has incomplete steps`. A trailing replay occurrence is `pending`, so it refuses, and while it
+  refuses this block runs. But nothing about the merge door is load-bearing for the guarantee, and
+  the moment the door's treatment of a step is widened, reordered, or short-circuited by an unrelated
+  refusal that fires first (`task is paused`, `task is in '<lane>'`, `task is marked 'failed': …`),
+  `mergeBlocker` goes undefined for a reason that has NOTHING to do with the replay, this block is
+  skipped, and the card reports NO stall at all — the silent strand this defect exists to eliminate,
+  restored through a different door. An earlier draft of this comment justified the ordering with a
+  `notes`/`result` completion exemption inside the merge door; that exemption is not in the shipped
+  rule, so the reasoning did not survive contact with the tree. The ordering stands on its own
+  footing: the name must never be conditioned on an unrelated refusal.
+
+  The undelivered hand-off is a fact about the DURABLE SHAPE (a trailing pending replay occurrence),
+  so it is decided BEFORE and independently of what the merge door thinks. `getTaskMergeBlocker` is
+  still consulted below and is still unchanged; only the ordering moved. Delivery itself never
+  depended on this gate — the revival sweep keys on `hasUndeliveredReplayStep` alone — so this is the
+  diagnostic half of the guarantee, made as unconditional as the delivery half.
+  */
+  if (hasUndeliveredReplayStep(task)) {
+    return {
+      code: "undelivered-replay-step",
+      reason: `Replay step '${task.steps?.[task.steps.length - 1]?.name}' was appended by a review revision but never delivered to the executor lane`,
+      observedAt,
+    };
+  }
+
   const mergeBlocker = getTaskMergeBlocker(task, { reviewColumns: context.reviewColumns });
   if (mergeBlocker) {
     if (mergeBlocker.startsWith(FAILED_TASK_MERGE_BLOCKER_PREFIX)) {

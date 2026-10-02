@@ -7,16 +7,50 @@
  * A pre-merge optional step REVISE schedules this bounce via sendTaskBackForFix AFTER reopening
  * the last plan step to pending. in-review must bounce like in-progress to avoid deadlock.
  */
-import type { TaskStore } from "@fusion/core";
+import type { Task, TaskStore } from "@fusion/core";
 import {
+  ACTIVE_WORKFLOW_WORK_ITEM_STATES,
   hasPendingReviewRemediationWork,
   resolveStepReopenPolicy,
   resolveWipTargetForTask,
   resolveWorkflowIrForTask,
+  type WorkflowWorkItemState,
 } from "@fusion/core";
 import { executorLog } from "../logger.js";
 import { moveTaskWithLifecycleReason } from "../execution/lifecycle-move.js";
+import { emitBoundedRunAudit } from "../util/emit-bounded-run-audit.js";
+import { generateSyntheticRunId } from "../util/run-audit.js";
 import { resolveReboundColumnFor } from "./lifecycle-columns.js";
+
+/*
+FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+A Code Review REVISE appends its replay step to the DURABLE ledger (reopenLastStepForRevision) and only
+THEN attempts the review→WIP hand-off, which is a best-effort setTimeout bounce. When the WIP lane is
+at capacity the move is caught and logged "retrying later", but before FUSI-068 nothing retried: the
+replay step stayed `pending` forever, `getTaskMergeBlocker` correctly returned "task has incomplete
+steps", no sweep is keyed on a non-terminal step, and `surfaceInReviewStalls` auto-disposed the card
+as `in-review-stall-deadlock`. The reviewer's real work was dropped with only a log line as evidence.
+
+The deferral is now DURABLE. On `deferred-capacity` this function writes the SAME durable
+continuation shape the graph's own capacity-suspend already uses (`workflow-column-boundary-hooks.ts`
+onSuspend: `state:"held"`, `waitReason:"capacity"`, `sourceColumn`/`targetColumn`), so the existing
+due-drain (`drainDuePlanningContinuations`, which admits EVERY due `kind:"task"` continuation whatever
+its waitReason) resumes the card when a slot frees, and `reconcileStrandedWorkflowContinuations`
+covers a continuation whose writing process died before the drain saw it. The invariant this restores:
+a committed pending step must never exist without a live path to the executor.
+
+An ACTIVE continuation for the same node is honored rather than duplicated (same live-wait guard the
+graph hook uses): a cancelled/exhausted row is finished work, and treating it as live would strand the
+card with nothing to resume from.
+
+Reservation-FIRST (AC1 option a) is deliberately NOT used here. The production `reserveSlot`
+(`scheduler.ts`) closes over per-dispatch-pass local scope-lease registries (`activeScopes`,
+`dormantScopes`, `leaseWaiverIds`) that the executor's bounce cannot reach — grep shows exactly one
+production call site. Sharing it would require extracting scheduler-internal state out of the
+dispatch loop, well beyond this fix's blast radius, and a no-op reservation would make a caller
+believe a slot is held. Durable continuation is the honest mechanism; the FN-267 empty-hand-off guard
+below is unchanged so a bounce with no pending work is still refused.
+*/
 
 export type WorkflowRerunBounceDeps = {
   store: TaskStore;
@@ -25,6 +59,64 @@ export type WorkflowRerunBounceDeps = {
   resolveResumeLanes: (taskId: string) => Promise<{ wip: string; review: string }>;
   clearTerminalStepFailuresForRetry: (taskId: string, mode: "archive" | "clear") => Promise<void>;
 };
+
+/**
+ * Record the durable capacity wait for a review→WIP bounce that lost the race (FUSI-068).
+ *
+ * Mirrors the graph's capacity-suspend continuation (`workflow-column-boundary-hooks.ts` `onSuspend`)
+ * so both capacity crossings in the codebase park through ONE durable shape that the due-drain and
+ * the stranded-continuation sweep already understand. Best-effort: a failure to write the marker must
+ * not mask the underlying deferral, and the Step-5 shape sweep is the backstop for a lost marker.
+ */
+export async function recordBounceCapacityWait(
+  store: TaskStore,
+  taskId: string,
+  sourceColumn: string,
+  targetColumn: string,
+  nodeId: string,
+): Promise<boolean> {
+  try {
+    const items = await store.listWorkflowWorkItemsForTask(taskId, { kinds: ["task"] });
+    const live = items.filter((item) =>
+      ACTIVE_WORKFLOW_WORK_ITEM_STATES.includes(item.state as WorkflowWorkItemState));
+    if (live.some((item) => item.nodeId === nodeId)) return false;
+    // The executor's bounce does not hold the graph's run id (it fires from a setTimeout after the
+    // graph already yielded), so it uses the SAME `${taskId}:workflow` stable fallback the graph hook
+    // itself applies when `workflowRunId` is unknown. The due-drain keys on `taskId`, not `runId`.
+    const stableRunId = `${taskId}:workflow`;
+    await store.replaceActiveTaskWorkflowContinuation({
+      runId: `${stableRunId}:continuation:${nodeId}:${items.length}`,
+      taskId,
+      nodeId,
+      kind: "task",
+      state: "held",
+      stableWorkflowRunId: stableRunId,
+      continuationSequence: items.length,
+      waitReason: "capacity",
+      sourceColumn,
+      targetColumn,
+    });
+    executorLog.log(`${taskId}: review bounce deferred for capacity — durable wait recorded (${sourceColumn} → ${targetColumn})`);
+    /*
+    FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+    Ids/columns/fixed outcome only. The merge-blocker string, the replay step's name, and reviewer
+    prose stay on the task; bounded telemetry never becomes a lifecycle dependency.
+    */
+    await emitBoundedRunAudit(store, {
+      taskId,
+      agentId: "executor",
+      runId: generateSyntheticRunId("review-bounce-capacity", taskId),
+      domain: "database",
+      mutationType: "task:review-bounce-capacity-parked",
+      target: taskId,
+      metadata: { taskId, sourceColumn, targetColumn, outcome: "durable-wait-recorded" },
+    });
+    return true;
+  } catch (err: unknown) {
+    executorLog.warn(`${taskId}: could not record durable capacity wait for review bounce: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
 
 export async function performWorkflowRerunBounce(
   deps: WorkflowRerunBounceDeps,
@@ -104,7 +196,24 @@ export async function performWorkflowRerunBounce(
             workflowMoveSource: "workflow-remediation",
           },
         );
-        if (!moveResult.moved) return "deferred-capacity";
+        if (!moveResult.moved) {
+          /*
+          FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+          The replay step for this REVISE is already committed to the durable ledger. A capacity
+          refusal therefore strands real review work unless the wait itself is durable — record it
+          through the same continuation shape the graph's capacity-suspend writes, so the existing
+          due-drain resumes the card when a slot frees. Best-effort by design: the marker write never
+          masks the deferral, and the shape sweep is the backstop if it is lost.
+          */
+          await recordBounceCapacityWait(
+            deps.store,
+            taskId,
+            latestTask.column,
+            bounceLanes.wip,
+            `workflow-remediation:${taskId}`,
+          );
+          return "deferred-capacity";
+        }
       }
       await deps.store.updateTask(taskId, {
         ...(persistWorktreePath ? { worktree: worktreePath } : {}),

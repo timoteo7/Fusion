@@ -45,6 +45,7 @@ import { PRE_MERGE_STEPS_NOT_RUN_BLOCKER, loadWorkspaceConfig, type TaskMoveLane
   isTaskExternallyBlocked,
   isTaskLogWriteRefusal,
   hasNonTerminalSteps,
+  hasUndeliveredReplayStep,
   fileScopeLeaseBlocksCandidate,
   normalizeOverlapScopeForTask,
 } from "@fusion/core";
@@ -306,6 +307,16 @@ every done card each pass.
 */
 const DONE_METADATA_REPAIR_CAP = 25;
 const DONE_TASK_INTEGRITY_SWEEP_LIMIT = 50;
+
+/*
+FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+The `pausedReason` this module writes when it auto-parks a card as a review deadlock, and the one
+signal `recoverUndeliveredReviewReplaySteps` uses to tell that ENGINE-authored park apart from an
+operator hold (`userPaused`). One constant for both the write and the read: the dispose arm and its
+recovery must agree on the exact string, and a hand-copied literal between them is precisely how a
+"cleared" park stops being recognized.
+*/
+const IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON = "in-review-stall-deadlock";
 /**
  * FNXC:GitWorktreeChurnCadenceCoarsen 2026-08-13-04:05 (RUFU-076):
  * Batch-1 git-churn steps (prune-worktrees, cleanup-orphans, cleanup-stale-temp-merge-worktrees,
@@ -1991,6 +2002,13 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
       { name: "recover-advanced-triage", fn: () => this.recoverAdvancedTriageTasks().then(() => undefined) },
       { name: "recover-mergeable-review", fn: () => this.recoverMergeableReviewTasks().then(() => undefined) },
       { name: "failed-pre-merge-steps", fn: () => this.recoverReviewTasksWithFailedPreMergeSteps().then(() => undefined) },
+      /*
+      FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+      The undelivered-replay revival is registered in BOTH the startup and periodic lists, matching
+      `reconcile-stranded-workflow-continuations`. A startup-only sweep is a startup-only fix: a card
+      stranded by a process that then died needs the recovery at boot, not merely on the next tick.
+      */
+      { name: "recover-undelivered-review-replay", fn: () => this.recoverUndeliveredReviewReplaySteps().then(() => undefined) },
       { name: "missing-worktree-review-failures", fn: () => this.recoverMissingWorktreeReviewFailures().then(() => undefined) },
       /*
       FNXC:Workspace 2026-08-15-08:59:
@@ -3071,6 +3089,11 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
           // a session can die mid-run without a restart, and the grace window keeps live work untouched.
           { name: "reconcile-stranded-workflow-continuations", fn: () => this.reconcileStrandedWorkflowContinuations() },
           { name: "recover-mergeable-review", fn: () => this.recoverMergeableReviewTasks() },
+          // FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20: steady-state half of the undelivered-replay
+          // revival above — the backstop for a review→WIP hand-off that was never delivered and never
+          // durably marked (the graph's own "remediation was not scheduled" path, or a crash between the
+          // durable step write and the bounce timer).
+          { name: "recover-undelivered-review-replay", fn: () => this.recoverUndeliveredReviewReplaySteps() },
           // FNXC:Workspace 2026-06-22-09:30 (Phase D U1) — workspace-mode reconcilers.
           { name: "reconcile-expired-workspace-leases", fn: async () => {
             const reconcileExpired = (this.store as Partial<TaskStore>).reconcileExpiredWorkspaceLeases;
@@ -10361,6 +10384,188 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
     }
   }
 
+  /**
+   * Revive an in-review card whose ONLY unfinished work is an engine-appended replay occurrence that
+   * was never delivered to the executor (FUSI-068).
+   *
+   * FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+   * A Code Review REVISE appends its replay step to the DURABLE ledger and then hands off to the WIP
+   * lane. When that hand-off lost the WIP capacity race, nothing retried: the pending step kept the
+   * merge door closed ("task has incomplete steps"), NO sweep was keyed on a non-terminal step, and
+   * `surfaceInReviewStalls` auto-disposed the card as `in-review-stall-deadlock`. The reviewer's real
+   * work was dropped with one log line as the only evidence.
+   *
+   * The capacity deferral now records a DURABLE wait (a workflow continuation the due-drain resumes)
+   * — that is the primary retry path. This sweep is the BACKSTOP for a delivery that was never even
+   * marked: the graph's own remediation entry point ending with "remediation was not scheduled", a
+   * crash between the durable step write and the bounce timer, or a lost marker. Both are needed; a
+   * card whose pending replay step reached WIP by either route is recovered exactly once.
+   *
+   * WHY A DEDICATE SWEEP rather than widening `recoverReviewTasksWithFailedPreMergeSteps`:
+   *   1. That sweep is gated on `latestFailedPreMergeStep` being present, so a card with NO failed
+   *      pre-merge result can never enter it — and that shape is real (measured on a stranded card).
+   *   2. Its blocker test is an EXACT STRING match; a second such match is the coupling class
+   *      `merge-blocker-reason-coupling.test.ts` exists to prevent. This sweep asks a PREDICATE.
+   *   3. It delivers the already-authored work, rather than authoring a NEW remediation wave — so it
+   *      correctly does NOT consume the post-review revision budget (re-running the review is not
+   *      what is missing here; an executor is).
+   *
+   * IDEMPOTENCE: recovery is the contained review→WIP move, which changes the card's column. A second
+   * pass no longer finds it in a review column, so it cannot revive twice. The card is also only
+   * revived when it is genuinely undelivered, never when an operator is merely holding it.
+   *
+   * @returns Number of cards revived
+   */
+  async recoverUndeliveredReviewReplaySteps(): Promise<number> {
+    try {
+      if (typeof this.store.listWorkflowWorkItemsForTask !== "function") return 0;
+      const settings = await this.store.getSettings();
+      if (settings.globalPause || settings.enginePaused) return 0;
+
+      /*
+      FNXC:WorkflowResolvedColumns 2026-07-30-21:20 (fleet):
+      Review lanes are RESOLVED, never compared to a literal "in-review" — a renamed board made
+      literal-column filters return empty, which is how a stranded card stayed stranded.
+      */
+      const reviewColumns = await resolveProjectColumnsForRoles(this.store, REVIEW_ROLES);
+      const byId = new Map<string, Task>();
+      for (const column of reviewColumns) {
+        for (const task of await this.store.listTasks({ column, slim: true })) byId.set(task.id, task);
+      }
+      const tasks = [...byId.values()];
+      if (tasks.length === 0) return 0;
+
+      const executingIds = this.options.getExecutingTaskIds?.() ?? new Set<string>();
+
+      const candidates = tasks.filter((task) => {
+        /* The durable shape: trailing pending replay occurrence, predecessor terminal. */
+        if (!hasUndeliveredReplayStep(task)) return false;
+        if (!allowsAutoMergeProcessing(task, settings)) return false;
+        /*
+        An OPERATOR hold is a human decision, full stop: `userPaused` (and a `paused` flag the engine
+        did not author itself) is never overridden.
+
+        FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+        A bare `task.paused` check would make this sweep unable to fix a SINGLE one of the cards that
+        motivated it. `surfaceInReviewStalls` parks a stranded card with `paused:true` +
+        `pausedReason:"in-review-stall-deadlock"` — an ENGINE-authored park, and the exact marker this
+        defect leaves behind. The engine already draws this line itself: the dispose is gated on
+        `task.userPaused !== true`, so it only ever auto-parks cards the operator is not holding.
+
+        So the honest gate is that same distinction: refuse a user pause and refuse any engine-authored
+        park this defect does not name, but DO clear the `in-review-stall-deadlock` park — that park
+        IS the stranded state, and it is not reversible by unpausing (measured: an operator unpause
+        returns the card to review, the gate is re-seeded, and the identical deadlock recurs the same
+        day). Clearing it is what lets the contained hand-off actually run.
+        */
+        if (task.userPaused === true) return false;
+        const enginePark = task.paused === true && task.pausedReason === IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON;
+        if (task.paused === true && !enginePark) return false;
+        if (executingIds.has(task.id)) return false;
+        /* A live executor session owns this card's delivery. */
+        if (this.options.isTaskActive?.(task.id)) return false;
+        /*
+        The merge door must actually be refusing on the unfinished step. Proved by the PREDICATE, not
+        by matching the blocker sentence: an unrelated blocker (no checkout, failed pre-merge step)
+        belongs to another lane and this sweep must not act on it.
+        */
+        const blocker = getTaskMergeBlocker(task, { reviewColumns: new Set(reviewColumns) });
+        if (!blocker) return false;
+        return true;
+      });
+
+      if (candidates.length === 0) return 0;
+      log.warn(
+        `Found ${candidates.length} in-review task(s) whose review replay step was never delivered to the executor — reviving`,
+      );
+
+      let revived = 0;
+      for (const task of candidates) {
+        const replayName = task.steps?.[task.steps.length - 1]?.name ?? "replay step";
+        /* Re-measured from the SAME candidate row the filter admitted (the filter's value was
+           closure-local). Both callers read it only after the card cleared its admission gates. */
+        const enginePark = task.paused === true && task.pausedReason === IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON;
+        try {
+          /*
+          The contained review→WIP move is the SAME authority the real bounce uses; it lost a capacity
+          race, so re-issuing it here restores the identical hand-off. A capacity refusal returns
+          `{moved:false, deferred:"capacity"}` and leaves the card for the next pass — the bounce
+          path has already recorded a durable wait for exactly that case.
+          */
+          const result = await moveTaskToContainedBackwardTarget(
+            this.store,
+            task.id,
+            "code-review-revise-remediation",
+            { preserveResumeState: true, preserveWorktree: true, workflowMoveSource: "workflow-remediation" },
+          );
+          if (!result.moved) {
+            /*
+            `moveTaskToContainedBackwardTarget` returns a discriminated union: a capacity deferral
+            carries `deferred`, every other refusal carries `reason`. Narrow on the discriminant
+            rather than testing it truthily — the log line must say which kind of refusal it was,
+            because "capacity" is a wait that resolves and "no-contained-target" is not.
+            */
+            const outcome = "deferred" in result
+              ? `deferred:${result.deferred}`
+              : result.reason;
+            log.log(
+              `Left ${task.id} in review — undelivered replay '${replayName}' could not be handed off `
+              + `(${outcome})`,
+            );
+            continue;
+          }
+          /*
+          FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+          Clear ONLY the engine-authored deadlock park, and only on a hand-off that actually moved.
+          Doing this after a successful move is what keeps it honest: had the move been deferred on
+          capacity the card keeps its park and stays visible, rather than a sweep having silently
+          cleared a park it could not make progress on. The move itself does not clear the flag, so a
+          card cannot sit in WIP while still advertising itself as a review deadlock.
+          */
+          if (enginePark) {
+            await this.store.updateTask(task.id, {
+              paused: false,
+              pausedReason: null,
+              error: null,
+            }).catch(() => undefined);
+          }
+          await this.store.logEntry(
+            task.id,
+            `Auto-revived undelivered review replay step '${replayName}' — the review hand-off had never reached the executor`,
+            "The reviewer's requested changes were queued durably but the hand-off to implementation never completed. "
+            + "Self-healing re-issued the contained review→WIP move; no new review round was authored.",
+          ).catch(() => undefined);
+          /*
+          FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+          Ids/columns/fixed recovery source only — never the step name, blocker string, or reviewer
+          prose in run-audit; those stay on the task.
+          */
+          await emitBoundedRunAudit(this.store, {
+            taskId: task.id,
+            agentId: "self-healing",
+            runId: generateSyntheticRunId("recover-undelivered-replay", task.id),
+            domain: "database",
+            mutationType: "task:review-bounce-capacity-recovered",
+            target: task.id,
+            metadata: { taskId: task.id, priorColumn: task.column, outcome: "undelivered-replay-sweep" },
+          });
+          revived++;
+          log.log(`Revived ${task.id}: undelivered review replay step '${replayName}' returned to implementation`);
+        } catch (err: unknown) {
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          log.error(`Failed to revive ${task.id}'s undelivered replay step: ${errorMessage}`);
+        }
+      }
+
+      if (revived > 0) log.log(`Auto-revived ${revived} in-review task(s) with an undelivered review replay step`);
+      return revived;
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error(`Undelivered review replay step revival failed: ${errorMessage}`);
+      return 0;
+    }
+  }
+
   /* FNXC:LifecycleContainment 2026-08-28-07:48: recoverStaleIncompleteReviewTasks was removed; only the in-place stuck-session detector may heal WIP liveness. */
 
   /**
@@ -10534,7 +10739,7 @@ export class SelfHealingManager extends SelfHealingGitEvidence {
           );
           await this.store.updateTask(task.id, {
             paused: true,
-            pausedReason: "in-review-stall-deadlock",
+            pausedReason: IN_REVIEW_STALL_DEADLOCK_PAUSE_REASON,
             status: "failed",
             error: `In-review stall deadlock: ${signal.code} repeated ${nextCount}× without progress. ${signal.reason}`,
           });
