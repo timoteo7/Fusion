@@ -21,6 +21,7 @@ export interface InReviewStallDeadlockCopy {
 
 const BADGE_LABEL_BY_CODE: Record<InReviewStallCode, string> = {
   "merge-blocker": "Merge blocked",
+  "undelivered-replay-step": "Review changes not started",
   "transient-merge-status-no-owner": "Merge stalled",
   "merge-retries-exhausted": "Retries exhausted",
   "completed-review-status-none": "Merge retry stalled",
@@ -29,6 +30,13 @@ const BADGE_LABEL_BY_CODE: Record<InReviewStallCode, string> = {
 };
 
 const COPY_BY_CODE: Record<InReviewStallCode, Omit<InReviewStallCopy, "badgeLabel" | "counter" | "code">> = {
+  "undelivered-replay-step": {
+    headline: "Reviewer asked for changes, but the work never started",
+    description:
+      "A review revision queued work to redo a step, but that work could not be handed to the executor — usually because the work queue was full at the time. The engine is waiting to hand it off; nothing was lost.",
+    suggestedAction:
+      "Wait for a free work slot so the queued changes can start, or free capacity by finishing or pausing another task.",
+  },
   "merge-blocker": {
     headline: "Merge blocked by a pre-merge check",
     description:
@@ -165,6 +173,10 @@ visual affordance is withheld — so the Review tab, run-audit, and self-healing
 
 - `no-worktree-no-merge-confirmed`: never surfaced as a badge.
 - `merge-blocker`: ordinary waiting stays quiet; a current failed pre-merge gate overrides suppression.
+- `undelivered-replay-step` (FUSI-068): deliberately NOT suppressed. Its generic counterpart
+  `merge-blocker` is suppressed because ordinary unfinished work is quiet; this one is the named case
+  where a reviewer's request was never delivered to anyone, which is exactly the loss an operator must
+  see.
 
 The other codes (transient-merge-status-no-owner, merge-retries-exhausted, non-retryable-provider-error)
 still badge — they report genuinely stuck states needing an operator.

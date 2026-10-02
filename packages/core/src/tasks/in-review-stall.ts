@@ -1,4 +1,4 @@
-import { getTaskMergeBlocker } from "../merge/task-merge.js";
+import { getTaskMergeBlocker, hasUndeliveredReplayStep } from "../merge/task-merge.js";
 import type { Task, TaskLogEntry } from "../types.js";
 
 /*
@@ -25,6 +25,7 @@ const LEGACY_REVIEW_LANES: ReadonlySet<string> = new Set(["in-review"]);
  */
 export type InReviewStallCode =
   | "merge-blocker"
+  | "undelivered-replay-step"
   | "transient-merge-status-no-owner"
   | "merge-retries-exhausted"
   | "completed-review-status-none"
@@ -337,6 +338,24 @@ export function getInReviewStallReason(
   */
   const mergeBlocker = getTaskMergeBlocker(task, { reviewColumns: context.reviewColumns });
   if (mergeBlocker) {
+    /*
+    FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+    A Code Review REVISE appended its replay step to the durable ledger, then the review→WIP hand-off
+    lost the WIP capacity race. `task has incomplete steps` is what the operator used to see for that
+    card — indistinguishable from any ordinary unfinished checklist, so a dropped hand-off read as
+    "the reviewer asked for work and nothing happened". Name it: when the card's only unfinished work
+    is an undelivered engine replay occurrence, report that as its OWN actionable code instead of the
+    generic blocker. The merge door itself is unchanged (this is diagnostic-only, per this module's
+    header) — the point is the CAUSE, not a different refusal.
+    */
+    if (hasUndeliveredReplayStep(task)) {
+      return {
+        code: "undelivered-replay-step",
+        reason: `Replay step '${task.steps?.[task.steps.length - 1]?.name}' was appended by a review revision but never delivered to the executor lane`,
+        observedAt,
+      };
+    }
+
     if (mergeBlocker.startsWith(FAILED_TASK_MERGE_BLOCKER_PREFIX)) {
       const error = mergeBlocker.slice(FAILED_TASK_MERGE_BLOCKER_PREFIX.length).trim();
       if (classifyProviderError(error) === "non_retryable") {

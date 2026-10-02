@@ -33,6 +33,17 @@ export async function reopenLastStepForRevision(
 
     const trailing = steps.at(-1)!;
     const index = steps.length;
+    /*
+    FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+    Give the appended replay occurrence a distinguishable identity (FUSI-068). Under FN-180 the
+    COMPLETED occurrence stays immutable and this new pending occurrence clones its name, which
+    leaves the two indistinguishable by name alone — the fingerprint that made a lost capacity
+    hand-off read as "nothing happened". `replay` is additive JSONB (no migration), is NOT the
+    `remediation` field (that one makes `parse-steps` preserve the full step list forever), and is
+    FORWARD-ONLY: a card stranded before this field existed still has name-clone twins, so the
+    undelivered-replay predicate keys on the durable shape, not this field.
+    */
+    const wave = steps.filter((step) => step.replay !== undefined).length + 1;
     replay = { index, name: trailing.name, indexes: [index] };
     /*
     FNXC:StepLedgerIntegrity 2026-09-01-02:31:
@@ -48,7 +59,7 @@ export async function reopenLastStepForRevision(
       `trailing replay step ${index} (${trailing.name}) appended after completion`,
     );
     return {
-      steps: [...steps, { name: trailing.name, status: "pending" }],
+      steps: [...steps, { name: trailing.name, status: "pending", replay: { wave, replaysStepIndex: index - 1 } }],
       currentStep: index,
       ...(log ? { log } : {}),
     };

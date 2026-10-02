@@ -357,6 +357,39 @@ export function hasNonTerminalSteps(task: Pick<Task, "steps">): boolean {
   return (task.steps ?? []).some((step) => NON_TERMINAL_STEP_STATUSES.has(step.status));
 }
 
+/*
+FNXC:ReviewBounceCapacityHandOff 2026-10-02-00:20:
+Is this card's only unfinished work an engine-appended REPLAY occurrence that was never delivered to
+an executor? Under the `reopen-trailing` policy `reopenLastStepForRevision` appends a pending step
+that CLONES its predecessor's name, so the durable fingerprint available on cards stranded before the
+`replay` provenance field existed is purely a SHAPE:
+
+  - the TRAILING step is pending,
+  - its name equals the IMMEDIATELY PRECEDING step's name (the completed occurrence it replays),
+  - that predecessor is terminal (done/skipped) — FN-180 keeps completed occurrences immutable, so a
+    live-name match can only be the appended twin, never a re-opened history entry.
+
+This is deliberately a PREDICATE, not a second blocker-string match. The exact-string coupling at the
+self-healing sweep (`blocker !== "task has failed pre-merge workflow steps"`) is the class this
+guard exists to prevent; a caller must be able to ask "is this an undelivered replay?" without
+matching an operator-facing sentence. Deliberately conservative (returns false when unsure) so it
+never mistakes an authored-pending step, a card merely waiting on a human, or a normal work queue for
+an undelivered engine hand-off.
+
+The `replay` provenance, when present, corroborates but is never required — that keeps the predicate
+forward-compatible with the field while still firing on the three cards that predate it.
+*/
+export function hasUndeliveredReplayStep(task: Pick<Task, "steps">): boolean {
+  const steps = task.steps ?? [];
+  if (steps.length < 2) return false;
+  const trailing = steps[steps.length - 1];
+  const predecessor = steps[steps.length - 2];
+  if (trailing.status !== "pending") return false;
+  if (predecessor.status === "pending" || predecessor.status === "in-progress") return false;
+  if (trailing.name.trim() !== predecessor.name.trim()) return false;
+  return true;
+}
+
 const NON_TERMINAL_WORKFLOW_STATUSES = new Set<WorkflowStepResult["status"]>([
   "pending",
 ]);
