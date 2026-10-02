@@ -82,9 +82,28 @@ describe("PrCommentHandler", () => {
   */
   describe("review item identity", () => {
     it("writes two distinct review items for two distinct comments on one PR", async () => {
-      await handler.handleNewComments("FN-001", mockPrInfo, [
+      /*
+      A STATEFUL store is required to exercise the overwrite path at all. The shared `mockStore` stubs
+      `getTask` to always return `{ review: undefined }`, so every `upsertReviewItem` reads an empty
+      list and pushes one item — which can never surface the collapse. The defect lives in the
+      second write finding the first write's key already present, so the fixture must return the
+      accumulated task the way a real store does.
+      */
+      let stored: Task = { id: "FN-001" } as Task;
+      const statefulStore = {
+        ...mockStore,
+        getTask: vi.fn(async () => stored),
+        updateTask: vi.fn(async (_id: string, updates: Partial<Task>) => {
+          stored = { ...stored, ...updates } as Task;
+          return stored;
+        }),
+      } as unknown as TaskStore;
+      const statefulHandler = new PrCommentHandler(statefulStore);
+
+      await statefulHandler.handleNewComments("FN-001", mockPrInfo, [
         {
           id: "IC_kwDOT5Q-Ec8AAAABXrfTmw",
+          sequence: 1,
           body: "Please fix the race condition in the retry loop",
           user: { login: "reviewer1" },
           created_at: "2024-01-01T00:00:00.000Z",
@@ -93,6 +112,7 @@ describe("PrCommentHandler", () => {
         },
         {
           id: "IC_kwDOT5Q-Ec8AAAABXrfTmz",
+          sequence: 2,
           body: "You should update the documentation for this flag",
           user: { login: "reviewer2" },
           created_at: "2024-01-02T00:00:00.000Z",
@@ -101,12 +121,7 @@ describe("PrCommentHandler", () => {
         },
       ]);
 
-      const reviewUpdate = mockStore.updateTask.mock.calls
-        .map((call) => call[1].review)
-        .filter((review) => review?.items?.length);
-      expect(reviewUpdate.length).toBeGreaterThan(0);
-
-      const finalItems = reviewUpdate[reviewUpdate.length - 1].items!;
+      const finalItems = stored.review?.items ?? [];
       expect(finalItems).toHaveLength(2);
       expect(finalItems[0].id).not.toBe(finalItems[1].id);
       expect(finalItems.map((item) => item.body)).toEqual([
@@ -116,11 +131,7 @@ describe("PrCommentHandler", () => {
 
       // The reviewState mirror must stay in lockstep — writing one list and not the other
       // leaves the card half-migrated.
-      const stateUpdate = mockStore.updateTask.mock.calls
-        .map((call) => call[1].reviewState)
-        .filter((state) => state?.items?.length);
-      expect(stateUpdate.length).toBeGreaterThan(0);
-      const finalStateItems = stateUpdate[stateUpdate.length - 1].items!;
+      const finalStateItems = stored.reviewState?.items ?? [];
       expect(finalStateItems).toHaveLength(2);
       expect(finalStateItems[0].id).not.toBe(finalStateItems[1].id);
       expect(finalStateItems.map((item) => item.id)).toEqual(finalItems.map((item) => item.id));

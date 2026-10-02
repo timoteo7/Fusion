@@ -44,7 +44,8 @@ tie-break therefore folds the opaque key into the fractional part via a fixed-wi
 pair (timestamp, key-hash) a total order that is identical on every call, in every process.
 */
 
-export type PrCommentIdentityKey = string;
+/** A numeric id resolves to a NUMBER (the long-standing REST contract); a node id to its opaque STRING. */
+export type PrCommentIdentityKey = string | number;
 export type PrCommentIdentitySequence = number;
 
 /** Thrown when a transport hands us an id we cannot turn into a real identity. Never coerced. */
@@ -63,7 +64,13 @@ export interface PrCommentIdentityInput {
 }
 
 export interface PrCommentIdentity {
-  /** IDENTITY role — compare only for equality. Opaque and stable. */
+  /**
+   * IDENTITY role — compare only for equality. Opaque and stable.
+   *
+   * A numeric id resolves to a NUMBER, preserving the long-standing public `PrComment.id: number`
+   * contract on the REST path; a GraphQL node id resolves to its opaque STRING. `buildPrCommentReviewItemId`
+   * coerces to string either way, so REST review keys stay exactly `gh-comment-5884072859` as before.
+   */
   key: PrCommentIdentityKey;
   /** ORDER role — compare with `>` and reduce with `Math.max`. Monotonic in creation time. */
   sequence: PrCommentIdentitySequence;
@@ -108,7 +115,9 @@ export function resolvePrCommentIdentity(input: PrCommentIdentityInput): PrComme
   // REST transport (and any numeric string): the id is real, monotonic, and the better sequence.
   if (isNumericCommentId(raw)) {
     const numeric = Number.parseInt(raw, 10);
-    return { key: raw, sequence: numeric };
+    // A numeric id resolves to itself for BOTH roles; the key keeps its numeric type so the public
+    // `PrComment.id` contract on the REST path is unchanged by this fix.
+    return { key: numeric, sequence: numeric };
   }
 
   // `gh` CLI transport: a GraphQL node id. It is opaque, so it is only ever the identity key.

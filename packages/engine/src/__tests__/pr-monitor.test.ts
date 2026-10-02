@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PrMonitor, type PrComment } from "../merge/pr-monitor.js";
 import type { PrMonitorGhClient } from "../merge/pr-monitor-gh.js";
+import { resolvePrCommentIdentity } from "@fusion/core";
 
 describe("PrMonitor", () => {
   let monitor: PrMonitor;
@@ -61,30 +62,39 @@ describe("PrMonitor", () => {
 
   describe("polling", () => {
     it("polls successfully and updates tracking state with filtered new comments", async () => {
-      fetchComments.mockResolvedValueOnce([]).mockResolvedValueOnce([
-        {
-          id: 5,
-          body: "older",
-          user: { login: "reviewer1" },
-          created_at: "2024-01-01T00:00:00.000Z",
-          updated_at: "2024-01-01T00:00:00.000Z",
-          html_url: "https://example.com/5",
-        },
-        {
-          id: 12,
-          body: "new feedback",
-          user: { login: "reviewer2" },
-          created_at: "2024-01-02T00:00:00.000Z",
-          updated_at: "2024-01-02T00:00:00.000Z",
-          html_url: "https://example.com/12",
-        },
-      ]);
+      /*
+      FNXC:ReviewItemIdentity 2026-10-02-04:00:
+      Re-derived against `sequence`, NOT deleted. This case previously seeded `lastCommentId = 10` and
+      asserted it became `12`, which only worked because the ids happened to be numbers. Under the
+      split identity/order contract the fixture must carry BOTH fields explicitly: a numeric id (the
+      REST shape, which still resolves to itself for key AND sequence) keeps this case meaningful.
+      */
+      const olderComment: PrComment = {
+        id: 5,
+        sequence: 5,
+        body: "older",
+        user: { login: "reviewer1" },
+        created_at: "2024-01-01T00:00:00.000Z",
+        updated_at: "2024-01-01T00:00:00.000Z",
+        html_url: "https://example.com/5",
+      };
+      const newerComment: PrComment = {
+        id: 12,
+        sequence: 12,
+        body: "new feedback",
+        user: { login: "reviewer2" },
+        created_at: "2024-01-02T00:00:00.000Z",
+        updated_at: "2024-01-02T00:00:00.000Z",
+        html_url: "https://example.com/12",
+      };
+
+      fetchComments.mockResolvedValueOnce([]).mockResolvedValueOnce([olderComment, newerComment]);
 
       monitor.startMonitoring("FN-001", "owner", "repo", mockPrInfo);
       await flushAsync(); // initial immediate poll
 
       const tracked = monitor.getTrackedPrs().get("FN-001")!;
-      tracked.lastCommentId = 10;
+      tracked.lastCommentSequence = 10;
       tracked.lastCheckedAt = new Date("2024-01-01T00:00:00.000Z");
       tracked.consecutiveErrors = 3;
 
@@ -99,7 +109,7 @@ describe("PrMonitor", () => {
         since: "2024-01-01T00:00:00.000Z",
       });
 
-      expect(tracked.lastCommentId).toBe(12);
+      expect(tracked.lastCommentSequence).toBe(12);
       expect(tracked.lastCheckedAt.toISOString()).toBe("2024-01-01T00:01:00.000Z");
       expect(tracked.consecutiveErrors).toBe(0);
       expect(tracked.bufferedComments).toHaveLength(1);
@@ -124,6 +134,7 @@ describe("PrMonitor", () => {
       */
       const earlyCreatedLowSort = {
         id: "IC_aaa0000000000",
+        sequence: resolvePrCommentIdentity({ id: "IC_aaa0000000000", createdAt: "2024-01-01T00:00:00.000Z" }).sequence,
         body: "Please fix the retry backoff",
         user: { login: "reviewer1" },
         created_at: "2024-01-01T00:00:00.000Z",
@@ -132,6 +143,7 @@ describe("PrMonitor", () => {
       };
       const lateCreatedHighSort = {
         id: "IC_kwDOT5Q-Ec8AAAABXrfTmw",
+        sequence: resolvePrCommentIdentity({ id: "IC_kwDOT5Q-Ec8AAAABXrfTmw", createdAt: "2024-01-02T00:00:00.000Z" }).sequence,
         body: "You should update the docs",
         user: { login: "reviewer2" },
         created_at: "2024-01-02T00:00:00.000Z",
@@ -174,6 +186,7 @@ describe("PrMonitor", () => {
     it("keeps buffered comments even when callback throws, and drainComments is single-consumption", async () => {
       const newComment: PrComment = {
         id: 101,
+        sequence: 101,
         body: "please update",
         user: { login: "reviewer" },
         created_at: "2024-01-02T00:00:00.000Z",

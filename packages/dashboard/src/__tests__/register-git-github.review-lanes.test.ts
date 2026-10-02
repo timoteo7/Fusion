@@ -236,10 +236,11 @@ describe("applyChangesRequestedTransition rebounds to a lane the board actually 
 
     await applyChangesRequestedTransition(store as never, task, snapshot, { number: 9 } as never);
 
-    const written = (store.upsertTaskDocument as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
-      key: string;
-      content: string;
-    };
+    // `upsertTaskDocument(taskId, document)` — the document is the SECOND argument.
+    const [, written] = (store.upsertTaskDocument as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { key: string; content: string },
+    ];
     expect(written.key).toBe("review-feedback");
     // BOTH bodies, not just the last writer.
     expect(written.content).toContain("Rename this local variable please");

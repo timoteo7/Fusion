@@ -2,7 +2,7 @@ import type { TaskStore } from "@fusion/core";
 import type { PrInfo } from "@fusion/core";
 import { prMonitorLog } from "../logger.js";
 import { resolveTerminalColumnsFor } from "../executor.js";
-import { resolveWorkflowIrForTask, columnsWithFlag } from "@fusion/core";
+import { resolveWorkflowIrForTask, columnsWithFlag, buildPrCommentReviewItemId } from "@fusion/core";
 
 /*
 FNXC:PullRequestReview 2026-07-26-00:00:
@@ -18,12 +18,25 @@ Converting one and leaving the other is the FN-6115 -> FN-6118 -> FN-6123 shape,
 both now call the shared `resolveTerminalColumnsFor` instead of carrying a private copy of the pair.
 */
 
+/*
+FNXC:ReviewItemIdentity 2026-10-02-04:00:
+THIS LOCAL `PrComment` WAS A THIRD COPY OF THE SAME SHAPE, DECLARED `id: number`.
+
+It is kept (rather than importing from `pr-monitor.js`) because this handler is the boundary that
+receives already-resolved comments from `PrMonitor`; the duplication is the price of that seam. What
+matters is that it now AGREES with what the transport supplies: `id` is the opaque identity key and
+`sequence` the monotonic order value, matching `pr-monitor.ts`. Leaving this copy typed `id: number`
+would let the next author re-introduce the `NaN` coercion right here.
+*/
 interface PrComment {
-  id: number;
+  /** Identity role — opaque key from the transport; compared only for equality. */
+  id: string | number;
+  /** Order role — monotonic; unused here, but part of the shape the monitor hands over. */
+  sequence: number;
   body: string;
   user: { login: string };
   created_at: string;
-  updated_at: string;
+  updated_at?: string;
   html_url: string;
 }
 
@@ -342,7 +355,7 @@ Please review the PR comments and address any remaining issues.`;
       items: [],
       selectedItemIds: [],
     };
-    const itemId = `gh-comment-${comment.id}`;
+    const itemId = buildPrCommentReviewItemId(comment.id);
     const existingIndex = current.items.findIndex((item: { id: string }) => item.id === itemId);
     const nextItem = {
       id: itemId,
@@ -368,6 +381,17 @@ Please review the PR comments and address any remaining issues.`;
       addressing: [],
     };
     const existingReviewStateIndex = currentReviewState.items.findIndex((item) => item.id === itemId);
+    /*
+      FNXC:ReviewItemIdentity 2026-10-02-04:00:
+      `githubCommentId` IS WRITTEN TRUTHFULLY, NEVER COERCED.
+
+      On the REST transport this is a real number and stays one. On the `gh` transport it is an opaque
+      node id, which the widened field type now admits. What is forbidden — and is the defect this
+      change exists to close — is coercing it to a number (`Number(nodeId)` -> NaN, `|| 0` -> a
+      constant), because `syncPrReviewsToTask` reads this field for the comment dedup key and a
+      wrong-but-constant value reproduces the `gh-comment-NaN` collapse one level down. The item key
+      above already carries the identity regardless of which transport produced the comment.
+      */
     const nextReviewStateItem = {
       id: itemId,
       githubCommentId: comment.id,

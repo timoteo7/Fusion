@@ -35,14 +35,16 @@ describe("resolvePrCommentIdentity", () => {
   it("resolves a REST numeric id to itself for both key and sequence", () => {
     const resolved = resolvePrCommentIdentity({ id: "5884072859", createdAt: "2024-01-02T00:00:00Z" });
 
-    expect(resolved.key).toBe("5884072859");
+    // The key keeps its numeric type so the public `PrComment.id` contract on the REST path is
+    // unchanged by this fix; both roles resolve to the same real id.
+    expect(resolved.key).toBe(5884072859);
     expect(resolved.sequence).toBe(5884072859);
   });
 
-  it("resolves a numeric-string id to the same numeric sequence", () => {
+  it("resolves a numeric-string id to the same numeric key and sequence", () => {
     const resolved = resolvePrCommentIdentity({ id: "100", createdAt: "2024-01-02T00:00:00Z" });
 
-    expect(resolved.key).toBe("100");
+    expect(resolved.key).toBe(100);
     expect(resolved.sequence).toBe(100);
   });
 
