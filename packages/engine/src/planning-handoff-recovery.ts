@@ -70,3 +70,33 @@ export function classifyPersistedPlanHandoff(
   if (!Number.isFinite(updatedAt) || options.now - updatedAt < staleMs) return null;
   return "legacy-null";
 }
+
+/**
+ * FNXC:TriagePlanningRecovery 2026-09-19-04:04:
+ * Requirement: a card left in planning may never be a silent no-op, and the graph fence that guards
+ * legacy null-status handoff repair must only defer to a LIVE graph run.
+ *
+ * `listWorkflowWorkItemsForTask` returns the card's whole work-item history, not just live rows, so
+ * the previous `len === 0` fence read finished history as in-flight work. Every card that had ever
+ * recorded an item was refused — in production the sweep logged `Recovering specified triage task
+ * FN-XXXX` on every poll and `recoverApprovedTask` returned false without a reason, so the board
+ * showed cards stuck in planning with no cause recorded anywhere.
+ *
+ * Terminal states are finished work: they cannot own the card. Anything else (runnable, running,
+ * held, retrying, manual-required, or an unknown future state) still blocks, which keeps the fence's
+ * original purpose — never double-finalize a plan whose graph run is live.
+ *
+ * Mirrors `TaskStore.isTerminalWorkflowWorkItemState`; kept as a local predicate because engine unit
+ * stores are narrow partial adapters that do not implement that method.
+ */
+export const TERMINAL_WORK_ITEM_STATES: ReadonlySet<string> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "exhausted",
+]);
+
+/** True when the card still has at least one work item that is not finished history. */
+export function hasNonTerminalWorkItem(items: readonly { state: string }[] | undefined | null): boolean {
+  return (items ?? []).some((item) => !TERMINAL_WORK_ITEM_STATES.has(item.state));
+}

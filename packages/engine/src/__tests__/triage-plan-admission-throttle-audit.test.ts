@@ -73,6 +73,26 @@ function runningTask(id: string): Task {
   } as Task;
 }
 
+/*
+FNXC:CapacitySlotLeak 2026-09-19-04:07:
+A durable `status:"planning"` claim with NO planner session behind it — the leak this suite pins.
+`status` is a row field, so it survives a stuck-killed, crashed, or never-started planner.
+*/
+function orphanedPlanningTask(id: string): Task {
+  return {
+    id,
+    description: "planning status with no live planner",
+    column: "todo",
+    status: "planning",
+    dependencies: [],
+    steps: [],
+    currentStep: 0,
+    log: [],
+    createdAt: "2026-09-18T22:00:00.000Z",
+    updatedAt: "2026-09-18T22:00:00.000Z",
+  } as Task;
+}
+
 function createStore(tasks: Task[], recorded: RecordedEvent[], settings: Partial<Settings> = {}): TaskStore {
   // The running claimant is added here so every case exhausts the one project slot.
   tasks = [runningTask("FN-RUNNING"), ...tasks];
@@ -264,6 +284,59 @@ describe("plan admission throttle run-audit (FN-8600)", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(recorded.filter((event) => event.type === "task:plan-admission-throttled")).toHaveLength(0);
+  });
+
+  /*
+  FNXC:CapacitySlotLeak 2026-09-19-04:07:
+  Original symptom (production, 2026-09-18): planning admission was withheld for HOURS while
+  `claimed=2, processing=0` — two durable planning statuses and no planner in the process — with one
+  eligible card waiting (677 "Plan throttled by running-agent cap" lines; FUSI-018 idle 32 min; the
+  20-minute `sweepStalePlanningStatuses` repair cleared two rows in the whole log and never unblocked it).
+
+  Exact reproduction: two todo cards carrying `status:"planning"` with no live planner, one eligible
+  todo card, and `maxConcurrent` equal to the orphan count. Assertion it is gone: the orphans consume
+  no capacity, so the eligible card is not throttled — and the inverse case below proves a claim whose
+  planner IS live still consumes its slot.
+  */
+  it("does not throttle planning on a stale planning status with no live planner", async () => {
+    const orphans = [orphanedPlanningTask("FN-LEAK-1"), orphanedPlanningTask("FN-LEAK-2")];
+    const store = createStore([...orphans, eligibleTodoTask("FN-LEAK-ELIGIBLE")], recorded, { maxConcurrent: 2 });
+    // Drop the seeded in-progress claimant: the ONLY claims under test are the two orphaned statuses.
+    (store.listTasks as unknown as { mockResolvedValue: (v: Task[]) => void })
+      .mockResolvedValue([...orphans, eligibleTodoTask("FN-LEAK-ELIGIBLE")]);
+    const processor = new TriageProcessor(store, "/tmp/fn-capacity-slot-leak-root", {});
+    vi.spyOn(processor, "specifyTask").mockResolvedValue(undefined);
+    (processor as unknown as { running: boolean }).running = true;
+    await (processor as unknown as { poll: () => Promise<void> }).poll();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(recorded.filter((event) => event.type === "task:plan-admission-throttled")).toHaveLength(0);
+  });
+
+  it("still counts a planning claim while its planner session is live", async () => {
+    const live = orphanedPlanningTask("FN-LEAK-LIVE");
+    const store = createStore([live, eligibleTodoTask("FN-LEAK-WAITING")], recorded, { maxConcurrent: 1 });
+    (store.listTasks as unknown as { mockResolvedValue: (v: Task[]) => void })
+      .mockResolvedValue([live, eligibleTodoTask("FN-LEAK-WAITING")]);
+    const processor = new TriageProcessor(store, "/tmp/fn-capacity-slot-leak-root", {});
+    vi.spyOn(processor, "specifyTask").mockResolvedValue(undefined);
+    /*
+    The processor's constructor registers the process-wide liveness probe, so owning the task in
+    `processing` is exactly how production proves a live planner (FN-8453 keeps planning on the same
+    maxConcurrent claim as execute/review, and this case must not regress that).
+    */
+    (processor as unknown as { processing: Set<string> }).processing.add("FN-LEAK-LIVE");
+    (processor as unknown as { running: boolean }).running = true;
+    await (processor as unknown as { poll: () => Promise<void> }).poll();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const throttle = recorded.filter((event) => event.type === "task:plan-admission-throttled");
+    expect(throttle).toHaveLength(1);
+    expect(throttle[0].metadata).toMatchObject({
+      maxConcurrent: 1,
+      claimed: 1,
+      eligibleTaskIds: ["FN-LEAK-WAITING"],
+    });
   });
 
   it("carries no prompt, title, or reason prose — ids and counts only", async () => {

@@ -205,6 +205,7 @@ export interface AgentPromptResult {
 export interface AgentSessionResult {
   session: AgentSession;
   sessionFile?: string;
+  settleFallbackDispatch?: () => Promise<void>;
 }
 
 /** The Fusion runtime contract this plugin implements (mirrors the engine interface). */
