@@ -84,6 +84,7 @@ export function createDefaultPrMonitorGhClient(): PrMonitorGhClient {
             sequence,
             comment: {
               id: key,
+              sequence,
               body: c.body,
               user: { login: c.author.login },
               created_at: c.createdAt,

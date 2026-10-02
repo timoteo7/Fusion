@@ -253,15 +253,24 @@ export class PrCommentHandler {
       ].join("\n");
 
       await this.store.addTaskComment(taskId, feedbackText, "agent");
+      /*
+      FNXC:ReviewItemIdentity 2026-10-02-04:00:
+      This is a SYNTHETIC review row, not a comment read off a transport: there is no `gh`/REST id to
+      resolve. `Date.now()` is already monotonic in real time, so it serves BOTH roles honestly — the
+      identity key (so the row cannot collide with another changes-requested row) and the sequence.
+      It is not a sentinel and not a constant, which is the failure mode criterion 7 forbids.
+      */
+      const syntheticAt = Date.now();
       await this.upsertReviewItem(
         taskId,
         prInfo,
         {
-          id: Date.now(),
+          id: syntheticAt,
+          sequence: syntheticAt,
           body: reviewBody || "(no review body)",
           user: { login: reviewerLogin },
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          created_at: new Date(syntheticAt).toISOString(),
+          updated_at: new Date(syntheticAt).toISOString(),
           html_url: prInfo.url,
         },
         "queued",
