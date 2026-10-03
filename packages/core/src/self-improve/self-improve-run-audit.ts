@@ -13,6 +13,11 @@ import {
   type CostBudgetVerdictValue,
   type CostTotals,
 } from "./cost-budget-types.js";
+import type {
+  LearningGatePrecedenceOutcome,
+  LearningGateVerdict,
+} from "../types/self-improve/learning-gate-verdict.js";
+import type { StructuralDenylistCategory } from "./structural-denylist.js";
 
 /*
 FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:20:
@@ -53,12 +58,13 @@ moment a new optional field was added to the ledger record — precisely the "na
 telemetry" failure this contract exists to prevent. The narrative stays in the append-only ledger
 trail (`learning_ledger_events`), which is the durable record; run-audit is the queryable edge.
 
-FNXC:SelfImproveRunAudit 2026-09-29-18:51:
-Single-writer contract. These façades are the ONLY writer of `selfimprove:*` mutation types.
-Do NOT call `recordRunAuditEvent` directly from ledger code, and do NOT introduce a second
-`selfimprove:*` mutation type: the ledger row and its audit row must never be produced by divergent
-code paths, because "the ledger says reverted but run-audit has no reversion" is exactly the
-divergence an operator cannot debug.
+FNXC:SelfImproveRunAudit 2026-09-30-15:26:
+There are now FOUR façades, not three: the three proposal-lifecycle transitions plus
+`emitSelfImproveGateVerdictRecorded` (FUSI-020). The single-writer contract extends to all four —
+do NOT call `recordRunAuditEvent` directly from any self-improvement code, and do NOT introduce a
+fifth `selfimprove:*` mutation type: the durable row and its audit row must never be produced by
+divergent code paths, because "the ledger says reverted but run-audit has no reversion" is exactly
+the divergence an operator cannot debug.
 
 FNXC:SelfImproveCostBudget 2026-09-30-13:45:
 FUSI-018 adds a FOURTH event to that union, and the single-writer rule applies to it exactly as it
@@ -71,6 +77,15 @@ is produced by exactly one façade in this file, never by a caller reaching past
 verdict still needs that protection is that an `over-budget` gate decision is the input to a later
 revert, so "the gate says over budget but no audit row names it" is just as un-debuggable as the
 revert case.
+
+FNXC:SelfImproveRunAudit 2026-09-29-18:51:
+Single-writer contract. These façades are the ONLY writer of `selfimprove:*` mutation types.
+Do NOT call `recordRunAuditEvent` directly from ledger code, and do NOT introduce a second
+`selfimprove:*` mutation type: the ledger row and its audit row must never be produced by divergent
+code paths, because "the ledger says reverted but run-audit has no reversion" is exactly the
+divergence an operator cannot debug. `emitSelfImproveDenylistRejected` (FUSI-019, the structural
+denylist refusal) lives here for the same reason as the rest: a refusal recorded by the guard and a
+refusal recorded by its caller would be two different code paths deciding the same event existed.
 
 FNXC:SelfImproveRunAudit 2026-09-29-18:51:
 Telemetry is NOT load-bearing. Every façade routes through the FN-9177 bounded core seam (the
@@ -96,25 +111,48 @@ a cross-run query. The stable default keeps every transition of one proposal und
 id while a caller that genuinely owns a run can still pass its own.
 */
 
-/** The mutation types this module is the sole writer of. The first three mirror the ledger trail's `kind`. */
+/** The mutation types this module is the sole writer of. Mirrors the ledger trail's `kind`. */
 export const SELF_IMPROVE_RUN_AUDIT_EVENTS = {
   created: "selfimprove:proposal-created",
   applied: "selfimprove:proposal-applied",
   reverted: "selfimprove:proposal-reverted",
   costBudgetEvaluated: "selfimprove:cost-budget-evaluated",
+  gateVerdict: "selfimprove:gate-verdict-recorded",
+  denylistRejected: "selfimprove:denylist-rejected",
 } as const;
+
+/*
+FNXC:SelfImproveRunAudit 2026-09-30-15:26:
+A gate verdict is NOT a proposal transition, so it gets its OWN mutation type rather than being
+folded into one of the three ledger events. The verdict names an EXPERIMENT and a BASELINE, not a
+proposal, and it is recorded when the deterministic gate RESOLVES — a point that frequently has no
+proposal row at all (a candidate judged against a baseline before it was ever proposed). Reusing
+`selfimprove:proposal-*` would have forced a fabricated `proposalId`/`target` into the metadata,
+which is exactly the fabrication the existing façades' "ids the caller actually has" rule forbids.
+
+FNXC:SelfImproveRunAudit 2026-09-30-15:26:
+Because the verdict's own identity is the experiment/baseline pair, the shared `SelfImproveRunAuditInput`
+(which requires a `proposalId` and its product `target`) does NOT fit it. This façade therefore takes
+its own input shape and does not route through `selfImproveEvent` — it builds the audit row directly,
+so the verdict path never borrows a proposal's identity to fill a required field. The bounded core
+seam, the fixed `SELF_IMPROVE_AUDIT_AGENT_ID` principal, and the `domain`/`taskId` conventions are all
+still reused, so this remains a `selfimprove:*` row like the others.
+*/
 
 /**
  * One of the `selfimprove:*` event types.
  *
- * The first three are LEDGER TRANSITIONS and mirror the append-only trail's `kind` CHECK. The fourth,
- * `selfimprove:cost-budget-evaluated`, is a GATE VERDICT: it records a decision the deterministic
- * primary gate reached, mutates no proposal state, and therefore has no `kind` in that CHECK. It lives
- * in this union — not in the ledger trail — because run-audit is the observability edge, and the
- * ledger trail is the durable record of what was DONE to a proposal.
+ * The first three are LEDGER TRANSITIONS and mirror the append-only trail's `kind` CHECK. The
+ * `selfimprove:cost-budget-evaluated` and `selfimprove:gate-verdict-recorded` rows are GATE VERDICTS:
+ * they record decisions the deterministic gate reached, mutate no proposal state, and therefore have
+ * no `kind` in that CHECK. `selfimprove:denylist-rejected` is a PRE-GATE REFUSAL (FUSI-019): the
+ * candidate was classified and refused before the gate ever ran, so it is neither a transition nor a
+ * verdict. The non-transition rows live in this union — not in the ledger trail — because run-audit
+ * is the observability edge, and the ledger trail is the durable record of what was DONE to a proposal.
  */
 export type SelfImproveRunAuditEventType =
   (typeof SELF_IMPROVE_RUN_AUDIT_EVENTS)[keyof typeof SELF_IMPROVE_RUN_AUDIT_EVENTS];
+
 
 /**
  * Outcome recorded for a created proposal. A closed enum so "how do proposals enter the ledger?" is
@@ -417,4 +455,181 @@ export function emitSelfImproveCostBudgetEvaluated(input: SelfImproveCostBudgetA
       },
     ),
   );
+}
+
+/**
+ * Shared input for the gate-verdict façade.
+ *
+ * Deliberately its own shape rather than {@link SelfImproveRunAuditInput}: a gate verdict is
+ * identified by an EXPERIMENT against a BASELINE, and it is routinely recorded for a candidate that
+ * has no proposal row yet. Reusing the proposal-shaped input would force a fabricated `proposalId`
+ * and `target` into the metadata. `host` is the same structural bounded-seam host the other façades
+ * use, and `runId` defaults to a stable per-experiment lineage id (not a clock) so every judgment
+ * about one experiment correlates under a single run.
+ */
+export interface SelfImproveGateVerdictAuditInput {
+  /** Any object exposing the minimal `recordRunAuditEvent` seam (`TaskStore` satisfies it structurally). */
+  host: RunAuditSinkHost;
+  /** The experiment this verdict is about. Also the audit `target`. */
+  experimentId: string;
+  /** The baseline the experiment was compared against. */
+  baselineId: string;
+  /** Project-scoped audit correlation id, when the caller tracks one. */
+  projectId?: string;
+  /** Actor recorded as the mutating agent. Defaults to the fixed system principal. */
+  agentId?: string;
+  /** Run that recorded the verdict. Defaults to a stable synthetic per-experiment id. */
+  runId?: string;
+  /** ISO-8601 instant override. Defaults to now. */
+  timestamp?: string;
+  /** The verdict that stands after the precedence rule. */
+  resolvedVerdict: LearningGateVerdict;
+  /** The primary gate's own verdict, verbatim. */
+  primaryVerdict: LearningGateVerdict;
+  /** The canary's verdict, or `null` when no canary ran. */
+  canaryVerdict: LearningGateVerdict | null;
+  /** Which rule decided the resolved verdict. */
+  precedenceOutcome: LearningGatePrecedenceOutcome;
+  /** The deterministic sha256 over the primary signals that the stored row is keyed on. */
+  inputFingerprint: string;
+  /** Version of the replay corpus the signals were computed against. */
+  corpusVersion: string;
+  /** Fixed seed the corpus was sampled with. */
+  seed: number;
+  /**
+   * Outcome recorded for the write. `already-recorded` marks an idempotent re-attempt that appended
+   * nothing new because the identical judgment (same derived verdict id) was already stored, so a
+   * repeat is distinguishable from the first successful record without writing prose.
+   */
+  outcome: "recorded" | "already-recorded";
+}
+
+/**
+ * Record that the deterministic gate resolved a verdict for an experiment.
+ *
+ * Emits `selfimprove:gate-verdict-recorded`. Metadata is an EXPLICIT closed list of ids/fixed
+ * outcomes: the experiment, the baseline, all THREE verdicts (resolved, primary, canary — the
+ * divergence is the point, so it must be observable), the input fingerprint, the corpus version,
+ * the seed, and the outcome. It deliberately does NOT include the primary signal booleans or the
+ * test-count delta: those live on the durable verdict row, and duplicating them in telemetry would
+ * give the two records a second thing to disagree about. It NEVER includes a diff, the canary's
+ * reasoning, or any free prose.
+ */
+export function emitSelfImproveGateVerdictRecorded(input: SelfImproveGateVerdictAuditInput): Promise<void> {
+  return emitBoundedRunAudit(input.host, {
+    // A gate verdict is not a task and belongs to no task column.
+    taskId: undefined,
+    agentId: input.agentId ?? SELF_IMPROVE_AUDIT_AGENT_ID,
+    runId: input.runId ?? `selfimprove-gate-${input.experimentId}`,
+    domain: "database",
+    mutationType: SELF_IMPROVE_RUN_AUDIT_EVENTS.gateVerdict,
+    target: input.experimentId,
+    ...(input.timestamp ? { timestamp: input.timestamp } : {}),
+    metadata: {
+      experimentId: input.experimentId,
+      baselineId: input.baselineId,
+      resolvedVerdict: input.resolvedVerdict,
+      primaryVerdict: input.primaryVerdict,
+      canaryVerdict: input.canaryVerdict,
+      precedenceOutcome: input.precedenceOutcome,
+      inputFingerprint: input.inputFingerprint,
+      corpusVersion: input.corpusVersion,
+      seed: input.seed,
+      outcome: input.outcome,
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+    },
+  });
+}
+
+/*
+FNXC:SelfImproveRunAudit 2026-09-30-11:50:
+The denylist refusal takes a NARROWER input than `SelfImproveRunAuditInput`, and the narrowing is
+the point rather than a convenience. That interface requires both a `proposalId` and a `target`,
+but the structural denylist runs BEFORE a proposal exists: the guard classifies a candidate COMMIT,
+and a commit can be refused with no proposal id and no product target in the world — a change to the
+gate barrel or the release script has no `evals`/`skills`/`memory` surface to point at. Making the
+ids optional here, and omitting them from the event when absent, is what lets the guard be the first
+thing to touch a diff. Fabricating a placeholder proposal id to satisfy a stricter signature would
+put a fake identity into an append-only audit trail, and fabricating a `target` would claim a product
+surface the refusal never had.
+
+FNXC:SelfImproveRunAudit 2026-09-30-11:50:
+The metadata is a CLOSED list of categories, counts, and outcomes — NEVER paths, diffs, or prose.
+The category names are the five fixed enum members, so "which floor did the experiment try to move"
+is answerable by counting; the per-category counts and the total `fileCount` are the only shape
+numbers. The offending PATHS are deliberately absent: recording them would write the candidate diff
+into run-audit, and run-audit's whole contract (stated at the top of this module) is ids/counts/
+fixed-outcomes only. The full path list stays in the guard's return value for the operator surface,
+where it belongs, and never reaches telemetry.
+*/
+
+/**
+ * Outcome recorded for a denylist refusal. A single fixed value: the guard only ever emits this
+ * when it actually refused, so there is no unreported or ambiguous outcome to distinguish.
+ */
+export type SelfImproveDenylistRejectedOutcome = "rejected";
+
+/**
+ * Input for a structural denylist refusal.
+ *
+ * Deliberately NOT `SelfImproveRunAuditInput`: see the FNXC block above. `proposalId` and `target`
+ * are both optional because a commit can be classified before any proposal exists and a code-level
+ * hit has no product target.
+ */
+export interface SelfImproveDenylistRejectedInput {
+  /** Any object exposing the minimal `recordRunAuditEvent` seam. */
+  host: RunAuditSinkHost;
+  /** The immutable categories the diff was refused under, in classifier order. */
+  categories: readonly StructuralDenylistCategory[];
+  /** Number of protected files per refused category. */
+  counts: Partial<Record<StructuralDenylistCategory, number>>;
+  /** Total number of protected files across all refused categories. */
+  fileCount: number;
+  /** Durable identity of the learning proposal, when the refusal is attributable to one. */
+  proposalId?: string;
+  /** Product surface the proposal acts on, when one is known. */
+  target?: LearningProposalTarget;
+  /** Project-scoped audit correlation id, when the caller tracks one. */
+  projectId?: string;
+  /** Actor recorded as the mutating agent. Defaults to the fixed system principal. */
+  agentId?: string;
+  /** Project-scoped audit correlation run id, when the caller owns one. */
+  runId?: string;
+  /** ISO-8601 instant override. Defaults to now. */
+  timestamp?: string;
+}
+
+/**
+ * Record that a candidate diff was refused by the structural denylist before the gate ran.
+ *
+ * Emits `selfimprove:denylist-rejected`. This is best-effort telemetry routed through the bounded
+ * core seam: an absent, throwing, rejecting, hung, or late sink changes what is OBSERVED and
+ * nothing about what the guard DID — the guard still refuses, and the gate still never runs. The
+ * refusal is a deterministic property of the diff, not something the audit row grants.
+ */
+export function emitSelfImproveDenylistRejected(
+  input: SelfImproveDenylistRejectedInput,
+): Promise<void> {
+  return emitBoundedRunAudit(input.host, {
+    taskId: undefined,
+    agentId: input.agentId ?? SELF_IMPROVE_AUDIT_AGENT_ID,
+    runId: input.runId ?? (input.proposalId ? `selfimprove-${input.proposalId}` : "selfimprove-denylist"),
+    domain: "database",
+    mutationType: SELF_IMPROVE_RUN_AUDIT_EVENTS.denylistRejected,
+    // A refusal with no proposal to attribute is a fixed sentinel target, not a borrowed id.
+    target: input.proposalId ?? "structural-denylist",
+    ...(input.timestamp ? { timestamp: input.timestamp } : {}),
+    // Explicit closed list: categories, per-category counts, the total, the rejection flag, and
+    // ids ONLY when the caller actually has them. Never paths, never diffs, never prose.
+    metadata: {
+      categories: input.categories,
+      counts: input.counts,
+      categoryCount: input.categories.length,
+      fileCount: input.fileCount,
+      rejected: true,
+      ...(input.proposalId ? { proposalId: input.proposalId } : {}),
+      ...(input.target ? { target: input.target } : {}),
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+    },
+  });
 }

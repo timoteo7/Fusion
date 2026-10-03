@@ -505,6 +505,7 @@
     "recordGoalCitations",
     "recordImportTranslation",
     "recordLearningApplication",
+    "recordLearningGateVerdict",
     "recordLearningReversal",
     "recordPatchnodeCompletion",
     "recordPatchnodeRevert",
@@ -2006,6 +2007,11 @@
       "reason": "reviewed public TaskStore operation; not a durable writer reached by this merge frontier"
     },
     {
+      "method": "listLearningGateVerdicts",
+      "kind": "non-writer",
+      "reason": "lists project-scoped learning gate verdicts without mutation or emission"
+    },
+    {
       "method": "listLearningProposals",
       "kind": "writer",
       "reason": "on the learning-ledger read frontier; classified a writer conservatively so an orphaned body reaching it is still fenced"
@@ -2471,6 +2477,16 @@
       "reason": "reviewed public TaskStore operation; not a durable writer reached by this merge frontier"
     },
     {
+      "method": "readLearningGateVerdictByBaseline",
+      "kind": "non-writer",
+      "reason": "reads project-scoped learning gate verdicts by baseline without mutation or emission"
+    },
+    {
+      "method": "readLearningGateVerdictByExperiment",
+      "kind": "non-writer",
+      "reason": "reads project-scoped learning gate verdicts by experiment without mutation or emission"
+    },
+    {
       "method": "readPreArchiveColumnFromTaskFile",
       "kind": "non-writer",
       "reason": "reviewed public TaskStore operation; not a durable writer reached by this merge frontier"
@@ -2614,6 +2630,11 @@
       "method": "recordLearningApplication",
       "kind": "writer",
       "reason": "appends a learning application event to the ledger"
+    },
+    {
+      "method": "recordLearningGateVerdict",
+      "kind": "writer",
+      "reason": "persists a deterministic learning gate verdict and emits bounded run audit"
     },
     {
       "method": "recordLearningReversal",

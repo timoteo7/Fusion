@@ -384,6 +384,15 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   body that reaches the learning-ledger read frontier is still treated as having reached the durable
   frontier; the classification errs toward fencing rather than toward missing a writer.
   */
+  /*
+  FNXC:SelfImproveGateVerdict 2026-10-03-00:56:
+  The verdict façade persists a committed verdict and emits bounded audit; its readers are
+  emission-free project-scoped lookups. Classify the real public surface with the verdict stage.
+  */
+  recordLearningGateVerdict: { kind: "writer", reason: "persists a deterministic learning gate verdict and emits bounded run audit" },
+  readLearningGateVerdictByExperiment: { kind: "non-writer", reason: "reads project-scoped learning gate verdicts by experiment without mutation or emission" },
+  readLearningGateVerdictByBaseline: { kind: "non-writer", reason: "reads project-scoped learning gate verdicts by baseline without mutation or emission" },
+  listLearningGateVerdicts: { kind: "non-writer", reason: "lists project-scoped learning gate verdicts without mutation or emission" },
   appendLearningProposal: { kind: "writer", reason: "persists a learning proposal row and its opening event" },
   recordLearningApplication: { kind: "writer", reason: "appends a learning application event to the ledger" },
   recordLearningReversal: { kind: "writer", reason: "appends a learning reversal event naming the application it cancels" },

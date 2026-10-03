@@ -1066,9 +1066,18 @@ export type DatabaseMutationType =
   | "overseer:no-op-finalize-vetoed-failed-executor"
   /*
    * FNXC:SelfImproveRunAudit 2026-09-29-18:51: FUSI-012 selfimprove audit events.
-   * FNXC:SelfImproveCostBudget 2026-09-30-13:45: FUSI-018 adds the gate-verdict event. It is NOT a
-   * ledger transition and has no `kind` in the learning_ledger_events CHECK — it records that the
-   * deterministic primary gate reached a cost-budget verdict (within / over / not-comparable).
+   * FNXC:SelfImproveCostBudget 2026-09-30-13:45: FUSI-018 adds the cost-budget gate-verdict event.
+   * It is NOT a ledger transition and has no `kind` in the learning_ledger_events CHECK — it records
+   * that the deterministic primary gate reached a cost-budget verdict (within / over /
+   * not-comparable).
+   * FNXC:SelfImproveGateVerdict 2026-09-30-15:26: FUSI-020 adds the persisted gate-verdict event. It
+   * is likewise NOT a ledger transition: it names an experiment judged against a baseline, and is
+   * routinely recorded for a candidate that has no proposal row yet. Metadata is
+   * ids/fixed-outcomes only — never a diff, the canary's reasoning, or free prose.
+   * FNXC:SelfImproveStructuralDenylist 2026-09-30-11:50: FUSI-019 adds the pre-gate refusal
+   * event. It is neither a ledger transition nor a gate verdict: the candidate diff was
+   * classified and REFUSED before the gate ever ran. Metadata is the fixed category enum,
+   * per-category counts, and a total file count — never the offending paths or the diff.
    * Metadata is ids/counts/fixed outcomes only — never proposal prose, evidence text, or diff.
    * The bounded core seam absorbs absent/throwing/rejecting/hanging sinks so the sink
    * never alters the ledger transition or the gate verdict.
@@ -1086,7 +1095,9 @@ export type DatabaseMutationType =
    * nothing about the verdict the caller already holds.
    */
   | "selfimprove:gate-run"
-  | "selfimprove:cost-budget-evaluated";
+  | "selfimprove:cost-budget-evaluated"
+  | "selfimprove:gate-verdict-recorded"
+  | "selfimprove:denylist-rejected";
 
 // ── Filesystem mutation types ─────────────────────────────────────────────────
 

@@ -121,6 +121,7 @@ import {
   SELFIMPROVE_LEARNING_LEDGER_VERSION,
   LEARNING_LEDGER_EVENTS_VERSION,
   LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
+  LEARNING_GATE_VERDICTS_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
 import type { PluginSchemaInitHook } from "../../postgres/plugin-schema-hook.js";
@@ -183,11 +184,17 @@ describe("schema-applier: immutable migration identities", () => {
     // 0089 for the revert-reason enum on the event trail. The baseline pin below must move with it,
     // and the new migration is pinned here so a renumbered or unregistered 0089 fails loudly here
     // rather than silently never running on an already-migrated database.
-    // FNXC:SelfImproveLearningLedger 2026-10-02-00:00: renumbered with the migration it pins — the
-    // revert-reason enum is 0089 here, not 0088, because the fork's main already owns 0086 and this
-    // chain claims 0087/0088 for the ledger and its trail. Two migrations may never share a number.
     expect(LEARNING_LEDGER_REVERT_SEMANTICS_VERSION).toBe("0089");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0089");
+    // FNXC:SelfImproveGateVerdict 2026-09-30-15:26: FUSI-020 advanced the baseline for the
+    // persisted deterministic gate verdict. The baseline pin below must move with it, and the new
+    // migration is pinned here so a renumbered or unregistered migration fails loudly here rather
+    // than silently never running on an already-migrated database.
+    // FNXC:SelfImproveGateVerdict 2026-10-02-00:00: renumbered with the migration it pins — the
+    // gate-verdict table is 0090 here, not 0089, because this chain already claims 0087/0088/0089
+    // for the ledger, its event trail, and the revert-reason enum. Two migrations may never share
+    // a number.
+    expect(LEARNING_GATE_VERDICTS_VERSION).toBe("0090");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0090");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -716,7 +723,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 120 project tables, 17 central tables, 1 archive table", async () => {
+  it("creates all 121 project tables, 17 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -734,10 +741,10 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     /*
     FNXC:PgSchemaApplier 2026-10-03-00:52:
     Registered migration DDL creates 118 upstream project tables, including the 0086 stale-review
-    callback waiver receipts table that the old 117 pin omitted. 0087 adds learning_proposals (118 → 119). 0088 adds learning_ledger_events (119 → 120); 0089 alters the trail without adding a table.
+    callback waiver receipts table that the old 117 pin omitted. 0087 adds learning_proposals (118 → 119). 0088 adds learning_ledger_events (119 → 120); 0089 alters the trail without adding a table. 0090 adds learning_gate_verdicts (120 → 121).
     Plugin-owned tables are excluded by disabling schema-init hooks for this baseline count.
     */
-    expect(bySchema.project).toBe(120);
+    expect(bySchema.project).toBe(121);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
@@ -1937,6 +1944,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
+      LEARNING_GATE_VERDICTS_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
   });
@@ -2042,6 +2050,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
+      LEARNING_GATE_VERDICTS_VERSION,
     ]);
   });
 
@@ -2280,6 +2289,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
+      LEARNING_GATE_VERDICTS_VERSION,
     ]);
   });
 
@@ -2399,6 +2409,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
+      LEARNING_GATE_VERDICTS_VERSION,
     ]);
   });
 
@@ -2518,6 +2529,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
+      LEARNING_GATE_VERDICTS_VERSION,
     ]);
   });
 });

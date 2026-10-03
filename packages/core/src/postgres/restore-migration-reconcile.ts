@@ -96,6 +96,7 @@ import {
   MULTI_ROLE_WORKFLOW_AGENTS_VERSION,
   OVERLAP_WAIT_SYNC_VERSION,
   LEARNING_LEDGER_EVENTS_VERSION,
+  LEARNING_GATE_VERDICTS_VERSION,
   OWNER_PROJECT_ID_SPLIT_VERSION,
   PATCHNODE_ENTRIES_VERSION,
   PLANNING_ACTIVE_TIMING_VERSION,
@@ -377,6 +378,14 @@ export const RESTORED_SCHEMA_RELATION_SENTINELS: readonly RestoredSchemaRelation
   the proposal record as suspect and replaying the whole ledger.
   */
   { version: LEARNING_LEDGER_EVENTS_VERSION, relations: ["project.learning_ledger_events"] },
+  /*
+  FNXC:SelfImproveGateVerdict 2026-09-30-15:26:
+  The persisted gate verdict carries its own sentinel, separate from 0088's, because the two are
+  independently rewind-detectable. A database restored from a point between 0088 and 0090 has the
+  event trail but no verdict table; reporting the floor as 0088 lets the caller replay 0090 alone
+  rather than treating the trail as suspect and replaying the whole self-improvement ledger.
+  */
+  { version: LEARNING_GATE_VERDICTS_VERSION, relations: ["project.learning_gate_verdicts"] },
 ];
 
 export async function detectRestoredSchemaRewindFloor(

@@ -30,10 +30,19 @@ const EXPECTED_GATE_CHECKS = [
   check("pi-versions-pinned"),
   check("workspace-package-graph"),
   check("no-test-timeout-appeasement"),
+  /*
+  FNXC:BarrelDuplicateExports 2026-09-30-16:46:
+  `check-no-comment-assertions-in-tests` was ALREADY absent from this pinned inventory when FUSI-022
+  ran — the same drift the verify-fast mirror records twice in its own comments. It is a real
+  validator in the canonical `test:gate:static` chain, so it is restored at its true position.
+  FUSI-022 appended `check-barrel-duplicate-exports` as the 17th canonical gate validator.
+  */
+  check("no-comment-assertions-in-tests"),
   check("changeset-format"),
   check("mock-completeness"),
   check("inert-sync-lane-conversions"),
   check("runtime-skill-loader-drift"),
+  check("barrel-duplicate-exports"),
 ];
 
 function createFixture() {
