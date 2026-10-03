@@ -3,3 +3,4 @@
  * Domain barrel for types/self-improve.
  */
 export * from "./learning-proposal.js";
+export * from "./primary-gate.js";

@@ -880,6 +880,18 @@ export type DatabaseMutationType =
   | "memory:semantics-skipped"
   | "memory:capture-recorded"
   | "memory:capture-failed"
+  /*
+   * FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:08:
+   * The learning revert is the self-improvement loop's authoritative undo, so its audit row is what
+   * answers "was this experiment backed out, and how many times" after the fact. Emitted through the
+   * CORE bounded seam (`emitBoundedRunAudit`) because `@fusion/core` cannot import the engine seam;
+   * the union lives here so the name is a real declared member and `docs/run-audit.md` can name it.
+   * One row per ATTEMPT, including the two no-op outcomes, so a retry is visible rather than silent.
+   * Metadata is ids/counts/fixed-outcomes only — proposal id, target, applied event id, revert event
+   * id, the `reverted`|`already-reverted`|`not-applied` outcome, and the fixed reason enum. It never
+   * carries a verdict, free prose, the restored value's diff, or reasoning.
+   */
+  | "learning:reverted"
   | "task:in-review-stall-deadlock-disposed"
   | "task:in-review-stall-terminal-provider-error"
   | "task:finalize-unproven-blocked"
@@ -1051,7 +1063,30 @@ export type DatabaseMutationType =
    * Metadata (ids/outcomes-only): { reason; branch; integrationBranch; lane:
    * "ai-empty-merge"; executorSignal?; executorSignalObservedAt? }
    */
-  | "overseer:no-op-finalize-vetoed-failed-executor";
+  | "overseer:no-op-finalize-vetoed-failed-executor"
+  /*
+   * FNXC:SelfImproveRunAudit 2026-09-29-18:51: FUSI-012 selfimprove audit events.
+   * FNXC:SelfImproveCostBudget 2026-09-30-13:45: FUSI-018 adds the gate-verdict event. It is NOT a
+   * ledger transition and has no `kind` in the learning_ledger_events CHECK — it records that the
+   * deterministic primary gate reached a cost-budget verdict (within / over / not-comparable).
+   * Metadata is ids/counts/fixed outcomes only — never proposal prose, evidence text, or diff.
+   * The bounded core seam absorbs absent/throwing/rejecting/hanging sinks so the sink
+   * never alters the ledger transition or the gate verdict.
+   */
+  | "selfimprove:proposal-created"
+  | "selfimprove:proposal-applied"
+  | "selfimprove:proposal-reverted"
+  /*
+   * FNXC:SelfImproveGateRunAudit 2026-09-30-09:50: FUSI-016 primary-gate event. Records that a
+   * candidate was JUDGED by the deterministic primary gate. Metadata is ids/counts/booleans only:
+   * candidate sha, boolean verdict, content-addressed fingerprint, per-step [id, boolean] pairs,
+   * failed-step count, affected-test count, scope kind, and duration. The diff, the step command
+   * lines, and any compiler/test log output are structurally excluded — the gate result is a yes/no.
+   * Emitted through the bounded core seam, so an absent/throwing/rejecting/hanging sink changes
+   * nothing about the verdict the caller already holds.
+   */
+  | "selfimprove:gate-run"
+  | "selfimprove:cost-budget-evaluated";
 
 // ── Filesystem mutation types ─────────────────────────────────────────────────
 

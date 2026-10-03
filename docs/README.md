@@ -41,6 +41,7 @@ For a full walkthrough (installation, onboarding, first task, and daily workflow
 | [Custom Workflow Reliability Acceptance Map](./custom-workflow-reliability-acceptance-map.md) | End-to-end reliability acceptance criteria for custom workflow authoring, selection, execution, recovery, restart durability, and deferred journeys |
 | [Custom Non-Coding Workflows MVP Spec](./custom-workflows-mvp-spec.md) | MVP framing for user-authored non-coding workflows, lifecycle mapping, metrics, and risk checklist |
 | [Task Evaluations](./evals.md) | Eval scoring contract, evidence persistence, score categories, and evaluation pipeline |
+| [Self-Improvement Learning Ledger](./self-improvement-ledger.md) | Self-improvement learning-ledger contract: proposal/evidence record fields, state machine, expiry and versioning invariants, reversal, project-scoped persistence, run-audit convention, and which M1 slices have not shipped yet |
 | [Multi-Project](./multi-project.md) | Central registry architecture, project management, isolation modes, and migration paths |
 | [Workspaces (Multi-Repository)](./workspaces.md) | Workspace setup, per-repository execution and land, recovery, revert, and archive cleanup |
 

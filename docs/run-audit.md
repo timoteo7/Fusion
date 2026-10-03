@@ -120,8 +120,77 @@ All `recordRunAuditEventWithinTransaction(tx, ...)` calls and the `recordRunAudi
 
 `task:reconcile-absent-branch-landed` records an ownership-trailer-proven review card finalized after its branch was cleaned up or when a still-present branch has no remaining task-owned unlanded commits. `task:reconcile-absent-branch-unproven` records a skipped absent-branch candidate. Metadata is IDs and fixed outcomes only: task id, source (`self-healing` or `manual`), branch/base branch identifiers, merge SHA/strategy or fixed reason, and ownership-proof classification; it never contains commit subjects, diffs, or reviewer text. Both emissions use the FN-9175 bounded best-effort engine seam, so hostile sinks cannot alter reconciliation. The unproven event is deduplicated per manager only after its audit write records successfully, allowing a failed audit write to be retried. `fn task reconcile <id>` and the automatic self-healing absent-branch sweep both call the same `SelfHealingManager.reconcileLandedReviewTask` fence, so a manual reconcile and an automatic one can never disagree about what "landed" means.
 
+### Self-improvement ledger events (FUSI-012, wired in FUSI-015)
+
+Three `selfimprove:*` events record the ledger's lifecycle transitions — proposal created, proposal applied, proposal reverted — through the core bounded run-audit seam (`packages/core/src/self-improve/self-improve-run-audit.ts`). They are the observability edge for the learning-proposal ledger added in FUSI-009/010/011.
+
+**Emission points** — the three `TaskStore` WRITE delegations in `packages/core/src/store.ts`: `appendLearningProposal` emits `selfimprove:proposal-created`, `recordLearningApplication` emits `selfimprove:proposal-applied`, `recordLearningReversal` emits `selfimprove:proposal-reverted`. Each emit runs after the awaited write has returned its committed row and is deliberately **unawaited**, so telemetry never sits on the transition's success path. `listLearningProposals` emits nothing: a read is not a transition. The audit row's `timestamp` is the transition's own durable instant (the proposal's `createdAt` or the event's `occurredAt`), not the emission wall-clock, so the audit trail orders against the ledger it observes; `runId` defaults to the stable `selfimprove-<proposalId>` lineage rather than a clock-derived id, and `agentId` defaults to the fixed `selfimprove` principal.
+
+**Never-fabricate guard** — the `applied` row's `version`/`confidence`/`value` are not on the appended event, so the delegation reads the committed proposal row through `readLearningProposal`. A missing row, or a read that fails after the event committed, SKIPS the emit and still returns the committed event: a missing audit row is honest, an invented weight is a lie an operator could read off the trail.
+
+**Metadata rule** — ids/counts/fixed outcomes only. No proposal prose, evidence text, rationale, or diff content ever appears in metadata. Each façade builds metadata from an explicit closed field list and never spreads caller input, so adding an optional ledger field cannot silently widen the audit surface. Evidence is recorded as a count (`evidenceCount`) and the pre-application value as a boolean (`hasPriorValue`); `revertReason` is a fixed five-member enum mirrored from the `0089` CHECK.
+
+**Sink independence** — all three façades delegate to `emitBoundedRunAudit` and are fully absorbent: absent, throwing, rejecting, never-settling, and late-settling sinks change nothing about the ledger transition. The sink is best-effort observability, not a lifecycle dependency. This is proven behaviorally, not merely by construction: `packages/core/src/__tests__/self-improve-run-audit-sink-health.test.ts` drives every façade through all six sink modes with fake timers, and the pg suite re-runs a full proposed→applied→reverted lifecycle against a throwing, a rejecting, and a never-settling `recordRunAuditEvent` and asserts every transition still commits.
+
+**Union registry** — the three literals are members of the engine `DatabaseMutationType` union, with a `date -u` FNXC comment stating the metadata rule.
+
+These events are intentionally outside the curated delivery-pipeline event catalogue (`DELIVERY_PIPELINE_RUN_AUDIT_EVENTS`). Adding or removing them requires updating this doc and the `DatabaseMutationType` union together — the run-audit catalogue parity test does not cover them.
+
+### Self-improvement primary-gate run (FUSI-016)
+
+`selfimprove:gate-run` records that a self-improvement candidate was **judged** by the deterministic primary gate, through the core bounded run-audit seam (`packages/core/src/self-improve/self-improve-gate-run-audit.ts`). Where the three ledger events above record that a learning transition *happened*, this one records that a candidate was *evaluated* and what the boolean answer was.
+
+**Emission point** — the gate's caller emits one row per gate run, immediately after the deterministic verdict is assembled. The façade is the **sole writer** of `selfimprove:gate-run`, mirroring the single-writer rule the three ledger façades follow (the rule holds per event: a verdict produced by one code path and an audit row produced by another is the divergence the contract exists to prevent). `runId` defaults to a stable `selfimprove-gate-<candidateSha>` lineage, `agentId` to the fixed `selfimprove` principal, and the row belongs to no task column.
+
+**Metadata rule** — ids/counts/booleans only. The fields are the candidate sha, the boolean `passed` verdict, the content-addressed `fingerprint`, each step as an `[id, boolean]` pair, `failedStepCount`, `affectedTestCount`, the `affectedScopeKind`, and the run `durationMs`. The code diff, each step's command line, and any compiler or test log output are **structurally excluded** — the gate result is a yes/no, and the evidence behind it lives in the ledger and the experiment worktree, not the queryable audit edge. The per-step record is deliberately the step's *boolean*, not the richer outcome vocabulary (`timed-out` vs `failed`): two runs reaching the same boolean decision share a fingerprint, and run-audit mirrors that decision-level identity. The façade builds metadata from an explicit closed field list and never spreads caller input, so a growing verdict can never silently widen the audit surface.
+
+**Sink independence** — the façade delegates to `emitBoundedRunAudit` and is fully absorbent: absent, throwing, rejecting, never-settling, and late-settling sinks leave the caller's verdict completely unchanged. Telemetry never becomes a lifecycle dependency on the decision to keep or revert a candidate. Proven behaviorally in `packages/core/src/__tests__/self-improve-gate-run-audit-sink-health.test.ts`, which drives all six sink modes and asserts the pre-emission verdict stays deep-equal, and that planted diff/command/log keys and values never reach the captured event.
+
+Like the three ledger events, `selfimprove:gate-run` is a member of the engine `DatabaseMutationType` union and is intentionally outside the curated delivery-pipeline event catalogue.
+
+### Self-improvement cost-budget verdicts (FUSI-018)
+
+`selfimprove:cost-budget-evaluated` records that the deterministic primary gate asked its cost question — did the candidate spend more than the configured slack over the same corpus, seed, and order? — and what it answered. It is a **gate verdict, not a ledger transition**: it mutates no proposal state, has no `kind` in the `learning_ledger_events_kind_check` CHECK, and is never appended to that trail. It lives in run-audit only, through the same bounded core seam as the three ledger façades (`emitSelfImproveCostBudgetEvaluated` in `packages/core/src/self-improve/self-improve-run-audit.ts`).
+
+**Outcome** — the deterministic verdict, widened by exactly one value: `within-budget` or `over-budget` from the guard, plus `not-comparable` for a refusal. The refusal is recorded as its own outcome rather than folded into the two budget verdicts because "these runs cannot be compared" is a harness fact the operator must act on, while the other two are the budget question itself.
+
+**Emission point** — the deterministic primary gate, calling the façade once per candidate evaluation. It is deliberately best-effort and never re-judges the verdict: the row records what the gate decided, and nothing about that decision depends on whether the row landed.
+
+**Metadata rule** — identities, counts, and fixed outcomes only. Recorded keys are exactly `proposalId`, `target`, `outcome`, `projectId`, `baselineCorpusId`, `baselineSeed`, `baselineTaskCount`, `baselineFingerprint`, `candidateCorpusId`, `candidateSeed`, `candidateTaskCount`, `candidateFingerprint`, plus the conditional `reason` (on `not-comparable`) and `exceededAxes` (on `over-budget`).
+
+**The measured cost numbers are deliberately NOT audited.** The baseline and candidate token/step/millisecond totals are corpus-specific figures that mean nothing outside the run that produced them — recording `baseline.tokens` beside a candidate's would invite an operator to compare a cached baseline against a candidate possibly measured days later under a different corpus. What is durable is *which* corpus, *which* seed, *how many* tasks, and *which* axes moved; the arithmetic is re-derivable from the recorded identities, and the `sha256:` fingerprints let a later reader prove they hold the same pair of runs. `exceededAxes` is filtered through the fixed `tokens|steps|wallClockMs` membership, so an unrecognized axis can never be written into telemetry.
+
+**Sink independence** — the façade delegates to `emitBoundedRunAudit` and is fully absorbent: absent, throwing, rejecting, never-settling, and late-settling sinks leave the caller's verdict unchanged. Proven behaviorally in `packages/core/src/__tests__/self-improve-cost-budget.test.ts`, which drives the façade through all six sink modes with fake timers.
+
+**Union registry** — the literal is a member of the engine `DatabaseMutationType` union, with a `date -u` FNXC comment stating the metadata rule. Like the other `selfimprove:*` events it is outside `DELIVERY_PIPELINE_RUN_AUDIT_EVENTS`, so the delivery-pipeline catalogue parity test does not cover it; this doc and the union must be updated together.
+
 ### Merge-boundary evidence recovery (FN-9345)
 
 Missing implementation proof is normally repaired through the workflow's durable task log and graph remediation path before merge admission. On startup and periodic maintenance, `task:merge-boundary-evidence-recovered` records a historic proofless park only after durable unfinished work, lifecycle ownership, liveness, and auto-merge policy are re-verified. These repairs intentionally do not put boundary reason prose, foreach identities, paths, review output, or external capability diagnostics in run-audit metadata. If recovery cannot prove an executable owner, the existing terminal `task:merge-boundary-unproven-parked` event remains the fail-closed audit surface and retains its ids/counts/fixed-outcomes-only contract.
 
 | `task:stale-review-callback-waived` | A bounded self-healing audit emitted after an eligible stale code-review callback receipt is committed. Metadata is IDs, receipt presence, fixed actor/reason, prior status, and threshold category only; it excludes reviewer output, findings, lease owners, paths, and errors. Audit failure never changes the durable waiver. |
+
+## Self-improvement learning ledger
+
+The self-improvement loop's proposal/evidence ledger follows the same ids/counts/outcomes-only rule for its transition events and emits them through the bounded core seam. See the [Self-Improvement Learning Ledger contract](./self-improvement-ledger.md#run-audit) for the fields, state machine, and reversal contract those events describe.
+
+## Self-improvement learning revert
+
+`learning:reverted` records one **revert attempt** against the self-improvement learning ledger, emitted through the core bounded seam (`packages/core/src/run-audit/emit-bounded-run-audit.ts`) because `@fusion/core` cannot import the engine seam. A revert is the loop's authoritative undo, so this row is what answers "was this experiment backed out, and how many times" after the fact.
+
+**One row is emitted per attempt, including the no-op outcomes.** The outcome is a fixed enum: `reverted` (a reversal event was appended), `already-reverted` (this exact application was cancelled before — the retry was absorbed and wrote nothing), and `not-applied` (there was no un-reverted application to cancel, so nothing was written). Recording the no-ops is what makes a retry visible rather than silent; only `reverted` mutates the ledger.
+
+**Metadata is ids/counts/fixed-outcomes only** and never carries a verdict, free prose, a diff, or the restored value itself:
+
+| Field | Content |
+| --- | --- |
+| `proposalId` | The learning proposal the reversal belongs to. |
+| `target` | The product surface the proposal acts on (`memory`, `evals`, or `skills`); absent when the proposal was not found. |
+| `appliedEventId` | The `applied` event the revert cancelled or would cancel; `null` when none was located. |
+| `revertEventId` | The derived id of the appended reversal; `null` for a no-op. |
+| `outcome` | Fixed enum `reverted` \| `already-reverted` \| `not-applied`. |
+| `reason` | Fixed enum `gate-rejected` \| `operator-veto` \| `superseded` \| `expired` \| `manual`. |
+
+**Readers counting ledger events must filter out `store:open`.** Every `TaskStore.init()` emits a `store:open` row, so a query that counts or orders the whole table sees a phantom row that has nothing to do with the learning trail. Filter to `mutation_type LIKE 'learning:%'` (or the specific type) before counting or asserting an ordered sequence. The same rule is why a caller cannot treat "one init, one learning row" as an exact-count invariant.
+
+**Idempotency is visible through the pair of rows, not through a status flag.** Because the reversal is an append naming the application it cancels, a repeated revert produces a second `learning:reverted` row with `outcome: already-reverted` and no new ledger event. The ledger row and its telemetry always agree: the audit `outcome` mirrors the ledger state exactly.
