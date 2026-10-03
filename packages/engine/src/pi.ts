@@ -73,6 +73,7 @@ import {
   type SkillSelectionContext,
 } from "./cli-runtime/skill-resolver.js";
 import { isContextLimitError } from "./errors/context-limit-detector.js";
+import { promptWithOutputTruncationGuard } from "./pi-output-truncation.js";
 import { applyClaudeAcpEnable } from "./cli-runtime/claude-acp-enable.js";
 import { createFusionAuthStorage, createFusionModelRegistry } from "./auth/auth-storage.js";
 import { refreshFusionModelRegistry } from "./auth/model-registry-refresh.js";
@@ -377,11 +378,13 @@ function safePreviewJson(value: unknown): string {
 
 export async function promptSessionAndCheck(session: AgentSession, prompt: string, options?: unknown): Promise<void> {
   clearSessionStateError(session);
-  if (options === undefined) {
-    await session.prompt(prompt);
-  } else {
-    await (session.prompt as any)(prompt, options);
-  }
+  await promptWithOutputTruncationGuard(session, async () => {
+    if (options === undefined) {
+      await session.prompt(prompt);
+    } else {
+      await (session.prompt as any)(prompt, options);
+    }
+  });
 
   const stateError = getSessionStateError(session);
   if (stateError) {
@@ -1202,7 +1205,7 @@ function resolveConfiguredModel(
 
   /*
   FNXC:ProviderAuth 2026-08-15-20:57:
-  Persisted model settings from the split Anthropic authentication cards may name an auth id. pi-ai only knows the direct execution provider, so normalize before registry lookup and template fallback; never register the auth id as a provider.
+  Persisted model settings from the split Anthropic authentication cards may name an auth id. pi-ai only knows the direct execution provider, so normalize before registry lookup; never register the auth id as a provider.
   */
   const executionProvider = toExecutionModelProviderId(provider);
   const model = modelRegistry.find(executionProvider, modelId);
@@ -1210,21 +1213,13 @@ function resolveConfiguredModel(
     return model;
   }
 
-  // Fall back to constructing a model on-the-fly if the provider is known.
-  // This mirrors the pi CLI's buildFallbackModel behaviour, which accepts any
-  // model ID for a configured provider (e.g. any OpenRouter model string) even
-  // when it isn't in the built-in or custom model list.
-  const providerModels = modelRegistry.getAll().filter((m) => m.provider === executionProvider);
-  if (providerModels.length > 0) {
-    const baseModel = providerModels[0]!;
-    piLog.warn(`${kind} model ${executionProvider}/${modelId} not in registry; using provider base model as template`);
-    return { ...baseModel, id: modelId, name: modelId };
-  }
-
+  // A known provider does not prove an unknown model's transport or capabilities.
+  // Exact entries from built-in, extension, and custom registrations are required.
   throw new Error(
     `Configured model ${executionProvider}/${modelId} (${kind} selection) was not found in the pi model registry. `
-    + "If this model comes from a custom provider, verify Settings → Custom Providers (stored in ~/.fusion/settings.json) includes this provider/model, "
-    + "or choose an available model from /api/models.",
+    + "Register its exact model definition in ~/.fusion/agent/models.json, "
+    + "verify Settings → Custom Providers (stored in ~/.fusion/settings.json) includes this provider/model, "
+    + "or choose a model already registered in the pi model registry.",
   );
 }
 

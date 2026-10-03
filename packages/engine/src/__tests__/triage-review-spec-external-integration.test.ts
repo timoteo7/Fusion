@@ -72,7 +72,7 @@ describe("triage deterministic plan validation for external integration evidence
       const processor = new TriageProcessor(store, rootDir);
       const failure = await (processor as any).validateGeneratedPrompt(
         taskId,
-        `## Mission\nAdd third-party external binary integration.\n## Steps\n- install and probe \`worktrunk\` from release URL https://github.com/${fabricatedRepo}/releases/latest/download/worktrunk.tar.gz\n`,
+        `## Mission\nAdd third-party external binary integration.\n## Steps\n### Step 0: Install and probe\n- install and probe \`worktrunk\` from release URL https://github.com/${fabricatedRepo}/releases/latest/download/worktrunk.tar.gz\n`,
       );
 
       expect(failure).toBeNull();
@@ -93,7 +93,7 @@ describe("triage deterministic plan validation for external integration evidence
       const processor = new TriageProcessor(store, rootDir);
       const failure = await (processor as any).validateGeneratedPrompt(
         taskId,
-        "## Mission\nValidate released third-party external integration.\n\n## External Integration Evidence\n- Canonical upstream repo URL: https://github.com/Runfusion/Fusion\n- Docs / homepage URL: https://github.com/Runfusion/Fusion#readme (npm package page: https://www.npmjs.com/package/@runfusion/fusion)\n- Release / download URL: https://registry.npmjs.org/@runfusion/fusion/-/fusion-0.41.0.tgz\n- Binary / CLI name: `fn`\n- Checksum (dist.integrity for 0.41.0): `sha512-y8BSeK3XUgcE7ceTrz6F/zWQidaiADVgHSHHWKRzwjyR40xeUc8i5ZSolGd1zL/K9AxrBSkRErimkW1xqb/EBw==` (marker: `upstream-pending-verification`)\n\n## Steps\n- Install, download, probe, and run the released external binary.\n",
+        "## Mission\nValidate released third-party external integration.\n\n## External Integration Evidence\n- Canonical upstream repo URL: https://github.com/Runfusion/Fusion\n- Docs / homepage URL: https://github.com/Runfusion/Fusion#readme (npm package page: https://www.npmjs.com/package/@runfusion/fusion)\n- Release / download URL: https://registry.npmjs.org/@runfusion/fusion/-/fusion-0.41.0.tgz\n- Binary / CLI name: `fn`\n- Checksum (dist.integrity for 0.41.0): `sha512-y8BSeK3XUgcE7ceTrz6F/zWQidaiADVgHSHHWKRzwjyR40xeUc8i5ZSolGd1zL/K9AxrBSkRErimkW1xqb/EBw==` (marker: `upstream-pending-verification`)\n\n## Steps\n### Step 0: Install and probe\n- Install, download, probe, and run the released external binary.\n",
       );
 
       expect(failure).toBeNull();
@@ -110,7 +110,7 @@ describe("triage deterministic plan validation for external integration evidence
       const processor = new TriageProcessor(store, rootDir);
       const failure = await (processor as any).validateGeneratedPrompt(
         taskId,
-        "## Mission\nAdd third-party external integration.\n## Context to Read First\n- https://github.com/max-sixty/worktrunk\n- https://worktrunk.dev/\n- WORKTRUNK_PINNED_RELEASE\n## Steps\n- probe and run `wt`\n- release URL: https://github.com/max-sixty/worktrunk/releases/latest/download/wt-linux-x64.tar.gz\n- source: upstream-pending-verification\n",
+        "## Mission\nAdd third-party external integration.\n## Context to Read First\n- https://github.com/max-sixty/worktrunk\n- https://worktrunk.dev/\n- WORKTRUNK_PINNED_RELEASE\n## Steps\n### Step 0: Probe integration\n- probe and run `wt`\n- release URL: https://github.com/max-sixty/worktrunk/releases/latest/download/wt-linux-x64.tar.gz\n- source: upstream-pending-verification\n",
       );
 
       expect(failure).toBeNull();

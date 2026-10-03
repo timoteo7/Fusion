@@ -113,7 +113,7 @@ describe("triage planning lifecycle lock transport failures (FN-8911)", () => {
     await mkdir(join(root, ".fusion", "tasks", "FN-8911"), { recursive: true });
 
     mockPromptWithFallback.mockImplementationOnce(async () => {
-      await writeFile(promptPath, "# Direct PostgreSQL plan\n", "utf8");
+      await writeFile(promptPath, "# Direct PostgreSQL plan\n\n## Steps\n### Step 0: Implement deployment\n", "utf8");
     });
     await new TriageProcessor(fixture.store, root).specifyTask(fixture.task());
 
