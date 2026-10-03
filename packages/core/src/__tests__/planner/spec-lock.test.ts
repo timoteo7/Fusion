@@ -90,6 +90,48 @@ describe("spec lock canonicalization", () => {
     expect(canonicalizePlan(text).status).toBe("unavailable");
   });
 
+  /*
+  FNXC:SpecLock 2026-09-30-15:33:
+  A task created outside any mission has no `## Mission` section, so requiring one made a
+  structurally valid plan permanently unlockable and drove the endless Plan Review replan loop
+  (FUSI-025). These cases pin the narrow relaxation; `mission-duplicate` staying fatal is the
+  boundary that keeps a mission-less task from hiding an ambiguous prompt.
+  */
+  const nonMissionPrompt = `# Task\n\n## File Scope\n\n- src/widget.ts\n\n## Steps\n\n1. Build widget\n\n## Completion Criteria\n\n- [ ] Widget works\n`;
+
+  it.each([undefined, "", "   "])("treats a blank missionId (%p) as no mission and keeps the plan lockable", (missionId) => {
+    const canonical = canonicalizePlan(nonMissionPrompt, { missionId });
+
+    expect(canonical).toMatchObject({ status: "available" });
+    expect(canonical.sections.mission).toMatchObject({ status: "available", canonical: "" });
+    expect(canonical.sections.mission.hash).toEqual(expect.any(String));
+    expect(canonical.contentHash).toEqual(expect.any(String));
+  });
+
+  it("keeps rejecting a Mission-less prompt for a task that declares a mission", () => {
+    expect(canonicalizePlan(nonMissionPrompt, { missionId: "M-1" })).toMatchObject({ status: "unavailable", reason: "mission-missing" });
+  });
+
+  it("keeps an empty Mission section fatal even for a task without a mission", () => {
+    expect(canonicalizePlan(`${nonMissionPrompt}\n## Mission\n`, { missionId: undefined })).toMatchObject({ status: "unavailable", reason: "mission-empty" });
+  });
+
+  it("keeps a duplicated Mission section fatal for a task without a mission", () => {
+    expect(canonicalizePlan(`${nonMissionPrompt}\n## Mission\n\nOne\n\n## Mission\n\nTwo`, { missionId: undefined })).toMatchObject({ status: "unavailable", reason: "mission-duplicate" });
+  });
+
+  it("keeps strict Mission behavior when bindings are not supplied at all", () => {
+    expect(canonicalizePlan(nonMissionPrompt)).toMatchObject({ status: "unavailable", reason: "mission-missing" });
+  });
+
+  it("reacts to drift when a non-mission task later gains a Mission section", () => {
+    const withoutMission = canonicalizePlan(nonMissionPrompt, { missionId: undefined });
+    const withMission = canonicalizePlan(`${nonMissionPrompt}\n## Mission\n\nBuild a safe widget.`, { missionId: undefined });
+
+    expect(diffSpecLocks(withoutMission, withMission).changedSections).toContain("mission");
+    expect(withoutMission.sections.mission.hash).not.toBe(withMission.sections.mission.hash);
+  });
+
   it("matches recursive glob boundaries without corrupting double-stars", () => {
     const recursive = evidence(prompt.replace("src/widget.ts", "src/**/*.ts"));
     expect(evaluateSpecDrift({ latestLock: lock(recursive), currentPlan: recursive, modifiedFiles: ["src/widget.ts", "src/deep/widget.ts"] }).findings).toEqual([]);

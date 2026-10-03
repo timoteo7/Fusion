@@ -779,24 +779,85 @@ export class MissionAutopilot {
     this.healthCheckTimer = null;
   }
 
+  /*
+  FNXC:MissionAutopilotHealthCheck 2026-09-30-13:04:
+  The periodic health check must derive its work list from the mission store, never from
+  `watchedMissions`. That map is derived state, not authority: it is written only by `poll()` and
+  `recoverMissions()`, so an autopilot process that started without a preceding poll — or that
+  started before the mission existed — kept the map empty forever, and the previous
+  `if (!this.running || this.watchedMissions.size === 0) return;` guard turned the corrector into a
+  silent no-op that still logged "fixed 0 inconsistencies" every interval. Measured on
+  M-MULZRJQ4-0001-IF11: autopilot reported `watched=false` while 6 health checks in 30 minutes each
+  logged "fixed 0" and slice S1.1 stayed `active` for 12+ hours.
+
+  The authoritative signals are each mission's own `autopilotEnabled` and `status`. A mission with
+  autopilot on is therefore auto-watched here (mirroring the poll wording) before being reconciled,
+  so the `watched` flag on `GET /api/missions/:missionId/autopilot` converges on reality.
+
+  The health check stays reconcile-only. It may call `watchMission` and
+  `reconcileMissionConsistency` and nothing else: never `advanceToNextSlice` /
+  `activateNextPendingSlice` (no slice promotion) and never a task-creating store method (no board
+  task). `status: "active"` missions are reconciled even with autopilot off so the corrector does not
+  hinge on a single flag, and `complete`/`archived` missions are never reconciled because their
+  bookkeeping is terminal.
+
+  The log now distinguishes "nothing needed repairing" from "nothing was eligible" — the two states
+  the old fixed-count line conflated while reporting health for a corrector that never ran.
+  */
   private async runHealthCheck(): Promise<void> {
-    if (!this.running || this.watchedMissions.size === 0) {
+    if (!this.running) {
       return;
     }
 
     try {
-      let fixedCount = 0;
-
-      for (const missionId of this.watchedMissions.keys()) {
-        const mission = await this.missionStore.getMissionWithHierarchy(missionId);
-        if (!mission) {
-          continue;
-        }
-
-        fixedCount += await this.reconcileMissionConsistency(mission);
+      const missions = await this.missionStore.listMissions();
+      // Terminal missions own settled bookkeeping; reconciling them could revive closed state.
+      const liveMissions = missions.filter((mission) => mission.status !== "complete" && mission.status !== "archived");
+      // Autopilot-enabled missions are watched first so the watch registry self-heals instead of
+      // gating the sweep that would heal it.
+      const autoWatchable = liveMissions.filter((mission) => mission.autopilotEnabled);
+      const adoptedIds: string[] = [];
+      for (const mission of autoWatchable) {
+        if (this.isWatching(mission.id)) continue;
+        autopilotLog.log(`Health check: auto-watching mission ${mission.id}`);
+        await this.watchMission(mission.id);
+        if (this.isWatching(mission.id)) adoptedIds.push(mission.id);
+      }
+      if (adoptedIds.length > 0) {
+        autopilotLog.log(`Health check: adopted unwatched autopilot mission ids: ${adoptedIds.join(", ")}`);
       }
 
-      autopilotLog.log(`Mission health check complete: fixed ${fixedCount} inconsistenc${fixedCount === 1 ? "y" : "ies"}`);
+      // Reconcile the union of autopilot-enabled and merely-active live missions, de-duplicated by
+      // id so an active autopilot mission is swept exactly once.
+      const reconcileIds = new Set<string>([
+        ...autoWatchable.map((mission) => mission.id),
+        ...liveMissions.filter((mission) => mission.status === "active").map((mission) => mission.id),
+      ]);
+      if (reconcileIds.size === 0) {
+        autopilotLog.log("Mission health check complete: no eligible missions — nothing reconciled");
+        return;
+      }
+
+      let fixedCount = 0;
+      let reconciledCount = 0;
+
+      for (const missionId of reconcileIds) {
+        // One store failure must not abort the remaining missions' sweep.
+        try {
+          const mission = await this.missionStore.getMissionWithHierarchy(missionId);
+          if (!mission) {
+            continue;
+          }
+          reconciledCount++;
+          fixedCount += await this.reconcileMissionConsistency(mission);
+        } catch (err) {
+          autopilotLog.error(`Mission health check failed for mission ${missionId}:`, err);
+        }
+      }
+
+      autopilotLog.log(
+        `Mission health check complete: reconciled ${reconciledCount} mission${reconciledCount === 1 ? "" : "s"}, fixed ${fixedCount} inconsistenc${fixedCount === 1 ? "y" : "ies"}`,
+      );
     } catch (err) {
       autopilotLog.error("Mission health check failed:", err);
     }

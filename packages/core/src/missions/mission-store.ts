@@ -3713,7 +3713,7 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
     const supersededFeatureIds = features
       .filter((feature) => !repairedIds.has(feature.id))
       .filter((feature) => feature.generatedFromFeatureId && (featureHasPassed(feature) || hasPassedAncestor(feature)))
-      .filter((feature) => feature.status !== "done" || feature.loopState !== "passed" || feature.taskId)
+      .filter((feature) => feature.status !== "done" || feature.loopState !== "passed" || feature.taskId || feature.lastValidatorStatus !== "passed")
       .map((feature) => feature.id);
 
     if (repairedFeatureIds.length > 0) {
@@ -3753,10 +3753,26 @@ export class MissionStore extends EventEmitter<MissionStoreEvents> {
         for (const featureId of supersededFeatureIds) {
           const feature = this.getFeature(featureId);
           if (!feature) continue;
+          /*
+          FNXC:Missions 2026-09-30-13:05:
+          `loopState` and `lastValidatorStatus` must move together. `computeSliceStatus` counts an
+          assertion-linked feature as done ONLY on `lastValidatorStatus === "passed"` (or an
+          idle/undefined `loopState`), so writing `loopState: "passed"` alone left the rollup reading
+          a field this reconciler never set and pinning a finished slice at `active` with every
+          feature `done` — and, because slice progression is serial, blocking every later slice
+          with no visible error.
+
+          This is FEATURE-level evidence, never assertion-level: the fix was superseded by a
+          feature that did pass, so it needs no further validation. It is deliberately NOT run
+          evidence: `lastValidatorRunId` stays unset, and the fabrication guard is not weakened
+          because such a feature always has a passed ancestor — the `!hasPassedAncestor` clause
+          above is exactly what protects genuine fabrications (issue #3574).
+          */
           this.updateFeature(featureId, {
             status: "done",
             taskId: undefined,
             loopState: "passed",
+            lastValidatorStatus: "passed",
           });
           if (feature.taskId) {
             this.db.prepare("UPDATE tasks SET missionId = NULL, sliceId = NULL WHERE id = ? AND \"deletedAt\" IS NULL").run(feature.taskId);

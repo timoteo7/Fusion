@@ -210,6 +210,7 @@
     "packages/engine/src/missions/mission-state-reconcile.ts",
     "packages/engine/src/missions/mission-symbol-admission.ts",
     "packages/engine/src/missions/mission-verification.ts",
+    "packages/engine/src/missions/slice-advance.ts",
     "packages/engine/src/missions/unlinked-missions-advisory-reporter.ts",
     "packages/engine/src/notification/mailbox-delivery.ts",
     "packages/engine/src/notification/notification-service.ts",
@@ -5900,7 +5901,7 @@
       "enclosingSymbolPath": "finalizeProvenAutoMergeTask",
       "writer": "store.logEntry",
       "ordinal": 1,
-      "lineHint": 523,
+      "lineHint": 529,
       "owningEntryPoint": "other",
       "reachableDataStates": [
         "unobservable:closure-wide production fixture pending"
@@ -5920,7 +5921,7 @@
       "enclosingSymbolPath": "finalizeProvenAutoMergeTask>cleanupLandedWorktree",
       "writer": "store.logEntry",
       "ordinal": 1,
-      "lineHint": 323,
+      "lineHint": 329,
       "owningEntryPoint": "runAiMerge",
       "reachableDataStates": [
         "single-repository merge finalization or fenced merge-failure recovery"
@@ -5940,7 +5941,7 @@
       "enclosingSymbolPath": "finalizeProvenAutoMergeTask>cleanupLandedWorktree",
       "writer": "store.logEntry",
       "ordinal": 2,
-      "lineHint": 325,
+      "lineHint": 331,
       "owningEntryPoint": "finalizeProvenAutoMergeTask",
       "reachableDataStates": [
         "proven landing finalization without a merge write fence"
@@ -5960,7 +5961,7 @@
       "enclosingSymbolPath": "finalizeProvenAutoMergeTask>finalized",
       "writer": "store.updateTaskAtomic",
       "ordinal": 1,
-      "lineHint": 491,
+      "lineHint": 497,
       "owningEntryPoint": "other",
       "reachableDataStates": [
         "unobservable:closure-wide production fixture pending"
@@ -5980,7 +5981,7 @@
       "enclosingSymbolPath": "finalizeProvenAutoMergeTask>move",
       "writer": "store.moveTaskIf",
       "ordinal": 1,
-      "lineHint": 450,
+      "lineHint": 456,
       "owningEntryPoint": "other",
       "reachableDataStates": [
         "unobservable:closure-wide production fixture pending"
@@ -6000,7 +6001,7 @@
       "enclosingSymbolPath": "finalizeProvenAutoMergeTask>persistProof",
       "writer": "store.updateTaskAtomic",
       "ordinal": 1,
-      "lineHint": 265,
+      "lineHint": 268,
       "owningEntryPoint": "other",
       "reachableDataStates": [
         "unobservable:closure-wide production fixture pending"
@@ -7108,7 +7109,7 @@
       "enclosingSymbolPath": "resumeMissingPostMergeGate",
       "writer": "store.logEntry",
       "ordinal": 1,
-      "lineHint": 62,
+      "lineHint": 75,
       "owningEntryPoint": "runAiMerge>finalizeTask>finalizeProvenAutoMergeTask",
       "reachableDataStates": [
         "confirmed merge with an enabled post-merge gate that has no durable result"
@@ -7128,7 +7129,7 @@
       "enclosingSymbolPath": "resumeMissingPostMergeGate>seeded",
       "writer": "store.seedWorkspaceCodeReviewContinuationIfIdle",
       "ordinal": 1,
-      "lineHint": 47,
+      "lineHint": 60,
       "owningEntryPoint": "runAiMerge>finalizeTask>finalizeProvenAutoMergeTask",
       "reachableDataStates": [
         "confirmed merge with an enabled post-merge gate that has no durable result"
@@ -10570,7 +10571,7 @@
       "enclosingSymbolPath": "releaseFileScopeWaitingContinuations>transitioned",
       "writer": "store.transitionWorkflowWorkItem",
       "ordinal": 1,
-      "lineHint": 804,
+      "lineHint": 805,
       "owningEntryPoint": "indeterminate",
       "reachableDataStates": [
         "No call edge from runAiMerge, landWorkspaceTask, or landOneRepo"
@@ -10590,7 +10591,7 @@
       "enclosingSymbolPath": "recoverApprovedStrandedAiMergeCommit>finalized",
       "writer": "finalizeProvenAutoMergeTask",
       "ordinal": 1,
-      "lineHint": 13905,
+      "lineHint": 13996,
       "owningEntryPoint": "other",
       "reachableDataStates": [
         "unobservable:closure-wide production fixture pending"
@@ -10610,7 +10611,7 @@
       "enclosingSymbolPath": "recoverMergedReviewTasks>finalization",
       "writer": "finalizeProvenAutoMergeTask",
       "ordinal": 1,
-      "lineHint": 12776,
+      "lineHint": 12865,
       "owningEntryPoint": "other",
       "reachableDataStates": [
         "unobservable:closure-wide production fixture pending"

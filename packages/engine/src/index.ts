@@ -384,6 +384,7 @@ export {
 export { MeshLeaseManager, type MeshLeaseManagerOptions, type LeaseRecoveryContext } from "./project/mesh-lease-manager.js";
 export { MissionAutopilot, type MissionAutopilotOptions } from "./missions/mission-autopilot.js";
 export { MissionExecutionLoop, type MissionExecutionLoopOptions, type ValidationResult, loopLog } from "./missions/mission-execution-loop.js";
+export { advanceMissionToNextSlice, type MissionStoreLike } from "./missions/slice-advance.js";
 export { resolveFeatureRepairTargets } from "./missions/mission-feature-sync.js";
 export {
   reconcileMissionState,
