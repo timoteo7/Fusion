@@ -387,10 +387,15 @@ describe("GET /models", () => {
     FNXC:ModelCatalog 2026-09-02-22:06:
     FN-9244's Pi 0.84.4 Muse Spark rows can omit thinkingLevelMap. Every route row now has
     a defined capability array, using [] when the registry does not publish that metadata.
+
+    FNXC:ModelCatalog 2026-09-30-19:50:
+    FUSI-024: every row now also carries `cost`, mirroring the CLI catalog. This registry publishes
+    no pricing, so the honest value is an explicit `null` — an unknown price is stated, not omitted
+    and not fabricated as 0.
     */
     expect(res.body.models).toEqual([
-      { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", reasoning: true, contextWindow: 200000, supportedThinkingLevels: [] },
-      { provider: "openai", id: "gpt-4o", name: "GPT-4o", reasoning: false, contextWindow: 128000, supportedThinkingLevels: ["off"] },
+      { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", reasoning: true, contextWindow: 200000, supportedThinkingLevels: [], cost: null },
+      { provider: "openai", id: "gpt-4o", name: "GPT-4o", reasoning: false, contextWindow: 128000, supportedThinkingLevels: ["off"], cost: null },
     ]);
     expect(modelRegistry.refresh).toHaveBeenCalled();
   });

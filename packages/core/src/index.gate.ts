@@ -58,6 +58,16 @@ export { measureCostRun } from "./self-improve/cost-budget-measure.js";
 export { evaluateCostBudget } from "./self-improve/cost-budget-guard.js";
 export type { CostBudgetInput, CostRunInput } from "./self-improve/cost-budget-guard.js";
 /*
+FNXC:SelfImproveCorpusMetrics 2026-09-30-18:56:
+Mirrored into the gate-safe barrel alongside the cost lane. The deterministic gate resolves
+`index.gate.ts`, so the canary's four metric definitions and the cost-budget arm it delegates to must
+be reachable from the SAME entry point — a definition the gate cannot see is a definition the gate
+cannot verify.
+*/
+export type { CorpusMetricObservation, CorpusMetricName, CorpusMetricTaskEntry, CorpusMetrics } from "./self-improve/corpus-metrics-types.js";
+export { CORPUS_METRIC_NAMES, isCorpusMetricName, toCostObservations } from "./self-improve/corpus-metrics-types.js";
+export { measureCorpusMetrics } from "./self-improve/corpus-metrics.js";
+/*
 FNXC:SelfImproveStructuralDenylist 2026-09-30-18:03:
 The structural denylist guard must be reachable from the `engine-core` merge-gate project. That
 project aliases `@fusion/core` to a PRE-BUNDLED `index.gate.ts` closure (see
@@ -76,6 +86,11 @@ export { STRUCTURAL_DENYLIST_CATEGORIES, isStructuralDenylistCategory, classifyS
 export type { StructuralDenylistCategory, StructuralDenylistVerdict } from "./self-improve/structural-denylist.js";
 export { guardStructuralDenylist } from "./self-improve/structural-denylist-guard.js";
 export type { StructuralDenylistGuardResult, StructuralDenylistGuardOptions, GateCallback } from "./self-improve/structural-denylist-guard.js";
+export { BASELINE_CACHE_ACTIONS, BASELINE_CACHE_REASONS, isBaselineCacheAction, isBaselineCacheReason } from "./types/self-improve/baseline-cache.js";
+export type { BaselineFingerprintInput, BaselineCacheAction, BaselineCacheReason, BaselineCacheDecision, BaselineCacheStatus } from "./types/self-improve/baseline-cache.js";
+export { computeBaselineFingerprint, isBaselineFingerprint, resolveBaselineCache, buildBaselineCacheStatus } from "./self-improve/baseline-fingerprint.js";
+export { SELF_IMPROVE_BASELINE_CACHE_EVENT, SELF_IMPROVE_BASELINE_CACHE_AGENT_ID, emitSelfImproveBaselineCacheResolved } from "./self-improve/self-improve-baseline-cache-run-audit.js";
+export type { SelfImproveBaselineCacheInput } from "./self-improve/self-improve-baseline-cache-run-audit.js";
 export { AGENT_VALID_TRANSITIONS, DUPLICATE_OF_METADATA_KEY, REPORT_ATTACHMENT_SOURCE, assertNotWorkspaceTaskMerge, isWorkspaceTask, WorkspaceTaskMergeError, normalizeAgentRoles } from "./types.js";
 export { MAX_TASK_STEP_REPORTS, MAX_TASK_STEP_REPORT_SUMMARY_CHARS, appendTaskStepReport } from "./workflows/task-step-reports.js";
 export {
@@ -101,6 +116,18 @@ export type {
   TaskBranchOrigin,
 } from "./branch/branch-assignment.js";
 export { customProviderRegistryKey } from "./ai/custom-provider-key.js";
+/*
+FNXC:ConfiguredProviderDiscovery 2026-09-30-19:10:
+FUSI-024: the configured-provider gate is exported from core so the dashboard `/api/models` route and the headless `fn models` CLI derive the same connected-provider set from ONE implementation. A catalog that advertises an unconnected provider is worse than no catalog, so this must never be re-implemented per surface.
+*/
+export {
+  addToggleConfiguredProviders,
+  discoverConfiguredProviders,
+} from "./ai/configured-provider-discovery.js";
+export type {
+  ConfiguredProviderAuthStorageLike,
+  ConfiguredProviderToggleFlags,
+} from "./ai/configured-provider-discovery.js";
 export {
   ANTHROPIC_PROVIDER_ID,
   ANTHROPIC_API_KEY_PROVIDER_ID,

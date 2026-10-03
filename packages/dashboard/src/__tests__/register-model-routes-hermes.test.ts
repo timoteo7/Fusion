@@ -78,8 +78,11 @@ const OPENAI_MODEL = { provider: "droid-cli", id: "droid/model", name: "Droid", 
 /*
 FNXC:ModelThinkingCapabilities 2026-08-23-23:20:
 FN-021 added a derived `supportedThinkingLevels` to every catalog row emitted by the registry map in /api/models; a non-reasoning row derives ["off"]. Rows Hermes appends after that map carry no such field, so only registry-sourced rows change shape here.
+
+FNXC:ModelCatalog 2026-09-30-18:45:
+FUSI-024 added a `cost` field to every published /api/models row. The droid-cli row is sourced from the registry with no price, so it publishes `cost: null` ("price unknown"), never a fabricated 0.
 */
-const EXPECTED_DROID_ROW = { ...OPENAI_MODEL, supportedThinkingLevels: ["off"] };
+const EXPECTED_DROID_ROW = { ...OPENAI_MODEL, supportedThinkingLevels: ["off"], cost: null };
 
 describe("register-model-routes: Hermes additive surfacing", () => {
   it("adds zero Hermes rows and leaves existing rows unchanged when no profiles are configured", async () => {
@@ -105,6 +108,7 @@ describe("register-model-routes: Hermes additive surfacing", () => {
       name: "default (MiniMax-M3)",
       reasoning: false,
       contextWindow: 0,
+      cost: null,
     });
   });
 
@@ -120,6 +124,7 @@ describe("register-model-routes: Hermes additive surfacing", () => {
       name: "bare-profile",
       reasoning: false,
       contextWindow: 0,
+      cost: null,
     });
   });
 
@@ -145,7 +150,10 @@ describe("register-model-routes: Hermes additive surfacing", () => {
 
     const hermesRows = response.models.filter((m) => m.provider === "hermes" && m.id === "default");
     expect(hermesRows).toHaveLength(1);
-    expect(hermesRows[0]).toEqual(existingHermesRow);
+    // The pre-existing registry row wins, and it is published with the full row shape the
+    // /api/models handler now emits: a derived `supportedThinkingLevels` (a reasoning row with
+    // no thinkingLevelMap derives the empty list) and the `cost` field (null, no price known).
+    expect(hermesRows[0]).toEqual({ ...existingHermesRow, supportedThinkingLevels: [], cost: null });
   });
 
   it("degrades to zero Hermes rows and returns HTTP 200 with existing rows intact when the façade throws", async () => {

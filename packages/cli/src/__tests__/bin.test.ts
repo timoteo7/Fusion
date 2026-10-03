@@ -104,6 +104,10 @@ const commandMocks = vi.hoisted(() => ({
   // Legacy aliases
   runNodeAdd: vi.fn(),
   runNodeRemove: vi.fn(),
+  // FUSI-024: the headless catalog read surface.
+  runModelsList: vi.fn(),
+  runModelsProviders: vi.fn(),
+  createModelCatalogDeps: vi.fn(async () => ({})),
 
   runAgentStop: vi.fn(),
   runAgentStart: vi.fn(),
@@ -270,6 +274,20 @@ vi.mock("../commands/node.js", () => ({
   // Legacy aliases
   runNodeAdd: commandMocks.runNodeAdd,
   runNodeRemove: commandMocks.runNodeRemove,
+}));
+
+/*
+ * FNXC:ModelCatalogCli 2026-09-30-19:40:
+ * FUSI-024 router coverage. The `models` module is mocked wholesale, including
+ * `createModelCatalogDeps`, so the router is exercised without a registry, a home directory, or a
+ * network. The cases below exist because the subcommand/flag distinction is a real parsing
+ * contract, not an implementation detail: `fn models --json` is `list`, and `fn models --provider
+ * openai` must not read `openai` as a bad subcommand.
+ */
+vi.mock("../commands/models.js", () => ({
+  runModelsList: commandMocks.runModelsList,
+  runModelsProviders: commandMocks.runModelsProviders,
+  createModelCatalogDeps: commandMocks.createModelCatalogDeps,
 }));
 
 vi.mock("../commands/cloud.js", () => ({
@@ -805,6 +823,75 @@ describe("bin command routing and fallbacks", () => {
       apiKey: "key",
       maxConcurrent: 4,
     });
+  });
+
+  /*
+   * FNXC:ModelCatalogCli 2026-09-30-19:40:
+   * FUSI-024: the subcommand-detection cases below are regression cover for two real defects found
+   * while wiring the router — a leading flag (`fn models --json`) and a valued flag
+   * (`fn models --provider openai`) were both initially misread as unknown subcommands, so the most
+   * natural flag orders were rejected with exit 1.
+   */
+  it("routes bare fn models to list", async () => {
+    await runBin(["models"]);
+
+    expect(commandMocks.runModelsList).toHaveBeenCalledWith(
+      expect.objectContaining({ all: false }),
+      expect.anything(),
+    );
+    expect(commandMocks.runModelsProviders).not.toHaveBeenCalled();
+  });
+
+  it("routes fn models list and models ls to list", async () => {
+    await runBin(["models", "list"]);
+    expect(commandMocks.runModelsList).toHaveBeenCalledTimes(1);
+
+    await runBin(["models", "ls", "--json"]);
+    expect(commandMocks.runModelsList).toHaveBeenCalledTimes(2);
+    expect(commandMocks.runModelsList.mock.calls.at(-1)![0]).toMatchObject({ json: true });
+  });
+
+  it("treats a leading --json as a flag on list, not as an unknown subcommand", async () => {
+    await runBin(["models", "--json"]);
+
+    expect(commandMocks.runModelsList).toHaveBeenCalledWith(
+      expect.objectContaining({ json: true, all: false }),
+      expect.anything(),
+    );
+  });
+
+  it("does not read the value of --provider as a subcommand", async () => {
+    await runBin(["models", "--provider", "openai"]);
+
+    expect(commandMocks.runModelsList).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openai" }),
+      expect.anything(),
+    );
+  });
+
+  it("routes fn models providers with its own options and not the list filters", async () => {
+    await runBin(["models", "providers", "--json"]);
+
+    expect(commandMocks.runModelsProviders).toHaveBeenCalledWith(
+      { json: true },
+      expect.anything(),
+    );
+    expect(commandMocks.runModelsList).not.toHaveBeenCalled();
+  });
+
+  it("passes --all through to list", async () => {
+    await runBin(["models", "list", "--all", "--json"]);
+
+    expect(commandMocks.runModelsList).toHaveBeenCalledWith(
+      expect.objectContaining({ all: true, json: true }),
+      expect.anything(),
+    );
+  });
+
+  it("rejects an unknown models subcommand without dispatching", async () => {
+    await expect(runBin(["models", "bogus"])).rejects.toThrow("process.exit:1");
+    expect(commandMocks.runModelsList).not.toHaveBeenCalled();
+    expect(commandMocks.runModelsProviders).not.toHaveBeenCalled();
   });
 
   it("passes extracted --project into command handlers", async () => {

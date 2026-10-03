@@ -9,8 +9,8 @@ export type { LearningLedgerEventKind, LearningLedgerEvent, LearningProposalWith
 export { deriveLearningStateFromEvents, normalizeLedgerLimit, normalizeLedgerOffset } from "./task-store/async/async-learning-ledger.js";
 export type { LearningRevertReason, LearningRevertOutcome, LearningRevertResult, LearningRevertInput } from "./self-improve/learning-revert-types.js";
 export { LEARNING_REVERT_REASONS, isLearningRevertReason, buildLearningRevertEventId } from "./self-improve/learning-revert-types.js";
-export { SELF_IMPROVE_RUN_AUDIT_EVENTS, SELF_IMPROVE_AUDIT_AGENT_ID, emitSelfImproveProposalCreated, emitSelfImproveProposalApplied, emitSelfImproveProposalReverted, emitSelfImproveCostBudgetEvaluated, emitSelfImproveGateVerdictRecorded, emitSelfImproveDenylistRejected } from "./self-improve/self-improve-run-audit.js";
-export type { SelfImproveRunAuditEventType, SelfImproveProposalCreatedOutcome, SelfImproveProposalAppliedOutcome, SelfImproveProposalRevertedOutcome, SelfImproveRunAuditInput, SelfImproveCostBudgetOutcome, SelfImproveCostBudgetAuditInput, SelfImproveGateVerdictAuditInput, SelfImproveDenylistRejectedOutcome, SelfImproveDenylistRejectedInput } from "./self-improve/self-improve-run-audit.js";
+export { SELF_IMPROVE_RUN_AUDIT_EVENTS, SELF_IMPROVE_AUDIT_AGENT_ID, emitSelfImproveProposalCreated, emitSelfImproveProposalApplied, emitSelfImproveProposalReverted, emitSelfImproveCostBudgetEvaluated, emitSelfImproveGateVerdictRecorded, emitSelfImproveDenylistRejected, emitSelfImproveComparabilityRefused } from "./self-improve/self-improve-run-audit.js";
+export type { SelfImproveRunAuditEventType, SelfImproveProposalCreatedOutcome, SelfImproveProposalAppliedOutcome, SelfImproveProposalRevertedOutcome, SelfImproveRunAuditInput, SelfImproveCostBudgetOutcome, SelfImproveCostBudgetAuditInput, SelfImproveGateVerdictAuditInput, SelfImproveDenylistRejectedOutcome, SelfImproveDenylistRejectedInput, SelfImproveComparabilityRefusedOutcome, SelfImproveComparabilityRefusedInput } from "./self-improve/self-improve-run-audit.js";
 export { SELF_IMPROVE_GATE_RUN_EVENT, SELF_IMPROVE_GATE_RUN_AGENT_ID, emitSelfImproveGateRun } from "./self-improve/self-improve-gate-run-audit.js";
 export type { SelfImproveGateRunInput } from "./self-improve/self-improve-gate-run-audit.js";
 export { PRIMARY_GATE_STEP_IDS } from "./types/self-improve/primary-gate.js";
@@ -22,6 +22,43 @@ export { COST_AXES, COST_BUDGET_REASONS, COST_BUDGET_VERDICT_VALUES, isCostAxis,
 export { measureCostRun } from "./self-improve/cost-budget-measure.js";
 export { evaluateCostBudget } from "./self-improve/cost-budget-guard.js";
 export type { CostBudgetInput, CostRunInput } from "./self-improve/cost-budget-guard.js";
+/*
+FNXC:SelfImproveReplayCorpusManifest 2026-09-30-19:35:
+The corpus contract is exported from the package root so the baseline cache (FUSI-031), the
+comparability guard (FUSI-032), and the corpus metrics (FUSI-033) all import ONE declaration of
+"which tasks, in which order, under which seed" instead of each restating the facts or accepting
+them as loose arguments. The provider stays a single literal in the exported type, so a consumer
+cannot widen it to reach a real model through the barrel.
+*/
+export type { ReplayCorpusManifest, ReplayCorpusManifestVersion, ReplayCorpusOrder, ReplayCorpusReproducibility, ReplayCorpusManifestRejectionReason } from "./types/self-improve/replay-corpus-manifest.js";
+export { REPLAY_CORPUS_MANIFEST_VERSION, REPLAY_CORPUS_MANIFEST_VERSIONS, REPLAY_CORPUS_ORDERS, REPLAY_CORPUS_MANIFEST_REJECTION_REASONS, isReplayCorpusOrder, isReplayCorpusManifestRejectionReason } from "./types/self-improve/replay-corpus-manifest.js";
+export type { ReplayCorpusManifestLoadResult } from "./self-improve/replay-corpus-manifest.js";
+export { loadReplayCorpusManifest, resolveReplayCorpusOrder, fingerprintReplayCorpusManifest } from "./self-improve/replay-corpus-manifest.js";
+/*
+FNXC:SelfImproveCorpusMetrics 2026-09-30-18:56:
+The corpus metrics reach the package root beside the cost lane they delegate to, so the replay canary
+resolves its four definitions through the SAME public seam the primary gate's cost-budget arm uses. The
+export exists in both `index.ts` and `index.gate.ts` by design: a bare `index.ts` addition would leave
+the bundled CLI — which resolves `index.gate.ts` — unable to reach the canary's measurement, and the
+"cost and latency live in exactly one place" guarantee would be unverifiable from the surface a real
+consumer uses.
+*/
+export type { CorpusMetricObservation, CorpusMetricName, CorpusMetricTaskEntry, CorpusMetrics } from "./self-improve/corpus-metrics-types.js";
+export { CORPUS_METRIC_NAMES, isCorpusMetricName, toCostObservations } from "./self-improve/corpus-metrics-types.js";
+export { measureCorpusMetrics } from "./self-improve/corpus-metrics.js";
+/*
+FNXC:SelfImproveComparability 2026-09-30-20:49:
+The comparability contract reaches the package root beside the baseline cache (FUSI-031) and the
+corpus manifest (FUSI-030) it consumes, so a caller that has a baseline fingerprint and a candidate
+fingerprint resolves ONE refusal vocabulary instead of restating which dimension drifted. The guard
+is pure and is exported from `index.ts` only — unlike the corpus metrics, nothing under the
+`engine-core` merge-gate bundle consumes it, and widening the reduced barrel for an unused symbol is
+the drift the reduced surface exists to prevent.
+*/
+export type { ComparabilityDimension, ComparabilityIdentity, ComparabilityRefusalReason, ComparabilityVerdict, ComparabilityVerdictValue } from "./self-improve/comparability-types.js";
+export { COMPARABILITY_DIMENSIONS, COMPARABILITY_REFUSAL_REASONS, COMPARABILITY_VERDICT_VALUES, isComparabilityDimension, isComparabilityRefusalReason, isComparabilityVerdictValue } from "./self-improve/comparability-types.js";
+export { evaluateComparability } from "./self-improve/comparability-guard.js";
+export type { ComparabilityInput } from "./self-improve/comparability-guard.js";
 /*
 FNXC:SelfImproveGateVerdict 2026-09-30-12:40:
 The verdict contract is exported from the package root so the deterministic gate, the store
@@ -40,6 +77,13 @@ export { STRUCTURAL_DENYLIST_CATEGORIES, isStructuralDenylistCategory, classifyS
 export type { StructuralDenylistCategory, StructuralDenylistVerdict } from "./self-improve/structural-denylist.js";
 export { guardStructuralDenylist } from "./self-improve/structural-denylist-guard.js";
 export type { StructuralDenylistGuardResult, StructuralDenylistGuardOptions, GateCallback } from "./self-improve/structural-denylist-guard.js";
+export { BASELINE_CACHE_ACTIONS, BASELINE_CACHE_REASONS, isBaselineCacheAction, isBaselineCacheReason } from "./types/self-improve/baseline-cache.js";
+export type { BaselineFingerprintInput, BaselineCacheAction, BaselineCacheReason, BaselineCacheDecision, BaselineCacheStatus } from "./types/self-improve/baseline-cache.js";
+export { computeBaselineFingerprint, isBaselineFingerprint, resolveBaselineCache, buildBaselineCacheStatus } from "./self-improve/baseline-fingerprint.js";
+export type { LearningBaselineCacheRecord, WriteBaselineCacheInput, WriteBaselineCacheResult } from "./task-store/async/async-learning-baseline-cache.js";
+export { readBaselineCache, writeBaselineCache, readBaselineCacheStatus } from "./task-store/async/async-learning-baseline-cache.js";
+export { SELF_IMPROVE_BASELINE_CACHE_EVENT, SELF_IMPROVE_BASELINE_CACHE_AGENT_ID, emitSelfImproveBaselineCacheResolved } from "./self-improve/self-improve-baseline-cache-run-audit.js";
+export type { SelfImproveBaselineCacheInput } from "./self-improve/self-improve-baseline-cache-run-audit.js";
 export type { RunAuditSinkHost, BoundedRunAuditResult } from "./run-audit/emit-bounded-run-audit.js";
 export { buildPatchnodeEntryId, buildPatchnodeEntryInput, groupPatchnodeEntriesByDay, matchesPatchnodeQuery, toPatchnodeDay, toPatchnodeOccurrenceKey } from "./board/patchnode.js";
 export type { VoiceInputSettings, Column, ColumnId, IssueInfo, IssueState, TaskSourceIssue, TaskGitLabTracking, TaskGitLabTrackedItem, GitLabTrackedItemKind, PrInfo, PrConflictState, PrConflictDiagnostics, PrCheckState, PrCheckStatus, PrStatus, BranchGroup, BranchGroupCreateInput, BranchGroupUpdate, BranchGroupPrState, Task, TaskReleaseGateVerdict, TaskPlanningFailureState, TaskTokenUsage, TaskTokenUsagePerModel, TaskAttachment, TaskComment, TaskCommentInput, TaskDocument, TaskDocumentRevision, TaskDocumentCreateInput, ArchivedTaskDocumentAdditionInput, ArchivedTaskDocumentAdditionResult, TaskDocumentWithTask, ArtifactType, Artifact, ArtifactCreateInput, ArtifactWithTask, TaskCreateInput, TaskSource, SourceType, TaskDetail, RetrySummary, InboxTask, TodoList, TodoItem, TodoListCreateInput, TodoListUpdateInput, TodoItemCreateInput, TodoItemUpdateInput, TodoListWithItems, AgentLogEntry, AgentLogType, AgentRole, BoardConfig, DistributedTaskIdReserveInput, DistributedTaskIdReserveResult, DistributedTaskIdCommitInput, DistributedTaskIdCommitResult, DistributedTaskIdAbortInput, DistributedTaskIdAbortResult, DistributedTaskIdStateInput, DistributedTaskIdStateResult, AutostashOrphanRecord, AutostashOutcome, MergeDetails, MergeResult, MergeIntegrationWorktreeMode, MergeAdvanceAutoSyncMode, MergeConflictStrategy, CanonicalMergeConflictStrategy, MergeStrategyOverlapBehavior, PostMergeAuditMode, MergeAuditAutoRecoveryMode, MergerMode, MergerSettings, AutoRecoveryMode, AutoRecoveryFailureClass, AutoRecoverySettings, DirectMergeCommitStrategy, Settings, GlobalSettings, ProjectSettings, ReportMode, ReportActionType, ReportTarget, SecretsEnvConfig, WebSearchBackend, ResearchEnabledSources, ResearchGlobalDefaults, ResearchProjectLimits, ResearchProjectSettings, SandboxBackendName, SandboxFailureMode, SandboxPolicy, SandboxProjectSettings, EvalFollowUpPolicy, EvalProjectSettings, ResolvedEvalSettings, SettingsScope, DaemonTokenSettings, TaskStep, TaskStepReport, StepStatus, TaskLogEntry, RunMutationContext, ActivityLogEntry, ActivityEventType, ThinkingLevel, AnthropicAuthPreference, ThemeMode, ColorTheme, Locale, ExecutionMode, PlannerOversightLevel, ReviewArtifactsMode, ReviewArtifactTaskClassification, TaskPriority, MergeQueueEntry, MergeQueueEnqueueOptions, MergeQueueAcquireOptions, MergeQueueReleaseOutcome, MergeRequestState, MergeRequestRecord, MergeRequestWorkflowProjectionOptions, CompletionHandoffMarker, WorkflowWorkItem, WorkflowWorkItemDueFilter, WorkflowWorkItemKind, WorkflowWorkItemState, WorkflowWorkItemTransitionPatch, WorkflowWorkItemUpsertInput, HandoffEvidence, HandoffToReviewOptions, UnavailableNodePolicy, OwningNodeHandoffPolicy, PlanningQuestion, PlanningSummary, PlanningResponse, PlanningQuestionType, ArchivedTaskEntry, BatchStatusRequest, BatchStatusResponse, BatchStatusEntry, BatchStatusResult, GithubIssueAction, ModelPreset, WorkflowStep, WorkflowStepMode, WorkflowStepGateMode, WorkflowStepPhase, WorkflowReviewKind, WorkflowReviewFinding, WorkflowRepositoryReviewOutcome, WorkflowReviewFindingSeverity, WorkflowStepInput, WorkflowStepResult, WorkflowStepTemplate, Agent, OrgTreeNode, AgentState, AgentDetail, AgentCreateInput, AgentUpdateInput, AgentApiKey, AgentApiKeyCreateResult, AgentCapability, AgentPromptTemplate, AgentPromptsConfig, AgentPermission, PermanentAgentActionCategory, PermanentAgentSensitiveActionCategory, PermanentAgentGatingContext, AgentPermissionPolicy, AgentPermissionPolicyRules, AgentPermissionPolicyToolRules, AgentPermissionPolicyActionCategory, AgentProvisioningApprovalMode, SandboxProvisioningApprovalMode, LegacyAgentPermissionPolicyActionCategory, ApprovalRequestActionCategoryInput, ApprovalRequestActionCategory, AgentPermissionPolicyDisposition, AgentPermissionPolicyPresetId, ApprovalRequestStatus, ApprovalRequestAuditEventType, ApprovalRequestActorSnapshot, ApprovalRequestTargetAction, ApprovalRequestAuditEvent, ApprovalRequest, ApprovalRequestCreateInput, ApprovalRequestDecisionInput, ApprovalRequestCompletionInput, ApprovalRequestListInput, TaskAssignSource, AgentAccessState, AgentHeartbeatConfig, AgentBudgetConfig, AgentBudgetStatus, InstructionsBundleConfig, MessageResponseMode, AgentHeartbeatEvent, AgentHeartbeatRun, BlockedStateSnapshot, HeartbeatInvocationSource, AgentTaskSession, AgentRating, AgentRatingSummary, AgentRatingInput, AgentConfigSnapshot, RevisionFieldDiff, AgentConfigRevision, AgentStats, ReflectionTrigger, ReflectionMetrics, AgentReflection, AgentPerformanceSummary, NtfyNotificationEvent, NotificationEvent, NotificationPayload, NotificationProviderConfig, CustomProvider, SteeringComment, ParticipantType, MessageType, Message, MessageCreateInput, MessageFilter, MessageMetadata, ProposedTaskMetadata, EphemeralTaskCreationPolicy, MessageReplyReference, MailKind, MailReportSection, MailReport, Mailbox, CheckoutLease, CheckoutClaimPrecondition, TaskClaimRow, CentralClaimStore, RunAuditDomain, RunAuditEvent, RunAuditEventInput, RunAuditEventFilter, AgentMemoryInclusionMode, HeartbeatPromptTemplate, HeartbeatScopeDisciplineMode, WorktrunkSettings, WorktrunkOnFailure, TaskBranchContext, CliAgentSettings, McpSecretRef, McpSensitiveValue, McpStdioTransport, McpSseTransport, McpStreamableHttpTransport, McpTransport, McpServerDefinition, McpServersSettings, GitlabConfigSettingsSource, ResolvedGitlabConfig, ResolveGitlabConfigInput, GitlabAuthTokenType, PlannerOversightStage, PlannerInterventionAction, PlannerInterventionOutcome, PlannerInterventionSourceLink, PlannerInterventionEntry, ExecutorOverseerSignalMemory, BackupSettingsMigrationCandidate, BackupSettingsMigrationConflict } from "./types.js";
@@ -123,6 +167,18 @@ export type {
   TaskBranchOrigin,
 } from "./branch/branch-assignment.js";
 export { customProviderRegistryKey } from "./ai/custom-provider-key.js";
+/*
+FNXC:ConfiguredProviderDiscovery 2026-09-30-19:10:
+FUSI-024: the configured-provider gate is exported from core so the dashboard `/api/models` route and the headless `fn models` CLI derive the same connected-provider set from ONE implementation. A catalog that advertises an unconnected provider is worse than no catalog, so this must never be re-implemented per surface.
+*/
+export {
+  addToggleConfiguredProviders,
+  discoverConfiguredProviders,
+} from "./ai/configured-provider-discovery.js";
+export type {
+  ConfiguredProviderAuthStorageLike,
+  ConfiguredProviderToggleFlags,
+} from "./ai/configured-provider-discovery.js";
 export {
   ANTHROPIC_PROVIDER_ID,
   ANTHROPIC_API_KEY_PROVIDER_ID,

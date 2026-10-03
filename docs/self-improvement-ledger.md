@@ -44,10 +44,12 @@ PRECEDENCE rule, so the persisted-verdict/precedence rule is no longer on the un
 the four-branch precedence rule in which the primary always prevails over the replay canary, the
 derived idempotent verdict id, the two required readers, and the bounded
 `selfimprove:gate-verdict-recorded` audit row). What remains unshipped is the gate RUNNER that computes
-the primary signals and drives the canary, the versioned replay corpus + manifest with its comparability
-guard, the structural denylist, and the `fn_selfimprove_*` operator surface — the verdict record is the
-durable destination the runner will write to, so recording the verdict contract now is accurate while
-leaving the runner, corpus, and comparability rules marked as not-yet-shipped.
+the primary signals and drives the canary, the replay corpus's cached baseline and comparability guard
+(the versioned manifest contract itself landed later, in FUSI-030 — see
+[Replay corpus manifest](#replay-corpus-manifest-fusi-030)), the structural denylist, and the
+`fn_selfimprove_*` operator surface — the verdict record is the durable destination the runner will
+write to, so recording the verdict contract now is accurate while leaving the runner, baseline cache,
+and comparability guard marked as not-yet-shipped.
 
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
@@ -62,22 +64,89 @@ merge, not as a description of code already present.
 /*
 FNXC:AutoImprovement 2026-09-30-15:26: FUSI-020 lands the deterministic gate's verdict record and
 primary-precedence rule; the block above states exactly which M1 surfaces remain unshipped.
+
+FNXC:AutoImprovement 2026-09-30-19:22: FUSI-031 lands the baseline cache with its content-addressed
+fingerprint, the reuse/rebuild resolver, the durable cache table, and the operator status read model.
+The cached-baseline arm of the replay-corpus bullet in the code-status block is therefore no longer
+entirely unshipped: the cache and its invalidation contract are real.
+
+FNXC:SelfImproveBaselineCacheStatus 2026-09-30-20:35: FUSI-034 lands `fn_selfimprove_status`, the
+operator tool that RENDERS the `BaselineCacheStatus` read model. Before it, the read model was built
+and unit-tested but nothing displayed it — every occurrence of the tool name in the repository was a
+comment describing a future render target — so an operator could not answer "may I reuse this
+baseline, and why" without a bespoke SQL query, and a silent incomparability had no first-class read
+path. The tool renders the read model VERBATIM through the one accessor (`readBaselineCacheStatus`),
+so it cannot report a reuse rule the cache is not governed by. It NEVER renders the cached payload:
+what must be observable is WHICH fingerprint is in play, never WHAT was measured. Each call records
+one `selfimprove:baseline-cache-resolved` row through the bounded FN-9177 seam, and telemetry is not
+load-bearing — a hostile sink leaves the returned read model unchanged.
+
+FNXC:SelfImproveBaselineCacheStatus 2026-09-30-20:35: The tool takes the fingerprint INPUTS as
+parameters and deliberately does NOT read them from the FUSI-030 manifest. That manifest carries a
+NUMBER `version` and a different digest (`fingerprintReplayCorpusManifest`), which are not this
+feature's `manifestVersion`/`configHash`; binding them together belongs to the measurement runner,
+which is still unshipped. Until then the operator supplies the exact inputs a measurement would use
+and the tool answers reuse-vs-rebuild for exactly those inputs.
 */
 
 > **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
 > run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
 > FUSI-016, the test-count delta guard landed with FUSI-017, the gate's cost-budget invariants
-> landed with FUSI-018, the structural denylist and its pre-gate guard landed with FUSI-019, and
-> the gate's persisted verdict record and primary-precedence rule landed with FUSI-020 — all
+> landed with FUSI-018, the structural denylist and its pre-gate guard landed with FUSI-019, the
+> gate's persisted verdict record and primary-precedence rule landed with FUSI-020, the versioned
+> replay corpus manifest landed with FUSI-030, the cached replay baseline with its fingerprint-based
+> invalidation landed with FUSI-031, the secondary ruler's four corpus metrics landed with FUSI-033,
+> and the `fn_selfimprove_status` operator tool that renders the baseline-cache status read model
+> landed with FUSI-034 — all
 > committed on the mission branch and **not yet merged into `main`**. The file paths and
 > migrations named here are therefore not yet present in a `main` checkout — they become real
 > when that branch lands. The still-unimplemented M1 surfaces are the gate runner that computes
-> the primary signals and drives the canary, the replay corpus + manifest with its comparability
-> guard, and the operator CLI.
+> the primary signals and drives the canary, and the
+> operator CLI.
 > See [Not yet shipped](#not-yet-shipped),
 > [The deterministic primary gate](#the-deterministic-primary-gate),
-> [Cost-budget invariants](#cost-budget-invariants-fusi-018), and
+> [Cost-budget invariants](#cost-budget-invariants-fusi-018),
+> [Replay corpus manifest](#replay-corpus-manifest-fusi-030),
+> [Cached replay baseline](#cached-replay-baseline),
+> [Corpus metrics](#corpus-metrics-fusi-033),
+> [Replay comparability guard](#replay-comparability-guard-fusi-032), and
 > [Deterministic gate verdict record](#deterministic-gate-verdict-record).
+
+FNXC:AutoImprovement 2026-09-30-19:35:
+FUSI-030 lands the REPLAY CORPUS MANIFEST — the versioned, validated document that declares which task
+ids a corpus covers, in which order, under which seed, with which provider. The cost-budget arm above
+already refuses to compare two runs that disagree on corpusId/seed/order, but until now those facts
+lived only as arguments a caller happened to pass, so "the same corpus" was an unverifiable claim.
+This manifest is the single on-disk declaration of them, plus a stable fingerprint the comparability
+machinery can key on. It is PURE types + a PURE validator: it declares a corpus, it does not run one.
+The provider is typed as the single mock literal (unrepresentable at the type level, not merely
+rejected at runtime) so no corpus run can ever reach a real model, and version is data rather than a
+boolean flag so a v1 document is refused by a v2 loader instead of silently half-interpreted. The
+baseline CACHE that consumes it landed with FUSI-031 and the comparability GUARD is the later slice
+FUSI-032; both stay on the not-yet-shipped list together with the measurement runner that would
+actually EXECUTE a corpus and skip re-execution on a reuse.
+
+<!--
+FNXC:AutoImprovement 2026-09-30-20:31:
+Conflict resolution: FUSI-030 (manifest), FUSI-031 (cached baseline), and FUSI-033 (corpus metrics)
+all extend this same status block. The merged text names all three, and the "See" list links all three
+sections, so the merged page claims exactly the surfaces the merged code actually ships. The list of
+not-yet-shipped surfaces is reconciled in the same way: the canary that CONSUMES the FUSI-033 metrics
+is still unshipped, and so is the operator CLI.
+
+FNXC:AutoImprovement 2026-09-30-20:49:
+FUSI-032 lands the replay corpus's COMPARABILITY GUARD, so the surfaces listed as unshipped in the
+block above and in FUSI-030's own dated note are now real. The guard is PURE — four fixed dimensions
+(`manifest`, `seed`, `engine`, `config`), a closed refusal vocabulary (`divergent-identity` |
+`not-a-run`), and a refusal that fires BEFORE any delta is computed — and it consumes exactly the
+manifest fingerprint FUSI-030 ORIGINATES and the cached baseline FUSI-031 stores. Its contract is
+documented under [Replay comparability guard](#replay-comparability-guard-fusi-032); its bounded
+`selfimprove:comparability-refused` row is catalogued in the Run-Audit Catalogue.
+
+This block records the transition rather than rewriting the dated blocks above it: those describe
+their own moment, and a contract page that simultaneously documents a surface and denies it exists
+is the exact failure this page's header warns against.
+-->
 
 ## Overview
 
@@ -361,6 +430,164 @@ a cached baseline against a candidate possibly measured days later under a diffe
 durable is *which* corpus, *which* seed, *how many* tasks, and *which* axes moved. See the
 [Run-Audit Catalogue](./run-audit.md) for the full metadata contract.
 
+## Replay corpus manifest (FUSI-030)
+
+The versioned declaration of *what a corpus is*. The cost-budget arm above refuses to compare two
+runs that disagree on `corpusId`, `seed`, or the canonical task order — but until FUSI-030 those
+facts lived only as arguments a caller happened to pass, so "the same corpus" was an unverifiable
+claim. This manifest is the single on-disk declaration of them, and its fingerprint is the identity
+the comparability machinery can key on.
+
+Shipped in FUSI-030 as **pure types plus a pure validator**: it declares a corpus, it does not run
+one. There is no store, no engine path, and no provider client.
+
+### Fields
+
+| Field | Meaning |
+|---|---|
+| `version` | Schema version; must be in `REPLAY_CORPUS_MANIFEST_VERSIONS` (currently `[1]`, exposed as `REPLAY_CORPUS_MANIFEST_VERSION`). |
+| `corpusId` | Identity of the task set; travels with every measurement so a run cannot be silently relabelled. |
+| `taskIds` | The tasks the corpus covers, in **declared** order. |
+| `seed` | The run's seed; a re-seeded corpus is a different corpus. |
+| `provider` | Always the **mock** provider. |
+| `order` | How `taskIds` becomes the canonical order: `lexicographic` or `manifest`. |
+| `reproducibility` | Three booleans — `deterministicSeed`, `stableOrder`, `mockProviderOnly` — the rules the corpus commits to. |
+
+The **provider is a single literal, not a union with a restriction**. `provider` is typed as
+`typeof MOCK_PROVIDER_ID`, so there is no union arm through which a real provider id can be written
+at all: a non-mock provider is *unrepresentable at the type level*, not merely rejected at runtime.
+That is stronger than a union plus a validator, which is a convention a future edit can quietly
+relax. A corpus run must never reach a real model, because a real call would make both the cost
+measurement and the gate verdict irreproducible.
+
+**Version is data, not a flag.** `version` is a `number` compared against the accepted-versions
+array, not a `legacy?: boolean`. A boolean admits exactly two histories; a version admits N and says
+which one a document was written against, so a v1 document is *refused* by a v2 loader rather than
+silently half-interpreted.
+
+### Load-time validation
+
+`loadReplayCorpusManifest(raw)` returns a result — it never throws — so the caller (a gate deciding
+whether to measure) learns *which* defect it hit without a try/catch. It copies `taskIds` and
+`reproducibility`, so the loaded manifest is a **snapshot** a later caller mutation cannot reach.
+
+Refusal reasons are a **closed enum**, and each refusal names the offending **field** but never the
+offending **value** (the value may be a task id; echoing caller text into an operator surface is how
+injection and secret-leak bugs start):
+
+| Reason | Refused because |
+|---|---|
+| `unsupported-version` | `version` is absent or outside the accepted set. |
+| `missing-field` | A required field is absent or the wrong type (including a non-object document). |
+| `empty-corpus` | `taskIds` is empty — a corpus with no tasks has nothing to replay. |
+| `duplicate-task-id` | The same task id appears twice. |
+| `empty-task-id` | A task id is empty or non-string. |
+| `provider-not-mock` | `provider` is not the mock provider. |
+| `unsupported-order` | `order` is not `lexicographic` or `manifest`. |
+| `unknown-field` | The document (or its `reproducibility` block) carries a field this version does not define. |
+
+`unknown-field` is **refused, not ignored**: a permissive reader would happily accept a document
+written for a future version and then measure the corpus as something it is not. Refusing the unknown
+key is what makes `version` load-bearing rather than decorative.
+
+### Ordering and the fingerprint
+
+`resolveReplayCorpusOrder(manifest)` returns a **fresh** array and never mutates the manifest.
+
+- **`lexicographic`** sorts by task id, so the order is a function of the *set*: a shuffled document
+  resolves to the same corpus.
+- **`manifest`** keeps the declared order, so a reordered document is a *different* corpus.
+
+`fingerprintReplayCorpusManifest(manifest)` is a `sha256:` digest over a **fixed-key canonical
+object** of exactly the comparability facts — `version`, `corpusId`, `seed`, `provider`, `order`, and
+the **resolved** ordered task ids. It mirrors `fingerprintCostRun` and deliberately **excludes** any
+timestamp, duration, or wall clock. Because the fingerprint hashes the *resolved* order, the two
+modes are distinguishable by construction: a lexicographic shuffle leaves the fingerprint unchanged,
+while a `manifest`-order shuffle changes it.
+
+The loaded manifest imports nothing but `node:crypto`, the shared mock-provider literal, and its own
+type module — no clock, no store, no provider client. That import list is the cheapest guard against
+the two mistakes that would destroy the feature's value: sampling `Date.now()` (which would make two
+runs of one corpus disagree) and reaching a provider (which would make a "reproducible" measurement
+depend on a real model's availability and pricing).
+
+The **baseline cache** (reuse/invalidation) landed with FUSI-031 and the operator tool that RENDERS its
+status, `fn_selfimprove_status`, landed with FUSI-034; the comparability GUARD (FUSI-032) and the
+measurement runner that would consume this manifest by supplying `manifestVersion`/`seed` are later
+slices and are not yet shipped.
+
+## Corpus metrics (FUSI-033)
+
+The secondary ruler. Where the primary gate is a boolean over build/lint/typecheck/gate/affected-tests
+plus the cost-budget invariants, the **replay canary** asks the follow-up question: over the same
+corpus, did the candidate still succeed as often, need as much rework, cost as much, and run as
+slowly? FUSI-033 ships the **measurement** of those four metrics. It is the pure, deterministic seam
+the canary will consume; it drives no replay itself, mutates no proposal state, and adds no run-audit
+event.
+
+<!--
+FNXC:SelfImproveCorpusMetrics 2026-09-30-18:56:
+FUSI-033 ships two pure modules under `packages/core/src/self-improve/`
+(`corpus-metrics-types.ts`, `corpus-metrics.ts`) plus their test. Unlike the cost-budget arm it has no
+verdict and no guard yet — the canary that CONSUMES these metrics, and the second ruler's
+keep/revert-by-canary decision, are later slices. This section therefore documents the measurement
+contract only; it does not claim the canary exists.
+-->
+
+### The four fixed definitions
+
+Each metric is a count over recorded observations or a straight arithmetic combination of counts —
+never a ratio of opinions, never a model-assigned score. If a definition could vary between two
+evaluations of the same corpus, the ruler would disagree with itself and become unreproducible.
+
+| Metric | Definition |
+| --- | --- |
+| **Success** | The number of DISTINCT tasks whose recorded terminal `succeeded` boolean is true, and the `successRate` = `succeededTaskCount / taskCount`. The denominator is the distinct task count, matching the cost lane's counting basis so both rulers divide by the same number. |
+| **Rework** | The SUM of the engine's recorded rework counter — `workflow_run_step_instances.reworkCount`, which the foreach graph increments on each `kind: "rework"` edge and `AgentSelfImproveService` already sums per task and run. |
+| **Cost** | Delegated to `measureCostRun` (see [Cost-budget invariants](#cost-budget-invariants-fusi-018)). Reported as the summed `tokens`, `steps`, and `wallClockMs`. |
+| **Latency** | Delegated to `measureCostRun` — the summed `wallClockMs` over the corpus. |
+
+**Rework is a counted fact, not a subjective judgment.** That is the load-bearing definitional choice.
+The engine already persists a verifiable counter; reading that recorded number gives "redone more" a
+definition two readers of the same run always agree on. Deriving rework from log prose, or scoring
+it, would make one run measure differently for two readers and would turn the ruler subjective — the
+exact failure the primary gate's determinism rule exists to prevent.
+
+**Cost and latency are reused, never forked.** They are the shipped cost lane's job, including its
+token convention (input + output + cacheWrite, cache reads excluded), canonical ordering, and
+fingerprint. This module does not restate them; it projects the recorded cost fields onto cost-lane
+observations via `toCostObservations` and hands them to `measureCostRun`. A corpus therefore has exactly
+ONE notion of "a run": if the corpus re-derived cost with a different rule, the canary could report a
+replay as cheaper while the primary gate's cost-budget arm reported the same replay as over budget, and
+neither verdict would be explainable.
+
+### Determinism: measured by recorded observation, never by clock
+
+`measureCorpusMetrics(observations)` is a **pure** function: it reads no clock, opens no store, imports
+no engine, and starts no process. Success, rework, tokens, steps, and wall-clock all arrive already
+captured on each observation. Ordering is canonicalized by **sort** on `taskId`, so a shuffled input
+yields byte-identical metrics and an identical `sha256:` fingerprint — two evaluations that merely
+arrived in different orders are still the same evaluation. `seed` and `corpusId` travel **with** each
+observation (not as measurement parameters) so a corpus cannot be silently re-run under a different
+seed or task set between the baseline and candidate passes.
+
+### Grouping by task, and duplicates that stay visible
+
+Metrics are grouped by `taskId` into one entry per distinct task, in canonical order. When a task was
+measured more than once, its occurrences collapse into a single entry whose numeric fields **sum**, whose
+`succeeded` flag is true only when **every** occurrence succeeded (a partial success must not read as
+clean success), and whose `occurrences` and `duplicateTaskIds` stay in the record so a corpus that
+measured a task twice is auditable rather than silently collapsed into a clean-looking total.
+
+### Validity is recorded, not thrown
+
+A `reworkCount` that is negative, fractional, or non-finite means the producer wrote a bad record. The
+measurement sets `valid: false` and lists the offending task ids in `invalidReworkTaskIds` rather than
+throwing, so a completed replay still reports its other metrics and a caller can decide whether to
+refuse. Summing destroys *which* observation was bad, so the ids are captured here, at the only point
+the individual observations still exist. The empty corpus is legal: it reports zero for every metric and
+a success rate of zero rather than throwing or producing `NaN`.
+
 ## Structural denylist
 
 The floor under the primary gate: an experiment may change product behavior, but it may not rewrite
@@ -524,21 +751,33 @@ This module is standalone: it imports nothing from the gate runner (FUSI-016) or
 
 This page covers the record contract that landed in FUSI-009, the store/revert/run-audit layers that
 landed with FUSI-010/011/012/015, the structural denylist and its pre-gate guard (FUSI-019), the
-gate library (FUSI-016), the test-count delta guard (FUSI-017), and the cost-budget invariants
-(FUSI-018) — all committed on the mission branch and
+gate library (FUSI-016), the test-count delta guard (FUSI-017), the cost-budget invariants
+(FUSI-018), and the secondary ruler's four corpus metrics (FUSI-033) — all committed on the mission branch and
 **not yet merged into `main`**, so none of that code is greppable in a `main` checkout. The
 following are later M1 slices and are **not** in the code at all:
 
 - The deterministic primary gate *runner* (FUSI-016's gate library above is landed, but the
-  runner that consumes the delta guard's verdict is not), the versioned **replay corpus** +
-  manifest with cached baseline and comparability guard, and the CLI/pi `fn_selfimprove_*`
+runner that consumes the delta guard's verdict is not), the **canary that consumes** the four
+  corpus metrics, and the CLI/pi `fn_selfimprove_*`
   operator surface (status, proposals, experiments, veto, pause, force-revert). The structural
-  denylist shipped in FUSI-019 and the **persisted verdict / precedence** rule in FUSI-020, so
-  neither is on this list.
+  denylist shipped in FUSI-019, the **persisted verdict / precedence** rule in FUSI-020, the
+  **versioned replay corpus manifest** in FUSI-030, the **cached baseline with its fingerprint and
+  invalidation rule** in FUSI-031, the four **corpus metrics** in FUSI-033, and the **comparability
+  guard** in FUSI-032, so none of those six is on this list.
 
-The gate runner and the replay canary are described in the mission brief, not implemented yet; when
-they land, this page is extended with the replay manifest's comparability rules. The cost-budget arm
-of the primary gate shipped in FUSI-018 and is described under
+The cached baseline itself shipped in FUSI-031 — see
+[Cached replay baseline](#cached-replay-baseline) — and the versioned manifest that ORIGINATES its
+`manifestVersion` and `seed` inputs shipped in FUSI-030 — see
+[Replay corpus manifest](#replay-corpus-manifest-fusi-030). The comparability guard that CONSUMES
+the manifest's fingerprint to decide whether two runs describe the same corpus shipped in FUSI-032 —
+see [Replay comparability guard](#replay-comparability-guard-fusi-032) — and what did not ship with
+it is the CLI that renders the status read model. The four corpus metrics — the secondary
+ruler's measurement seam — shipped in FUSI-033 and are described under
+[Corpus metrics](#corpus-metrics-fusi-033); what did NOT ship there is the **canary** that consumes
+them and turns their comparison into a keep/revert decision. The gate runner and the replay canary
+are described in the mission brief, not implemented yet; when they land, this page is extended with
+the rules for driving a comparison from a guarded verdict. The cost-budget arm of the primary gate shipped in
+FUSI-018 and is described under
 [Cost-budget invariants](#cost-budget-invariants-fusi-018).
 
 ## The deterministic primary gate (FUSI-016)
@@ -601,6 +840,43 @@ The primary gate is a boolean over its deterministic signals (build, lint, typec
 
 **Durable shape** — table `project.learning_gate_verdicts` (migration `0090`), with CHECKs mirroring the verdict/precedence enums, a canary-pairing invariant (a verdict that records a canary must record that canary's verdict), and a fingerprint-format check. The pure precedence rule and its fingerprint are pinned by `learning-gate-verdict-pure.test.ts`; the durable shape by `self-improve-gate-verdicts.pg.test.ts`; the store's audit mirroring and emission-freedom by `self-improve-gate-verdict-store.test.ts`.
 
+## Cached replay baseline
+
+A verdict names a baseline; this section is what makes that baseline's **measurement identity** checkable. Without a cache the loop re-measures the replay corpus for every candidate — slow, and worse, with no proof the candidate was compared against a baseline produced under the same corpus, engine build, configuration, and seed. A stale reuse would silently mix incomparable measurements, which is the failure this feature exists to prevent.
+
+The pure identity contract lives in `packages/core/src/self-improve/baseline-fingerprint.ts`; the durable cache and its accessors are in `packages/core/src/task-store/async/async-learning-baseline-cache.ts`.
+
+**Fingerprint** — `computeBaselineFingerprint` is a deterministic SHA-256 over a canonical, order-stable, NUL-separated `key=value` string of exactly four inputs: `manifestVersion`, `engineSha`, `configHash`, and `seed`. It is emitted as `sha256:<hex>`, matching the convention in `cost-budget-measure.ts` and `test-count-delta.ts`. Because it covers all four, a change to any one of them is provably a different measurement. Two normalization rules matter:
+
+- **The seed is normalized to an integer.** A manifest may carry `"42"` while a runtime passes `42`; hashing the raw string would mint two fingerprints for one seed and rebuild the baseline on every alternate call path — a cache that never hits.
+- **A non-numeric seed is refused, not coerced.** Unlike the verdict fingerprint, which falls back to `0`, silently hashing `NaN` as `0` here would attribute a measurement to a seed it was not run with — the same unattributability the blank-field refusal prevents. Blank `manifestVersion`, `engineSha`, and `configHash` are refused for the same reason.
+
+**Reuse/rebuild resolver** — `resolveBaselineCache({ cachedFingerprint, requestedFingerprint })` is pure and TOTAL, returning `{ action, reason }` over a closed vocabulary:
+
+| Condition | `action` | `reason` |
+| --- | --- | --- |
+| Nothing cached for the key | `rebuild` | `no-cached-baseline` |
+| Cached fingerprint identical | `reuse` | `fingerprint-matched` |
+| Cached fingerprint differs | `rebuild` | `fingerprint-diverged` |
+
+The reason is a closed enum rather than free text so an operator can **count** why comparisons were refused — "how many comparisons were refused as incomparable" must be answerable by query. The resolver takes two strings rather than a cache entry, so the accessor decides how to *fetch* while this function alone decides what the answer *means*; a cache that reuses on a different rule than the one status reports is the drift this separation prevents.
+
+**Status read model** — `buildBaselineCacheStatus` (pure) and `readBaselineCacheStatus` (accessor-backed) produce the object `fn_selfimprove_status` will render:
+
+```ts
+{ baselineKey, inputFingerprint, cachedFingerprint, present, action, reason }
+```
+
+It is the complete answer to "may I trust this comparison?". `present` is **derived** from the cached fingerprint rather than accepted as a separate input, so a status can never claim a baseline exists while simultaneously reporting `no-cached-baseline`. Both fingerprints are surfaced so an operator can see which component moved. The CLI that renders this is a later M1 slice; this feature delivers the substrate only.
+
+**Durable shape** — table `project.learning_baseline_cache` (migration `0091`), keyed `(project_id, baseline_key)`. Unlike the verdict trail this is a **cache, not an append-only log**: one row per baseline per project, because the newest entry is the only valid one. `writeBaselineCache` therefore uses `onConflictDoUpdate`, which gives three behaviors from one statement — an identical re-store is a no-op, a changed fingerprint replaces the entry in place, a first measurement inserts. The four measurement components are denormalized beside `input_fingerprint` (a SHA-256 is one-way; without them a reader could confirm two entries came from the same inputs but not *which*), while `payload` is deliberately **opaque jsonb** — the measurement layer owns its shape, and the fingerprint, never the payload, governs reuse. `created_at` survives a replacement so a forced rebuild stays distinguishable from the original measurement. A CHECK restricts `input_fingerprint` to the `sha256:<hex>` shape so a drifted writer fails loudly at the database instead of being read back as a plausible value.
+
+The accessor is an `AsyncDataLayer` function, deliberately **not** a `TaskStore` method: a measurement cache has no business widening the durable-write inventory the store's public surface is held to.
+
+**Observability** — every resolution emits one bounded `selfimprove:baseline-cache-resolved` run-audit row carrying ids and fixed outcomes only; the measured payload is structurally excluded. See [Run-Audit Catalogue](./run-audit.md#self-improvement-baseline-cache-resolution-fusi-031).
+
+**Verification** — the pure identity, normalization, refusals, and resolver truth table are pinned by `self-improve-baseline-fingerprint-pure.test.ts`; the durable round trip, row-count idempotence, in-place replacement, `created_at` preservation, project scoping, and CHECK rejections by `self-improve-baseline-cache.pg.test.ts`; the sink health and metadata containment by `self-improve-baseline-cache-run-audit-sink-health.test.ts`.
+
 
 /*
 FNXC:AutoImprovement 2026-09-30-18:03:
@@ -614,6 +890,54 @@ FNXC banner at the head of this file still lists the denylist among the remainin
 surfaces in one historical block; those blocks are dated and describe their own moment, so they
 are left intact rather than retroactively rewritten.
 */
+
+## Replay comparability guard (FUSI-032)
+
+A replay experiment keeps a **cached baseline** from a prior pass and measures a **fresh candidate**
+now. The entire value of the delta between them rests on both sides having been produced the same
+way, so the loop refuses to compare two runs whose measurement inputs differ. The contract is pure
+and lives in `packages/core/src/self-improve/comparability-types.ts`; the guard is
+`evaluateComparability` in `packages/core/src/self-improve/comparability-guard.ts`.
+
+**Four fixed dimensions.** A replay result is invalid because the corpus `manifest` was edited, the
+`seed` was re-rolled, the `engine` build changed, or the resolved `config` changed — and those are
+the only four ways, because they are the only inputs that determine *what* a replay pass measures.
+The set is a closed enum (`COMPARABILITY_DIMENSIONS`, evaluated in exactly the order
+`manifest, seed, engine, config`) so a crafted or misspelled name cannot widen what is compared or
+recorded. The order is fixed so the reported cause is a deterministic, reproducible list.
+
+**Refuse before running — never compute a metric.** There is deliberately no "how far apart" field.
+The guard walks the four dimensions, collects **every** dimension whose value differs, and the moment
+at least one does it returns `not-comparable` carrying that ordered list, computing no delta, score,
+or comparison value at all. A delta between two differently-produced runs is a number with no
+meaning, and a meaningless number that renders as a plausible delta is worse than none — it survives
+a glance and enters a keep-or-revert decision. Only a `comparable` verdict (all four dimensions equal)
+authorizes a metric downstream.
+
+**A half-populated identity is not a run.** An identity with an empty `manifest`, `seed`, `engine`, or
+`config` is a placeholder, not a measurement, and its own reported values are not evidence that a pass
+happened. It is refused as `not-a-run` (checked on both sides, before any dimension comparison) rather
+than trusted — this mirrors the cost-budget guard's `inconsistent-run` refusal. So the refusal
+vocabulary is exactly two fixed values: `divergent-identity` (a dimension diverged; `diverged` names
+which) and `not-a-run` (a placeholder side).
+
+**Determinism by content, never by clock.** An identity's `fingerprint` is a `sha256:` digest over the
+canonical serialization of its four dimension values, computed from the identity's own content — not
+from a clock, a store, an engine import, or the caller's property insertion order. The same four
+values always yield the same fingerprint on any host, which is exactly what makes a baseline cached on
+one pass comparable to a candidate measured later or elsewhere. Judging the same pair twice is
+deep-equal, including the recomputed fingerprints and both echoed identities, so a caller can record
+exactly what was judged without re-deriving it.
+
+**Fixed-outcome recording.** A refusal emits `selfimprove:comparability-refused` through the core
+bounded run-audit seam (see
+[Self-improvement learning ledger](./run-audit.md)). Metadata is ids/counts/fixed outcomes only: a
+fixed `outcome` (`divergent-identity` | `not-a-run`), the ordered `diverged` dimension list, its
+`divergedCount`, the eight opaque identity values (four per side), and `proposalId`/`projectId` only
+when present. The `diverged` enum list **is** the named cause — a reason sentence would be a second,
+uncountable vocabulary — and a crafted unknown dimension name is dropped rather than recorded. A
+hostile audit sink cannot soften, delay, or reverse a stop: the refusal was already decided by the
+pure guard before the emit was attempted.
 
 ## Related documentation
 

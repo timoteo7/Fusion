@@ -8,6 +8,16 @@ import { api } from "../client/client.js";
 
 // --- Models API ---
 
+/** Per-model price, USD per 1,000,000 tokens, copied verbatim from the registry. */
+export interface ModelCostInfo {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** Request-wide pricing tiers; the highest matching input threshold applies to the full request. */
+  tiers?: ModelCostInfo[];
+}
+
 /** Available AI model info returned by the models endpoint */
 export interface ModelInfo {
   provider: string;
@@ -17,6 +27,13 @@ export interface ModelInfo {
   contextWindow: number;
   /** Ordered pi-documented levels for this model; absent means the registry did not expose capability metadata. */
   supportedThinkingLevels?: ThinkingLevel[];
+  /**
+   * FNXC:ModelCatalog 2026-09-30-18:45:
+   * Present on every published row. `null` means no price is known for the model (a CLI-picker
+   * row, or a registry row with no cost) and is deliberately distinct from a `0` rate, which
+   * means the model really is free. Never render a missing price as `$0.00`.
+   */
+  cost?: ModelCostInfo | null;
   /** Provider-wide public instance metadata, attached by fetchModels for picker consumers. */
   credentialInstances?: ProviderCredentialInstanceSummary[];
 }

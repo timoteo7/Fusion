@@ -857,6 +857,42 @@ Subcommands: `status`.
 
 ---
 
+## `fn models`
+
+Read the model catalog from the command line. This is a **headless, read-only** surface: it needs no dashboard process, no API token, and no running engine, and it opens no store and starts no server. It never prints credentials — it reads them only to decide which providers are connected.
+
+```bash
+fn models [list|ls] [--json] [--provider <id>] [--all]
+fn models providers [--json]
+```
+
+Subcommands:
+
+- `list` / `ls` — list usable models by provider with per-model price. Bare `fn models` is the same command.
+- `providers` — list configured providers and how many catalog models each exposes.
+
+Flags:
+
+- `--json` — emit a machine-readable envelope instead of the table. `list` emits `{ "models": [...] }`; `providers` emits `{ "providers": [...] }`.
+- `--provider <id>` — restrict `list` to a single provider (e.g. `--provider anthropic`).
+- `--all` — include providers you are **not** connected to. By default only configured providers are shown.
+
+Example:
+
+```bash
+fn models --json | jq '.models[] | select(.cost.input == 0)'
+fn models list --provider anthropic
+fn models providers
+```
+
+Behavior notes:
+
+- **Provider gate.** By default `list` shows only providers you are connected to (a stored credential, a provider toggle you enabled, or a custom provider you configured) — the same gate the dashboard uses. `--all` is the explicit opt-out. A `list` advertising a provider you cannot use is worse than a short one, so an unconnected provider is hidden by default.
+- **Pricing.** Prices are shown in USD per 1,000,000 tokens, copied from the model registry and never rescaled. A model with no known price is shown as `n/a` (table) or `"cost": null` (JSON) — an unknown price is stated, never fabricated as `$0.00`.
+- **Refresh.** The catalog is refreshed within a bounded window. If the registry cannot be reached the command still prints whatever it already knows rather than hanging or failing the shell.
+
+---
+
 ## `fn cloud`
 
 Link a local Fusion engine to a cloud control plane. Set `FUSION_CLOUD_HTTP_URL` to the HTTPS control-plane base URL, or pass `--http <url>` to `pair-start` or `pair-complete`. Plain HTTP is accepted only for loopback development endpoints.

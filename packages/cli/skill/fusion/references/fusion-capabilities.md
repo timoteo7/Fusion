@@ -54,6 +54,7 @@ All skill/extension tool invocations in this catalog use the public `fn_*` names
 | `fn_insight_show` | Agent sessions | Show a single persisted insight by ID. |
 | `fn_insight_run_list` | Agent sessions | List recent insight-generation runs with optional status/trigger filters. |
 | `fn_insight_run_show` | Agent sessions | Show a single insight-generation run by ID. |
+| `fn_selfimprove_status` | Agent sessions | Report whether a cached replay baseline may be reused for given measurement inputs, showing both fingerprints, the reuse/rebuild decision, and its reason. |
 | `fn_mission_create` | Agent sessions | Create a new mission — a high-level objective that can span multiple milestones. Missions contain milestones that break down work into phases. |
 | `fn_mission_list` | Agent sessions | List all missions with their current status. |
 | `fn_goal_list` | Agent sessions | List goals by status with active-goal warning details. |

@@ -1,13 +1,26 @@
 /*
 FNXC:CliRuntimeRouting 2026-08-15-13:51:
 The dashboard owns picker admission and engine deliberately cannot import it.
-Parse the explicit `configuredProviders.add(...)` forms instead, so a new
-selectable provider cannot become executable only through pi by accident.
+Parse the explicit `<set>.add(...)` forms instead, so a new selectable provider
+cannot become executable only through pi by accident.
 Unrecognised syntax is a violation: this guard must fail closed, not quietly
 skip a catalog form it no longer understands.
+
+FNXC:CliRuntimeRouting 2026-09-30-20:05:
+FUSI-024 moved provider admission out of the dashboard route into the shared core gate
+(`discoverConfiguredProviders` / `addToggleConfiguredProviders`), so the toggle/custom-provider
+`add` call sites now live in packages/core/src/ai/configured-provider-discovery.ts and the
+picker-id constants it references live in the dashboard model-cache modules. This guard now reads
+BOTH the route and that core module; the set name it recognizes is not pinned to
+`configuredProviders` (that binding was an artifact of where the code used to live), and every
+`add(...)` expression it cannot classify is still a fail-closed violation.
 */
 
-const ADD = /configuredProviders\.add\(([^\n;]+)\)/g;
+// Admit `<identifier>.add(<expr>)` for the set names the catalog admission gate uses. The set is
+// the local `providers` in `addToggleConfiguredProviders`; the credential-discovery sets
+// (`oauthProviders`, `apiKeyProviders`, `anonymousProviders`, ...) are NOT catalog admission and
+// are excluded by scoping the scan to the admission block (see extractAdmissionBlock below).
+const ADD = /\b(?:configuredProviders|providers)\.add\(([^\n;]+)\)/g;
 const STRING = /^\s*["']([^"']+)["']\s*$/;
 const PICKER = /^\s*([A-Z][A-Z0-9_]*_PICKER_PROVIDER_ID)\s*$/;
 const DYNAMIC = /^\s*customProviderRegistryKey\(/;
@@ -41,13 +54,21 @@ function constantsFromSources(sources) {
   return constants;
 }
 
-/** @param {{routeSource:string,censusSource:string,constantSources?:string[]}} input */
+/**
+ * @param {{routeSource:string,censusSource:string,constantSources?:string[],admissionSource?:string}} input
+ *   `admissionSource` is the source the gate's `add(...)` call sites are scanned in. It defaults to
+ *   `routeSource` so a caller that only knows the route keeps working; the production caller passes
+ *   the route PLUS the extracted core admission block (see check-cli-runtime-routing.mjs).
+ */
 export function checkCliRuntimeRouting(input) {
   const violations = [];
   const constants = constantsFromSources(input.constantSources ?? []);
   const admitted = new Set();
   let calls = 0;
-  for (const match of input.routeSource.matchAll(ADD)) {
+  // FNXC:CliRuntimeRouting 2026-09-30-20:05: FUSI-024 moved the toggle/custom-provider `add` sites
+  // into the shared core gate. `admissionSource` is the CONCATENATION of the dashboard route and
+  // that core module, so the guard still sees every admission call site wherever it now lives.
+  for (const match of (input.admissionSource ?? input.routeSource).matchAll(ADD)) {
     calls += 1;
     const expression = match[1].trim();
     const literal = STRING.exec(expression)?.[1];
@@ -60,9 +81,9 @@ export function checkCliRuntimeRouting(input) {
       continue;
     }
     if (DYNAMIC.test(expression)) continue;
-    violations.push(`unrecognised configuredProviders.add expression: ${expression}`);
+    violations.push(`unrecognised provider-gate add expression: ${expression}`);
   }
-  if (calls === 0) violations.push("zero configuredProviders.add call sites found");
+  if (calls === 0) violations.push("zero provider-gate add call sites found");
 
   const census = censusEntries(input.censusSource);
   if (census.length === 0) violations.push("CLI provider routing census is empty or unparseable");

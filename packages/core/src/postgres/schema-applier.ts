@@ -91,7 +91,8 @@ touches no data; it must advance in the same change that ships a new migration f
 /* FNXC:OverlapWaitSynchronization 2026-09-17-00:22: advance the ceiling so an upgraded project has the durable wait table before any overlap-marker transition tries to record into it. Renumbered 0074->0084 (2026-09-18): upstream's own migrations 0074 (FN-323 project notes) through 0083 (FN-514) are absent from this branch by design (it excludes their source commits), but the numeric slots are real and must not be reused, or a database that ran the real 0074..0083 would be misread as compatible with this branch's different 0074. */
 /* FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45: SCHEMA_BASELINE_VERSION advances 0088 -> 0089 for the learning-revert reason enum on the event trail. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the column, not a follow-up. */
 /* FNXC:SelfImproveGateVerdict 2026-09-30-15:26: SCHEMA_BASELINE_VERSION advances 0089 -> 0090 for the persisted deterministic gate verdict. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the table, not a follow-up. FNXC:SelfImproveGateVerdict 2026-10-02-00:00: renumbered 0089 -> 0090 because this chain already claims 0087/0088/0089 for the ledger, its event trail, and the revert-reason enum; two migrations may never share a number. */
-export const SCHEMA_BASELINE_VERSION = "0090";
+/* FNXC:SelfImproveBaselineCache 2026-10-03-00:52: The restored FUSI-031 cache follows upstream 0086 and the ledger/event/revert/verdict migrations at 0087..0090; its complete apply registration advances the baseline to 0091. */
+export const SCHEMA_BASELINE_VERSION = "0091";
 /** FNXC:SymbolLock 2026-07-20-10:00: upgrades need durable task declarations before admission resolves symbols. */
 export const TASK_DECLARED_SYMBOLS_VERSION = "0028";
 const INITIAL_SCHEMA_VERSION = "0000";
@@ -316,6 +317,17 @@ guard below are the only things that make the verdict table exist on an already-
 same self-improvement trail.
 */
 export const LEARNING_GATE_VERDICTS_VERSION = "0090";
+
+/*
+FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
+0091 registers the cached replay baseline and is claimed immediately after FUSI-020's 0090, because
+the cache is a property of the same self-improvement measurement trail: a verdict names a baseline,
+and the cache is what makes that baseline's measurement identity checkable. Everything that makes the
+cache table exist on an already-migrated database — this constant, the migration path below, the
+`alreadyApplied` check, and the `to_regclass` guard — is registered together; a migration that is
+registered but not covered by this marker silently never runs.
+*/
+export const BASELINE_CACHE_VERSION = "0091";
 
 /** FNXC:MemoryFocus 2026-08-13-15:57: explicit registration prevents the per-conversation memory-focus migration from being skipped. Renumbered to 0060 (FN-9037 took 0059), then 0061, then 0065 (2026-08-20) when the upstream FN-066..FN-094 batch claimed 0061-0064. */
 export const CHAT_SESSION_MEMORY_FOCUS_VERSION = "0066";
@@ -590,6 +602,7 @@ const SELFIMPROVE_LEARNING_LEDGER_MIGRATION_PATH = join(MIGRATIONS_DIR, "0087_fn
 const LEARNING_LEDGER_EVENTS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0088_fn_selfimprove_learning_events.sql");
 const LEARNING_LEDGER_REVERT_SEMANTICS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0089_fusi_011_learning_revert_semantics.sql");
 const LEARNING_GATE_VERDICTS_MIGRATION_PATH = join(MIGRATIONS_DIR, "0090_fn_selfimprove_learning_gate_verdicts.sql");
+const BASELINE_CACHE_MIGRATION_PATH = join(MIGRATIONS_DIR, "0091_fn_selfimprove_learning_baseline_cache.sql");
 
 /**
  * Ensure the migration bookkeeping table exists. Lives in the public schema so
@@ -740,6 +753,7 @@ export async function applySchemaBaseline(
     const learningLedgerEventsAlreadyApplied = applied.includes(LEARNING_LEDGER_EVENTS_VERSION);
     const learningLedgerRevertSemanticsAlreadyApplied = applied.includes(LEARNING_LEDGER_REVERT_SEMANTICS_VERSION);
     const learningGateVerdictsAlreadyApplied = applied.includes(LEARNING_GATE_VERDICTS_VERSION);
+    const baselineCacheAlreadyApplied = applied.includes(BASELINE_CACHE_VERSION);
     assertBinaryNotOlderThanDatabase(applied);
     let schemaChanged = false;
 
@@ -1748,6 +1762,25 @@ export async function applySchemaBaseline(
       const migrationSql = await readFile(LEARNING_GATE_VERDICTS_MIGRATION_PATH, "utf8");
       await tx.execute(sql.raw(migrationSql));
       await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${LEARNING_GATE_VERDICTS_VERSION}) ON CONFLICT (version) DO NOTHING`);
+      schemaChanged = true;
+    }
+    /*
+    FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
+    Like 0087/0088/0090, 0091 CREATES a table, so the guard is a `to_regclass` table-presence probe: a
+    database whose bookkeeping row says 0091 ran but whose table is missing (a partially applied
+    upgrade) must still be repaired, and re-running the idempotent CREATE/RLS/policy/trigger
+    statements is safe to repeat. The baseline cache is the one migration in this trail that can be
+    SILENTLY absent while every other self-improvement surface works — a verdict would still be
+    recorded, only against a baseline that was re-measured every time — so the presence probe is the
+    only thing standing between a partially applied upgrade and silent non-caching.
+    */
+    const baselineCacheMissing = ((await tx.execute(sql`
+      SELECT to_regclass('project.learning_baseline_cache') IS NULL AS missing
+    `)) as unknown as Array<{ missing: boolean }>)[0]?.missing ?? true;
+    if (!baselineCacheAlreadyApplied || baselineCacheMissing) {
+      const migrationSql = await readFile(BASELINE_CACHE_MIGRATION_PATH, "utf8");
+      await tx.execute(sql.raw(migrationSql));
+      await tx.execute(sql`INSERT INTO public.${sql.identifier(MIGRATION_BOOKKEEPING_TABLE)} (version) VALUES (${BASELINE_CACHE_VERSION}) ON CONFLICT (version) DO NOTHING`);
       schemaChanged = true;
     }
     return { applied: schemaChanged, pluginHooksRun: pluginHooks.length };
