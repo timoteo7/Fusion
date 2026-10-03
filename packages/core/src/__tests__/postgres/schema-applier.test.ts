@@ -119,6 +119,8 @@ import {
   DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
   STALE_REVIEW_CALLBACK_WAIVER_RECEIPTS_VERSION,
   SELFIMPROVE_LEARNING_LEDGER_VERSION,
+  LEARNING_LEDGER_EVENTS_VERSION,
+  LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
 import type { PluginSchemaInitHook } from "../../postgres/plugin-schema-hook.js";
@@ -176,7 +178,9 @@ describe("schema-applier: immutable migration identities", () => {
     expect(CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION).toBe("0073");
     expect(Number(SCHEMA_BASELINE_VERSION)).toBeGreaterThanOrEqual(Number(CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION));
     expect(SELFIMPROVE_LEARNING_LEDGER_VERSION).toBe("0087");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0087");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0089");
+    expect(LEARNING_LEDGER_EVENTS_VERSION).toBe("0088");
+    expect(LEARNING_LEDGER_REVERT_SEMANTICS_VERSION).toBe("0089");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -705,7 +709,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 119 project tables, 17 central tables, 1 archive table", async () => {
+  it("creates all 120 project tables, 17 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -723,10 +727,10 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     /*
     FNXC:PgSchemaApplier 2026-10-03-00:52:
     Registered migration DDL creates 118 upstream project tables, including the 0086 stale-review
-    callback waiver receipts table that the old 117 pin omitted. 0087 adds learning_proposals (118 → 119).
+    callback waiver receipts table that the old 117 pin omitted. 0087 adds learning_proposals (118 → 119). 0088 adds learning_ledger_events (119 → 120); 0089 alters the trail without adding a table.
     Plugin-owned tables are excluded by disabling schema-init hooks for this baseline count.
     */
-    expect(bySchema.project).toBe(119);
+    expect(bySchema.project).toBe(120);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
@@ -1924,6 +1928,8 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
       STALE_REVIEW_CALLBACK_WAIVER_RECEIPTS_VERSION,
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
+      LEARNING_LEDGER_EVENTS_VERSION,
+      LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
   });
@@ -2027,6 +2033,8 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
       STALE_REVIEW_CALLBACK_WAIVER_RECEIPTS_VERSION,
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
+      LEARNING_LEDGER_EVENTS_VERSION,
+      LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
     ]);
   });
 
@@ -2263,6 +2271,8 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
       STALE_REVIEW_CALLBACK_WAIVER_RECEIPTS_VERSION,
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
+      LEARNING_LEDGER_EVENTS_VERSION,
+      LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
     ]);
   });
 
@@ -2380,6 +2390,8 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
       STALE_REVIEW_CALLBACK_WAIVER_RECEIPTS_VERSION,
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
+      LEARNING_LEDGER_EVENTS_VERSION,
+      LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
     ]);
   });
 
@@ -2497,6 +2509,8 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       DROP_EXCLUDED_UPSTREAM_FEATURE_SCHEMA_VERSION,
       STALE_REVIEW_CALLBACK_WAIVER_RECEIPTS_VERSION,
       SELFIMPROVE_LEARNING_LEDGER_VERSION,
+      LEARNING_LEDGER_EVENTS_VERSION,
+      LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
     ]);
   });
 });

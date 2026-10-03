@@ -180,8 +180,25 @@ import {
   reconcilePatchnodeFromLiveTasks,
   type PatchnodeReconcileResult,
 } from "./task-store/async/async-patchnode.js";
+import {
+  appendLearningProposal,
+  listLearningProposals,
+  readLearningProposal,
+  recordLearningApplication,
+  recordLearningReversal,
+  type AppendLearningProposalInput,
+  type RecordLearningApplicationInput,
+  type RecordLearningReversalInput,
+} from "./task-store/async/async-learning-ledger.js";
+import {
+  emitSelfImproveProposalApplied,
+  emitSelfImproveProposalCreated,
+  emitSelfImproveProposalReverted,
+} from "./self-improve/self-improve-run-audit.js";
 import { buildPatchnodeEntryId, buildPatchnodeEntryInput } from "./board/patchnode.js";
 import type { PatchnodeEntry, PatchnodeQuery } from "./types/task/patchnode.js";
+import type { LearningProposal } from "./types/self-improve/learning-proposal.js";
+import type { LearningLedgerEvent, LearningLedgerPage, LearningLedgerQuery } from "./self-improve/ledger-events.js";
 import { resolveWorkflowIrForTask } from "./workflows/workflow-ir-resolver.js";
 // FNXC:RuntimeBackendAsync 2026-06-24-10:15:
 // Async helper imports for backend-mode (AsyncDataLayer/PostgreSQL) delegation.
@@ -1228,6 +1245,79 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       });
     }
     return queryPatchnodeEntries(this.asyncLayer, query);
+  }
+  async appendLearningProposal(input: AppendLearningProposalInput): Promise<LearningProposal> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    const stored = await appendLearningProposal(this.asyncLayer, input);
+    void emitSelfImproveProposalCreated({
+      host: this,
+      proposalId: stored.proposalId,
+      target: stored.target,
+      projectId: this.asyncLayer.projectId ?? undefined,
+      timestamp: stored.createdAt,
+      evidenceCount: stored.evidenceRefs.length,
+    });
+    return stored;
+  }
+
+  async recordLearningApplication(input: RecordLearningApplicationInput): Promise<LearningLedgerEvent> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    const stored = await recordLearningApplication(this.asyncLayer, input);
+    /*
+    FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+    The applied EVENT carries identity + target only; the asserted weight lives on the proposal row,
+    so the delegation reads that row to build the audit metadata. The read is wrapped because the
+    EVENT is ALREADY committed by the line above: a metadata read that failed must not reject a
+    method whose write succeeded. A read failure is treated exactly like an absent row — skip the
+    emit, return the committed event. The learning transition is never reported as failed because
+    its telemetry could not be enriched.
+    */
+    let proposal: LearningProposal | null = null;
+    try {
+      proposal = await readLearningProposal(this.asyncLayer, stored.proposalId);
+    } catch (error) {
+      storeLog.warn("Learning application committed but its proposal row could not be read for run-audit", {
+        proposalId: stored.proposalId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (proposal) {
+      void emitSelfImproveProposalApplied({
+        host: this,
+        proposalId: proposal.proposalId,
+        target: proposal.target,
+        projectId: this.asyncLayer.projectId ?? undefined,
+        timestamp: stored.occurredAt,
+        version: proposal.version,
+        confidence: proposal.confidence,
+        value: proposal.value,
+        evidenceCount: proposal.evidenceRefs.length,
+        hasPriorValue: proposal.priorValue !== null,
+      });
+    }
+    return stored;
+  }
+
+  async recordLearningReversal(input: RecordLearningReversalInput): Promise<LearningLedgerEvent> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    const stored = await recordLearningReversal(this.asyncLayer, input);
+    // The committed event carries the trimmed pairing and the enum reason; use the STORED values so
+    // the audit row can never disagree with the ledger row it mirrors.
+    void emitSelfImproveProposalReverted({
+      host: this,
+      proposalId: stored.proposalId,
+      target: stored.target,
+      projectId: this.asyncLayer.projectId ?? undefined,
+      timestamp: stored.occurredAt,
+      revertedEventId: stored.revertsEventId ?? input.revertsEventId,
+      revertReason: stored.revertReason ?? input.revertReason,
+    });
+    return stored;
+  }
+
+  async listLearningProposals(query: LearningLedgerQuery = {}): Promise<LearningLedgerPage> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    return listLearningProposals(this.asyncLayer, query);
   }
   public async atomicWriteTaskJsonWithAudit( dir: string, task: Task, auditInput?: RunAuditEventInput, planningInvalidation?: PlanningDependencyInvalidation, specPlanPrompt?: string, shouldPersist?: () => boolean, persistFence?: TaskAtomicPersistFence, ): Promise<void> {
     return atomicWriteTaskJsonWithAuditImpl(this, dir, task, auditInput, planningInvalidation, specPlanPrompt, shouldPersist, persistFence);
