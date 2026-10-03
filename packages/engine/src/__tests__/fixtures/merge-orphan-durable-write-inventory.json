@@ -349,6 +349,7 @@
     "appendAgentLog",
     "appendAgentLogBatch",
     "appendCurrentPlanEvidence",
+    "appendLearningProposal",
     "appendRemediationSteps",
     "appendSpecDriftReport",
     "appendSpecDriftReportWhilePlanningLocked",
@@ -444,6 +445,7 @@
     "issueStaleReviewCallbackWaiver",
     "linkGithubIssue",
     "linkTaskRecommendation",
+    "listLearningProposals",
     "listPatchnodeEntries",
     "lockCurrentPlan",
     "lockCurrentPlanWhilePlanningLocked",
@@ -501,6 +503,8 @@
     "recordDependencyCycleRejectedAudit",
     "recordGoalCitations",
     "recordImportTranslation",
+    "recordLearningApplication",
+    "recordLearningReversal",
     "recordPatchnodeCompletion",
     "recordPatchnodeRevert",
     "recordPluginActivation",
@@ -698,6 +702,11 @@
       "method": "appendCurrentPlanEvidence",
       "kind": "writer",
       "reason": "persists or mutates TaskStore state"
+    },
+    {
+      "method": "appendLearningProposal",
+      "kind": "writer",
+      "reason": "persists a learning proposal row and its opening event"
     },
     {
       "method": "appendRemediationSteps",
@@ -1995,6 +2004,11 @@
       "reason": "reviewed public TaskStore operation; not a durable writer reached by this merge frontier"
     },
     {
+      "method": "listLearningProposals",
+      "kind": "writer",
+      "reason": "on the learning-ledger read frontier; classified a writer conservatively so an orphaned body reaching it is still fenced"
+    },
+    {
       "method": "listLegacyAutoMergeStampCandidates",
       "kind": "non-writer",
       "reason": "reviewed public TaskStore operation; not a durable writer reached by this merge frontier"
@@ -2593,6 +2607,16 @@
       "method": "recordImportTranslation",
       "kind": "writer",
       "reason": "persists or mutates TaskStore state"
+    },
+    {
+      "method": "recordLearningApplication",
+      "kind": "writer",
+      "reason": "appends a learning application event to the ledger"
+    },
+    {
+      "method": "recordLearningReversal",
+      "kind": "writer",
+      "reason": "appends a learning reversal event naming the application it cancels"
     },
     {
       "method": "recordPatchnodeCompletion",
