@@ -27,6 +27,8 @@ import {
 } from "@fusion/core";
 import {
   BRANCH_WRITE_PROVENANCE_FAILURE_VALUE,
+  PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC_CONTEXT_KEY,
+  PLAN_LOCK_UNAVAILABLE_HOLD_VALUE,
   PLAN_REVIEW_PROVIDER_FAILURE_HOLD_VALUE,
   WORKFLOW_DRIFT_PARK_CONTEXT_KEY,
 } from "../workflows/workflow-graph-executor.js";
@@ -515,6 +517,34 @@ export async function handleGraphFailure(
           executorLog.warn(`${task.id}: ${message}`);
           await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
         }
+        await deps.persistTokenUsage(task.id);
+        return;
+      }
+      if (graphFailureValue(result) === PLAN_LOCK_UNAVAILABLE_HOLD_VALUE) {
+        /*
+        FNXC:PlanReviewReplan 2026-09-30-15:33 (FUSI-029):
+        A plan the spec parser cannot bind is a structural, terminal failure. Re-running the reviewer
+        cannot change the parser's verdict for an unchanged PROMPT.md, so this takes its own
+        single-shot terminal park instead of the bounded in-place provider hold above (which retries
+        and leaves `error: null`, hiding the card from every error-based detection).
+
+        The parser relaxation for provably non-mission tasks removes the common cause, so reaching
+        here means a genuinely malformed mission prompt: park with a non-null, actionable error
+        naming the parser diagnostic and pointing the operator at PROMPT.md. No new attempt runs
+        until the prompt itself changes (FUSI-025 Acceptance #2 and #4).
+        */
+        const diagnostic = result.context?.[PLAN_LOCK_UNAVAILABLE_DIAGNOSTIC_CONTEXT_KEY];
+        const detail = typeof diagnostic === "string" && diagnostic.trim() ? diagnostic.trim() : "the plan could not be locked";
+        const message = `Plan Review approved a plan that cannot be locked: ${detail}. This is a structural PROMPT.md defect, not a correctable plan — fix the prompt, then retry the task.`;
+        executorLog.warn(`${task.id}: ${message}`);
+        await deps.store.logEntry(task.id, message, undefined, deps.getRunContextFor(task.id));
+        await retryTerminalFailurePersistence(
+          deps.store,
+          task.id,
+          message,
+          deps.getRunContextFor(task.id),
+          live.columnMovedAt,
+        );
         await deps.persistTokenUsage(task.id);
         return;
       }

@@ -364,6 +364,58 @@ Slices represent staged execution windows.
 
 Manual activation is available through `fn mission activate-slice <slice-id>`.
 
+### Both slice-closure routes advance the roadmap
+
+A slice can close by two equally valid routes, and **both** must advance the next
+slice. Before, the advance hook was wired only to one of them.
+
+1. **Task completion.** A linked task lands in a terminal column. The scheduler's
+   `handleMissionTaskCompletion` reconciles the feature and, once the source slice
+   is complete, calls `Scheduler.onSliceComplete(slice)`.
+2. **Feature validation.** The last outstanding feature of a slice reaches `done`
+   through a `passed` validator verdict. This happens on features with **no linked
+   task at all**, so no task-completion event ever fires.
+
+Route 2 used to stall the mission silently: the slice became `complete`, no hook
+ran, and the next `pending` slice stayed `pending` forever — no error and no
+progress log. This was observed on mission `M-MULZRJQ4-0001-IF11`, where `S1.1`
+closed via feature `F-MUN6HH49-0007-3UMV` passing validator run
+`VR-MUO2D2O3-000L-3MGM` and `S1.2` (`SL-MULZRJXG-000H-ALLI`) had to be activated by
+hand.
+
+Both routes now converge on one shared seam,
+`advanceMissionToNextSlice(missionStore, missionId)` in
+`packages/engine/src/missions/slice-advance.ts`. `MissionExecutionLoop` fires it
+from `notifyValidationPass` — the single funnel every pass verdict already reaches
+(no-assertion early return, the `reuse-pass` branch, and the main
+`result.status === "pass"` branch) — after re-reading the feature's slice from the
+store and confirming it is `complete`. `Scheduler.onSliceComplete` delegates to the
+same function, so the two routes cannot drift.
+
+**Why the seam is store-backed rather than a `Scheduler` method.** The seam takes a
+mission store and a mission ID, never a `Scheduler`. In UI-only mode
+(`fn dashboard --no-engine`) no `Scheduler` is ever constructed, and
+`MissionAutopilot.advanceToNextSlice` delegates to `Scheduler.activateNextPendingSlice`,
+which does not exist there — a scheduler-shaped seam would be a permanent silent
+no-op in that mode. A store-backed seam reaches identical behavior in every mode
+with no engine bootstrap.
+
+**Guarantees preserved on both routes:**
+
+- Strict ordering. Admission is delegated to
+  `MissionStore.tryActivateNextPendingSlice`, which selects through
+  `selectNextSerialMissionSlice`: a later slice is never admitted while an earlier
+  one is still `pending`.
+- The guards are reproduced verbatim — the mission must exist, be `active`, and have
+  `autopilotEnabled === true || autoAdvance === true`. A non-autorunning mission,
+  or one with autopilot off, never advances.
+- No slice promotion. The seam only admits the next slice; it never moves the slice
+  that just closed.
+- Fail-soft. A throwing or absent store is logged and yields no advance, so a store
+  fault can never prevent a validator verdict from being recorded.
+- Duplicate-safe. A repeated pass signal re-enters the seam, but the store's atomic
+  admission admits at most once.
+
 ## Mission Autopilot
 
 Missions are always created stopped (`status: "planning"`, `autopilotEnabled: false`, `autoAdvance: false`).
@@ -384,6 +436,10 @@ Typical flow:
 3. If no slice is active, autopilot activates only the earliest pending slice after every earlier milestone and slice is complete
 4. When milestones are all complete, mission transitions to complete
 
+A slice also closes when its last feature passes validation without any task
+completing. That route advances the roadmap through the same guarded seam — see
+[Both slice-closure routes advance the roadmap](#both-slice-closure-routes-advance-the-roadmap).
+
 If validation cannot run (unexpected loop state, duplicate trigger, blocked validation, or validator error), Fusion logs a mission `warning`/`error` event with structured metadata so the stuck state is visible in mission events.
 
 Mission `status` and `autopilotEnabled` transitions are atomically written with a mission activity event. The event records stable actor type/id, optional display name, source, and before/after values; unchanged values create no transition event. Dashboard controls identify an operator, tools identify an agent when they expose a sensitive mutation, and autonomous engine paths identify the system/autopilot.
@@ -401,6 +457,26 @@ Automatic hierarchy rollup, including terminal-task delivery reconciliation, own
 - `autopilotEnabled=false`, `autoAdvance=true` → features are planned (legacy compat)
 - Active autopilot slices are continuously reconciled on startup recovery and periodic maintenance: stranded features (`taskId == null`) are re-triaged idempotently, title-matched tasks are linked first, and successful link/triage repairs emit `mission:stranded-feature-triaged` run-audit events.
 - `autopilotEnabled=false`, `autoAdvance=false` → manual slice activation only
+
+**Periodic health check:**
+
+The background consistency sweep runs on the `missionHealthCheckIntervalMs` cadence (5 minutes by
+default; `0` disables it). It is **reconcile-only** — it repairs feature/task status bookkeeping and
+never creates a board task, promotes or activates a slice, or re-enters the lifecycle.
+
+- **Eligibility is derived from the mission store, never from the in-memory watch registry.** A
+  mission is eligible when its own `autopilotEnabled` is on and its `status` is neither `complete`
+  nor `archived`, or when its `status` is `active` (reconciled even with autopilot off, so the
+  corrector does not depend on a single flag). Terminal missions are never reconciled.
+- **Unwatched autopilot missions are auto-adopted before being reconciled**, so the `watched` flag on
+  `GET /api/missions/:missionId/autopilot` converges on reality after a restart or a poll that
+  started before the mission existed. The sweep is not gated on the watch registry: that registry is
+  derived state written only by the poll and startup recovery, so gating on it let a stopped corrector
+  keep reporting health while repairing nothing.
+- **The log distinguishes the two outcomes.** `Mission health check complete: no eligible missions —
+  nothing reconciled` means nothing was eligible; `Mission health check complete: reconciled N
+  missions, fixed M inconsistencies` means a real sweep ran and found M repairs. A per-mission store
+  failure is logged and skipped without aborting the remaining missions.
 
 **Slice progression (on slice completion):**
 
@@ -742,7 +818,7 @@ Evidence is secret-redacted before persistence. Each assertion retains at most 1
 
 Generated fix features and their triaged tasks include the same **Validation cause** section with source feature, validator run, failed assertion IDs, bounded observations, and evidence. SQLite `MissionStore` and PostgreSQL `AsyncMissionStore` use the shared renderer, so a retry does not produce backend-specific causes or duplicate sections. A fix that is already linked to a canonical task is an idempotent race; otherwise Mission activity tells the operator to inspect and retry triage rather than exposing internal exception/loop-state prose.
 
-A generated fix superseded by successful validation is terminal because it is no longer needed; superseding it never invents a passed validator result. Autonomous reconciliation preserves that terminal state instead of re-blocking it. A task-less generated fix with an unvalidated passed marker is restored to `defined` automatically, and an operator may also use validation repair to clear that marker; a passed marker tied to a validator run remains genuine evidence and is not cleared.
+A generated fix superseded by successful validation is terminal because it is no longer needed. Superseding it stamps feature-level completion evidence — `status`, `loopState`, and `lastValidatorStatus` all read `done`/`passed` together — so the slice rollup, which counts an assertion-linked feature as done only on `lastValidatorStatus === "passed"`, can promote the slice instead of pinning it at `active` with every feature done. This is deliberately not run evidence: the superseded fix carries no `lastValidatorRunId`, because nothing validated it. Autonomous reconciliation preserves that terminal state instead of re-blocking it. A task-less generated fix with an unvalidated passed marker and **no passed ancestor** is restored to `defined` automatically, and an operator may also use validation repair to clear that marker; a passed marker tied to a validator run remains genuine evidence and is not cleared. The two cases are distinguished by ancestry, not by the marker itself: a legitimate supersede always has a passed ancestor, so the fabrication guard never undoes it.
 
 The loop state is internal scheduling context, not an operator diagnosis. Its public meanings and actions are:
 

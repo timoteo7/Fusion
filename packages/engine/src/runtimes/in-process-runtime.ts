@@ -63,6 +63,7 @@ import { MeshLeaseManager } from "../project/mesh-lease-manager.js";
 import { PluginRunner } from "../plugins/plugin-runner.js";
 import { MissionAutopilot } from "../missions/mission-autopilot.js";
 import { MissionExecutionLoop } from "../missions/mission-execution-loop.js";
+import { advanceMissionToNextSlice } from "../missions/slice-advance.js";
 import { TriageProcessor } from "../triage.js";
 import { validateProjectNodeMapping } from "../project/node-dispatch-validation.js";
 import { attachAgentLinkSync } from "../agents/task-agent-sync.js";
@@ -1440,24 +1441,46 @@ export class InProcessRuntime
             missionAutopilot: missionAutopilot
               ? {
                   notifyValidationComplete: async (featureId: string) => {
-                    // Pass the feature's linked taskId to handleTaskCompletion, not the featureId
+                    /*
+                    FNXC:MissionSliceAdvanceOnValidation 2026-09-30-13:45:
+                    A feature can close by VALIDATION with no linked task, so the
+                    former `if (!feature?.taskId) return;` early-return swallowed the
+                    no-task path entirely and left the mission stalled. It is removed;
+                    the task-completion work below is now guarded by the taskId check
+                    it always needed, and the unlinked-feature case reaches the
+                    slice-advance seam (wired as `onSliceValidated` below).
+                    */
                     const feature = await missionStore.getFeature(featureId);
-                    if (!feature?.taskId) {
+                    if (!feature) {
                       return;
                     }
-                    const slice = await missionStore.getSlice(feature.sliceId);
-                    const milestone = slice ? await missionStore.getMilestone(slice.milestoneId) : undefined;
-                    const missionId = milestone?.missionId;
-                    if (missionId) {
-                      const mission = await missionStore.getMission(missionId);
-                      if (mission?.autopilotEnabled && !missionAutopilot.isWatching(missionId)) {
-                        missionAutopilot.watchMission(missionId);
+                    if (feature.taskId) {
+                      // Pass the feature's linked taskId to handleTaskCompletion, not the featureId
+                      const slice = await missionStore.getSlice(feature.sliceId);
+                      const milestone = slice ? await missionStore.getMilestone(slice.milestoneId) : undefined;
+                      const missionId = milestone?.missionId;
+                      if (missionId) {
+                        const mission = await missionStore.getMission(missionId);
+                        if (mission?.autopilotEnabled && !missionAutopilot.isWatching(missionId)) {
+                          missionAutopilot.watchMission(missionId);
+                        }
                       }
+                      await missionAutopilot.handleTaskCompletion(feature.taskId);
                     }
-                    await missionAutopilot.handleTaskCompletion(feature.taskId);
                   },
                 }
               : undefined,
+            /*
+            FNXC:MissionSliceAdvanceOnValidation 2026-09-30-13:46:
+            The slice-advance seam is a store-backed function, not a Scheduler
+            method, so a feature that closes by validation advances the next slice
+            in BOTH engine mode and UI-only mode (where no Scheduler exists). It
+            closes over the missionStore already in scope — no Scheduler reference,
+            no lazy lookup, no circular import.
+            */
+            onSliceValidated: async (missionId: string) => {
+              await advanceMissionToNextSlice(missionStore, missionId);
+            },
             rootDir: this.config.workingDirectory,
             pluginRunner: this.pluginRunner,
             agentStore: this.agentStore,

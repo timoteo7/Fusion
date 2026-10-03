@@ -162,6 +162,7 @@ export function canonicalizePlan(prompt: string, bindings?: PlanEvidenceBindings
   current-plan revision and cannot degrade into an inactive-but-clean lock.
   */
   applyLivePlanBindings(result, bindings);
+  relaxMissionSectionForNonMissionTask(result, bindings);
   const unavailable = Object.values(result).find((section) => section.status === "unavailable");
   if (unavailable) return { parserVersion: SPEC_LOCK_PARSER_VERSION, sections: result, status: "unavailable", reason: unavailable.reason };
   const content = JSON.stringify(Object.fromEntries(Object.entries(result).map(([key, section]) => [key, section.hash])));
@@ -196,6 +197,37 @@ function normalizedPlanEvidenceBindings(bindings: PlanEvidenceBindings | undefin
     ...(bindings?.sliceId?.trim() ? { sliceId: bindings.sliceId.trim() } : {}),
     ...(bindings?.sourceParentTaskId?.trim() ? { sourceParentTaskId: bindings.sourceParentTaskId.trim() } : {}),
   };
+}
+
+/*
+FNXC:SpecLock 2026-09-30-15:33:
+Mission prose is locked only when a mission actually exists. A task created outside any mission has no
+`## Mission` section, so requiring one made a structurally valid plan permanently unlockable: the spec-lock
+seam rejected the approval, and the Plan Review graph read that as a correctable plan defect and replanned it
+forever (FUSI-025 measured 20 rejections in ~67 min, one full LLM session each, with `error` left null).
+
+This relaxation is deliberately narrow so it can never weaken a mission plan:
+  - It applies ONLY when bindings were supplied AND `bindings.missionId` is blank after trimming. A caller
+    that omits bindings entirely (legacy direct callers) keeps the strict behavior unchanged.
+  - It applies ONLY to `mission-missing` (the `## Mission` heading is absent entirely). `mission-empty`
+    (a present-but-empty heading) and `mission-duplicate` (two headings) stay fatal even for a non-mission
+    task: a heading that exists but is empty or repeated is an authoring defect no task can excuse by
+    "having no mission", and relaxing it would hide a malformed prompt.
+  - A prompt that DOES declare a mission (`missionId` present) is unaffected: its missing Mission section
+    is a real prompt defect and must still be rejected.
+The relaxed section is lockable-but-absent (`canonical: ""` with a real hash), so drift still reacts as soon
+as a `## Mission` section appears: adding one changes the `mission` section hash (see `diffSpecLocks`).
+*/
+function relaxMissionSectionForNonMissionTask(
+  sections: Record<SpecLockSection, CanonicalPlanSection>,
+  bindings: PlanEvidenceBindings | undefined,
+): void {
+  if (bindings === undefined) return;
+  if ((bindings.missionId ?? "").trim() !== "") return;
+  const mission = sections.mission;
+  if (mission.status !== "unavailable") return;
+  if (mission.reason !== "mission-missing") return;
+  sections.mission = { status: "available", canonical: "", hash: hash("") };
 }
 
 function applyLivePlanBindings(
