@@ -30,8 +30,18 @@ steps must not reach review or execution.
 
 ## Safeguards
 
-- Model selection requires an exact registered definition. A configured, known
-  fallback still works; an unknown selection produces an actionable error.
+- Registered model definitions stay first. Missing OpenRouter selections load
+  exact, validated metadata from the official public catalog automatically.
+  Context and output ceilings stay distinct. Reasoning comes from published
+  capabilities, including mandatory reasoning and supported effort levels.
+  Discovery is credential-free, bounded and single-flight. Successful metadata
+  has a five-minute cache; late timed-out fetches cannot publish it.
+- Custom endpoints, original model definitions, headers, credential routing and
+  explicit OpenRouter routing policy are preserved. Unsupported selections still
+  fail clearly, without borrowing another model's metadata.
+- A missing optional fallback warns and is disabled for that session rather than
+  blocking a valid primary. If neither primary nor fallback resolves, startup
+  fails. Known configured fallbacks retain their behavior.
 - Each live Pi prompt has a fixed budget of three truncated assistant responses.
   The first two request smaller, complete outputs without dropping required
   sections. Exhaustion requests abort and reports an error only after the native
@@ -50,10 +60,12 @@ steps must not reach review or execution.
 
 ## Operator action
 
-Register the exact model definition using the supported runtime registry, such
-as `~/.fusion/agent/models.json`, with verified transport and capacity metadata.
-A provider catalog listing alone is not an exact runtime registration. An
-unknown-ID `modelOverrides` entry alone does not add that model.
+OpenRouter models such as `stealth/space-bunny-alpha` do not require manual
+registration when the official catalog supplies complete metadata. Custom
+endpoints and other providers still need their exact supported definitions,
+such as in `~/.fusion/agent/models.json`. An unknown-ID `modelOverrides` entry
+alone does not add a model. Catalog capability is not an execution account's
+availability or a request's actual output budget.
 
 Do not guess an output budget from the context window, copy another model's
 limits, lower `max_tokens` blindly, or bypass review to release an incomplete

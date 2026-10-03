@@ -6495,13 +6495,18 @@ describe("pause-abort status clearing (bug fix)", () => {
       },
     });
     const { promptWithFallback } = await import("../pi.js");
-    (promptWithFallback as ReturnType<typeof vi.fn>).mockReturnValueOnce(disposePromise);
+    let resolvePromptStarted!: () => void;
+    const promptStarted = new Promise<void>((resolve) => { resolvePromptStarted = resolve; });
+    (promptWithFallback as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      resolvePromptStarted();
+      return disposePromise;
+    });
 
     const task: Task = { id: "FN-001", description: "test", column: "triage", dependencies: [], steps: [], currentStep: 0, log: [], createdAt: "", updatedAt: "" };
     const processor = new TriageProcessor(store, "/tmp/root");
     const specifyPromise = processor.specifyTask(task);
 
-    await new Promise((r) => setTimeout(r, 20));
+    await promptStarted;
 
     for (const fn of settingsListeners) {
       fn({ settings: { globalPause: true }, previous: { globalPause: false } });

@@ -58,6 +58,7 @@ import {
   runWithFusionSessionIdentity,
   resolvePiExtensionProjectRoot,
   resolveToolOutputBudget,
+  resolveGlobalDirForHome,
   matchStepHeadings,
 } from "@fusion/core";
 import type {
@@ -75,8 +76,9 @@ import {
 import { isContextLimitError } from "./errors/context-limit-detector.js";
 import { promptWithOutputTruncationGuard } from "./pi-output-truncation.js";
 import { applyClaudeAcpEnable } from "./cli-runtime/claude-acp-enable.js";
-import { createFusionAuthStorage, createFusionModelRegistry } from "./auth/auth-storage.js";
+import { createFusionAuthStorage, createFusionModelRegistry, getModelRegistryModelsPath } from "./auth/auth-storage.js";
 import { refreshFusionModelRegistry } from "./auth/model-registry-refresh.js";
+import { hydrateOpenRouterModel, openRouterHydrationPolicy } from "./auth/openrouter-catalog.js";
 import { piLog, extensionsLog } from "./logger.js";
 import { readCustomProviders } from "./auth/custom-providers.js";
 import { buildCustomProviderModels } from "./auth/custom-provider-registry.js";
@@ -1193,7 +1195,7 @@ function resolveCustomProviderApiType(apiType: string): "anthropic-messages" | "
   return "openai-completions";
 }
 
-function resolveConfiguredModel(
+async function resolveConfiguredModel(
   modelRegistry: ModelRegistry,
   kind: "primary" | "fallback",
   provider?: string,
@@ -1213,8 +1215,21 @@ function resolveConfiguredModel(
     return model;
   }
 
+  if (executionProvider === "openrouter") {
+    try {
+      const policy = openRouterHydrationPolicy(
+        readJsonObject(join(resolveGlobalDirForHome(homedir()), "settings.json")),
+        readJsonObject(getModelRegistryModelsPath()),
+      );
+      const discovered = await hydrateOpenRouterModel(modelRegistry, modelId, policy);
+      if (discovered) return discovered;
+    } catch {
+      throw new Error(`Configured model ${executionProvider}/${modelId} (${kind} selection) could not be resolved from the OpenRouter public model catalog. Discovery failed or timed out; retry or register its exact definition.`);
+    }
+  }
+
   // A known provider does not prove an unknown model's transport or capabilities.
-  // Exact entries from built-in, extension, and custom registrations are required.
+  // Exact entries from built-in, extension, custom registrations, or catalog are required.
   throw new Error(
     `Configured model ${executionProvider}/${modelId} (${kind} selection) was not found in the pi model registry. `
     + "Register its exact model definition in ~/.fusion/agent/models.json, "
@@ -2713,10 +2728,10 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
   // Resolve explicit model selection if provider and model ID are specified.
   // If the primary configured model cannot be resolved but a fallback model is
   // configured, prefer the fallback as the initial model selection.
-  let selectedModel;
-  let fallbackModel;
+  let selectedModel: Awaited<ReturnType<typeof resolveConfiguredModel>>;
+  let fallbackModel: Awaited<ReturnType<typeof resolveConfiguredModel>>;
   try {
-    selectedModel = resolveConfiguredModel(
+    selectedModel = await resolveConfiguredModel(
       modelRegistry,
       "primary",
       options.defaultProvider,
@@ -2726,7 +2741,7 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
     if (!options.fallbackProvider || !options.fallbackModelId) {
       throw primaryResolutionError;
     }
-    fallbackModel = resolveConfiguredModel(
+    fallbackModel = await resolveConfiguredModel(
       modelRegistry,
       "fallback",
       options.fallbackProvider,
@@ -2736,12 +2751,19 @@ export async function createPiAgentSessionRaw(options: AgentOptions): Promise<Ag
   }
 
   if (!fallbackModel) {
-    fallbackModel = resolveConfiguredModel(
-      modelRegistry,
-      "fallback",
-      options.fallbackProvider,
-      options.fallbackModelId,
-    );
+    try {
+      fallbackModel = await resolveConfiguredModel(
+        modelRegistry,
+        "fallback",
+        options.fallbackProvider,
+        options.fallbackModelId,
+      );
+    } catch (fallbackResolutionError) {
+      // A valid primary must not depend on optional fallback metadata. Keep the
+      // session usable, but never invent a fallback definition or change settings.
+      if (!selectedModel) throw fallbackResolutionError;
+      piLog.warn(`Configured fallback ${options.fallbackProvider}/${options.fallbackModelId} is unavailable; fallback disabled for this session. The resolved primary model will be used.`);
+    }
   }
 
   // Resolve skill selection: explicit skillSelection wins over convenience `skills`
