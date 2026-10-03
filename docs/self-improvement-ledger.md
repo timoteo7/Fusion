@@ -37,6 +37,18 @@ and never of a clock, so measuring twice yields the same answer. The gate's OTHE
 corpus, and the operator CLI remain unimplemented and stay marked — this page still describes no
 field, state, or event the code does not actually have.
 
+FNXC:AutoImprovement 2026-09-30-15:26:
+FUSI-020 lands a further M1 slice: the deterministic gate's VERDICT RECORD and its PRIMARY-GATE
+PRECEDENCE rule, so the persisted-verdict/precedence rule is no longer on the unshipped list. The
+"Deterministic gate verdict record" section below states the shipped shape (the closed verdict enum,
+the four-branch precedence rule in which the primary always prevails over the replay canary, the
+derived idempotent verdict id, the two required readers, and the bounded
+`selfimprove:gate-verdict-recorded` audit row). What remains unshipped is the gate RUNNER that computes
+the primary signals and drives the canary, the versioned replay corpus + manifest with its comparability
+guard, the structural denylist, and the `fn_selfimprove_*` operator surface — the verdict record is the
+durable destination the runner will write to, so recording the verdict contract now is accurate while
+leaving the runner, corpus, and comparability rules marked as not-yet-shipped.
+
 FNXC:AutoImprovement 2026-09-29-10:24:
 STATUS OF THE CODE THIS PAGE DESCRIBES. FUSI-009 is committed (37bd1f102) on the mission branch
 mission/M-MULZRJQ4-0001-IF11, NOT on main, and is pending merge. Every file path and migration
@@ -45,19 +57,27 @@ named below is therefore absent from the current checkout until that branch land
 document. The contract below is accurate to that committed code, but the symbols are not yet
 greppable in the reader's working tree, so this page must be re-read as a forward contract for the
 merge, not as a description of code already present.
--->
+*/
+
+/*
+FNXC:AutoImprovement 2026-09-30-15:26: FUSI-020 lands the deterministic gate's verdict record and
+primary-precedence rule; the block above states exactly which M1 surfaces remain unshipped.
+*/
 
 > **Code status:** the record contract below landed in FUSI-009 and its store, revert-write, and
 > run-audit layers landed with FUSI-010/011/012/015, the deterministic primary gate landed with
-> FUSI-016, the test-count delta guard landed with FUSI-017, and the gate's cost-budget invariants
-> landed with FUSI-018 — all committed on the mission branch and **not yet merged into `main`**. The
-> file paths and migrations named here are therefore not yet present in a `main` checkout — they
-> become real when that branch lands. The still-unimplemented M1 surfaces are the denylist, the gate
-> runner that consumes the delta verdict, the replay corpus, the persisted-verdict/precedence rule,
-> and the operator CLI.
+> FUSI-016, the test-count delta guard landed with FUSI-017, the gate's cost-budget invariants
+> landed with FUSI-018, the structural denylist and its pre-gate guard landed with FUSI-019, and
+> the gate's persisted verdict record and primary-precedence rule landed with FUSI-020 — all
+> committed on the mission branch and **not yet merged into `main`**. The file paths and
+> migrations named here are therefore not yet present in a `main` checkout — they become real
+> when that branch lands. The still-unimplemented M1 surfaces are the gate runner that computes
+> the primary signals and drives the canary, the replay corpus + manifest with its comparability
+> guard, and the operator CLI.
 > See [Not yet shipped](#not-yet-shipped),
-> [The deterministic primary gate](#the-deterministic-primary-gate), and
-> [Cost-budget invariants](#cost-budget-invariants-fusi-018).
+> [The deterministic primary gate](#the-deterministic-primary-gate),
+> [Cost-budget invariants](#cost-budget-invariants-fusi-018), and
+> [Deterministic gate verdict record](#deterministic-gate-verdict-record).
 
 ## Overview
 
@@ -341,6 +361,82 @@ a cached baseline against a candidate possibly measured days later under a diffe
 durable is *which* corpus, *which* seed, *how many* tasks, and *which* axes moved. See the
 [Run-Audit Catalogue](./run-audit.md) for the full metadata contract.
 
+## Structural denylist
+
+The floor under the primary gate: an experiment may change product behavior, but it may not rewrite
+the equipment that measures it. Shipped in FUSI-019 as a pure classifier plus a guard that aborts
+before any gate step runs.
+
+- **Five immutable categories**, evaluated **first-match-wins** in this order:
+  1. `quarantine` — the flaky-test ledger (`scripts/lib/test-quarantine.json` and its schema). It
+     leads because its consumers are also vitest configs, and the file that decides which failures
+     are tolerated must always be answerable as "quarantine".
+  2. `gate` — everything the merge gate's verdict depends on (see the family below).
+  3. `ratchets` — the `scripts/check-*.mjs` validator family (matched by shape, so a new validator
+     is protected the day it lands) plus `eslint.config.mjs`.
+  4. `release` — `scripts/release.mjs`, the `.changeset/` directory, and every `CHANGELOG.md`.
+  5. `self-patching` — `packages/core/src/self-improve/` and `packages/engine/src/experiment/`.
+
+- **The gate category is a derived family, never a hand list.** The merge gate is not one file: it
+  is `test:gate` → `run-static-gate-checks.mjs` (which itself reads the `test:gate:static` body out
+  of the manifest at runtime) plus the four launchers `test:gate` / `test:gate:static` /
+  `smoke:boot` / `verify:fast`, plus the `engine-core` vitest project that actually decides the
+  verdict. Membership:
+  - `scripts/run-static-gate-checks.mjs` — `test:gate`'s first command, and **not** a `check-*.mjs`.
+  - `scripts/build-engine-core-gate-bundle.mjs` — wired into `engine-core` via `globalSetup`.
+  - `scripts/boot-smoke.mjs` — merge-blocking at `pr-checks.yml:300`, and not a check either.
+  - `scripts/verify-fast.mjs` — one of the four launchers.
+  - `packages/core/src/index.gate.ts` — the reduced `@fusion/core` barrel `engine-core` aliases to;
+    its drift has already broken Plan Review and 72 gate cases.
+  - `packages/core/src/__test-utils__/vitest-teardown.ts` — the root `globalSetup` every project
+    inherits.
+  - the per-package `packages/<pkg>/vitest*.config.ts` family (not just `vitest.config.ts`), whose
+    `engine-core` allow-list decides which suites are merge-blocking. The sibling configs matter
+    because each is a `--config` a gate lane invokes and each `mergeConfig`s the protected base:
+    `packages/core/vitest.pg.config.ts` is what `test:pg-gate` runs, so overriding include/exclude or
+    `hookTimeout` there silently reweights one third of the gate.
+  - the **manifests that define the gate**, matched by shape: root `package.json` and every
+    `packages/<pkg>/package.json`. These are loaders, not targets. `run-static-gate-checks.mjs`
+    resolves the blocking-validator inventory out of the root manifest at runtime
+    (`scripts/run-static-gate-checks.mjs:55-56`), and `packages/core/package.json` holds the literal
+    merge-blocking file lists for `test:unit-gate` and `test:pg-gate` — two of the three lanes the
+    root `test:gate` spawns. Protecting only the scripts those bodies point at would let an
+    experiment delete a validator from `test:gate:static`, or un-list a blocking test file, while
+    touching **no** denylisted path, because the removed `check-*.mjs` files are never modified.
+    Manifests are protected by shape rather than by inspecting their bodies, because the classifier
+    is pure: it sees a path string and nothing else. Over-refusing a manifest edit (a dependency
+    bump in `packages/core/package.json`) is the correct conservative answer — the floor may be
+    wider than the need, never narrower.
+
+  A **census test** re-derives this set from the repository — the four manifest gate bodies, the
+  nested validator level, the on-disk `check-*` sweep, the `engine-core` `globalSetup`/`resolve.alias`
+  targets, the whole `vitest*.config.ts` family, the root manifest, and each `--filter <pkg>` manifest
+  the root gate spawns — and asserts each derived path classifies non-null, so a new gate-authoritative
+  file fails the suite rather than the first time an experiment edits it. The manifest and sibling-config
+  legs are asserted explicitly: a derivation that yielded only scripts and `vitest.config.ts` passed
+  vacuously while the files holding the gate bodies were unprotected.
+
+- **Refusal happens before the gate runs.** `guardStructuralDenylist(changedPaths, gate, options)`
+  is the module's single entry and the only place the gate callback is invoked — one `await gate()`
+  call site at the bottom of that function, marked `THE ONE INVOCATION SITE`. It classifies the
+  full changed-path set first; on a hit it returns `{ executed: false, rejected: true, categories,
+  counts, fileCount }` **without ever calling the callback**, so there is no gate verdict for a
+  caller to weigh against the refusal. `rejected: true` is a hard stop the primary gate cannot
+  ignore.
+
+- **No escape hatch.** There is no `bypass`/`force`/`skipDenylist`/`override` parameter, no
+  environment variable, and no settings key. An escape-hatch ratchet in the guard suite scans both
+  new source files (comments stripped) for exactly those identifiers and env/settings reads.
+
+- **The refusal is auditable, and telemetry is not load-bearing.** The row is
+  `selfimprove:denylist-rejected`, written through the same bounded core seam as the other three
+  events. Its metadata is a closed list — `categories`, per-category `counts`, `categoryCount`,
+  `fileCount`, `rejected: true`, plus `proposalId`/`target`/`projectId` **only when present**.
+  `proposalId` and `target` are optional because a commit is classified before any proposal exists
+  and a code-level hit has no product target. **Paths, diffs, and prose are never recorded.** An
+  absent, throwing, rejecting, never-settling, or late-settling sink still yields `rejected: true`
+  with zero gate calls.
+
 ## Safety rails
 
 Shipped in FUSI-017:
@@ -427,16 +523,18 @@ This module is standalone: it imports nothing from the gate runner (FUSI-016) or
 ## Not yet shipped
 
 This page covers the record contract that landed in FUSI-009, the store/revert/run-audit layers that
-landed with FUSI-010/011/012/015, the gate library (FUSI-016), the test-count delta guard
-(FUSI-017), and the cost-budget invariants (FUSI-018) — all committed on the mission branch and
+landed with FUSI-010/011/012/015, the structural denylist and its pre-gate guard (FUSI-019), the
+gate library (FUSI-016), the test-count delta guard (FUSI-017), and the cost-budget invariants
+(FUSI-018) — all committed on the mission branch and
 **not yet merged into `main`**, so none of that code is greppable in a `main` checkout. The
 following are later M1 slices and are **not** in the code at all:
 
-- Structural denylist enforcement, the deterministic primary gate *runner* (FUSI-016's gate library
-  above is landed, but the runner that consumes the delta guard's verdict is not), the versioned
-  **replay corpus** + manifest with cached baseline and comparability guard, and the CLI/pi
-  `fn_selfimprove_*` operator surface (status, proposals, experiments, veto, pause, force-revert).
-  The **persisted verdict / precedence** rule is likewise a later slice.
+- The deterministic primary gate *runner* (FUSI-016's gate library above is landed, but the
+  runner that consumes the delta guard's verdict is not), the versioned **replay corpus** +
+  manifest with cached baseline and comparability guard, and the CLI/pi `fn_selfimprove_*`
+  operator surface (status, proposals, experiments, veto, pause, force-revert). The structural
+  denylist shipped in FUSI-019 and the **persisted verdict / precedence** rule in FUSI-020, so
+  neither is on this list.
 
 The gate runner and the replay canary are described in the mission brief, not implemented yet; when
 they land, this page is extended with the replay manifest's comparability rules. The cost-budget arm
@@ -481,6 +579,41 @@ fails closed with a named reason instead of wedging.
 recording the boolean verdict, the fingerprint, the per-step ids/booleans, and counts — ids,
 counts, and booleans only, never the diff, command lines, or log prose. The emission is
 best-effort: a hostile audit sink never alters the verdict the caller already holds.
+
+## Deterministic gate verdict record (FUSI-020)
+
+The gate's **verdict** is persisted as an append-only trail so an experiment's outcome is an operator-visible, reproducible record rather than a log line. The verdict contract is pure and lives in `packages/core/src/self-improve/learning-gate-verdict-types.ts`; the persistence and readers are in `packages/core/src/task-store/async/async-learning-gate-verdicts.ts`.
+
+**Closed verdict enum** — `keep | reverse | inconclusive | abstain`. A closed enum (not free text) is required so a verdict is countable and an operator can never read a novel label off the trail.
+
+**Primary-gate precedence.** The verdict is resolved by ONE pure function, `resolveLearningGateVerdict(primaryVerdict, canaryVerdict)`, from the primary gate's verdict and the replay canary's verdict. The rule, in order:
+
+1. **Canary absent** → the primary's verdict stands; `precedenceOutcome: "canary-absent"`.
+2. **Both agree** → that verdict stands; `precedenceOutcome: "agreed"`.
+3. **Primary abstained** (`inconclusive`) → the canary decides; `precedenceOutcome: "primary-abstained"`. If the canary is *also* inconclusive, the resolved verdict stays inconclusive — an abstention is never upgraded into a decision.
+4. **Both decisive and disagreeing** → **the PRIMARY gate prevails**; the canary never overturns it; `precedenceOutcome: "primary-prevailed"`.
+
+The primary gate is a boolean over its deterministic signals (build, lint, typecheck, gate, affected tests, the test-count delta, and the cost-budget invariant) and yields `keep` only when every lane is green and both invariants held; any failed lane, a moved test count, or a broken cost invariant is `reverse`; absent signals are the honest `inconclusive`. A failing lane is therefore never downgraded to "we don't know".
+
+**Idempotency by derivation.** `verdict_id` is `buildLearningGateVerdictId(experimentId, baselineId, fingerprint)` — never a fresh uuid — where the fingerprint is a canonical NUL-separated SHA-256 over the primary signals. Re-recording the *identical* judgment collides on the composite `(project_id, verdict_id)` primary key and is a no-op reported as `outcome: "already-recorded"`; a re-evaluation under a changed corpus version or seed yields a different fingerprint and therefore a genuinely new row, so the trail holds every judgment made rather than the last write. The resolution is computed by the accessor, never accepted from the caller, so the stored primary/canary/resolved triple is self-consistent by construction.
+
+**Readers** — `readLearningGateVerdictByExperiment` and `readLearningGateVerdictByBaseline` (both project-scoped and index-backed), plus a paginated `listLearningGateVerdicts`. The record is append-only: no accessor updates or deletes a verdict, because a status flip would make "the gate judged this and was overruled" indistinguishable from "the record moved". A gate verdict emits one bounded run-audit row (`selfimprove:gate-verdict-recorded`) from the committed row; the readers emit nothing.
+
+**Durable shape** — table `project.learning_gate_verdicts` (migration `0090`), with CHECKs mirroring the verdict/precedence enums, a canary-pairing invariant (a verdict that records a canary must record that canary's verdict), and a fingerprint-format check. The pure precedence rule and its fingerprint are pinned by `learning-gate-verdict-pure.test.ts`; the durable shape by `self-improve-gate-verdicts.pg.test.ts`; the store's audit mirroring and emission-freedom by `self-improve-gate-verdict-store.test.ts`.
+
+
+/*
+FNXC:AutoImprovement 2026-09-30-18:03:
+FUSI-019 lands a further M1 slice: the STRUCTURAL DENYLIST and its pre-gate guard — the pure
+five-category classifier, the single-invocation-site guard that refuses a candidate diff before
+any gate step runs, and the `selfimprove:denylist-rejected` audit row. It is documented above
+under "Structural denylist" rather than left on the unshipped list, and that list plus the
+code-status banner have been corrected accordingly: a page that simultaneously documents a
+contract and denies it exists is the exact failure the top-of-page block warns about. The
+FNXC banner at the head of this file still lists the denylist among the remaining unshipped
+surfaces in one historical block; those blocks are dated and describe their own moment, so they
+are left intact rather than retroactively rewritten.
+*/
 
 ## Related documentation
 

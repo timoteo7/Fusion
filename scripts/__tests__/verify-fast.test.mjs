@@ -77,6 +77,16 @@ const PRETEST_CHECKS = [
   "scripts/check-pi-versions-pinned.mjs",
   "scripts/check-workspace-package-graph.mjs",
   "scripts/check-no-test-timeout-appeasement.mjs",
+  /*
+  FNXC:BarrelDuplicateExports 2026-09-30-16:46:
+  `check-no-comment-assertions-in-tests` was ALREADY missing from this mirror when FUSI-022 ran —
+  the drift guard reported it as undocumented, the same failure mode the comments above record twice
+  already (verify:fast was RIGHT and the mirror was stale). It is a real script in the canonical
+  pretest chain, so it is restored at its true position rather than left out again.
+  FUSI-022 then appended `check-barrel-duplicate-exports` as the 17th canonical pretest validator.
+  Both entries are kept in production order, because the assertion is an order-sensitive deepEqual.
+  */
+  "scripts/check-no-comment-assertions-in-tests.mjs",
   "scripts/check-changeset-format.mjs",
   /*
   FNXC:TestInfrastructure 2026-08-19-12:04:
@@ -87,6 +97,7 @@ const PRETEST_CHECKS = [
   "scripts/check-pre-json-anchor.mjs",
   "scripts/check-routes-modular.mjs",
   "scripts/check-runtime-skill-loader-drift.mjs",
+  "scripts/check-barrel-duplicate-exports.mjs",
 ];
 const STATIC_STEP_IDS = PRETEST_CHECKS.map((script) => `static-check:${script.slice("scripts/".length, -".mjs".length)}`);
 const PRETEST_VALIDATORS_START = "<!-- pretest-validators:start -->";
