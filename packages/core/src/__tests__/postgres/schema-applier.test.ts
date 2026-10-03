@@ -122,6 +122,7 @@ import {
   LEARNING_LEDGER_EVENTS_VERSION,
   LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
   LEARNING_GATE_VERDICTS_VERSION,
+  BASELINE_CACHE_VERSION,
 } from "../../postgres/schema-applier.js";
 import { ProjectPartitionRekeyError, rekeyFallbackProjectPartition } from "../../postgres/migration-stamping.js";
 import type { PluginSchemaInitHook } from "../../postgres/plugin-schema-hook.js";
@@ -194,7 +195,8 @@ describe("schema-applier: immutable migration identities", () => {
     // for the ledger, its event trail, and the revert-reason enum. Two migrations may never share
     // a number.
     expect(LEARNING_GATE_VERDICTS_VERSION).toBe("0090");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0090");
+    expect(BASELINE_CACHE_VERSION).toBe("0091");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0091");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
@@ -723,7 +725,7 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     ctx = null;
   });
 
-  it("creates all 121 project tables, 17 central tables, 1 archive table", async () => {
+  it("creates all 122 project tables, 17 central tables, 1 archive table", async () => {
     ctx = await setupFreshDb();
     // FNXC:PostgresCutover 2026-07-05-15:55: apply the BASELINE only.
     // applySchemaBaseline now runs the plugin schema-init hooks by default,
@@ -741,10 +743,10 @@ pgDescribe("schema-applier: VAL-SCHEMA-001 final-schema parity (table counts)", 
     /*
     FNXC:PgSchemaApplier 2026-10-03-00:52:
     Registered migration DDL creates 118 upstream project tables, including the 0086 stale-review
-    callback waiver receipts table that the old 117 pin omitted. 0087 adds learning_proposals (118 → 119). 0088 adds learning_ledger_events (119 → 120); 0089 alters the trail without adding a table. 0090 adds learning_gate_verdicts (120 → 121).
+    callback waiver receipts table that the old 117 pin omitted. 0087 adds learning_proposals (118 → 119). 0088 adds learning_ledger_events (119 → 120); 0089 alters the trail without adding a table. 0090 adds learning_gate_verdicts (120 → 121). 0091 adds learning_baseline_cache (121 → 122).
     Plugin-owned tables are excluded by disabling schema-init hooks for this baseline count.
     */
-    expect(bySchema.project).toBe(121);
+    expect(bySchema.project).toBe(122);
     /*
     FNXC:CapacityModel 2026-07-29-08:10 (drop the cross-project cap — table half):
     17, not 18: `central.global_concurrency` is dropped by migration 0037. A fresh
@@ -1945,6 +1947,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
     expect((await applySchemaBaseline(ctx.db, { pluginHooks: [] })).applied).toBe(false);
   });
@@ -2051,6 +2054,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 
@@ -2290,6 +2294,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 
@@ -2410,6 +2415,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 
@@ -2530,6 +2536,7 @@ pgDescribe("schema-applier: automation project-isolation upgrade", () => {
       LEARNING_LEDGER_EVENTS_VERSION,
       LEARNING_LEDGER_REVERT_SEMANTICS_VERSION,
       LEARNING_GATE_VERDICTS_VERSION,
+      BASELINE_CACHE_VERSION,
     ]);
   });
 });

@@ -1,160 +1,32 @@
-import { access, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { customProviderRegistryKey, mergeSupplementalAnthropicModels, mergeSupplementalOpenAiCodexModels, resolvePlanningSettingsModel, toExecutionModelProviderId, ANTHROPIC_API_KEY_PROVIDER_ID, ANTHROPIC_PROVIDER_ID, ANTHROPIC_SUBSCRIPTION_PROVIDER_ID, THINKING_LEVELS, type ThinkingLevel } from "@fusion/core";
+import { mergeSupplementalAnthropicModels, mergeSupplementalOpenAiCodexModels, resolvePlanningSettingsModel, toExecutionModelProviderId, ANTHROPIC_API_KEY_PROVIDER_ID, ANTHROPIC_PROVIDER_ID, ANTHROPIC_SUBSCRIPTION_PROVIDER_ID, THINKING_LEVELS, type ThinkingLevel, addToggleConfiguredProviders, discoverConfiguredProviders } from "@fusion/core";
 import type { CustomProvider } from "@fusion/core";
 import { ApiError } from "../api-error.js";
-import { getCursorPickerModels, CURSOR_PICKER_PROVIDER_ID } from "../cursor-model-cache.js";
-import { getGrokPickerModels, GROK_PICKER_PROVIDER_ID } from "../grok-model-cache.js";
-import { getAntigravityPickerModels, ANTIGRAVITY_PICKER_PROVIDER_ID } from "../antigravity-model-cache.js";
-import { getClaudePickerModels, CLAUDE_PICKER_PROVIDER_ID } from "../claude-model-cache.js";
-import { getOmpPickerModels, OMP_PICKER_PROVIDER_ID } from "../omp-model-cache.js";
-import { getHermesPickerModels, HERMES_PICKER_PROVIDER_ID } from "../hermes-model-cache.js";
+import { getCursorPickerModels } from "../cursor-model-cache.js";
+import { getGrokPickerModels } from "../grok-model-cache.js";
+import { getAntigravityPickerModels } from "../antigravity-model-cache.js";
+import { getClaudePickerModels } from "../claude-model-cache.js";
+import { getOmpPickerModels } from "../omp-model-cache.js";
+import { getHermesPickerModels } from "../hermes-model-cache.js";
 import {
   invalidateModelRegistryRefreshCache,
   refreshModelRegistryForRequest,
 } from "../model-registry-refresh-cache.js";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import type { AuthStorageLike, ModelRegistryModelLike } from "../routes.js";
+import type { AuthStorageLike, ModelCostLike, ModelRegistryModelLike } from "../routes.js";
 import type { ApiRouteRegistrar } from "./types.js";
 
-/**
- * Read provider names from Fusion's own auth stores (primary + legacy .pi).
- * These represent providers the user has explicitly configured in Fusion,
- * as opposed to supplemental credentials inherited from Codex CLI,
- * Claude Code, or environment variables.
- */
-function isRawAnthropicApiKeyCredential(credential: unknown): boolean {
-  return Boolean(
-    credential
-      && typeof credential === "object"
-      && (credential as { type?: unknown; key?: unknown }).type === "api_key"
-      && typeof (credential as { key?: unknown }).key === "string"
-      && (credential as { key: string }).key.length > 0,
-  );
-}
+type ProviderCredential = { type?: unknown } | null | undefined;
 
+/*
+FNXC:ConfiguredProviderDiscovery 2026-09-30-19:10:
+FUSI-024 moved the gate's private `toModelProviderId` into core, where `discoverConfiguredProviders`
+applies it to auth-storage API-key provider ids. The per-credential instance projection below is
+route-local (it is a /api/models concern, not a discovery one), so it keeps a local alias to the
+same core primitive rather than restating the mapping.
+*/
 function toModelProviderId(providerId: string): string {
   return toExecutionModelProviderId(providerId);
 }
-
-function addAuthStorageConfiguredProviders(authStorage: AuthStorageLike | undefined, providers: Set<string>): void {
-  if (!authStorage) {
-    return;
-  }
-
-  try {
-    authStorage.reload?.();
-  } catch {
-    // Ignore unreadable auth storage and fall back to persisted files below.
-  }
-
-  for (const provider of authStorage.getOAuthProviders?.() ?? []) {
-    const providerId = provider.id;
-    if (providerId === ANTHROPIC_PROVIDER_ID || providerId === ANTHROPIC_SUBSCRIPTION_PROVIDER_ID) {
-      continue;
-    }
-    if (authStorage.hasAuth?.(providerId)) {
-      providers.add(providerId);
-    }
-  }
-
-  for (const provider of authStorage.getApiKeyProviders?.() ?? []) {
-    const storedCredential = authStorage.get?.(provider.id);
-    if (authStorage.hasApiKey?.(provider.id) || isRawAnthropicApiKeyCredential(storedCredential)) {
-      providers.add(toModelProviderId(provider.id));
-    }
-  }
-
-  /*
-  FNXC:ProviderAuth 2026-07-01-15:10:
-  Advertise the direct `anthropic` provider whenever auth storage reports usable anthropic auth — raw API key, subscription OAuth, legacy OAuth, or fallback. Restored v0.51.0 behavior (issue #1857): a subscription/OAuth token executes on the built-in `anthropic` provider via pi-ai's Claude Code impersonation, so OAuth-only users must be able to pick Claude models. `hasAuth("anthropic")` already unifies these sources.
-  */
-  if (authStorage.hasAuth?.(ANTHROPIC_PROVIDER_ID) || authStorage.hasAuth?.(ANTHROPIC_SUBSCRIPTION_PROVIDER_ID)) {
-    providers.add(ANTHROPIC_PROVIDER_ID);
-  }
-}
-
-async function getConfiguredProviderNames(authStorage?: AuthStorageLike): Promise<Set<string>> {
-  const home = process.env.HOME || process.env.USERPROFILE || homedir();
-  const providers = new Set<string>();
-
-  addAuthStorageConfiguredProviders(authStorage, providers);
-
-  // Fusion primary + legacy .pi auth files
-  const authPaths = [
-    join(home, ".fusion", "agent", "auth.json"),
-    join(home, ".pi", "agent", "auth.json"),
-    join(home, ".pi", "auth.json"),
-  ];
-
-  for (const authPath of authPaths) {
-    try {
-      await access(authPath);
-      const parsed = JSON.parse(await readFile(authPath, "utf-8")) as Record<string, unknown>;
-      for (const [key, credential] of Object.entries(parsed)) {
-        if (key === ANTHROPIC_SUBSCRIPTION_PROVIDER_ID) {
-          // A separated subscription OAuth row makes the direct `anthropic` provider usable.
-          providers.add(ANTHROPIC_PROVIDER_ID);
-          continue;
-        }
-        if (key !== ANTHROPIC_PROVIDER_ID) {
-          providers.add(key);
-          continue;
-        }
-        // Raw API key OR OAuth (legacy subscription) both configure the direct `anthropic` provider.
-        const credType = credential && typeof credential === "object"
-          ? (credential as { type?: unknown }).type
-          : undefined;
-        if (credType === "api_key" || credType === "oauth") {
-          providers.add(key);
-        }
-      }
-    } catch {
-      // Ignore missing or invalid auth files
-    }
-  }
-
-  /*
-  FNXC:ProviderAuth 2026-07-01-15:10:
-  Anthropic's three surfaces in discovery (restored v0.51.0 behavior, issue #1857): the direct `anthropic` provider is advertised for raw API-key auth (auth.json `type: api_key`, models.json apiKey, `ANTHROPIC_API_KEY`) AND for subscription/legacy OAuth (which executes on the built-in `anthropic` provider via pi-ai's Claude Code impersonation to /v1). `anthropic-subscription` is an auth/usage credential id, never its own picker row. Claude CLI models appear as `pi-claude-cli` only when the CLI picker toggle is enabled.
-
-  FNXC:ModelCatalog 2026-07-01-13:41:
-  `/api/models` must follow the same connected-state source as Settings/auth status when ServerOptions.authStorage is injected. Use auth storage first for OAuth/API-key surfaces, then fall back to legacy files/env so v0.50-style local API-key discovery still works.
-  */
-  if (process.env.ANTHROPIC_API_KEY) {
-    providers.add(ANTHROPIC_PROVIDER_ID);
-  }
-
-  // Check models.json for providers with inline API keys
-  const modelsPaths = [
-    join(home, ".fusion", "agent", "models.json"),
-    join(home, ".pi", "agent", "models.json"),
-    join(home, ".pi", "models.json"),
-  ];
-  for (const modelsPath of modelsPaths) {
-    try {
-      await access(modelsPath);
-      const parsed = JSON.parse(await readFile(modelsPath, "utf-8")) as {
-        providers?: Record<string, { apiKey?: string }>;
-      };
-      const provs = parsed?.providers;
-      if (provs) {
-        for (const [providerId, config] of Object.entries(provs)) {
-          if (config.apiKey) {
-            providers.add(providerId);
-          }
-        }
-      }
-    } catch {
-      // Ignore missing or invalid models.json
-    }
-  }
-
-  return providers;
-}
-
-type ProviderCredential = { type?: unknown } | null | undefined;
 
 /**
  * Return the models which today's configured-provider gate would advertise for a
@@ -401,6 +273,19 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
         reasoning: boolean;
         contextWindow: number;
         supportedThinkingLevels?: ThinkingLevel[];
+        /*
+        FNXC:ModelCatalog 2026-09-30-18:45:
+        Every published catalog row carries `cost` so price is readable wherever the catalog is
+        consumed (this route and the `fn models` CLI surface). Registry rows copy pi's price
+        verbatim (USD per 1M tokens, never rescaled); picker rows injected below have no price
+        and are normalized to `null` — "price unknown" is a real state and must stay distinct
+        from a genuinely free `0`, so a missing cost is never substituted with `0`.
+
+        `cost` is optional on this intermediate array because the CLI-picker rows merged below
+        are pushed before the final normalization map; the map that runs just before the response
+        guarantees the key is present on every published row.
+        */
+        cost?: ModelCostLike | null;
       }> = options.modelRegistry.getAvailable().map((m) => {
         const supportedThinkingLevels = deriveSupportedThinkingLevels(m);
         return {
@@ -410,6 +295,7 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
           reasoning: m.reasoning,
           contextWindow: m.contextWindow,
           supportedThinkingLevels,
+          cost: m.cost ?? null,
         };
       });
 
@@ -614,37 +500,37 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
       so a connected Hermes runtime can never deactivate independently-configured
       custom Fusion providers/models. See register-model-routes-hermes-additive.test.ts.
       */
-      const configuredProviders = await getConfiguredProviderNames(options?.authStorage);
-      if (useClaudeCli) configuredProviders.add("pi-claude-cli");
-      if (useClaudeCli) configuredProviders.add(CLAUDE_PICKER_PROVIDER_ID);
-      if (useDroidCli) configuredProviders.add("droid-cli");
-      if (useLlamaCpp) configuredProviders.add("llama-server");
-      // FNXC:ModelCatalog 2026-07-08-00:05 (FN-7696): allow-list "cursor-cli"
-      // through the final filter whenever the toggle is on — independent of
-      // any auth.json/models.json cursor-cli entry and independent of
-      // whether discovery actually contributed rows (mirrors
-      // useClaudeCli/useDroidCli/useLlamaCpp exactly; unlike hermesRowsAdded,
-      // Cursor's own toggle IS the signal, not row presence). This closes the
-      // previously-missing configuredProviders.add("cursor-cli") gap that
-      // silently dropped Cursor rows even when the plugin surfaced them.
-      if (useCursorCli) configuredProviders.add(CURSOR_PICKER_PROVIDER_ID);
-      // FNXC:GrokCli 2026-07-08-00:05 (FN-7705): allow-list "grok-cli" through
-      // the final filter whenever the toggle is on, mirroring cursor-cli above.
-      if (useGrokCli) configuredProviders.add(GROK_PICKER_PROVIDER_ID);
-      if (useAntigravityCli) configuredProviders.add(ANTIGRAVITY_PICKER_PROVIDER_ID);
-      // FNXC:OmpAcp 2026-07-13-22:50: allow-list omp-cli when toggle is on.
-      if (useOmpCli) configuredProviders.add(OMP_PICKER_PROVIDER_ID);
-      // FNXC:ModelCatalog 2026-07-07-09:05 (FN-7636): only allow-list "hermes"
-      // through the final filter when Hermes rows were actually contributed
-      // above, mirroring the useClaudeCli/useDroidCli toggle pattern (Hermes
-      // has no separate settings toggle — profile presence IS the signal).
-      if (hermesRowsAdded) configuredProviders.add(HERMES_PICKER_PROVIDER_ID);
-      // Custom providers are configured in Fusion's global settings rather than
-      // the auth.json/models.json stores, so add their registry keys explicitly.
-      for (const provider of customProviders) {
-        configuredProviders.add(customProviderRegistryKey(provider, customProviders));
-      }
+      /*
+      FNXC:ConfiguredProviderDiscovery 2026-09-30-19:10:
+      FUSI-024: discovery and the toggle/custom-provider additions are now the shared core
+      functions, so this route and the headless `fn models` CLI cannot drift apart. The behavior
+      is unchanged — the provider-id literals and every conditional below moved verbatim into
+      `addToggleConfiguredProviders`, whose FNXC comments carry the original per-toggle rationale.
+      */
+      const configuredProviders = addToggleConfiguredProviders(
+        await discoverConfiguredProviders(options?.authStorage),
+        {
+          useClaudeCli,
+          useDroidCli,
+          useLlamaCpp,
+          useCursorCli,
+          useGrokCli,
+          useAntigravityCli,
+          useOmpCli,
+          hermesRowsAdded,
+        },
+        customProviders,
+      );
       models = models.filter((m) => configuredProviders.has(m.provider));
+      /*
+      FNXC:ModelCatalog 2026-09-30-18:45:
+      Normalize the price of every published row in one place. Registry rows already carry a
+      verbatim `cost`; the CLI-picker rows merged above (hermes/cursor/claude/grok/antigravity/omp)
+      have none, so they are published as an explicit `null` — "price unknown" stays
+      distinguishable from a genuinely free `0` and from a real rate. Consumers can therefore
+      trust that a `cost` key is always present on a row.
+      */
+      models = models.map((m) => ({ ...m, cost: m.cost ?? null }));
       const providerInstances = getProviderInstances(options?.authStorage, configuredProviders, models);
 
       res.json({

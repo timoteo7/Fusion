@@ -97,6 +97,7 @@ import {
   OVERLAP_WAIT_SYNC_VERSION,
   LEARNING_LEDGER_EVENTS_VERSION,
   LEARNING_GATE_VERDICTS_VERSION,
+  BASELINE_CACHE_VERSION,
   OWNER_PROJECT_ID_SPLIT_VERSION,
   PATCHNODE_ENTRIES_VERSION,
   PLANNING_ACTIVE_TIMING_VERSION,
@@ -386,6 +387,16 @@ export const RESTORED_SCHEMA_RELATION_SENTINELS: readonly RestoredSchemaRelation
   rather than treating the trail as suspect and replaying the whole self-improvement ledger.
   */
   { version: LEARNING_GATE_VERDICTS_VERSION, relations: ["project.learning_gate_verdicts"] },
+  /*
+  FNXC:SelfImproveBaselineCache 2026-09-30-18:53:
+  The cached baseline carries its own sentinel, separate from 0090's, because the two are
+  independently rewind-detectable. A database restored from a point between 0090 and 0091 has the
+  verdict table but no baseline cache; reporting the floor as 0090 lets the caller replay 0091 alone
+  rather than treating the verdict trail as suspect. That distinction matters more here than for the
+  append-only tables: a missing cache does not lose an append-only record, it silently disables
+  reuse, so the rewind must be reported as "replay the cache" rather than as data loss.
+  */
+  { version: BASELINE_CACHE_VERSION, relations: ["project.learning_baseline_cache"] },
 ];
 
 export async function detectRestoredSchemaRewindFloor(

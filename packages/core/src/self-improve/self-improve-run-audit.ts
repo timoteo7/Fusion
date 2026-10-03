@@ -18,6 +18,13 @@ import type {
   LearningGateVerdict,
 } from "../types/self-improve/learning-gate-verdict.js";
 import type { StructuralDenylistCategory } from "./structural-denylist.js";
+import {
+  COMPARABILITY_DIMENSIONS,
+  isComparabilityDimension,
+  type ComparabilityDimension,
+  type ComparabilityIdentity,
+  type ComparabilityRefusalReason,
+} from "./comparability-types.js";
 
 /*
 FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:20:
@@ -119,6 +126,7 @@ export const SELF_IMPROVE_RUN_AUDIT_EVENTS = {
   costBudgetEvaluated: "selfimprove:cost-budget-evaluated",
   gateVerdict: "selfimprove:gate-verdict-recorded",
   denylistRejected: "selfimprove:denylist-rejected",
+  comparabilityRefused: "selfimprove:comparability-refused",
 } as const;
 
 /*
@@ -629,6 +637,124 @@ export function emitSelfImproveDenylistRejected(
       rejected: true,
       ...(input.proposalId ? { proposalId: input.proposalId } : {}),
       ...(input.target ? { target: input.target } : {}),
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+    },
+  });
+}
+
+/*
+FNXC:SelfImproveComparability 2026-09-30-19:55:
+A COMPARABILITY REFUSAL IS ITS OWN EVENT, NOT A REUSE OF `cost-budget-evaluated`. The cost-budget row
+records a verdict the primary gate REACHED after a measurement; this one records that a comparison was
+REFUSED BEFORE anything was measured, because the cached baseline and the fresh candidate were not
+produced the same way. Those are different facts at different points in the pipeline, and folding the
+earlier refusal into the later verdict row would make "the harness was misconfigured" indistinguishable
+from "the candidate spent too much" — the two most actionable and most opposite operator instructions
+the loop can produce. The single-writer rule applies here exactly as it does to every other
+`selfimprove:*` row: the guard that decided the refusal and the code that records it must not be two
+divergent paths, or "run-audit has no row" and "the guard refused" stop agreeing.
+
+FNXC:SelfImproveComparability 2026-09-30-19:55:
+THE `diverged` LIST IS THE NAMED CAUSE, AND IT IS THE ONLY REASON THIS ROW CARRIES. The guard already
+decided which fixed dimension(s) diverged; recording that ordered enum list makes the refusal
+actionable ("re-seed the corpus" / "rebuild the engine" / "re-resolve the config") without a single
+sentence of prose. A reason string would be a second, unbounded vocabulary that cannot be counted, so
+recurring mismatches would not group by cause. For the same reason the row NEVER carries a diff, a
+manifest body, a config blob, or a rationale: the eight identity values are opaque digests/ids
+precisely so that an operator sees WHICH dimension broke without the audit trail absorbing the content
+that broke it.
+
+FNXC:SelfImproveComparability 2026-09-30-19:55:
+The `diverged` list is filtered through the `isComparabilityDimension` membership guard exactly as the
+sibling `exceededAxes` list is filtered through `COST_AXES`, so a caller passing a crafted or
+misspelled dimension name cannot write an unrecognized value into telemetry — the recorded cause list
+is structurally bounded by the same closed enum the guard compared against. The `divergedCount` is
+recorded separately so a recurring single-dimension failure is countable without parsing the list.
+*/
+
+/** Outcome recorded for a comparability refusal. */
+export type SelfImproveComparabilityRefusedOutcome = ComparabilityRefusalReason;
+
+/**
+ * Input for a comparability refusal's audit row.
+ *
+ * Deliberately NOT `SelfImproveRunAuditInput`: a comparability refusal can happen before any proposal
+ * exists (a baseline is a cached corpus pass, not a learning transition), so `proposalId` is optional
+ * and omitted from the row when absent rather than fabricated. `target` is not part of this input at
+ * all: a replay corpus has no product surface to point at, and borrowing one would claim a rung of the
+ * apply-order ladder the refusal never occupied.
+ */
+export interface SelfImproveComparabilityRefusedInput {
+  /** Any object exposing the minimal `recordRunAuditEvent` seam. */
+  host: RunAuditSinkHost;
+  /** The cached baseline identity the candidate was to be compared against. */
+  baseline: ComparabilityIdentity;
+  /** The candidate identity that was refused. */
+  candidate: ComparabilityIdentity;
+  /**
+   * Fixed dimensions that differed, in `COMPARABILITY_DIMENSIONS` order. Recorded only after
+   * membership filtering, so an unknown name is dropped rather than written. Empty for a `not-a-run`
+   * refusal (a placeholder is not a divergence).
+   */
+  diverged?: readonly ComparabilityDimension[];
+  /** Deterministic refusal reason, recorded verbatim. */
+  outcome: SelfImproveComparabilityRefusedOutcome;
+  /** Durable identity of the learning proposal, when the refusal is attributable to one. */
+  proposalId?: string;
+  /** Project-scoped audit correlation id, when the caller tracks one. */
+  projectId?: string;
+  /** Actor recorded as the evaluating agent. Defaults to the fixed system principal. */
+  agentId?: string;
+  /** Correlation run id, when the caller owns one. Defaults to a stable non-clock sentinel. */
+  runId?: string;
+  /** ISO-8601 instant override. Defaults to now. */
+  timestamp?: string;
+}
+
+/**
+ * Record that a replay comparison was refused because the baseline and candidate were not comparable.
+ *
+ * Emits `selfimprove:comparability-refused` through the same bounded core seam as every other
+ * `selfimprove:*` row, so an absent, throwing, rejecting, never-settling, or late-settling sink changes
+ * what is OBSERVED and nothing about what the guard DID — the refusal was already decided by the pure
+ * guard before this function was called. This function never computes, re-judges, or softens a verdict.
+ */
+export function emitSelfImproveComparabilityRefused(
+  input: SelfImproveComparabilityRefusedInput,
+): Promise<void> {
+  // Only dimensions that are BOTH named by the caller and members of the fixed set are recorded, so
+  // this list cannot become an open-ended free-text channel through a crafted caller. The recorded
+  // list is normalized to the fixed COMPARABILITY_DIMENSIONS order so a repeat of the same refusal
+  // produces the same row.
+  const diverged = COMPARABILITY_DIMENSIONS.filter(
+    (dimension): boolean =>
+      (input.diverged ?? []).some((named) => isComparabilityDimension(named) && named === dimension),
+  );
+
+  return emitBoundedRunAudit(input.host, {
+    taskId: undefined,
+    agentId: input.agentId ?? SELF_IMPROVE_AUDIT_AGENT_ID,
+    runId: input.runId ?? (input.proposalId ? `selfimprove-${input.proposalId}` : "selfimprove-comparability"),
+    domain: "database",
+    mutationType: SELF_IMPROVE_RUN_AUDIT_EVENTS.comparabilityRefused,
+    target: input.proposalId ?? "replay-comparability",
+    ...(input.timestamp ? { timestamp: input.timestamp } : {}),
+    // Explicit closed list: the fixed outcome, the ordered diverged dimensions and their count, the
+    // eight identity values (four per side), and ids ONLY when the caller actually has them. The
+    // identity values are opaque digests/ids, never manifest bodies, diffs, or prose.
+    metadata: {
+      outcome: input.outcome,
+      diverged,
+      divergedCount: diverged.length,
+      baselineManifest: input.baseline.manifest,
+      baselineSeed: input.baseline.seed,
+      baselineEngine: input.baseline.engine,
+      baselineConfig: input.baseline.config,
+      candidateManifest: input.candidate.manifest,
+      candidateSeed: input.candidate.seed,
+      candidateEngine: input.candidate.engine,
+      candidateConfig: input.candidate.config,
+      ...(input.proposalId ? { proposalId: input.proposalId } : {}),
       ...(input.projectId ? { projectId: input.projectId } : {}),
     },
   });

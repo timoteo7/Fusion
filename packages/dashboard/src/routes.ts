@@ -118,12 +118,34 @@ export { __resetModelRegistryRefreshCacheForTests } from "./model-registry-refre
  * Minimal interface matching pi 0.80.8+ ModelRuntime's ModelRegistry
  * compatibility facade. Avoids a direct dependency on the pi-coding-agent package.
  */
+/**
+ * FNXC:ModelCatalog 2026-09-30-18:45:
+ * pi's per-model price. Units are USD per 1,000,000 tokens and the values are
+ * copied verbatim from the registry — never rescaled and never synthesized.
+ */
+export interface ModelCostLike {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** Request-wide pricing tiers; the highest matching input threshold applies to the full request. */
+  tiers?: Array<ModelCostLike>;
+}
+
 export interface ModelRegistryModelLike {
   id: string;
   name: string;
   provider: string;
   reasoning: boolean;
   contextWindow: number;
+  /**
+   * FNXC:ModelCatalog 2026-09-30-18:45:
+   * The registry always carries a `cost`; the dashboard row mapping copies it so price is
+   * readable everywhere the catalog is published (this route and the `fn models` CLI surface).
+   * Optional on the type so injected/legacy fixtures without a price stay assignable — a
+   * missing cost is published as `null` ("price unknown"), never as a fabricated `0`.
+   */
+  cost?: ModelCostLike;
   /** Pi model-level tristate map; omitted means capability metadata is unavailable to Fusion's picker. */
   thinkingLevelMap?: Partial<Record<string, string | null>>;
 }

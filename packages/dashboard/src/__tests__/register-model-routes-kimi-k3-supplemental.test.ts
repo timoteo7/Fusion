@@ -1,5 +1,6 @@
 import type { Router } from "express";
 import { describe, expect, it, vi } from "vitest";
+import { KIMI_CODING_MODELS } from "@earendil-works/pi-ai/providers/kimi-coding.models";
 import { createKimiModelCatalogRegistry } from "./_kimi-model-catalog-fixture.js";
 import { registerModelRoutes } from "../routes/register-model-routes.js";
 
@@ -55,16 +56,32 @@ async function getK3Rows(modelRegistry: ReturnType<typeof createKimiModelCatalog
 /*
 FNXC:ModelThinkingCapabilities 2026-08-23-23:20:
 FN-021 derives `supportedThinkingLevels` for every /api/models row from the pinned catalog's thinkingLevelMap; K3's bundled map yields low/high/max. Asserted explicitly so a regression in the derivation is visible from the K3 catalog coverage.
+
+FNXC:ModelCatalog 2026-09-30-18:45:
+FUSI-024 added `cost` to every published row. The expected row references pi-ai's own bundled
+K3 cost rather than a hardcoded literal, so this asserts the route copies the registry's price
+verbatim (USD per 1M tokens, never rescaled) instead of pinning a value that an SDK price change
+would silently invalidate.
 */
+const EXPECTED_K3_ROW = {
+  provider: "kimi-coding",
+  id: "k3",
+  name: "Kimi K3",
+  reasoning: true,
+  contextWindow: 1_048_576,
+  supportedThinkingLevels: ["low", "high", "max"],
+  cost: KIMI_CODING_MODELS.k3.cost,
+};
+
 describe("FN-8180: Kimi K3 /api/models catalog", () => {
   it("surfaces the native K3 model once for a configured Kimi provider", async () => {
     const k3Rows = await getK3Rows(createKimiModelCatalogRegistry());
-    expect(k3Rows).toEqual([{ provider: "kimi-coding", id: "k3", name: "Kimi K3", reasoning: true, contextWindow: 1_048_576, supportedThinkingLevels: ["low", "high", "max"] }]);
+    expect(k3Rows).toEqual([EXPECTED_K3_ROW]);
   });
 
   it("dedupes a colliding native K3 row after the route's supplemental merges", async () => {
     const k3Rows = await getK3Rows(createKimiModelCatalogRegistry({ duplicateK3: true }));
-    expect(k3Rows).toEqual([{ provider: "kimi-coding", id: "k3", name: "Kimi K3", reasoning: true, contextWindow: 1_048_576, supportedThinkingLevels: ["low", "high", "max"] }]);
+    expect(k3Rows).toEqual([EXPECTED_K3_ROW]);
   });
 
   it("makes a missing native K3 catalog row explicit instead of passing vacuously", async () => {

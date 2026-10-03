@@ -54,6 +54,8 @@ import {
   resolveWorkflowIrForTaskWithProvenance,
   resolveWorkflowIrForTask,
   resolveReviewColumns,
+  readBaselineCacheStatus,
+  emitSelfImproveBaselineCacheResolved,
 } from "@fusion/core";
 import {
   getGhErrorMessage,
@@ -4084,6 +4086,89 @@ export default function kbExtension(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: { run },
+      };
+    },
+  });
+
+  // ── Self-Improvement Tools ──────────────────────────────────────
+
+  /*
+  FNXC:SelfImproveBaselineCacheStatus 2026-09-30-19:40:
+  `fn_selfimprove_status` is the operator surface for the cached replay baseline. Before it, the
+  `BaselineCacheStatus` read model was built and unit-tested but NOTHING displayed it: the only
+  occurrences of the tool name in the repository were comments describing a future render target. An
+  operator could not answer "may I reuse this baseline, and why" without a bespoke SQL query, so a
+  silent incomparability (a baseline measured under a different corpus/build/config/seed) had no
+  first-class read path. This tool is that read path.
+
+  It renders the read model VERBATIM and never re-derives the reuse rule. The decision comes from the
+  ONE shipped pure resolver (`resolveBaselineCache`) reached through the ONE accessor
+  (`readBaselineCacheStatus`), so the tool cannot report an action/reason the cache is not actually
+  governed by. This is the third conjunct of the baseline-cache acceptance criterion: an identical
+  fingerprint reuses (reuse/fingerprint-matched), a divergent one invalidates (rebuild/
+  fingerprint-diverged), and BOTH fingerprints are now observable here.
+
+  The fingerprint INPUTS are tool parameters, NOT read from the replay-corpus manifest. The shipped
+  FUSI-030 manifest carries a NUMBER `version` and a different digest (`fingerprintReplayCorpusManifest`),
+  which are NOT this feature's `manifestVersion`/`configHash`. Binding them together belongs to the
+  measurement runner that does not exist yet; wiring the wrong shape here would make the tool lie about
+  which corpus it fingerprinted. Until then the operator supplies the exact inputs a measurement would
+  use, and the tool answers reuse-vs-rebuild for exactly those inputs.
+
+  The tool NEVER renders the cached `payload`. The payload is an opaque measured blob (corpus contents,
+  counts, command output); what an operator must observe is WHICH fingerprint is in play, never WHAT was
+  measured. `details` carries the read model, which itself excludes the payload by construction.
+
+  Telemetry is bounded and best-effort: `emitSelfImproveBaselineCacheResolved` routes through the
+  FN-9177 core seam and returns its promise so the caller MAY await it, but it never throws and a
+  hostile sink changes nothing about the status returned to the operator. The full read model is
+  returned regardless of sink health.
+  */
+  pi.registerTool({
+    name: "fn_selfimprove_status",
+    label: "fn: Self-Improve Status",
+    description:
+      "Report whether a cached replay baseline may be reused for given measurement inputs, showing both fingerprints, the reuse/rebuild decision, and its reason.",
+    promptSnippet: "Check whether a cached self-improvement baseline is still valid",
+    parameters: Type.Object({
+      baselineKey: Type.String({ description: "Baseline key whose cached entry is being resolved (e.g. replay-corpus baseline name)" }),
+      manifestVersion: Type.String({ description: "Version of the replay-corpus manifest this measurement would use" }),
+      engineSha: Type.String({ description: "Git sha of the engine build that produced (or would produce) the measurement" }),
+      configHash: Type.String({ description: "Hash of the measurement configuration (ordering, corpus contents, provider)" }),
+      seed: Type.Union([Type.Number(), Type.String()], { description: "Random seed pinning the measurement's non-determinism (number or numeric string)" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const store = await getStore(ctx.cwd);
+      const status = await readBaselineCacheStatus(requireProjectLayer(store, "fn_selfimprove_status"), {
+        baselineKey: params.baselineKey,
+        fingerprintInput: {
+          manifestVersion: params.manifestVersion,
+          engineSha: params.engineSha,
+          configHash: params.configHash,
+          seed: params.seed,
+        },
+      });
+
+      // Bounded audit façade: best-effort, never throws, never alters the returned read model.
+      await emitSelfImproveBaselineCacheResolved({
+        host: store,
+        status,
+        projectId: store.getProjectId() ?? undefined,
+      });
+
+      const lines = [
+        `Baseline: ${status.baselineKey}`,
+        `Cached: ${status.present ? "yes" : "no"}`,
+        `Input fingerprint: ${status.inputFingerprint}`,
+        `Cached fingerprint: ${status.cachedFingerprint ?? "none"}`,
+        `Action: ${status.action}`,
+        `Reason: ${status.reason}`,
+      ];
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        // The read model, verbatim. It excludes the cached payload by construction.
+        details: { status },
       };
     },
   });
