@@ -90,9 +90,9 @@ touches no data; it must advance in the same change that ships a new migration f
 /* FNXC:ChatSidebarPerf 2026-09-08-04:48: baseline marker includes the chat-message recency index required for index-backed sidebar previews. */
 /* FNXC:OverlapWaitSynchronization 2026-09-17-00:22: advance the ceiling so an upgraded project has the durable wait table before any overlap-marker transition tries to record into it. Renumbered 0074->0084 (2026-09-18): upstream's own migrations 0074 (FN-323 project notes) through 0083 (FN-514) are absent from this branch by design (it excludes their source commits), but the numeric slots are real and must not be reused, or a database that ran the real 0074..0083 would be misread as compatible with this branch's different 0074. */
 /* FNXC:SelfImproveLearningLedger 2026-10-02-00:00: renumbered 0086 -> 0087 because the fork's main already owns 0086 for FN-9429 stale-review callback waiver receipts. This file's own rule applies: two migrations cannot share a number, because the runner keys bookkeeping on it and the second would read as already-applied and silently never run. SCHEMA_BASELINE_VERSION therefore advances 0086 -> 0087 so the renumbered ledger migration is actually applied on an existing database. */
-export const SCHEMA_BASELINE_VERSION = "0089";
 /* FNXC:SelfImproveLearningLedger 2026-09-29-15:15: SCHEMA_BASELINE_VERSION advances 0087 -> 0088 for the append-only learning-ledger event trail. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the table, not a follow-up. */
 /* FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45: SCHEMA_BASELINE_VERSION advances 0088 -> 0089 for the learning-revert reason enum on the event trail. A migration that is registered but not covered by this marker silently never runs, so the bump is part of landing the column, not a follow-up. */
+export const SCHEMA_BASELINE_VERSION = "0089";
 /** FNXC:SymbolLock 2026-07-20-10:00: upgrades need durable task declarations before admission resolves symbols. */
 export const TASK_DECLARED_SYMBOLS_VERSION = "0028";
 const INITIAL_SCHEMA_VERSION = "0000";

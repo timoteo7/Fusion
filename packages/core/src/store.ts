@@ -195,10 +195,12 @@ import {
   emitSelfImproveProposalCreated,
   emitSelfImproveProposalReverted,
 } from "./self-improve/self-improve-run-audit.js";
+import { revertLearningApplication } from "./task-store/async/async-learning-revert.js";
 import { buildPatchnodeEntryId, buildPatchnodeEntryInput } from "./board/patchnode.js";
 import type { PatchnodeEntry, PatchnodeQuery } from "./types/task/patchnode.js";
 import type { LearningProposal } from "./types/self-improve/learning-proposal.js";
 import type { LearningLedgerEvent, LearningLedgerPage, LearningLedgerQuery } from "./self-improve/ledger-events.js";
+import type { LearningRevertInput, LearningRevertResult } from "./self-improve/learning-revert-types.js";
 import { resolveWorkflowIrForTask } from "./workflows/workflow-ir-resolver.js";
 // FNXC:RuntimeBackendAsync 2026-06-24-10:15:
 // Async helper imports for backend-mode (AsyncDataLayer/PostgreSQL) delegation.
@@ -1246,6 +1248,32 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
     }
     return queryPatchnodeEntries(this.asyncLayer, query);
   }
+  /*
+  FNXC:SelfImproveLearningLedger 2026-09-29-15:15:
+  The four self-improvement ledger methods are thin delegations through the async layer, matching
+  the patchnode pattern. They throw the same "requires an async data layer" guard when no layer is
+  bound, so a synchronous-only store never silently no-ops a learning transition. `appendLearningProposal`
+  writes the proposal row AND its opening event in one transaction; the two record methods append
+  only — none of them updates a previously written row, which is the append-only contract FUSI-011's
+  revert decision depends on.
+
+  FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+  The three WRITE delegations now emit their `selfimprove:*` run-audit row (FUSI-015 wires the
+  façades FUSI-012 declared; `listLearningProposals` stays emission-free because a pure read is not
+  a transition). Each emit runs AFTER the awaited write has returned its committed row, and is
+  deliberately NOT awaited: the bounded seam never throws or rejects, so a sink that is absent,
+  throws, rejects, or hangs changes what is OBSERVED and nothing about what the ledger DID. A
+  learning experiment is judged on its deterministic gate verdict, not on telemetry health, so
+  telemetry must never sit on the transition's success path.
+
+  FNXC:SelfImproveRunAudit 2026-09-29-21:49:
+  The `applied` row is the one transition whose audit metadata (version/confidence/value/evidence
+  count) is not present on the appended EVENT, so the delegation reads the committed proposal row
+  first. A null row (proposal absent or the read racing a rolled-back write) SKIPS the emit rather
+  than fabricating weights — see `readLearningProposal` for why an invented weight is worse than a
+  missing row. `timestamp` is the transition's own durable instant (`createdAt` / `occurredAt`), not
+  `Date.now()`, so the audit row is ordered against the ledger it observes.
+  */
   async appendLearningProposal(input: AppendLearningProposalInput): Promise<LearningProposal> {
     if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
     const stored = await appendLearningProposal(this.asyncLayer, input);
@@ -1313,6 +1341,20 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       revertReason: stored.revertReason ?? input.revertReason,
     });
     return stored;
+  }
+
+  /*
+  FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45:
+  The revert is the loop's authoritative undo. It APPENDS a `reverted` event naming the application
+  it cancels and returns the proposal's `priorValue` verbatim; it never updates the application or
+  proposal row. The store passes `this` as the run-audit host so the bounded emission has a real
+  `recordRunAuditEvent` sink (the AsyncDataLayer alone would always read as `absent`). Emission is
+  best-effort and happens after the transition commits, so a hostile audit sink can never alter the
+  outcome or the ledger.
+  */
+  async revertLearningApplication(input: LearningRevertInput): Promise<LearningRevertResult> {
+    if (!this.asyncLayer) throw new Error("Learning ledger requires an async data layer");
+    return revertLearningApplication(this.asyncLayer, input, { auditHost: this });
   }
 
   async listLearningProposals(query: LearningLedgerQuery = {}): Promise<LearningLedgerPage> {

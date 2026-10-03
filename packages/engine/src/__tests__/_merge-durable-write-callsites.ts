@@ -104,6 +104,40 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   checkAndRecordUnplannedExecutionBlock: { kind: "writer", reason: "persists or mutates TaskStore state" },
   claimNextToolFailureRetry: { kind: "writer", reason: "persists or mutates TaskStore state" },
   /*
+  FNXC:MergeReliability 2026-09-30-12:37:
+  The 0084 overlap-wait surface adds three public writers and one pure read to TaskStore. All three
+  writers mutate `schema.project.taskOverlapWaits` inside `layer.transactionImmediate`, so each is a
+  durable writer on its own semantics — not on who calls it — because an orphaned merge body that
+  reaches one of them would have reached the durable frontier.
+  `claimTaskOverlapWaitImpl` takes the per-task advisory transaction lock, then UPDATEs the row to
+  `phase: "analyzing"` with owner/checkoutEpoch/planFingerprint and a merged observation, bumping
+  `attempt + 1` and `revision + 1` under an `(episodeId, expectedRevision)` fence so a stale claim
+  returns null instead of overwriting a concurrent owner.
+  `completeTaskOverlapWaitImpl` also takes the advisory lock, sets `receipt` and the caller-supplied
+  `phase` (default `"ready"`) with `revision + 1`, and additionally UPDATEs `schema.project.tasks.log`
+  with a dedupe-keyed release entry when the phase is `"ready"` or `"delivered"` — so it touches two
+  durable tables, not one.
+  `publishTaskOverlapDeliveriesImpl` is deliberately different: it does NOT take the advisory lock
+  and does NOT change `phase`. It selects only rows not already `delivered`/`cancelled` and stamps
+  the merged delivery snapshot (`observation`, `blockerLineageId`, `revision + 1`, `updatedAt`)
+  under an optimistic-concurrency `revision` compare-and-set. It still persists, so it stays a
+  writer; the compare-and-set is what makes it safe without the advisory lock.
+  `listTaskOverlapWaitsImpl` is the one 0084 overlap-wait method that is genuinely NOT a durable
+  writer, and it is classified as such on evidence rather than on naming. It is a single
+  `layer.db.select()` from `schema.project.taskOverlapWaits` (optionally filtered to rows whose
+  phase is not already `delivered`/`cancelled`) with NO transaction and NO persistence — it only
+  maps rows through `mapRow`. That makes it the same shape as the `getProjectId` non-writer above.
+
+  Unlike `listLearningProposals`, this read is NOT classified conservatively as a writer. The
+  learning-ledger read was made a writer because it sits on a read frontier a future orphaned merge
+  body could plausibly reach, and erring toward fencing is the safe default when a subsystem is new.
+  The overlap-wait read has no merge-frontier caller at all — its callers are the overlap workflow
+  and the merger, none of which an orphaned merge body reaches. Keeping it a non-writer is therefore
+  both honest and not a coverage loss: classifying it a writer would add a fence around a
+  provably read-only method. If a future change gives it a merge-path caller, the correct move is to
+  revisit this row, and the guard's `unclassified`/drift assertions will surface the new call site.
+  */
+  /*
   FNXC:MergeReliability 2026-09-24-17:09:
   FN-9388 classifies overlap-wait operations by their durable episode semantics. Claims, delivery
   publication, and completion mutate fenced episode ownership or receipts; listing is read-only.
@@ -354,6 +388,15 @@ const STORE_METHOD_CLASSIFICATION: Record<string, Omit<SurfaceClassification, "m
   recordLearningApplication: { kind: "writer", reason: "appends a learning application event to the ledger" },
   recordLearningReversal: { kind: "writer", reason: "appends a learning reversal event naming the application it cancels" },
   listLearningProposals: { kind: "writer", reason: "on the learning-ledger read frontier; classified a writer conservatively so an orphaned body reaching it is still fenced" },
+  /*
+  FNXC:SelfImproveLearningRevertSemantics 2026-09-29-15:45:
+  The revert is a durable APPEND like the other three ledger writers: it inserts a `reverted` event
+  naming the application it cancels inside an immediate transaction, and additionally emits a
+  bounded run-audit row. It is classified a writer for the same reason as the others — an orphaned
+  merge body that reached the learning-revert frontier has reached the durable frontier, and the
+  classification errs toward fencing.
+  */
+  revertLearningApplication: { kind: "writer", reason: "appends a learning revert event naming the cancelled application and restores the proposal's prior value" },
   appendAgentLog: { kind: "writer", reason: "persists task-scoped agent timeline state" },
   emit: { kind: "writer", reason: "announces task lifecycle events to durable subscribers" },
   logEntry: { kind: "writer", reason: "persists task-scoped log state and refreshes updatedAt" },

@@ -178,9 +178,16 @@ describe("schema-applier: immutable migration identities", () => {
     expect(CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION).toBe("0073");
     expect(Number(SCHEMA_BASELINE_VERSION)).toBeGreaterThanOrEqual(Number(CHAT_MESSAGES_SESSION_RECENCY_INDEX_VERSION));
     expect(SELFIMPROVE_LEARNING_LEDGER_VERSION).toBe("0087");
-    expect(SCHEMA_BASELINE_VERSION).toBe("0089");
     expect(LEARNING_LEDGER_EVENTS_VERSION).toBe("0088");
+    // FNXC:SelfImproveLearningRevertSemantics 2026-09-30-08:08: FUSI-011 advanced the baseline to
+    // 0089 for the revert-reason enum on the event trail. The baseline pin below must move with it,
+    // and the new migration is pinned here so a renumbered or unregistered 0089 fails loudly here
+    // rather than silently never running on an already-migrated database.
+    // FNXC:SelfImproveLearningLedger 2026-10-02-00:00: renumbered with the migration it pins — the
+    // revert-reason enum is 0089 here, not 0088, because the fork's main already owns 0086 and this
+    // chain claims 0087/0088 for the ledger and its trail. Two migrations may never share a number.
     expect(LEARNING_LEDGER_REVERT_SEMANTICS_VERSION).toBe("0089");
+    expect(SCHEMA_BASELINE_VERSION).toBe("0089");
   });
 
   it("keeps monitor and approval isolation assigned to version 0003", () => {
