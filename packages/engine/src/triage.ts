@@ -44,7 +44,6 @@ import {
   isWorkflowAgentNodeForRole,
   resolveWorktreeCapacityLimit,
   workflowHasColumn,
-  getStepParser,
   computePlanApprovalFingerprint,
   extractIntentSignature,
   findNearDuplicates,
@@ -781,12 +780,17 @@ export class TriageProcessor {
     planningGeneration: number,
     content: string,
     mirrorPlan: boolean,
+    requirePlanningStage = false,
   ): Promise<boolean> {
     let persisted = false;
     await this.store.withPlanningLifecycleLock(task.id, async () => {
       if (this.resetFence.isStale(task.id, planningGeneration)) return;
-      const updated = await this.store.withTaskLock(task.id, () => this.store.updateTaskUnlocked(task.id, { prompt: content }));
-      if (this.store.isBackendMode()) {
+      const updated = await this.store.withTaskLock(task.id, async () => {
+        if (requirePlanningStage && !isTaskStillInPlanningStage(await this.store.readTaskForMove(task.id))) return;
+        return this.store.updateTaskUnlocked(task.id, { prompt: content });
+      });
+      if (requirePlanningStage && !updated) return;
+      if (updated && this.store.isBackendMode()) {
         await this.store.reconcileSpecDriftWhilePlanningLocked(updated).catch((error: unknown) => {
           planLog.warn(`[spec-lock] deferred drift reconciliation for ${updated.id}: ${error instanceof Error ? error.message : String(error)}`);
         });
@@ -1693,45 +1697,10 @@ export class TriageProcessor {
       return false;
     }
 
-    const deterministicSpecFailure = await this.validateGeneratedPrompt(task.id, written);
+    const deterministicSpecFailure = await this.validateGeneratedPrompt(task.id, written, task.title);
     if (deterministicSpecFailure) {
       planLog.warn(`${task.id} planning recovery skipped — PROMPT.md failed deterministic validation (${deterministicSpecFailure})`);
       return false;
-    }
-
-    /*
-    FNXC:TriageStuckRecovery 2026-07-20:
-    A stuck planner may leave a partially edited seed that no longer matches the
-    byte-exact unplanned-seed detector. For step-heading workflows, non-empty prose
-    is not executable proof: require parsed steps unless the plan explicitly opts
-    into the legitimate zero-work contract. Otherwise recovery would release the
-    task to parse-steps, whose empty foreach could advance toward merge.
-
-    FNXC:TriageStuckRecovery 2026-07-21-00:15:
-    Explicit `DUPLICATE: FN-NNNN` markers are not implementation specs — they short-circuit
-    to flag/delete/clear in finalizeApprovedTask. Requiring step headings for those markers
-    withheld recovery forever (empty steps) so the marker path never ran.
-    */
-    const isExplicitDuplicateRedirect = Boolean(resolveExplicitDuplicateMarker(written, task.title).marker);
-    const workflow = await resolveWorkflowIrForTask(this.store, task.id).catch(() => undefined);
-    const requiresPromptImplementationSteps = workflow?.nodes.some((node) =>
-      node.kind === "parse-steps"
-      && (node.config?.artifact === undefined || node.config.artifact === "PROMPT.md")
-      && node.config?.parser === "step-headings"
-      && node.config?.requireStepsUnlessNoCommits === true
-    ) === true;
-    if (
-      !isExplicitDuplicateRedirect
-      && requiresPromptImplementationSteps
-      && !promptDeclaresNoCommitsExpected(written)
-    ) {
-      const parsedSteps = getStepParser("step-headings")?.parse(written).steps ?? [];
-      if (parsedSteps.length === 0) {
-        const message = "Planning recovery withheld: PROMPT.md has no executable steps and does not declare no commits expected";
-        planLog.warn(`${task.id} ${message}`);
-        await this.store.logEntry(task.id, message);
-        return false;
-      }
     }
 
     const report = await this.finalizeApprovedTask(task, written, settings, {
@@ -3971,8 +3940,17 @@ export class TriageProcessor {
             return;
           }
 
-          const deterministicSpecFailure = await this.validateGeneratedPrompt(task.id, written);
+          const deterministicSpecFailure = await this.validateGeneratedPrompt(task.id, written, task.title);
           if (deterministicSpecFailure) {
+            // A failed rewrite must not replace the last complete plan. Restore only a validated
+            // baseline, through the existing reset-fenced writer, and still keep this attempt held.
+            const baseline = planningAttempt.baseline;
+            if (baseline && baseline !== written
+              && !await this.validateGeneratedPrompt(task.id, baseline, task.title)
+              && (parseStepHeadings(baseline).length > 0 || promptDeclaresNoCommitsExpected(baseline))) {
+              if (!await this.persistResetFencedPlanningArtifact(task, planningGeneration, baseline, true, true)) return;
+              written = baseline;
+            }
             const decision = computeRecoveryDecision({
               recoveryRetryCount: task.recoveryRetryCount,
               nextRecoveryAt: task.nextRecoveryAt,
@@ -4814,7 +4792,7 @@ export class TriageProcessor {
     return content && !isTaskAwaitingPlanning(task, content) ? "needs-replan" : null;
   }
 
-  private async validateGeneratedPrompt(taskId: string, promptContent: string): Promise<string | null> {
+  private async validateGeneratedPrompt(taskId: string, promptContent: string, taskTitle?: string): Promise<string | null> {
     /*
     FNXC:PlanReview 2026-06-29-01:52:
     Triage owns only deterministic PROMPT.md hygiene. AI plan quality review is graph-owned by the optional Plan Review step, so this helper must never call reviewer agents or require a fn_review_spec APPROVE verdict.
@@ -4829,7 +4807,24 @@ export class TriageProcessor {
     // FNXC:StepDependencyValidation 2026-10-01-01:59: Visible heading labels are prose;
     // parse-time positional validation is the one deterministic admission contract.
     try {
-      parseStepHeadings(promptContent);
+      const parsedSteps = parseStepHeadings(promptContent);
+      const isExplicitDuplicateRedirect = Boolean(resolveExplicitDuplicateMarker(promptContent, taskTitle).marker);
+      if (parsedSteps.length === 0 && !isExplicitDuplicateRedirect && !promptDeclaresNoCommitsExpected(promptContent)) {
+        // Enforce the execution parser's existing contract before any fresh or recovered plan handoff.
+        const workflow = await resolveWorkflowIrForTask(this.store, taskId);
+        const requiresPromptImplementationSteps = workflow.nodes.some((node) =>
+          node.kind === "parse-steps"
+          && (node.config?.artifact === undefined || node.config.artifact === "PROMPT.md")
+          && node.config?.parser === "step-headings"
+          && node.config?.requireStepsUnlessNoCommits === true
+        );
+        if (requiresPromptImplementationSteps) {
+          const diagnostic = "PROMPT.md has no executable steps and does not declare no commits expected";
+          planLog.warn(`${taskId}: ${diagnostic}`);
+          await this.store.logEntry(taskId, `Generated plan validation failed: ${diagnostic}`);
+          return diagnostic;
+        }
+      }
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
       planLog.warn(`${taskId}: ${diagnostic}`);

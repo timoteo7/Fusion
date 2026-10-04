@@ -2353,7 +2353,7 @@ Planner rewrote mission without the raw request.
 
       const failure = await (processor as any).validateGeneratedPrompt(
         taskId,
-        "# Spec\n\n## Mission\n\nCurrent prompt",
+        "# Spec\n\n## Mission\n\nCurrent prompt\n\n## Steps\n\n### Step 0: Implement\n",
       );
 
       expect(failure).toBeNull();
@@ -3173,7 +3173,7 @@ describe("specified triage recovery", () => {
     expect(store.moveTask).not.toHaveBeenCalledWith("FN-001", "todo");
     expect(store.logEntry).toHaveBeenCalledWith(
       "FN-001",
-      "Planning recovery withheld: PROMPT.md has no executable steps and does not declare no commits expected",
+      "Generated plan validation failed: PROMPT.md has no executable steps and does not declare no commits expected",
     );
   });
 
@@ -4043,10 +4043,10 @@ describe("taskCreate tool model inheritance", () => {
       const promptPath = join(root, ".fusion", "tasks", task.id, "PROMPT.md");
       await mkdir(join(root, ".fusion", "tasks", task.id), { recursive: true });
       const liveTask = { ...task, attachments: [], comments: [] } as Task;
-      const initialPrompt = "## Mission\n\nPlanner-authored initial plan\n";
-      const changedPrompt = "## Mission\n\nPlanner-authored changed plan\n";
-      const replanInputPrompt = "## Mission\n\nPlanner-authored replan input\n";
-      const successfulPrompt = "## Mission\n\nPlanner-authored successful plan\n";
+      const initialPrompt = "## Mission\n\nPlanner-authored initial plan\n\n## Steps\n### Step 0: Implement\n";
+      const changedPrompt = "## Mission\n\nPlanner-authored changed plan\n\n## Steps\n### Step 0: Implement\n";
+      const replanInputPrompt = "## Mission\n\nPlanner-authored replan input\n\n## Steps\n### Step 0: Implement\n";
+      const successfulPrompt = "## Mission\n\nPlanner-authored successful plan\n\n## Steps\n### Step 0: Implement\n";
       const sourceHashFor = (prompt: string) => createCurrentPlanEvidence({
         version: 1,
         sourceRevision: 1,
@@ -4463,7 +4463,7 @@ describe("taskCreate tool model inheritance", () => {
       const { promptWithFallback } = await import("../pi.js");
       (promptWithFallback as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
         housekeepingTimer = setTimeout(() => undefined, 60_000);
-        await writeFile(promptPath, "## Mission\n\nClean plan beside runtime housekeeping\n", "utf8");
+        await writeFile(promptPath, "## Mission\n\nClean plan beside runtime housekeeping\n\n## Steps\n### Step 0: Implement\n", "utf8");
       });
 
       try {
@@ -4512,7 +4512,7 @@ describe("taskCreate tool model inheritance", () => {
           await writeFile(promptPath, "## Mission\n\nFallback plan\n", "utf8");
         })
         .mockImplementationOnce(async () => {
-          await writeFile(promptPath, "## Mission\n\nClean primary plan\n", "utf8");
+          await writeFile(promptPath, "## Mission\n\nClean primary plan\n\n## Steps\n### Step 0: Implement\n", "utf8");
         });
 
       try {
@@ -4554,10 +4554,10 @@ describe("taskCreate tool model inheritance", () => {
       const { promptWithFallback } = await import("../pi.js");
       (promptWithFallback as ReturnType<typeof vi.fn>)
         .mockImplementationOnce(async () => {
-          await writeFile(promptPath, "## Mission\n\nFirst clean plan\n", "utf8");
+          await writeFile(promptPath, "## Mission\n\nFirst clean plan\n\n## Steps\n### Step 0: Implement\n", "utf8");
         })
         .mockImplementationOnce(async () => {
-          await writeFile(promptPath, "## Mission\n\nSecond clean plan\n", "utf8");
+          await writeFile(promptPath, "## Mission\n\nSecond clean plan\n\n## Steps\n### Step 0: Implement\n", "utf8");
           queueMicrotask(() => {
             void callbacks[0]?.({
               primaryModel: "openai/gpt-4o",
@@ -6495,13 +6495,18 @@ describe("pause-abort status clearing (bug fix)", () => {
       },
     });
     const { promptWithFallback } = await import("../pi.js");
-    (promptWithFallback as ReturnType<typeof vi.fn>).mockReturnValueOnce(disposePromise);
+    let resolvePromptStarted!: () => void;
+    const promptStarted = new Promise<void>((resolve) => { resolvePromptStarted = resolve; });
+    (promptWithFallback as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      resolvePromptStarted();
+      return disposePromise;
+    });
 
     const task: Task = { id: "FN-001", description: "test", column: "triage", dependencies: [], steps: [], currentStep: 0, log: [], createdAt: "", updatedAt: "" };
     const processor = new TriageProcessor(store, "/tmp/root");
     const specifyPromise = processor.specifyTask(task);
 
-    await new Promise((r) => setTimeout(r, 20));
+    await promptStarted;
 
     for (const fn of settingsListeners) {
       fn({ settings: { globalPause: true }, previous: { globalPause: false } });

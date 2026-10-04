@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Settings, Task, TaskStore, WorkflowIr } from "@fusion/core";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { parseStepHeadings } from "@fusion/core";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TriageProcessor } from "../triage.js";
@@ -110,6 +111,133 @@ describe("planning retry hold safety gate (FN-9260)", () => {
 
   afterEach(async () => {
     await rm(rootDir, { recursive: true, force: true });
+  });
+
+  it.each([
+    ["published placeholder", "# Partial plan\n\nSTEPS_GO_HERE!\n", false],
+    ["empty Steps section", "# Partial plan\n\n## Steps\n", false],
+    ["unrelated headings", "# Partial plan\n\n## Context\n### Implementation notes\n", false],
+    ["published placeholder before manual approval", "# Partial plan\n\nSTEPS_GO_HERE!\n", true],
+  ] as const)("refuses planner handoff after finishing with %s and zero parseable steps", async (_label, draft, requirePlanApproval = false) => {
+    const task = taskFixture();
+    const store = createStore(task, { requirePlanApproval });
+    vi.mocked(store.getWorkflowSettingValues).mockReturnValue({ requirePlanApproval });
+    const promptPath = join(rootDir, ".fusion", "tasks", task.id, "PROMPT.md");
+    await mkdir(join(rootDir, ".fusion", "tasks", task.id), { recursive: true });
+    mockPromptWithFallback.mockImplementationOnce(async () => {
+      await writeFile(promptPath, draft, "utf8");
+    });
+    const onSpecifyComplete = vi.fn();
+    const processor = new TriageProcessor(store, rootDir, { onSpecifyComplete });
+
+    await processor.specifyTask(task);
+
+    expect(task.status).toBe("needs-replan");
+    expect(task.column).toBe("triage");
+    expect(task.recoveryRetryCount).toBe(1);
+    expect(store.moveTaskIf).not.toHaveBeenCalled();
+    expect(onSpecifyComplete).not.toHaveBeenCalled();
+    expect(await evaluateUnplannedForExecution(store, task, EMPTY_IR)).toMatchObject({
+      unplanned: true,
+      reason: "needs-replan",
+    });
+  });
+
+  it.each([
+    ["numbered steps", VALID_PLAN],
+    ["plain headings in Steps", "# Plan\n\n## Steps\n### Implement\n- Deliver the requested behavior.\n"],
+    ["placeholder mentioned in an executable plan", `${VALID_PLAN}\n- Replace the literal STEPS_GO_HERE! in the fixture.\n`],
+    ["declared no-commit plan", "# No-op plan\n\n**No commits expected:** true\n"],
+  ])("accepts %s and hands off to manual approval", async (_label, plan) => {
+    const task = taskFixture();
+    const store = createStore(task);
+    vi.mocked(store.parseStepsFromPrompt).mockResolvedValue(parseStepHeadings(plan));
+    const promptPath = join(rootDir, ".fusion", "tasks", task.id, "PROMPT.md");
+    await mkdir(join(rootDir, ".fusion", "tasks", task.id), { recursive: true });
+    mockPromptWithFallback.mockImplementationOnce(async () => {
+      await writeFile(promptPath, plan, "utf8");
+    });
+    const onSpecifyComplete = vi.fn();
+
+    await new TriageProcessor(store, rootDir, { onSpecifyComplete }).specifyTask(task);
+
+    expect(task.status).toBe("awaiting-approval");
+    expect(task.steps).toHaveLength(parseStepHeadings(plan).length);
+    expect(onSpecifyComplete).toHaveBeenCalledWith(task, expect.objectContaining({ outcome: "parked" }));
+    expect(store.moveTaskIf).not.toHaveBeenCalled();
+    if (plan.includes("**No commits expected:**")) expect(task.noCommitsExpected).toBe(true);
+  });
+
+  it("restores the last complete plan after a planner finishes a partial rewrite without releasing it", async () => {
+    const task = taskFixture({ status: "needs-replan" });
+    const store = createStore(task);
+    const promptPath = join(rootDir, ".fusion", "tasks", task.id, "PROMPT.md");
+    await mkdir(join(rootDir, ".fusion", "tasks", task.id), { recursive: true });
+    await writeFile(promptPath, VALID_PLAN, "utf8");
+    const upsertTaskDocument = vi.fn(async () => undefined);
+    Object.assign(store, { upsertTaskDocument });
+    vi.mocked(store.updateTaskUnlocked).mockImplementation(async (_id, patch) => {
+      if (typeof patch.prompt === "string") await writeFile(promptPath, patch.prompt, "utf8");
+      return Object.assign(task, patch);
+    });
+    mockPromptWithFallback.mockImplementationOnce(async () => {
+      await writeFile(promptPath, "# Partial rewrite\n\nSTEPS_GO_HERE!\n", "utf8");
+    });
+    const onSpecifyComplete = vi.fn();
+
+    await new TriageProcessor(store, rootDir, { onSpecifyComplete }).specifyTask(task);
+
+    expect(await readFile(promptPath, "utf8")).toBe(VALID_PLAN);
+    expect(upsertTaskDocument).toHaveBeenLastCalledWith(task.id, expect.objectContaining({
+      key: "plan",
+      content: VALID_PLAN,
+    }));
+    expect(task.status).toBe("needs-replan");
+    expect(task.recoveryRetryCount).toBe(1);
+    expect(store.moveTaskIf).not.toHaveBeenCalled();
+    expect(onSpecifyComplete).not.toHaveBeenCalled();
+  });
+
+  it("does not restore a prior plan after the task advances out of planning", async () => {
+    const task = taskFixture({ status: "needs-replan" });
+    const store = createStore(task);
+    const promptPath = join(rootDir, ".fusion", "tasks", task.id, "PROMPT.md");
+    await mkdir(join(rootDir, ".fusion", "tasks", task.id), { recursive: true });
+    await writeFile(promptPath, VALID_PLAN, "utf8");
+    const partial = "# Partial rewrite\n\nSTEPS_GO_HERE!\n";
+    mockPromptWithFallback.mockImplementationOnce(async () => {
+      await writeFile(promptPath, partial, "utf8");
+      task.column = "in-progress";
+      task.status = "executing";
+    });
+
+    await new TriageProcessor(store, rootDir).specifyTask(task);
+
+    expect(store.updateTaskUnlocked).not.toHaveBeenCalledWith(task.id, { prompt: VALID_PLAN });
+    expect(await readFile(promptPath, "utf8")).toBe(partial);
+    expect(task).toMatchObject({ column: "in-progress", status: "executing" });
+  });
+
+  it("terminalizes a zero-step planner result when the existing recovery budget is exhausted", async () => {
+    const task = taskFixture({ recoveryRetryCount: 3 });
+    const store = createStore(task);
+    const promptPath = join(rootDir, ".fusion", "tasks", task.id, "PROMPT.md");
+    await mkdir(join(rootDir, ".fusion", "tasks", task.id), { recursive: true });
+    mockPromptWithFallback.mockImplementationOnce(async () => {
+      await writeFile(promptPath, "# Partial plan\n\nSTEPS_GO_HERE!\n", "utf8");
+    });
+    const onSpecifyComplete = vi.fn();
+
+    await new TriageProcessor(store, rootDir, { onSpecifyComplete }).specifyTask(task);
+
+    expect(task).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("Specification failed deterministic validation after 3 retries"),
+      recoveryRetryCount: null,
+      nextRecoveryAt: null,
+    });
+    expect(store.moveTaskIf).not.toHaveBeenCalled();
+    expect(onSpecifyComplete).not.toHaveBeenCalled();
   });
 
   it("holds a deterministic-validation retry over a real plan, refuses release, and later requires approval", async () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PathLike } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1501,7 +1501,9 @@ keep asserting pi internals rather than the routing seam (covered by
 agent-session-helpers/runtime-resolution tests).
 */
 describe("createFnAgent", () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) }));
     vi.clearAllMocks();
     execSyncMock.mockReturnValue("");
     spawnSyncMock.mockReturnValue({ status: 1, stdout: "" });
@@ -2350,24 +2352,28 @@ describe("createFnAgent", () => {
     });
   });
 
-  it("throws when the configured fallback model cannot be resolved", async () => {
+  it("warns and disables an unavailable fallback without blocking a healthy primary", async () => {
     findMock.mockImplementation((provider: string, modelId: string) => (
       provider === "openai-codex" && modelId === "missing-model" ? undefined : { provider, id: modelId }
     ));
 
     const { createPiAgentSessionRaw: createFnAgent } = await import("../pi.js");
 
-    await expect(createFnAgent({
-      cwd: "/tmp",
-      systemPrompt: "test",
-      tools: "coding",
-      defaultProvider: "openai-codex",
-      defaultModelId: "gpt-5.4",
-      fallbackProvider: "openai-codex",
-      fallbackModelId: "missing-model",
-    })).rejects.toThrow("Configured model openai-codex/missing-model (fallback selection) was not found in the pi model registry");
-
-    expect(createAgentSessionMock).not.toHaveBeenCalled();
+    const { piLog } = await import("../logger.js");
+    const warning = vi.spyOn(piLog, "warn");
+    try {
+      await createFnAgent({
+        cwd: "/tmp",
+        systemPrompt: "test",
+        tools: "coding",
+        defaultProvider: "openai-codex",
+        defaultModelId: "gpt-5.4",
+        fallbackProvider: "openai-codex",
+        fallbackModelId: "missing-model",
+      });
+      expect(createAgentSessionMock.mock.calls[0]?.[0].model).toEqual({ provider: "openai-codex", id: "gpt-5.4" });
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("fallback disabled for this session"));
+    } finally { warning.mockRestore(); }
   });
 
   // FNXC:ModelRegistry 2026-07-09-00:00:
@@ -2376,8 +2382,8 @@ describe("createFnAgent", () => {
   // registered into the execution registry (see registerExtensionProviders in ../pi.js). This
   // mirrors the zai/glm-5.1 throw test above to reproduce the exact original failure, then proves
   // it is gone once the registry resolves a grok-cli model (mirroring how registerBuiltInGrokProvider
-  // makes the provider resolvable), and that an unlisted grok-cli id also resolves via the
-  // provider-base-model on-the-fly fallback.
+  // makes the provider resolvable). Unlisted IDs must still fail closed rather than
+  // borrowing another model's capabilities.
   it("reproduces then proves gone the grok-cli/grok-4.5 'not found in the pi model registry' hard-fail", async () => {
     // Without any grok-cli provider registration, find() returns nothing and getAll() has no
     // grok-cli models — resolveConfiguredModel must throw the exact original error message.
@@ -2416,29 +2422,140 @@ describe("createFnAgent", () => {
     });
   });
 
-  it("resolves an unlisted grok-cli model id via the provider-base-model on-the-fly fallback", async () => {
-    // find() has no entry for the unlisted id, but getAll() reports the provider has at least one
-    // registered grok-cli model (as it does once registerBuiltInGrokProvider seeds the provider) —
-    // resolveConfiguredModel should synthesize a model from the base model rather than throwing.
-    findMock.mockImplementation((provider: string, modelId: string) => (
-      provider === "grok-cli" && modelId === "grok-4-fast" ? undefined : { provider, id: modelId }
+  it("automatically resolves Bunny from public metadata without borrowing the first OpenRouter model", async () => {
+    const { bunnyCatalog } = await import("./fixtures/openrouter-bunny.js");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => bunnyCatalog });
+    vi.stubGlobal("fetch", fetchMock);
+    existsSyncMock.mockImplementation((path: PathLike) => String(path).endsWith("settings.json"));
+    readFileSyncMock.mockImplementation((path: any) => String(path).endsWith("settings.json") ? JSON.stringify({
+      openrouterProviderPreferences: { only: ["constructor-route"], allow_fallbacks: false },
+      openrouterAppAttribution: { referer: "https://constructor.example.test", title: "Constructor app" },
+    }) : "{}");
+    const { piLog } = await import("../logger.js");
+    const warning = vi.spyOn(piLog, "warn");
+    let hydrated: any;
+    findMock.mockImplementation((provider: string, id: string) => (
+      provider === "openrouter" && id === "stealth/space-bunny-alpha" ? hydrated : undefined
     ));
-    getAllMock.mockReturnValue([{ provider: "grok-cli", id: "grok-4.5", name: "Grok 4.5" }]);
+    getAllMock.mockReturnValue([{ provider: "openrouter", id: "anthropic/claude-3-haiku", api: "anthropic-messages", maxTokens: 4096, reasoning: false }]);
+    registerProviderMock.mockImplementation((provider: string, config: any) => {
+      if (provider === "openrouter") hydrated = { ...config.models.find((model: any) => model.id === "stealth/space-bunny-alpha"), provider };
+    });
+    try {
+      const { createPiAgentSessionRaw } = await import("../pi.js");
+      await createPiAgentSessionRaw({ cwd: "/tmp", systemPrompt: "test", tools: "readonly", defaultProvider: "openrouter", defaultModelId: "stealth/space-bunny-alpha", fallbackProvider: "clinefree", fallbackModelId: "stealth/space-bunny-alpha" });
+      expect(createAgentSessionMock.mock.calls[0]?.[0].model).toMatchObject({
+        id: "stealth/space-bunny-alpha", provider: "openrouter", api: "openai-completions",
+        contextWindow: 1_000_000, maxTokens: 524_288, reasoning: true, input: ["text", "image"],
+        compat: { openRouterRouting: { only: ["constructor-route"], allow_fallbacks: false } },
+        headers: { "HTTP-Referer": "https://constructor.example.test", "X-Title": "Constructor app" },
+      });
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("Configured fallback clinefree/stealth/space-bunny-alpha is unavailable; fallback disabled for this session"));
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledWith("https://openrouter.ai/api/v1/models", expect.objectContaining({ signal: expect.any(AbortSignal), redirect: "error" }));
+      expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty("headers");
+    } finally {
+      warning.mockRestore();
+      registerProviderMock.mockReset();
+      vi.unstubAllGlobals();
+    }
+  });
 
+  it.each([
+    ["openrouter", "stealth/model-absent-from-catalog", "anthropic/claude-3-haiku"],
+    ["grok-cli", "grok-4-fast", "grok-4.5"],
+    ["custom-openai", "unregistered-model", "registered-model"],
+  ])("rejects unregistered %s/%s instead of borrowing another model's metadata", async (provider, modelId, templateId) => {
+    findMock.mockImplementation((requestedProvider: string, requestedId: string) => (
+      requestedProvider === provider && requestedId === modelId ? undefined : { provider: requestedProvider, id: requestedId }
+    ));
+    getAllMock.mockReturnValue([{
+      provider,
+      id: templateId,
+      api: "anthropic-messages",
+      contextWindow: 200_000,
+      maxTokens: 4096,
+      reasoning: false,
+    }]);
+
+    const { createPiAgentSessionRaw: createFnAgent } = await import("../pi.js");
+
+    await expect(createFnAgent({
+      cwd: "/tmp",
+      systemPrompt: "test",
+      tools: "readonly",
+      defaultProvider: provider,
+      defaultModelId: modelId,
+    })).rejects.toThrow(`Configured model ${provider}/${modelId} (primary selection) was not found in the pi model registry`);
+
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("fails clearly when both primary and fallback lack exact definitions, even when their providers have other models", async () => {
+    findMock.mockReturnValue(undefined);
+    getAllMock.mockReturnValue([{ provider: "openrouter", id: "anthropic/claude-3-haiku", api: "anthropic-messages", maxTokens: 4096, reasoning: false }]);
+    const { createPiAgentSessionRaw: createFnAgent } = await import("../pi.js");
+
+    await expect(createFnAgent({
+      cwd: "/tmp",
+      systemPrompt: "test",
+      tools: "readonly",
+      defaultProvider: "openai-codex",
+      defaultModelId: "gpt-5.4",
+      fallbackProvider: "openrouter",
+      fallbackModelId: "stealth/model-absent-from-catalog",
+    })).rejects.toThrow("Configured model openrouter/stealth/model-absent-from-catalog (fallback selection) was not found in the pi model registry");
+    expect(createAgentSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("uses exact fallback metadata when an unregistered primary has other provider models", async () => {
+    const fallbackModel = { provider: "openai-codex", id: "gpt-5.4", api: "openai-codex-responses", maxTokens: 16_384, reasoning: true };
+    findMock.mockImplementation((provider: string, modelId: string) => (
+      provider === fallbackModel.provider && modelId === fallbackModel.id ? fallbackModel : undefined
+    ));
+    getAllMock.mockReturnValue([{ provider: "openrouter", id: "anthropic/claude-3-haiku", api: "anthropic-messages", maxTokens: 4096, reasoning: false }]);
     const { createPiAgentSessionRaw: createFnAgent } = await import("../pi.js");
 
     await createFnAgent({
       cwd: "/tmp",
       systemPrompt: "test",
       tools: "readonly",
-      defaultProvider: "grok-cli",
-      defaultModelId: "grok-4-fast",
+      defaultProvider: "openrouter",
+      defaultModelId: "stealth/model-absent-from-catalog",
+      fallbackProvider: fallbackModel.provider,
+      fallbackModelId: fallbackModel.id,
     });
 
     expect(createAgentSessionMock).toHaveBeenCalledTimes(1);
-    expect(createAgentSessionMock.mock.calls[0]?.[0]).toMatchObject({
-      model: { provider: "grok-cli", id: "grok-4-fast" },
+    expect(createAgentSessionMock.mock.calls[0]?.[0].model).toBe(fallbackModel);
+  });
+
+  it.each(["openrouter", "custom-openai"])("preserves exact registered %s model metadata", async (provider) => {
+    const exactModel = {
+      provider,
+      id: "stealth/model-absent-from-catalog",
+      api: "openai-completions",
+      contextWindow: 1_000_000,
+      maxTokens: 16_384,
+      reasoning: true,
+      compat: { maxTokensField: "max_tokens" },
+    };
+    findMock.mockImplementation((requestedProvider: string, requestedId: string) => (
+      requestedProvider === provider && requestedId === exactModel.id ? exactModel : undefined
+    ));
+    getAllMock.mockReturnValue([{ provider, id: "anthropic/claude-3-haiku", api: "anthropic-messages", maxTokens: 4096, reasoning: false }, exactModel]);
+    const { createPiAgentSessionRaw: createFnAgent } = await import("../pi.js");
+
+    await createFnAgent({
+      cwd: "/tmp",
+      systemPrompt: "test",
+      tools: "readonly",
+      defaultProvider: provider,
+      defaultModelId: exactModel.id,
     });
+
+    expect(createAgentSessionMock).toHaveBeenCalledTimes(1);
+    expect(createAgentSessionMock.mock.calls[0]?.[0].model).toBe(exactModel);
   });
 
   it("creates a session when configured models resolve successfully", async () => {
