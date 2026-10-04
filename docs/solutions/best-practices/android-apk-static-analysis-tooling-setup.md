@@ -94,21 +94,31 @@ exec "$JAVA_HOME/bin/java" -cp "$HOME/.local/opt/apk-re/lib/jadx-1.5.6-all.jar" 
 export JAVA_HOME="$HOME/.local/opt/apk-re/jdk/jdk-21.0.12.1+1"
 exec "$JAVA_HOME/bin/java" -jar "$HOME/.local/opt/apk-re/apktool.jar" "$@"
 
-# $PREFIX/bin/mitmdump and mitmweb
+# $PREFIX/bin/mitmproxy and $PREFIX/bin/mitmweb — one wrapper per entry point.
+# PYTHONPATH is what makes the bundled libraries importable, so every mitmproxy
+# entry point needs it; without it `mitmproxy-lib/bin/mitmdump --version` raises
+# an ImportError instead of printing a version.
 export PYTHONPATH="$HOME/.local/opt/apk-re/mitmproxy-lib"
-exec "$HOME/.local/opt/apk-re/mitmproxy-lib/bin/mitmdump" "$@"
+exec "$HOME/.local/opt/apk-re/mitmproxy-lib/bin/mitmweb" "$@"
 ```
 
-Verify each one actually runs, rather than assuming the file landing on disk means it works:
+Verify each one actually runs, rather than assuming the file landing on disk means it works. `JAVA_HOME/bin` has to
+be on `PATH` explicitly — the wrappers pin the JDK per tool, so `$PREFIX/bin` alone still resolves the system JVM:
 
 ```bash
-export PATH="$HOME/.local/opt/apk-re/bin:$PATH"
-java -version    # openjdk version "21.0.12.1"
-javac -version   # javac 21.0.12.1
-jadx --version   # 1.5.6
-apktool --version  # 3.0.3
-mitmdump --version  # Mitmproxy: 12.2.3
+export PREFIX="$HOME/.local/opt/apk-re"
+export JAVA_HOME="$PREFIX/jdk/jdk-21.0.12.1+1"
+export PATH="$PREFIX/bin:$JAVA_HOME/bin:$PATH"
+
+java -version       # openjdk version "21.0.12.1"
+javac -version      # javac 21.0.12.1
+jadx --version      # 1.5.6
+apktool --version   # 3.0.3
+mitmweb --version   # Mitmproxy: 12.2.3
 ```
+
+Prepending `JAVA_HOME/bin` is scoped to that one shell; the system JVM is still what a fresh login gets, and it still
+reports `1.8.0_504` with no `javac` on `PATH`.
 
 ## 2. Proxy: start it, then be honest about what you proved
 
