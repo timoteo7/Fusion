@@ -63,6 +63,8 @@ const mocks = vi.hoisted(() => {
   const autoUpdater = {
     autoDownload: false,
     autoInstallOnAppQuit: false,
+    channel: null as string | null,
+    allowPrerelease: false,
     on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
       updaterHandlers.set(event, handler);
       return autoUpdater;
@@ -85,8 +87,24 @@ const mocks = vi.hoisted(() => {
     readFile,
     writeFile,
     rename,
+    settingsInit: vi.fn(async () => {}),
+    settingsGet: vi.fn(async () => ({ updateChannel: "stable" })),
   };
 });
+
+/*
+FNXC:UpdateChannels 2026-10-04-00:30:
+The native unit tests own the settings-store boundary. Importing the real core
+barrel under fake timers can time out while updater setup still reads settings,
+then leak an initial check into the next module-reset test. Keep settings in
+memory and await the initial check, not only flags set before the settings read.
+*/
+vi.mock("@fusion/core", () => ({
+  GlobalSettingsStore: class {
+    init() { return mocks.settingsInit(); }
+    getSettings() { return mocks.settingsGet(); }
+  },
+}));
 
 vi.mock("electron", () => ({
   app: mocks.app,
@@ -122,6 +140,11 @@ describe("native integrations", () => {
     mocks.updaterHandlers.clear();
     mocks.autoUpdater.autoDownload = false;
     mocks.autoUpdater.autoInstallOnAppQuit = false;
+    mocks.autoUpdater.channel = null;
+    mocks.autoUpdater.allowPrerelease = false;
+    mocks.autoUpdater.checkForUpdates.mockReset().mockResolvedValue(undefined);
+    mocks.settingsInit.mockReset().mockResolvedValue(undefined);
+    mocks.settingsGet.mockReset().mockResolvedValue({ updateChannel: "stable" });
     (mocks.Notification.isSupported as ReturnType<typeof vi.fn>).mockReturnValue(true);
 
     mocks.dialog.showSaveDialog.mockResolvedValue({
@@ -309,7 +332,53 @@ describe("native integrations", () => {
       await vi.waitFor(() => {
         expect(mocks.autoUpdater.autoDownload).toBe(true);
         expect(mocks.autoUpdater.autoInstallOnAppQuit).toBe(true);
+        expect(mocks.autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
       });
+    });
+
+    it("waits for delayed settings without duplicating the initial check", async () => {
+      const { setupAutoUpdater } = await importNativeModule();
+      let releaseSettings!: () => void;
+      const settingsReady = new Promise<void>((resolve) => { releaseSettings = resolve; });
+      mocks.settingsInit.mockReturnValue(settingsReady);
+      mocks.settingsGet.mockResolvedValue({ updateChannel: "beta" });
+
+      try {
+        setupAutoUpdater(mocks.browserWindow as never);
+        // Settle the mock import, not the held settings read, before the second setup.
+        // Vitest manual mocks bypass one of two simultaneous dynamic imports.
+        await vi.dynamicImportSettled();
+        setupAutoUpdater(mocks.browserWindow as never);
+        await vi.dynamicImportSettled();
+        expect(mocks.autoUpdater.on).toHaveBeenCalledTimes(4);
+        expect(mocks.settingsInit).toHaveBeenCalledTimes(2);
+        expect(mocks.autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+
+        releaseSettings();
+        await vi.waitFor(() => {
+          expect(mocks.autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+        });
+        expect(mocks.autoUpdater.channel).toBe("beta");
+        expect(mocks.autoUpdater.allowPrerelease).toBe(true);
+      } finally {
+        releaseSettings();
+        await vi.dynamicImportSettled();
+      }
+    });
+
+    it("falls back to stable when settings cannot be read", async () => {
+      const { setupAutoUpdater } = await importNativeModule();
+      mocks.settingsInit.mockRejectedValue(new Error("settings unavailable"));
+      mocks.autoUpdater.channel = "beta";
+      mocks.autoUpdater.allowPrerelease = true;
+
+      setupAutoUpdater(mocks.browserWindow as never);
+      await vi.dynamicImportSettled();
+      await vi.waitFor(() => {
+        expect(mocks.autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+      });
+      expect(mocks.autoUpdater.channel).toBeNull();
+      expect(mocks.autoUpdater.allowPrerelease).toBe(false);
     });
 
     it("registers updater listeners and checks for updates", async () => {
@@ -453,6 +522,26 @@ describe("native integrations", () => {
   });
 
   describe("triggerUpdateCheck", () => {
+    it("re-reads the channel on manual checks without rebinding listeners", async () => {
+      const { setupAutoUpdater, triggerUpdateCheck } = await importNativeModule();
+      mocks.settingsGet.mockResolvedValue({ updateChannel: "beta" });
+      setupAutoUpdater(mocks.browserWindow as never);
+      await vi.dynamicImportSettled();
+      await vi.waitFor(() => {
+        expect(mocks.autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+      });
+      expect(mocks.autoUpdater.channel).toBe("beta");
+      expect(mocks.autoUpdater.allowPrerelease).toBe(true);
+
+      mocks.settingsGet.mockResolvedValue({ updateChannel: "stable" });
+      await expect(triggerUpdateCheck(mocks.browserWindow as never)).resolves.toEqual({ status: "checking" });
+      await vi.dynamicImportSettled();
+      expect(mocks.autoUpdater.channel).toBeNull();
+      expect(mocks.autoUpdater.allowPrerelease).toBe(false);
+      expect(mocks.autoUpdater.on).toHaveBeenCalledTimes(4);
+      expect(mocks.autoUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+    });
+
     it("returns checking when checkForUpdates succeeds", async () => {
       const { triggerUpdateCheck } = await importNativeModule();
 
